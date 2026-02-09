@@ -104,8 +104,8 @@ When a PR exists, you MUST remain in this loop until the PR is fully ready:
 1. Push your latest fixes.
 2. Run local validation (`make verify-vendor`, `make test`, `make build`).
 3. Request review with `@codex review`.
-4. Run `./scripts/wait_pr_codex.sh <pr_number>` and wait for Codex.
+4. Run `./scripts/wait_pr_ready.sh <pr_number>` (it polls Codex + required checks concurrently and fails fast).
 5. If Codex leaves comments, address them, resolve threads with `./scripts/resolve_pr_comment.sh <thread_id>`, push, and repeat.
-6. After explicit Codex approval, run `./scripts/wait_pr_checks.sh <pr_number>` and wait for required checks to pass.
+6. If checks/mergeability fail, fix issues locally, push, and repeat.
 
 The only early-stop exception is when the reviewer is clearly misunderstanding the intended change and further churn would be counterproductive. In that case, leave a clarifying PR comment and pause for human direction.

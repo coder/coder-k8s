@@ -3,22 +3,42 @@ set -euo pipefail
 
 # Wait for Codex to respond to a `@codex review` request.
 #
-# Usage: ./scripts/wait_pr_codex.sh <pr_number>
+# Usage: ./scripts/wait_pr_codex.sh <pr_number> [--once]
 #
 # Exits:
 #   0 - Codex approved (posts an explicit approval comment)
 #   1 - Codex left comments to address OR failed to review (e.g. rate limit)
+#  10 - still waiting for Codex response (only in --once mode)
 
-if [ $# -eq 0 ]; then
-  echo "Usage: $0 <pr_number>"
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+  echo "Usage: $0 <pr_number> [--once]"
   exit 1
 fi
 
 PR_NUMBER=$1
+MODE="wait"
+
+if [ $# -eq 2 ]; then
+  if [ "$2" = "--once" ]; then
+    MODE="once"
+  else
+    echo "❌ Unknown argument: '$2'" >&2
+    echo "Usage: $0 <pr_number> [--once]" >&2
+    exit 1
+  fi
+fi
+
 BOT_LOGIN_GRAPHQL="chatgpt-codex-connector"
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+CHECK_CODEX_COMMENTS_SCRIPT="$SCRIPT_DIR/check_codex_comments.sh"
 
 if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
   echo "❌ PR number must be numeric. Got: '$PR_NUMBER'"
+  exit 1
+fi
+
+if [ ! -x "$CHECK_CODEX_COMMENTS_SCRIPT" ]; then
+  echo "❌ assertion failed: missing executable helper script: $CHECK_CODEX_COMMENTS_SCRIPT" >&2
   exit 1
 fi
 
@@ -262,39 +282,53 @@ FETCH_ALL_THREADS() {
   echo "$all_threads"
 }
 
-echo "⏳ Waiting for Codex review on PR #$PR_NUMBER..."
-echo ""
-echo "Tip: after you comment '@codex review', Codex will respond with either:"
-echo "  - review comments / threads to address (script exits 1)"
-echo "  - an explicit approval comment (script exits 0)"
-echo ""
+LAST_REQUEST_AT=""
 
-while true; do
-  PR_STATE_RESULT=$(FETCH_PR_STATE)
-  PR_STATE=$(echo "$PR_STATE_RESULT" | jq -r '.data.repository.pullRequest.state // empty')
+CHECK_CODEX_STATUS_ONCE() {
+  local pr_state_result
+  local pr_state
+  local all_comments
+  local all_threads
+  local request_at
+  local rate_limit_comment
+  local approval_comment
+  local codex_response_count_comments
+  local codex_response_count_threads
+  local codex_response_count
+  local check_output
 
-  if [[ -z "$PR_STATE" ]]; then
+  pr_state_result=$(FETCH_PR_STATE)
+  pr_state=$(echo "$pr_state_result" | jq -r '.data.repository.pullRequest.state // empty')
+
+  if [[ -z "$pr_state" ]]; then
     echo "❌ Unable to fetch PR state for #$PR_NUMBER in ${OWNER}/${REPO}." >&2
-    exit 1
+    return 1
   fi
 
-  if [ "$PR_STATE" = "MERGED" ]; then
-    echo "✅ PR #$PR_NUMBER has been merged!"
-    exit 0
-  fi
+  case "$pr_state" in
+    MERGED)
+      echo "✅ PR #$PR_NUMBER has been merged!"
+      return 0
+      ;;
+    CLOSED)
+      echo "❌ PR #$PR_NUMBER is closed (not merged)!"
+      return 1
+      ;;
+    OPEN)
+      ;;
+    *)
+      echo "❌ assertion failed: unexpected PR state '$pr_state' for PR #$PR_NUMBER" >&2
+      return 1
+      ;;
+  esac
 
-  if [ "$PR_STATE" = "CLOSED" ]; then
-    echo "❌ PR #$PR_NUMBER is closed (not merged)!"
-    exit 1
-  fi
-
-  ALL_COMMENTS=$(FETCH_ALL_COMMENTS)
-  ALL_THREADS=$(FETCH_ALL_THREADS)
+  all_comments=$(FETCH_ALL_COMMENTS)
+  all_threads=$(FETCH_ALL_THREADS)
 
   # Ignore Codex's own comments since they mention "@codex review" in boilerplate.
-  REQUEST_AT=$(echo "$ALL_COMMENTS" | jq -r --arg bot "$BOT_LOGIN_GRAPHQL" '[.[] | select(.author.login != $bot and (.body | contains("@codex review")))] | sort_by(.createdAt) | last | .createdAt // empty')
+  request_at=$(echo "$all_comments" | jq -r --arg bot "$BOT_LOGIN_GRAPHQL" '[.[] | select(.author.login != $bot and (.body | contains("@codex review")))] | sort_by(.createdAt) | last | .createdAt // empty')
 
-  if [[ -z "$REQUEST_AT" ]]; then
+  if [[ -z "$request_at" ]]; then
     echo "❌ No '@codex review' comment found on PR #$PR_NUMBER." >&2
     echo "" >&2
     echo "Post one (example):" >&2
@@ -303,50 +337,100 @@ while true; do
     echo "  " >&2
     echo "  Please take another look." >&2
     echo "  EOF" >&2
-    exit 1
+    return 1
   fi
 
-  # If Codex can't run (usage limits, etc) it posts a comment we shouldn't treat as "approval".
-  RATE_LIMIT_COMMENT=$(echo "$ALL_COMMENTS" | jq -r --arg bot "$BOT_LOGIN_GRAPHQL" --arg request_at "$REQUEST_AT" --arg regex "$CODEX_RATE_LIMIT_REGEX" '[.[] | select(.author.login == $bot and .createdAt > $request_at and (.body | test($regex))) | {createdAt, body}] | sort_by(.createdAt) | last // empty | .body // empty')
+  LAST_REQUEST_AT="$request_at"
 
-  if [[ -n "$RATE_LIMIT_COMMENT" ]]; then
+  # If Codex can't run (usage limits, etc) it posts a comment we shouldn't treat as "approval".
+  rate_limit_comment=$(echo "$all_comments" | jq -r --arg bot "$BOT_LOGIN_GRAPHQL" --arg request_at "$request_at" --arg regex "$CODEX_RATE_LIMIT_REGEX" '[.[] | select(.author.login == $bot and .createdAt > $request_at and (.body | test($regex))) | {createdAt, body}] | sort_by(.createdAt) | last // empty | .body // empty')
+
+  if [[ -n "$rate_limit_comment" ]]; then
     echo ""
     echo "❌ Codex was unable to review (usage limits)."
     echo ""
-    echo "$RATE_LIMIT_COMMENT"
-    exit 1
+    echo "$rate_limit_comment"
+    return 1
   fi
 
-  APPROVAL_COMMENT=$(echo "$ALL_COMMENTS" | jq -r --arg bot "$BOT_LOGIN_GRAPHQL" --arg request_at "$REQUEST_AT" --arg regex "$CODEX_APPROVAL_REGEX" '[.[] | select(.author.login == $bot and .createdAt > $request_at and (.body | test($regex))) | {createdAt, body}] | sort_by(.createdAt) | last // empty | .body // empty')
+  approval_comment=$(echo "$all_comments" | jq -r --arg bot "$BOT_LOGIN_GRAPHQL" --arg request_at "$request_at" --arg regex "$CODEX_APPROVAL_REGEX" '[.[] | select(.author.login == $bot and .createdAt > $request_at and (.body | test($regex))) | {createdAt, body}] | sort_by(.createdAt) | last // empty | .body // empty')
 
-  if [[ -n "$APPROVAL_COMMENT" ]]; then
+  if [[ -n "$approval_comment" ]]; then
     echo ""
     echo "✅ Codex approved PR #$PR_NUMBER"
     echo ""
-    echo "$APPROVAL_COMMENT"
-    exit 0
+    echo "$approval_comment"
+    return 0
   fi
 
-  CODEX_RESPONSE_COUNT_COMMENTS=$(echo "$ALL_COMMENTS" | jq -r --arg bot "$BOT_LOGIN_GRAPHQL" --arg request_at "$REQUEST_AT" '[.[] | select(.author.login == $bot and .createdAt > $request_at)] | length')
-  CODEX_RESPONSE_COUNT_THREADS=$(echo "$ALL_THREADS" | jq -r --arg bot "$BOT_LOGIN_GRAPHQL" --arg request_at "$REQUEST_AT" '[.[] | select((.comments.nodes | length) > 0 and .comments.nodes[0].author.login == $bot and .comments.nodes[0].createdAt > $request_at)] | length')
-  CODEX_RESPONSE_COUNT=$((CODEX_RESPONSE_COUNT_COMMENTS + CODEX_RESPONSE_COUNT_THREADS))
+  codex_response_count_comments=$(echo "$all_comments" | jq -r --arg bot "$BOT_LOGIN_GRAPHQL" --arg request_at "$request_at" '[.[] | select(.author.login == $bot and .createdAt > $request_at)] | length')
+  codex_response_count_threads=$(echo "$all_threads" | jq -r --arg bot "$BOT_LOGIN_GRAPHQL" --arg request_at "$request_at" '[.[] | select((.comments.nodes | length) > 0 and .comments.nodes[0].author.login == $bot and .comments.nodes[0].createdAt > $request_at)] | length')
+  codex_response_count=$((codex_response_count_comments + codex_response_count_threads))
 
-  if [ "$CODEX_RESPONSE_COUNT" -eq 0 ]; then
-    echo -ne "\r⏳ Waiting for Codex response... (requested at ${REQUEST_AT})  "
-    sleep 5
-    continue
+  if [ "$codex_response_count" -eq 0 ]; then
+    return 10
   fi
 
   # Codex responded to the latest @codex review request; defer to check_codex_comments.sh for
   # unresolved comment/thread detection so we don't duplicate filtering logic here.
-  if ! CHECK_OUTPUT=$(./scripts/check_codex_comments.sh "$PR_NUMBER" 2>&1); then
+  if ! check_output=$("$CHECK_CODEX_COMMENTS_SCRIPT" "$PR_NUMBER" 2>&1); then
     echo ""
-    echo "$CHECK_OUTPUT"
-    exit 1
+    echo "$check_output"
+    return 1
   fi
 
   echo ""
   echo "❌ Codex responded, but no explicit approval comment was found after the latest '@codex review'."
   echo "   👉 If you expected approval, re-comment '@codex review' and run this script again."
-  exit 1
+  return 1
+}
+
+if [ "$MODE" = "once" ]; then
+  if CHECK_CODEX_STATUS_ONCE; then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  case "$rc" in
+    0 | 1 | 10)
+      exit "$rc"
+      ;;
+    *)
+      echo "❌ assertion failed: unexpected Codex status code '$rc'" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+echo "⏳ Waiting for Codex review on PR #$PR_NUMBER..."
+echo ""
+echo "Tip: after you comment '@codex review', Codex will respond with either:"
+echo "  - review comments / threads to address (script exits 1)"
+echo "  - an explicit approval comment (script exits 0)"
+echo ""
+
+while true; do
+  if CHECK_CODEX_STATUS_ONCE; then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  case "$rc" in
+    0)
+      exit 0
+      ;;
+    1)
+      exit 1
+      ;;
+    10)
+      echo -ne "\r⏳ Waiting for Codex response... (requested at ${LAST_REQUEST_AT})  "
+      sleep 5
+      ;;
+    *)
+      echo "❌ assertion failed: unexpected Codex status code '$rc'" >&2
+      exit 1
+      ;;
+  esac
 done
