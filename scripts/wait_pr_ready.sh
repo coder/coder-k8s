@@ -70,52 +70,55 @@ while true; do
     CODEX_RC=$?
   fi
 
+  CODEX_STATUS=$(status_from_rc "$CODEX_RC") || exit 1
+
+  # True fail-fast behavior: if Codex is already terminal-failed, exit immediately
+  # without waiting for the checks gate.
+  if [ "$CODEX_RC" -eq 1 ]; then
+    echo -ne "\r⏳ Gate status: Codex=${CODEX_STATUS} | Checks=skipped    "
+    echo ""
+    echo ""
+    echo "❌ PR #$PR_NUMBER is not ready."
+    echo ""
+    echo "--- Codex gate output ---"
+    if [ -n "$CODEX_OUT" ]; then
+      echo "$CODEX_OUT"
+    else
+      echo "(no output)"
+    fi
+    echo ""
+    echo "Address Codex feedback (or retry if Codex was rate-limited), push, and request review again:"
+    echo ""
+    echo "  gh pr comment $PR_NUMBER --body-file - <<'EOF'"
+    echo "  @codex review"
+    echo ""
+    echo "  Please take another look."
+    echo "  EOF"
+    exit 1
+  fi
+
   if CHECKS_OUT=$("$WAIT_CHECKS_SCRIPT" "$PR_NUMBER" --once 2>&1); then
     CHECKS_RC=0
   else
     CHECKS_RC=$?
   fi
 
-  CODEX_STATUS=$(status_from_rc "$CODEX_RC") || exit 1
   CHECKS_STATUS=$(status_from_rc "$CHECKS_RC") || exit 1
-
   echo -ne "\r⏳ Gate status: Codex=${CODEX_STATUS} | Checks=${CHECKS_STATUS}    "
 
-  if [ "$CODEX_RC" -eq 1 ] || [ "$CHECKS_RC" -eq 1 ]; then
+  if [ "$CHECKS_RC" -eq 1 ]; then
     echo ""
     echo ""
     echo "❌ PR #$PR_NUMBER is not ready."
-
-    if [ "$CODEX_RC" -eq 1 ]; then
-      echo ""
-      echo "--- Codex gate output ---"
-      if [ -n "$CODEX_OUT" ]; then
-        echo "$CODEX_OUT"
-      else
-        echo "(no output)"
-      fi
-      echo ""
-      echo "Address Codex feedback (or retry if Codex was rate-limited), push, and request review again:"
-      echo ""
-      echo "  gh pr comment $PR_NUMBER --body-file - <<'EOF'"
-      echo "  @codex review"
-      echo ""
-      echo "  Please take another look."
-      echo "  EOF"
+    echo ""
+    echo "--- Checks gate output ---"
+    if [ -n "$CHECKS_OUT" ]; then
+      echo "$CHECKS_OUT"
+    else
+      echo "(no output)"
     fi
-
-    if [ "$CHECKS_RC" -eq 1 ]; then
-      echo ""
-      echo "--- Checks gate output ---"
-      if [ -n "$CHECKS_OUT" ]; then
-        echo "$CHECKS_OUT"
-      else
-        echo "(no output)"
-      fi
-      echo ""
-      echo "Fix issues locally, push, and rerun this script."
-    fi
-
+    echo ""
+    echo "Fix issues locally, push, and rerun this script."
     exit 1
   fi
 
