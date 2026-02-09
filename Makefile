@@ -2,7 +2,7 @@ GOFLAGS ?= -mod=vendor
 VENDOR_STAMP := vendor/.modules.stamp
 MODULE_FILES := go.mod $(wildcard go.sum)
 
-.PHONY: vendor test build lint vuln verify-vendor codegen
+.PHONY: vendor test build lint vuln verify-vendor codegen manifests
 
 $(VENDOR_STAMP): $(MODULE_FILES)
 	go mod tidy
@@ -31,6 +31,9 @@ verify-vendor:
 	go mod tidy
 	go mod vendor
 	git diff --exit-code -- go.mod go.sum vendor/
+
+manifests: $(VENDOR_STAMP)
+	bash ./hack/update-manifests.sh
 
 codegen: $(VENDOR_STAMP)
 	bash ./hack/update-codegen.sh
