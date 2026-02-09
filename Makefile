@@ -24,4 +24,4 @@ verify-vendor:
 	git diff --exit-code -- go.mod go.sum vendor/
 
 codegen: $(VENDOR_STAMP)
-	@echo "Run k8s.io/code-generator scripts from ./vendor once API packages exist"
+	bash ./hack/update-codegen.sh
