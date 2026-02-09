@@ -6,7 +6,13 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/coder/coder-k8s/internal/app/apiserverapp"
 	"github.com/coder/coder-k8s/internal/app/controllerapp"
+)
+
+var (
+	runControllerApp          = controllerapp.Run
+	runAggregatedAPIServerApp = apiserverapp.Run
 )
 
 func run(args []string) error {
@@ -19,9 +25,9 @@ func run(args []string) error {
 
 	switch appMode {
 	case "controller":
-		return controllerapp.Run(ctrl.SetupSignalHandler())
+		return runControllerApp(ctrl.SetupSignalHandler())
 	case "aggregated-apiserver":
-		return fmt.Errorf("aggregated-apiserver mode is not yet implemented")
+		return runAggregatedAPIServerApp(ctrl.SetupSignalHandler())
 	case "":
 		return fmt.Errorf("assertion failed: --app flag is required; must be one of: controller, aggregated-apiserver")
 	default:

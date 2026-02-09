@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -74,14 +76,29 @@ func TestRunRejectsUnknownMode(t *testing.T) {
 	}
 }
 
-func TestRunAggregatedAPIServerModeStub(t *testing.T) {
+func TestRunDispatchesAggregatedAPIServerMode(t *testing.T) {
 	t.Helper()
 
-	err := run([]string{"--app=aggregated-apiserver"})
-	if err == nil {
-		t.Fatal("expected an error for aggregated-apiserver mode stub")
+	previous := runAggregatedAPIServerApp
+	t.Cleanup(func() {
+		runAggregatedAPIServerApp = previous
+	})
+
+	expectedErr := errors.New("sentinel aggregated-apiserver error")
+	called := false
+	runAggregatedAPIServerApp = func(ctx context.Context) error {
+		called = true
+		if ctx == nil {
+			t.Fatal("expected non-nil context passed to aggregated apiserver runner")
+		}
+		return expectedErr
 	}
-	if !strings.Contains(err.Error(), "not yet implemented") {
-		t.Fatalf("unexpected error: %v", err)
+
+	err := run([]string{"--app=aggregated-apiserver"})
+	if !called {
+		t.Fatal("expected aggregated apiserver runner to be called")
+	}
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("expected sentinel error %v, got %v", expectedErr, err)
 	}
 }

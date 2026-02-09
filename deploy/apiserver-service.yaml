@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: coder-k8s-apiserver
+  namespace: coder-system
+spec:
+  selector:
+    app: coder-k8s-apiserver
+  ports:
+    - name: https
+      port: 443
+      protocol: TCP
+      targetPort: 6443

@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coder-k8s-controller
+  namespace: coder-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: coder-k8s-controller
+  template:
+    metadata:
+      labels:
+        app: coder-k8s-controller
+    spec:
+      containers:
+        - name: controller
+          image: ghcr.io/coder/coder-k8s:latest
+          args: ["--app=controller"]
+          ports:
+            - containerPort: 8081
+              name: health
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
