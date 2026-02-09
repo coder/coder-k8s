@@ -96,12 +96,16 @@ Run from repository root.
 - Use `./scripts/wait_pr_ready.sh <pr_number>` for a one-command wait flow after requesting review.
 - Prefer `gh` CLI for GitHub interactions over manual web/curl flows.
 
-When a PR exists, stay in this loop until ready:
+> PR readiness is mandatory. You MUST keep iterating until the PR is fully ready.
+> A PR is fully ready only when: (1) Codex explicitly approves, (2) all Codex review threads are resolved, and (3) all required CI checks pass.
+> You MUST NOT report success or stop the loop before these conditions are met.
+
+When a PR exists, you MUST remain in this loop until the PR is fully ready:
 1. Push your latest fixes.
 2. Run local validation (`make verify-vendor`, `make test`, `make build`).
 3. Request review with `@codex review`.
 4. Run `./scripts/wait_pr_codex.sh <pr_number>` and wait for Codex.
 5. If Codex leaves comments, address them, resolve threads with `./scripts/resolve_pr_comment.sh <thread_id>`, push, and repeat.
-6. After explicit Codex approval, run `./scripts/wait_pr_checks.sh <pr_number>`.
+6. After explicit Codex approval, run `./scripts/wait_pr_checks.sh <pr_number>` and wait for required checks to pass.
 
-Only stop the loop early if the reviewer is clearly misunderstanding the intended change and further churn would be counterproductive. In that case, leave a clarifying PR comment and wait for human direction.
+The only early-stop exception is when the reviewer is clearly misunderstanding the intended change and further churn would be counterproductive. In that case, leave a clarifying PR comment and pause for human direction.
