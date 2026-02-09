@@ -36,8 +36,9 @@ if [[ -z "$INPUT" ]]; then
   exit 1
 fi
 
-# Detect if input is PR number or run ID (run IDs are much longer)
-if [[ "$INPUT" =~ ^[0-9]{1,5}$ ]]; then
+# Detect if input is a PR number or a run ID.
+# Prefer PR interpretation whenever the number resolves to an existing PR.
+if [[ "$INPUT" =~ ^[0-9]+$ ]] && gh pr view "$INPUT" --json number --jq '.number' >/dev/null 2>&1; then
   PR_NUMBER="$INPUT"
   echo "🔍 Finding latest failed run for PR #$PR_NUMBER..." >&2
 

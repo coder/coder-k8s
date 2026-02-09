@@ -11,16 +11,24 @@ if [ $# -eq 0 ]; then
 fi
 
 PR_NUMBER="$1"
+if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+  echo "❌ PR number must be numeric. Got: '$PR_NUMBER'"
+  exit 1
+fi
 
 REPO_INFO=$(gh repo view --json owner,name --jq '{owner: .owner.login, name: .name}')
 OWNER=$(echo "$REPO_INFO" | jq -r '.owner')
 REPO=$(echo "$REPO_INFO" | jq -r '.name')
 
-# shellcheck disable=SC2016 # Single quotes are intentional - this is a GraphQL query, not shell expansion
-GRAPHQL_QUERY='query($owner: String!, $repo: String!, $pr: Int!) {
+# shellcheck disable=SC2016 # Single quotes are intentional - this is a GraphQL query.
+GRAPHQL_QUERY='query($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $pr) {
-      reviewThreads(first: 100) {
+      reviewThreads(first: 100, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
         nodes {
           id
           isResolved
@@ -38,18 +46,46 @@ GRAPHQL_QUERY='query($owner: String!, $repo: String!, $pr: Int!) {
   }
 }'
 
-RESULT=$(gh api graphql \
-  -f query="$GRAPHQL_QUERY" \
-  -F owner="$OWNER" \
-  -F repo="$REPO" \
-  -F pr="$PR_NUMBER")
+THREAD_CURSOR=""
+ALL_THREADS='[]'
 
-if [ "$(echo "$RESULT" | jq -r '.data.repository.pullRequest == null')" = "true" ]; then
-  echo "❌ PR #$PR_NUMBER was not found in ${OWNER}/${REPO}."
-  exit 1
-fi
+while true; do
+  if [ -n "$THREAD_CURSOR" ]; then
+    RESULT=$(gh api graphql \
+      -f query="$GRAPHQL_QUERY" \
+      -F owner="$OWNER" \
+      -F repo="$REPO" \
+      -F pr="$PR_NUMBER" \
+      -F cursor="$THREAD_CURSOR")
+  else
+    RESULT=$(gh api graphql \
+      -f query="$GRAPHQL_QUERY" \
+      -F owner="$OWNER" \
+      -F repo="$REPO" \
+      -F pr="$PR_NUMBER")
+  fi
 
-UNRESOLVED=$(echo "$RESULT" | jq -c '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false) | {thread_id: .id, user: (.comments.nodes[0].author.login // "unknown"), body: (.comments.nodes[0].body // ""), diff_hunk: (.comments.nodes[0].diffHunk // ""), commit_id: (.comments.nodes[0].commit.oid // "")}')
+  if [ "$(echo "$RESULT" | jq -r '.data.repository.pullRequest == null')" = "true" ]; then
+    echo "❌ PR #$PR_NUMBER was not found in ${OWNER}/${REPO}."
+    exit 1
+  fi
+
+  PAGE_THREADS=$(echo "$RESULT" | jq '.data.repository.pullRequest.reviewThreads.nodes')
+  ALL_THREADS=$(jq -cn --argjson all "$ALL_THREADS" --argjson page "$PAGE_THREADS" '$all + $page')
+
+  HAS_NEXT=$(echo "$RESULT" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage')
+  if [ "$HAS_NEXT" != "true" ]; then
+    break
+  fi
+
+  THREAD_CURSOR=$(echo "$RESULT" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor')
+  if [ -z "$THREAD_CURSOR" ] || [ "$THREAD_CURSOR" = "null" ]; then
+    echo "❌ Assertion failed: review thread cursor missing while hasNextPage=true"
+    exit 1
+  fi
+done
+
+UNRESOLVED=$(echo "$ALL_THREADS" | jq -c '.[] | select(.isResolved == false) | {thread_id: .id, user: (.comments.nodes[0].author.login // "unknown"), body: (.comments.nodes[0].body // ""), diff_hunk: (.comments.nodes[0].diffHunk // ""), commit_id: (.comments.nodes[0].commit.oid // "")}')
 
 if [ -n "$UNRESOLVED" ]; then
   echo "❌ Unresolved review comments found:"
