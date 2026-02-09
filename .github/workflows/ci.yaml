@@ -14,7 +14,7 @@ permissions:
 jobs:
   changes:
     name: Detect changed paths
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     permissions:
       contents: read
       pull-requests: read
@@ -56,6 +56,8 @@ jobs:
               - '.golangci.yaml'
             workflows:
               - '.github/workflows/**'
+              - '.github/actionlint.yaml'
+              - '.github/actionlint.yml'
             publish:
               - '**/*.go'
               - 'go.mod'
@@ -67,7 +69,8 @@ jobs:
   lint:
     needs: changes
     if: github.event_name == 'merge_group' || needs.changes.outputs.go == 'true'
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -104,7 +107,8 @@ jobs:
   test:
     needs: changes
     if: github.event_name == 'merge_group' || needs.changes.outputs.go == 'true'
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -145,7 +149,8 @@ jobs:
     name: E2E Smoke (Kind)
     needs: [changes, test]
     if: needs.changes.outputs.go == 'true'
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -205,7 +210,7 @@ jobs:
     name: Lint GitHub Actions
     needs: changes
     if: github.event_name == 'merge_group' || needs.changes.outputs.workflows == 'true'
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -233,7 +238,7 @@ jobs:
   codex-comments:
     name: Codex Comments
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     permissions:
       contents: read
       pull-requests: read
@@ -261,7 +266,8 @@ jobs:
       (needs.lint.result == 'success' || needs.lint.result == 'skipped') &&
       (needs.lint-actions.result == 'success' || needs.lint-actions.result == 'skipped') &&
       (needs.e2e-kind.result == 'success' || needs.e2e-kind.result == 'skipped')
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write

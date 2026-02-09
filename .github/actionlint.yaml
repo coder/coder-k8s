@@ -1,0 +1,11 @@
+# actionlint configuration for this repository.
+#
+# We use Depot-managed GitHub Actions runners (depot-*) instead of GitHub-hosted
+# runners. actionlint does not know custom runner labels by default, so we must
+# explicitly allow them here.
+#
+# Docs: https://github.com/rhysd/actionlint/blob/main/docs/config.md
+self-hosted-runner:
+  labels:
+    - depot-ubuntu-24.04
+    - depot-ubuntu-24.04-8
