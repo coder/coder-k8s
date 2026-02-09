@@ -1,17 +1,45 @@
 package v1alpha1
 
-import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+import (
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+const (
+	// CoderControlPlanePhasePending indicates the control plane has not reported ready yet.
+	CoderControlPlanePhasePending = "Pending"
+	// CoderControlPlanePhaseReady indicates at least one control plane pod is ready.
+	CoderControlPlanePhaseReady = "Ready"
+)
 
 // CoderControlPlaneSpec defines the desired state of a CoderControlPlane.
 type CoderControlPlaneSpec struct {
-	// Image is the placeholder container image for the control plane deployment.
+	// Image is the container image used for the Coder control plane pod.
 	Image string `json:"image,omitempty"`
+	// Replicas is the desired number of control plane pods.
+	Replicas *int32 `json:"replicas,omitempty"`
+	// Service controls the service created in front of the control plane.
+	Service ServiceSpec `json:"service,omitempty"`
+	// ExtraArgs are appended to the default Coder server arguments.
+	ExtraArgs []string `json:"extraArgs,omitempty"`
+	// ExtraEnv are injected into the Coder control plane container.
+	ExtraEnv []corev1.EnvVar `json:"extraEnv,omitempty"`
+	// ImagePullSecrets are used by the pod to pull private images.
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 }
 
 // CoderControlPlaneStatus defines the observed state of a CoderControlPlane.
 type CoderControlPlaneStatus struct {
-	// Phase is a placeholder status field for future reconciliation stages.
+	// ObservedGeneration tracks the spec generation this status reflects.
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// ReadyReplicas is the number of ready pods observed in the deployment.
+	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
+	// URL is the in-cluster URL for the control plane service.
+	URL string `json:"url,omitempty"`
+	// Phase is a high-level readiness indicator.
 	Phase string `json:"phase,omitempty"`
+	// Conditions are Kubernetes-standard conditions for this resource.
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

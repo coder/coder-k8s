@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/coderbootstrap"
 	"github.com/coder/coder-k8s/internal/controller"
 )
 
@@ -68,6 +69,15 @@ func Run(ctx context.Context) error {
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create controller: %w", err)
+	}
+
+	workspaceProxyReconciler := &controller.WorkspaceProxyReconciler{
+		Client:          client,
+		Scheme:          managerScheme,
+		BootstrapClient: coderbootstrap.NewSDKClient(),
+	}
+	if err := workspaceProxyReconciler.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create workspace proxy controller: %w", err)
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -35,6 +37,7 @@ func TestReconcile_NotFound(t *testing.T) {
 
 func TestReconcile_ExistingResource(t *testing.T) {
 	ctx := context.Background()
+	replicas := int32(2)
 
 	cp := &coderv1alpha1.CoderControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
@@ -42,7 +45,11 @@ func TestReconcile_ExistingResource(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
-			Image: "test-image:latest",
+			Image:    "test-image:latest",
+			Replicas: &replicas,
+			Service: coderv1alpha1.ServiceSpec{
+				Port: 8080,
+			},
 		},
 	}
 
@@ -69,6 +76,22 @@ func TestReconcile_ExistingResource(t *testing.T) {
 	}
 	if result != (ctrl.Result{}) {
 		t.Fatalf("expected empty result, got: %+v", result)
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+		t.Fatalf("expected deployment to be reconciled: %v", err)
+	}
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != replicas {
+		t.Fatalf("expected deployment replicas %d, got %#v", replicas, deployment.Spec.Replicas)
+	}
+
+	service := &corev1.Service{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, service); err != nil {
+		t.Fatalf("expected service to be reconciled: %v", err)
+	}
+	if len(service.Spec.Ports) != 1 || service.Spec.Ports[0].Port != 8080 {
+		t.Fatalf("expected service port 8080, got %+v", service.Spec.Ports)
 	}
 }
 
