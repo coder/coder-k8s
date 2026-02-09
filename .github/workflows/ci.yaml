@@ -2,6 +2,8 @@ name: CI
 
 on:
   pull_request:
+  merge_group:
+    types: [checks_requested]
   push:
     branches:
       - main
@@ -17,16 +19,27 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      go: ${{ steps.filter.outputs.go }}
-      workflows: ${{ steps.filter.outputs.workflows }}
-      publish: ${{ steps.filter.outputs.publish }}
+      go: ${{ steps.merge_group_defaults.outputs.go || steps.filter.outputs.go }}
+      workflows: ${{ steps.merge_group_defaults.outputs.workflows || steps.filter.outputs.workflows }}
+      publish: ${{ steps.merge_group_defaults.outputs.publish || steps.filter.outputs.publish }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
 
+      - name: Set merge-group defaults
+        if: github.event_name == 'merge_group'
+        id: merge_group_defaults
+        run: |
+          {
+            echo "go=true"
+            echo "workflows=true"
+            echo "publish=false"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Detect changed paths
+        if: github.event_name != 'merge_group'
         id: filter
         uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
         with:
@@ -51,7 +64,7 @@ jobs:
 
   lint:
     needs: changes
-    if: needs.changes.outputs.go == 'true'
+    if: github.event_name == 'merge_group' || needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -88,7 +101,7 @@ jobs:
 
   test:
     needs: changes
-    if: needs.changes.outputs.go == 'true'
+    if: github.event_name == 'merge_group' || needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -189,7 +202,7 @@ jobs:
   lint-actions:
     name: Lint GitHub Actions
     needs: changes
-    if: needs.changes.outputs.workflows == 'true'
+    if: github.event_name == 'merge_group' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -212,6 +225,7 @@ jobs:
         uses: zizmorcore/zizmor-action@0dce2577a4760a2749d8cfb7a84b7d5585ebcb7d # v0.5.0
         with:
           advanced-security: false
+          online-audits: false
           inputs: .github/workflows
 
   codex-comments:
