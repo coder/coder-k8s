@@ -19,6 +19,7 @@ spec:
       containers:
         - name: manager
           image: ghcr.io/coder/coder-k8s:e2e
+          args: ["--app=controller"]
           imagePullPolicy: Never
           ports:
             - containerPort: 8081
