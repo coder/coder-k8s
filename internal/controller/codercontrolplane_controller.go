@@ -1,3 +1,4 @@
+// Package controller contains Kubernetes controllers for coder-k8s resources.
 package controller
 
 import (
