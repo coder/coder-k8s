@@ -109,8 +109,10 @@ jobs:
           git diff --exit-code -- go.mod go.sum vendor/
 
       - name: Setup envtest assets
+        env:
+          GOFLAGS: -mod=vendor
         run: |
-          KUBEBUILDER_ASSETS_PATH="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.23 use 1.35.x --bin-dir ./bin/envtest -p path)"
+          KUBEBUILDER_ASSETS_PATH="$(go run ./vendor/sigs.k8s.io/controller-runtime/tools/setup-envtest use 1.35.x --bin-dir ./bin/envtest -p path)"
           echo "KUBEBUILDER_ASSETS=${KUBEBUILDER_ASSETS_PATH}" >> "$GITHUB_ENV"
 
       - name: Run tests

@@ -3,7 +3,6 @@ VENDOR_STAMP := vendor/.modules.stamp
 MODULE_FILES := go.mod $(wildcard go.sum)
 ENVTEST_K8S_VERSION ?= 1.35.x
 ENVTEST_ASSETS_DIR := $(shell pwd)/bin/envtest
-SETUP_ENVTEST_VERSION ?= release-0.23
 
 .PHONY: vendor test test-integration setup-envtest build lint vuln verify-vendor codegen manifests
 
@@ -16,14 +15,14 @@ $(VENDOR_STAMP): $(MODULE_FILES)
 vendor: $(VENDOR_STAMP)
 
 setup-envtest:
-	GOFLAGS= go run sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION) use $(ENVTEST_K8S_VERSION) --bin-dir $(ENVTEST_ASSETS_DIR) -p path > /dev/null
+	GOFLAGS=-mod=vendor go run ./vendor/sigs.k8s.io/controller-runtime/tools/setup-envtest use $(ENVTEST_K8S_VERSION) --bin-dir $(ENVTEST_ASSETS_DIR) -p path > /dev/null
 
 test: $(VENDOR_STAMP) setup-envtest
-	KUBEBUILDER_ASSETS="$$(GOFLAGS= go run sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION) use $(ENVTEST_K8S_VERSION) --bin-dir $(ENVTEST_ASSETS_DIR) -p path)" \
+	KUBEBUILDER_ASSETS="$$(GOFLAGS=-mod=vendor go run ./vendor/sigs.k8s.io/controller-runtime/tools/setup-envtest use $(ENVTEST_K8S_VERSION) --bin-dir $(ENVTEST_ASSETS_DIR) -p path)" \
 	GOFLAGS=$(GOFLAGS) go test ./...
 
 test-integration: $(VENDOR_STAMP) setup-envtest
-	KUBEBUILDER_ASSETS="$$(GOFLAGS= go run sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION) use $(ENVTEST_K8S_VERSION) --bin-dir $(ENVTEST_ASSETS_DIR) -p path)" \
+	KUBEBUILDER_ASSETS="$$(GOFLAGS=-mod=vendor go run ./vendor/sigs.k8s.io/controller-runtime/tools/setup-envtest use $(ENVTEST_K8S_VERSION) --bin-dir $(ENVTEST_ASSETS_DIR) -p path)" \
 	GOFLAGS=$(GOFLAGS) go test ./internal/controller/... -count=1 -v
 
 build: $(VENDOR_STAMP)
