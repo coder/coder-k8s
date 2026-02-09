@@ -9,3 +9,6 @@
 # IDE
 .vscode/
 .idea/
+
+# Temporary external clones/forks
+/tmpfork/
