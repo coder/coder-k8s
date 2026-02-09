@@ -19,16 +19,27 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      go: ${{ steps.filter.outputs.go }}
-      workflows: ${{ steps.filter.outputs.workflows }}
-      publish: ${{ steps.filter.outputs.publish }}
+      go: ${{ steps.merge_group_defaults.outputs.go || steps.filter.outputs.go }}
+      workflows: ${{ steps.merge_group_defaults.outputs.workflows || steps.filter.outputs.workflows }}
+      publish: ${{ steps.merge_group_defaults.outputs.publish || steps.filter.outputs.publish }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
 
+      - name: Set merge-group defaults
+        if: github.event_name == 'merge_group'
+        id: merge_group_defaults
+        run: |
+          {
+            echo "go=true"
+            echo "workflows=true"
+            echo "publish=false"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Detect changed paths
+        if: github.event_name != 'merge_group'
         id: filter
         uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
         with:
