@@ -26,6 +26,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          # Required so paths-filter can diff push events using github.event.before without fetching.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set merge-group defaults
