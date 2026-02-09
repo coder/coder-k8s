@@ -10,6 +10,41 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify vendor is up to date
+        run: |
+          go mod tidy
+          go mod vendor
+          git diff --exit-code -- go.mod go.sum vendor/
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9
+        with:
+          version: v2.8
+          args: --timeout=5m ./...
+
+      - name: Run golangci-lint formatter checks
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.8.0 fmt --diff
+
+      - name: Run govulncheck
+        uses: golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee # v1
+        with:
+          go-version-file: go.mod
+          go-package: ./...
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -68,7 +103,7 @@ jobs:
 
   publish-main:
     name: Publish GHCR :main
-    needs: [test, lint-actions]
+    needs: [test, lint, lint-actions]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

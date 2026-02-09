@@ -25,6 +25,8 @@
               goreleaser
               actionlint
               zizmor
+              golangci-lint
+              govulncheck
             ];
           };
         }
