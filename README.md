@@ -44,7 +44,7 @@ kubectl get codercontrolplanes -A
 ## Testing strategy
 
 - **Unit tests**: `make test` runs all tests, including unit tests in `main_test.go`.
-- **Integration tests**: Use `envtest` to exercise reconciliation against a lightweight API server (no real cluster needed). In this repository, run them via `make test` (no dedicated `make test-integration` target is currently defined).
+- **Integration tests**: Use `envtest` to exercise reconciliation against a lightweight API server (no real cluster needed). Run them via `make test` (included in the full suite) or `make test-integration` (focused on controller tests only).
 - **E2E smoke tests**: Recommended CI smoke coverage uses a Kind-based flow that deploys the controller image and verifies pod health.
 
 ## Project structure
