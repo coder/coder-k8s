@@ -25,7 +25,6 @@ func TestReconcile_NotFound(t *testing.T) {
 			Namespace: "default",
 		},
 	})
-
 	if err != nil {
 		t.Fatalf("expected no error for not-found resource, got: %v", err)
 	}
@@ -65,7 +64,6 @@ func TestReconcile_ExistingResource(t *testing.T) {
 			Namespace: cp.Namespace,
 		},
 	})
-
 	if err != nil {
 		t.Fatalf("expected no error for existing resource, got: %v", err)
 	}
