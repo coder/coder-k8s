@@ -1,0 +1,38 @@
+project_name: coder-k8s
+
+before:
+  hooks:
+    - go mod tidy
+    - go mod vendor
+
+builds:
+  - id: coder-k8s
+    main: ./
+    binary: coder-k8s
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: default
+    format: tar.gz
+    files:
+      - none*
+
+dockers:
+  - id: coder-k8s-image
+    image_templates:
+      - "ghcr.io/coder/coder-k8s:{{ .Version }}"
+      - "ghcr.io/coder/coder-k8s:latest"
+    dockerfile: Dockerfile.goreleaser
+    use: buildx
+    build_flag_templates:
+      - "--pull"
+      - "--platform=linux/amd64"
+
+changelog:
+  use: github
