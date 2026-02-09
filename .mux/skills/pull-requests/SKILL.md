@@ -31,10 +31,11 @@ Always check `$MUX_MODEL_STRING`, `$MUX_THINKING_LEVEL`, and `$MUX_COSTS_USD` vi
 
 ## CI & Validation
 
-- After pushing, you may use `./scripts/wait_pr_checks.sh <pr_number>` to wait for CI to pass.
-- Use `wait_pr_checks` only when there's no more useful work to do.
+- During active iteration, using `./scripts/wait_pr_checks.sh <pr_number>` is optional.
+- Before declaring a PR complete, you MUST wait until all required checks pass.
+- When you are done coding and want end-to-end readiness waiting, prefer `./scripts/wait_pr_ready.sh <pr_number>` (Codex wait first, CI checks second).
 - Waiting for PR checks can take 10+ minutes, so prefer local validation first (for this repo: `make verify-vendor`, `make test`, `make build`) to catch issues early.
-- If asked to fix an issue in CI, first replicate it locally, get it to pass locally, then use `wait_pr_checks` to wait for CI to pass.
+- If asked to fix an issue in CI, first replicate it locally, get it to pass locally, then wait for required CI checks to pass.
 
 ## Status Decoding
 
@@ -80,15 +81,17 @@ When Codex leaves review comments, you **must** address them before the PR can m
 
 ### Required Loop Discipline
 
-After a PR is open, stay in a review loop until completion:
+Completion criteria are strict: you MUST continue this loop until Codex explicitly approves, all Codex review threads are resolved, and all required CI checks pass. You MUST NOT mark work complete earlier.
+
+After a PR is open, you MUST stay in a review loop until those completion criteria are met:
 
 1. Run local validation and push fixes.
 2. Request review with `@codex review`.
 3. Run `./scripts/wait_pr_codex.sh <pr_number>` and wait for Codex to respond.
 4. If Codex leaves comments, address them, resolve each thread, push, and repeat from step 2.
-5. Once Codex explicitly approves, run `./scripts/wait_pr_checks.sh <pr_number>` and wait for required checks.
+5. Once Codex explicitly approves, run `./scripts/wait_pr_checks.sh <pr_number>` and wait for required checks to pass.
 
-Only stop the loop early if a reviewer is clearly misunderstanding the change intent and further edits would be counterproductive. In that case, leave a clarifying PR comment and pause for human direction.
+The only early-stop exception is when a reviewer is clearly misunderstanding the change intent and further edits would be counterproductive. In that case, leave a clarifying PR comment and pause for human direction.
 
 ## PR Title Conventions
 
