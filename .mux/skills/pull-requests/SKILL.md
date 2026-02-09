@@ -74,10 +74,11 @@ Use these scripts to check, resolve, and wait on Codex review comments:
 
 When Codex leaves review comments, you **must** address them before the PR can merge:
 
-1. Push your fixes
-2. Resolve each review thread: `./scripts/resolve_pr_comment.sh <thread_id>`
-3. Comment `@codex review` to re-request review
-4. Run `./scripts/wait_pr_codex.sh <pr_number>` to wait for the next Codex response (either new comments to address, or an explicit approval comment)
+1. Address the feedback in your branch.
+2. Resolve each review thread before pushing: `./scripts/resolve_pr_comment.sh <thread_id>`
+3. Push your fixes.
+4. Comment `@codex review` to re-request review.
+5. Run `./scripts/wait_pr_codex.sh <pr_number>` to wait for the next Codex response (either new comments to address, or an explicit approval comment).
 
 ### Required Loop Discipline
 
