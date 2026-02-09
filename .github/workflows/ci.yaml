@@ -128,8 +128,9 @@ jobs:
 
   e2e-kind:
     name: E2E Smoke (Kind)
+    needs: [changes, test]
+    if: needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
-    needs: [test]
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -166,7 +167,9 @@ jobs:
           kubectl apply -f config/rbac/
 
       - name: Deploy controller
-        run: kubectl apply -f config/e2e/
+        run: |
+          kubectl apply -f config/e2e/namespace.yaml
+          kubectl apply -f config/e2e/
 
       - name: Wait for controller
         run: kubectl wait --for=condition=Available deploy/coder-k8s -n coder-system --timeout=120s
