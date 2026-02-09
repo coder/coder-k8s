@@ -64,7 +64,7 @@ jobs:
         uses: zizmorcore/zizmor-action@0dce2577a4760a2749d8cfb7a84b7d5585ebcb7d # v0.5.0
         with:
           advanced-security: false
-          inputs: .github/workflows/ci.yaml
+          inputs: .github/workflows
 
   publish-main:
     name: Publish GHCR :main
