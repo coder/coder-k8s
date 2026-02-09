@@ -23,6 +23,14 @@ func TestSchemeRegistersCoderControlPlaneKinds(t *testing.T) {
 	}
 }
 
+func TestHealthProbeBindAddressIsEnabled(t *testing.T) {
+	t.Helper()
+
+	if healthProbeBindAddress == "" || healthProbeBindAddress == "0" {
+		t.Fatalf("expected non-empty healthProbeBindAddress, got %q", healthProbeBindAddress)
+	}
+}
+
 func TestReconcilerSetupWithManagerRequiresManager(t *testing.T) {
 	t.Helper()
 

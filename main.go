@@ -20,6 +20,11 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
+const (
+	// healthProbeBindAddress exposes /healthz and /readyz checks for kube probes.
+	healthProbeBindAddress = ":8081"
+)
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(coderv1alpha1.AddToScheme(scheme))
@@ -28,7 +33,10 @@ func init() {
 func main() {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{Scheme: scheme})
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+		Scheme:                 scheme,
+		HealthProbeBindAddress: healthProbeBindAddress,
+	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
