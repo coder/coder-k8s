@@ -2,6 +2,8 @@ name: CI
 
 on:
   pull_request:
+  merge_group:
+    types: [checks_requested]
   push:
     branches:
       - main
@@ -51,7 +53,7 @@ jobs:
 
   lint:
     needs: changes
-    if: needs.changes.outputs.go == 'true'
+    if: github.event_name == 'merge_group' || needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -88,7 +90,7 @@ jobs:
 
   test:
     needs: changes
-    if: needs.changes.outputs.go == 'true'
+    if: github.event_name == 'merge_group' || needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -121,7 +123,7 @@ jobs:
   lint-actions:
     name: Lint GitHub Actions
     needs: changes
-    if: needs.changes.outputs.workflows == 'true'
+    if: github.event_name == 'merge_group' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
