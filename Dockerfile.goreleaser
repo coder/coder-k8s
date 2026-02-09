@@ -1,0 +1,5 @@
+FROM gcr.io/distroless/static:nonroot
+
+ENTRYPOINT ["/coder-k8s"]
+COPY coder-k8s /coder-k8s
+USER nonroot:nonroot

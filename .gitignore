@@ -1,0 +1,11 @@
+# Go
+/bin/
+*.test
+*.out
+
+# Nix / direnv
+.direnv/
+
+# IDE
+.vscode/
+.idea/
