@@ -2,36 +2,51 @@ You are an experienced, pragmatic software engineering AI agent. Do not over-eng
 
 ## Project Overview
 
-`coder-k8s` is a Go-based Kubernetes operator scaffold for managing a custom resource named `CoderControlPlane` (`coder.com/v1alpha1`). The current codebase focuses on baseline wiring: CRD types, scheme registration, controller startup, and a placeholder reconciliation loop.
+`coder-k8s` is a Go-based Kubernetes control-plane project with two app modes: a controller-runtime operator for `CoderControlPlane` (`coder.com/v1alpha1`) and an aggregated API server for `CoderWorkspace`/`CoderTemplate` (`aggregation.coder.com/v1alpha1`).
 
 **Tech stack**
-- Go `1.25.6` (`go.mod`)
-- Kubernetes libraries: `controller-runtime`, `client-go`, `apimachinery`, `code-generator`
+- Go `1.25.7` (`go.mod`)
+- Kubernetes libraries: `controller-runtime`, `client-go`, `apimachinery`, `apiserver`, `code-generator`
 - Vendored dependencies committed under `vendor/`
-- Tooling: `make`, Bash scripts in `hack/`, GitHub Actions, GoReleaser, optional Nix dev shell (`flake.nix`)
+- Tooling: `make`, `golangci-lint`/`gofumpt`, Bash scripts in `hack/` and `scripts/`, GitHub Actions, GoReleaser, optional Nix dev shell (`flake.nix`)
 
 ## Reference
 
 ### Key files
-- `main.go`: manager bootstrap, scheme registration, health/readiness endpoints, controller wiring.
-- `main_test.go`: baseline tests for scheme registration and defensive nil-check behavior.
-- `api/v1alpha1/codercontrolplane_types.go`: CRD spec/status and list types.
+- `main.go`: process entrypoint; initializes logging and exits on application failure.
+- `app_dispatch.go`: `--app` mode dispatch between `controller` and `aggregated-apiserver`.
+- `main_test.go`: dispatch and defensive nil-check coverage.
+- `internal/app/controllerapp/controllerapp.go`: controller mode bootstrap (scheme, manager, health/readiness checks).
+- `internal/app/apiserverapp/apiserverapp.go`: aggregated API server bootstrap and API group installation.
+- `api/v1alpha1/codercontrolplane_types.go`: CRD spec/status and list types for `CoderControlPlane`.
+- `api/aggregation/v1alpha1/types.go`: aggregated API types for `CoderWorkspace` and `CoderTemplate`.
 - `internal/controller/codercontrolplane_controller.go`: reconciler and `SetupWithManager` logic.
+- `internal/aggregated/storage/workspace.go` + `template.go`: hardcoded in-memory aggregated API storage.
+- `hack/update-manifests.sh`: CRD/RBAC generation entrypoint.
 - `hack/update-codegen.sh`: deepcopy codegen entrypoint.
-- `Makefile`: canonical build/test/vendor/codegen commands.
-- `.github/workflows/ci.yaml`: CI checks, workflow linting, and `:main` container publish.
+- `Makefile`: canonical build/test/lint/vendor/codegen/manifests commands.
+- `.golangci.yml`: lint and formatting rules (including `gofumpt`).
+- `.github/workflows/ci.yaml` and `.github/workflows/release.yaml`: CI and release pipelines.
+- `.goreleaser.yaml` and `Dockerfile.goreleaser`: release packaging and container build configuration.
 
 ### Important directories
-- `api/v1alpha1/`: API group/version types and generated deepcopy code.
-- `internal/controller/`: reconciliation logic.
-- `internal/deps/`: blank imports to keep baseline Kubernetes tool deps in `go.mod`/`vendor`.
-- `hack/`: maintenance scripts.
+- `api/v1alpha1/`: CRD API group/version types and generated deepcopy code.
+- `api/aggregation/v1alpha1/`: aggregated API group/version types and generated deepcopy code.
+- `internal/app/`: application-mode bootstrap packages (`controllerapp`, `apiserverapp`).
+- `internal/controller/`: controller reconciliation logic and envtest coverage.
+- `internal/aggregated/`: aggregated API server storage implementation.
+- `internal/deps/`: blank imports to keep Kubernetes tool deps pinned in `go.mod`/`vendor`.
+- `config/`: generated CRDs, RBAC, and sample manifests.
+- `deploy/`: deployment manifests for controller and aggregated API server components.
+- `hack/`: maintenance scripts (codegen/manifests).
+- `scripts/`: PR workflow automation and review/check helpers.
 - `.github/workflows/`: CI and release automation.
 - `vendor/`: checked-in module dependencies (required by project workflow).
 
 ### Architecture notes
-- `main` registers core Kubernetes + project schemes, constructs a controller-runtime manager, and starts it.
-- Reconciliation is intentionally minimal: fetch resource, validate identity assumptions, then no-op with TODO markers.
+- `main` delegates to `run(...)`, which requires `--app=<controller|aggregated-apiserver>`.
+- `controller` mode registers core Kubernetes + `coder.com/v1alpha1` schemes, starts the controller-runtime manager, and wires health/readiness probes.
+- `aggregated-apiserver` mode builds a generic API server for `aggregation.coder.com/v1alpha1` and installs `coderworkspaces`/`codertemplates` storage.
 - Defensive checks are intentional (`assertion failed: ...`) and used to fail fast during development.
 
 ## Essential Commands
@@ -39,14 +54,19 @@ You are an experienced, pragmatic software engineering AI agent. Do not over-eng
 Run from repository root.
 
 - **Build:** `make build`
-- **Format (apply):** `find . -type f -name '*.go' -not -path './vendor/*' -print0 | xargs -0 gofmt -w`
-- **Format (check):** `find . -type f -name '*.go' -not -path './vendor/*' -print0 | xargs -0 gofmt -l`
-- **Lint (workflows):** `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.10`
 - **Test:** `make test`
-- **Clean:** `go clean -cache -testcache && rm -f ./coder-k8s && rm -rf ./dist`
-- **Development run:** `GOFLAGS=-mod=vendor go run .` (requires Kubernetes config via your env, e.g. `KUBECONFIG`)
+- **Integration tests (controller envtest):** `make test-integration`
+- **Lint + format checks:** `make lint`
+- **Format (apply):** `GOFLAGS=-mod=vendor golangci-lint fmt`
+- **Format (check):** `GOFLAGS=-mod=vendor golangci-lint fmt --diff`
+- **Vulnerability scan:** `make vuln`
+- **Lint (workflows):** `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.10`
+- **Development run (controller mode):** `GOFLAGS=-mod=vendor go run . --app=controller` (requires Kubernetes config via your env, e.g. `KUBECONFIG`)
+- **Development run (aggregated API mode):** `GOFLAGS=-mod=vendor go run . --app=aggregated-apiserver`
 - **Vendor consistency:** `make verify-vendor`
+- **Manifest generation:** `make manifests` (or `bash ./hack/update-manifests.sh`)
 - **Code generation:** `make codegen` (or `bash ./hack/update-codegen.sh`)
+- **Clean:** `go clean -cache -testcache && rm -f ./coder-k8s && rm -rf ./dist`
 - **Shell scripts:** `find . -type f -name '*.sh' -not -path './vendor/*'`
 
 ## Patterns
@@ -55,10 +75,10 @@ Run from repository root.
   **Don’t** silently ignore these paths or convert them to soft failures.
 - **Do** keep vendoring in sync when dependencies change (`go mod tidy`, `go mod vendor`, then verify diff).
   **Don’t** submit dependency changes without updating `vendor/`.
-- **Do** regenerate deepcopy code after API type changes (`make codegen`).
-  **Don’t** hand-edit `api/v1alpha1/zz_generated.deepcopy.go`.
-- **Do** keep controller and API changes paired with tests in `main_test.go` or focused package tests.
-  **Don’t** add reconciliation behavior without coverage for critical assumptions.
+- **Do** regenerate generated artifacts after API changes (`make codegen`, `make manifests`).
+  **Don’t** hand-edit generated files like `zz_generated.deepcopy.go` or CRD/RBAC manifests.
+- **Do** keep controller, aggregated API server, and storage changes paired with focused tests (`main_test.go`, `internal/controller/*_test.go`, and package tests under `internal/app/`/`internal/aggregated/`).
+  **Don’t** add behavior without coverage for critical assumptions.
 
 ## Anti-patterns
 
@@ -68,7 +88,8 @@ Run from repository root.
 
 ## Code Style
 
-- Follow idiomatic Go and keep code `gofmt`-formatted.
+- Follow idiomatic Go and the [Uber Go Style Guide](https://github.com/uber-go/guide/blob/master/style.md) as a baseline; project-specific rules in this file take precedence.
+- Keep code `gofumpt`-formatted (enforced via `golangci-lint fmt`).
 - Keep comments concise and purposeful (package docs, exported type/function docs).
 - Match existing error style: contextual wrapping + explicit assertion messages for impossible conditions.
 
@@ -78,8 +99,9 @@ Run from repository root.
 1. Run `make test`.
 2. Run `make build`.
 3. Run `make verify-vendor`.
-4. If API types changed, run `make codegen` and include generated updates.
-5. If `.github/workflows/*` changed, run `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.10`.
+4. Run `make lint` (or explain why it was skipped).
+5. If API types changed, run `make codegen` and `make manifests`, then include generated updates.
+6. If `.github/workflows/*` changed, run `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.10`.
 
 ### Commit messages
 - Match repository history style: short imperative summary, optionally prefixed by type (e.g., `chore: ...`).
@@ -102,7 +124,7 @@ Run from repository root.
 
 When a PR exists, you MUST remain in this loop until the PR is fully ready:
 1. Push your latest fixes.
-2. Run local validation (`make verify-vendor`, `make test`, `make build`).
+2. Run local validation (`make verify-vendor`, `make test`, `make build`, `make lint`).
 3. Request review with `@codex review`.
 4. Run `./scripts/wait_pr_ready.sh <pr_number>` (it polls Codex + required checks concurrently and fails fast).
 5. If Codex leaves comments, address them, resolve threads with `./scripts/resolve_pr_comment.sh <thread_id>`, push, and repeat.
