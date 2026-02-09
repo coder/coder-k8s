@@ -23,6 +23,8 @@
               gnumake
               git
               goreleaser
+              actionlint
+              zizmor
             ];
           };
         }
