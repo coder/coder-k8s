@@ -69,6 +69,15 @@ Run from repository root.
 - **Clean:** `go clean -cache -testcache && rm -f ./coder-k8s && rm -rf ./dist`
 - **Shell scripts:** `find . -type f -name '*.sh' -not -path './vendor/*'`
 
+## Mux Tooling Helpers
+
+- `.mux/tool_env` is sourced before every `bash` tool call (Mux docs: `/hooks/tools`).
+- Use `run_and_report <step_name> <command...>` for multi-step validation in one bash invocation.
+- The helper writes full logs to `/tmp/mux-<workspace>-<step>.log`, prints pass/fail markers, and tails failures.
+- Example:
+  - `run_and_report verify-vendor make verify-vendor`
+  - `run_and_report test make test`
+
 ## Patterns
 
 - **Do** preserve fail-fast assertions for impossible states (nil manager/client/scheme, mismatched fetched objects).

@@ -1,0 +1,33 @@
+# .mux/tool_env
+# Sourced by Mux before every bash tool invocation.
+# Docs: https://mux.coder.com/hooks/tools
+
+run_and_report() {
+  local step_name="${1:-}"
+  if [[ -z "${step_name}" ]]; then
+    echo "assertion failed: run_and_report requires a non-empty step name" >&2
+    return 97
+  fi
+  shift
+
+  if [[ "$#" -eq 0 ]]; then
+    echo "assertion failed: run_and_report requires a command after the step name" >&2
+    return 97
+  fi
+
+  local safe_name
+  safe_name="$(printf '%s' "${step_name}" | tr -cs 'A-Za-z0-9._-' '_')"
+  local workspace_tag="${MUX_WORKSPACE_ID:-local}"
+  local log_file="/tmp/mux-${workspace_tag}-${safe_name}.log"
+
+  echo "==> Running ${step_name}"
+  if "$@" >"${log_file}" 2>&1; then
+    echo "==> ${step_name} passed"
+    return 0
+  else
+    local exit_code=$?
+    echo "==> ${step_name} failed (showing tail from ${log_file})" >&2
+    tail -n 120 "${log_file}" >&2 || true
+    return "${exit_code}"
+  fi
+}
