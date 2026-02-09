@@ -1,3 +1,4 @@
+// Package apiserverapp provides the aggregated API server application mode for coder-k8s.
 package apiserverapp
 
 import (

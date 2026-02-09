@@ -1,3 +1,4 @@
+// Package controllerapp provides the controller-runtime application mode for coder-k8s.
 package controllerapp
 
 import (

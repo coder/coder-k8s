@@ -1,3 +1,4 @@
+// Package storage provides hardcoded in-memory storage implementations for aggregated API resources.
 package storage
 
 import (
@@ -16,11 +17,13 @@ import (
 	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
 )
 
-var _ rest.Storage = (*WorkspaceStorage)(nil)
-var _ rest.Getter = (*WorkspaceStorage)(nil)
-var _ rest.Lister = (*WorkspaceStorage)(nil)
-var _ rest.Scoper = (*WorkspaceStorage)(nil)
-var _ rest.SingularNameProvider = (*WorkspaceStorage)(nil)
+var (
+	_ rest.Storage              = (*WorkspaceStorage)(nil)
+	_ rest.Getter               = (*WorkspaceStorage)(nil)
+	_ rest.Lister               = (*WorkspaceStorage)(nil)
+	_ rest.Scoper               = (*WorkspaceStorage)(nil)
+	_ rest.SingularNameProvider = (*WorkspaceStorage)(nil)
+)
 
 // WorkspaceStorage provides hardcoded CoderWorkspace objects.
 type WorkspaceStorage struct {

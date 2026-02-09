@@ -1,3 +1,4 @@
+// Package storage provides hardcoded in-memory storage implementations for aggregated API resources.
 package storage
 
 import (

@@ -16,11 +16,13 @@ import (
 	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
 )
 
-var _ rest.Storage = (*TemplateStorage)(nil)
-var _ rest.Getter = (*TemplateStorage)(nil)
-var _ rest.Lister = (*TemplateStorage)(nil)
-var _ rest.Scoper = (*TemplateStorage)(nil)
-var _ rest.SingularNameProvider = (*TemplateStorage)(nil)
+var (
+	_ rest.Storage              = (*TemplateStorage)(nil)
+	_ rest.Getter               = (*TemplateStorage)(nil)
+	_ rest.Lister               = (*TemplateStorage)(nil)
+	_ rest.Scoper               = (*TemplateStorage)(nil)
+	_ rest.SingularNameProvider = (*TemplateStorage)(nil)
+)
 
 // TemplateStorage provides hardcoded CoderTemplate objects.
 type TemplateStorage struct {
