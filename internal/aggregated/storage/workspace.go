@@ -20,6 +20,7 @@ var _ rest.Storage = (*WorkspaceStorage)(nil)
 var _ rest.Getter = (*WorkspaceStorage)(nil)
 var _ rest.Lister = (*WorkspaceStorage)(nil)
 var _ rest.Scoper = (*WorkspaceStorage)(nil)
+var _ rest.SingularNameProvider = (*WorkspaceStorage)(nil)
 
 // WorkspaceStorage provides hardcoded CoderWorkspace objects.
 type WorkspaceStorage struct {
@@ -97,6 +98,11 @@ func (s *WorkspaceStorage) Destroy() {}
 // NamespaceScoped returns true because CoderWorkspace is namespaced.
 func (s *WorkspaceStorage) NamespaceScoped() bool {
 	return true
+}
+
+// GetSingularName returns the singular name of the CoderWorkspace resource.
+func (s *WorkspaceStorage) GetSingularName() string {
+	return "coderworkspace"
 }
 
 // NewList returns an empty CoderWorkspaceList object.

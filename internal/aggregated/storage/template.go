@@ -20,6 +20,7 @@ var _ rest.Storage = (*TemplateStorage)(nil)
 var _ rest.Getter = (*TemplateStorage)(nil)
 var _ rest.Lister = (*TemplateStorage)(nil)
 var _ rest.Scoper = (*TemplateStorage)(nil)
+var _ rest.SingularNameProvider = (*TemplateStorage)(nil)
 
 // TemplateStorage provides hardcoded CoderTemplate objects.
 type TemplateStorage struct {
@@ -97,6 +98,11 @@ func (s *TemplateStorage) Destroy() {}
 // NamespaceScoped returns true because CoderTemplate is namespaced.
 func (s *TemplateStorage) NamespaceScoped() bool {
 	return true
+}
+
+// GetSingularName returns the singular name of the CoderTemplate resource.
+func (s *TemplateStorage) GetSingularName() string {
+	return "codertemplate"
 }
 
 // NewList returns an empty CoderTemplateList object.

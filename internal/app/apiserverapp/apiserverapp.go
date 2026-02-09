@@ -5,7 +5,9 @@ import (
 	"fmt"
 
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apiserver/pkg/authentication/request/anonymous"
@@ -32,6 +34,12 @@ const (
 // NewScheme builds the runtime scheme used by the aggregated API server.
 func NewScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
+	// Register meta types for the v1 options external version used by
+	// genericapiserver.NewDefaultAPIGroupInfo (OptionsExternalVersion "v1").
+	// Without this, InstallAPIGroup fails with "no kind ListOptions is
+	// registered for version v1".
+	metav1.AddToGroupVersion(scheme, schema.GroupVersion{Version: "v1"})
+	utilruntime.Must(metav1.AddMetaToScheme(scheme))
 	utilruntime.Must(metainternalversion.AddToScheme(scheme))
 	utilruntime.Must(aggregationv1alpha1.AddToScheme(scheme))
 	return scheme
