@@ -1,6 +1,12 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  name: coder-k8s-controller
+  namespace: coder-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
   name: coder-k8s-apiserver
   namespace: coder-system
 ---

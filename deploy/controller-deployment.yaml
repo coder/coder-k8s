@@ -13,6 +13,7 @@ spec:
       labels:
         app: coder-k8s-controller
     spec:
+      serviceAccountName: coder-k8s-controller
       containers:
         - name: controller
           image: ghcr.io/coder/coder-k8s:latest
