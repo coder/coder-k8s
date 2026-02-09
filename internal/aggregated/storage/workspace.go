@@ -178,7 +178,7 @@ func (s *WorkspaceStorage) List(ctx context.Context, _ *metainternalversion.List
 }
 
 // ConvertToTable converts a workspace object or list into kubectl table output.
-func (s *WorkspaceStorage) ConvertToTable(ctx context.Context, object runtime.Object, tableOptions runtime.Object) (*metav1.Table, error) {
+func (s *WorkspaceStorage) ConvertToTable(ctx context.Context, object, tableOptions runtime.Object) (*metav1.Table, error) {
 	if s == nil {
 		return nil, fmt.Errorf("assertion failed: workspace storage must not be nil")
 	}

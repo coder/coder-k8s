@@ -177,7 +177,7 @@ func (s *TemplateStorage) List(ctx context.Context, _ *metainternalversion.ListO
 }
 
 // ConvertToTable converts a template object or list into kubectl table output.
-func (s *TemplateStorage) ConvertToTable(ctx context.Context, object runtime.Object, tableOptions runtime.Object) (*metav1.Table, error) {
+func (s *TemplateStorage) ConvertToTable(ctx context.Context, object, tableOptions runtime.Object) (*metav1.Table, error) {
 	if s == nil {
 		return nil, fmt.Errorf("assertion failed: template storage must not be nil")
 	}
