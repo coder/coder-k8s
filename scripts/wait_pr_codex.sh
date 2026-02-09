@@ -17,6 +17,11 @@ fi
 PR_NUMBER=$1
 BOT_LOGIN_GRAPHQL="chatgpt-codex-connector"
 
+if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+  echo "❌ PR number must be numeric. Got: '$PR_NUMBER'"
+  exit 1
+fi
+
 # Keep these regexes in sync with ./scripts/check_codex_comments.sh.
 CODEX_APPROVAL_REGEX="Didn't find any major issues"
 CODEX_RATE_LIMIT_REGEX="usage limits have been reached"
@@ -83,13 +88,24 @@ if [[ "$LOCAL_HASH" != "$REMOTE_HASH" ]]; then
   exit 1
 fi
 
-# Use GraphQL to get all comments (including minimized status).
-# shellcheck disable=SC2016 # Single quotes are intentional - this is a GraphQL query, not shell expansion
-GRAPHQL_QUERY='query($owner: String!, $repo: String!, $pr: Int!) {
+# shellcheck disable=SC2016 # Single quotes are intentional - these are GraphQL queries.
+PR_STATE_QUERY='query($owner: String!, $repo: String!, $pr: Int!) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $pr) {
       state
-      comments(last: 100) {
+    }
+  }
+}'
+
+# shellcheck disable=SC2016 # Single quotes are intentional - these are GraphQL queries.
+COMMENTS_QUERY='query($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $pr) {
+      comments(first: 100, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
         nodes {
           id
           author { login }
@@ -98,7 +114,19 @@ GRAPHQL_QUERY='query($owner: String!, $repo: String!, $pr: Int!) {
           isMinimized
         }
       }
-      reviewThreads(last: 100) {
+    }
+  }
+}'
+
+# shellcheck disable=SC2016 # Single quotes are intentional - these are GraphQL queries.
+THREADS_QUERY='query($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $pr) {
+      reviewThreads(first: 100, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
         nodes {
           id
           isResolved
@@ -127,18 +155,21 @@ REPO=$(echo "$REPO_INFO" | jq -r '.name')
 MAX_ATTEMPTS=5
 BACKOFF_SECS=2
 
-FETCH_PR_DATA() {
+FETCH_GRAPHQL_WITH_RETRY() {
+  local query="$1"
+  shift
+
   local attempt
   local backoff
-
   backoff="$BACKOFF_SECS"
 
   for ((attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)); do
     if gh api graphql \
-      -f query="$GRAPHQL_QUERY" \
+      -f query="$query" \
       -F owner="$OWNER" \
       -F repo="$REPO" \
-      -F pr="$PR_NUMBER"; then
+      -F pr="$PR_NUMBER" \
+      "$@"; then
       return 0
     fi
 
@@ -153,22 +184,99 @@ FETCH_PR_DATA() {
   done
 }
 
+FETCH_PR_STATE() {
+  FETCH_GRAPHQL_WITH_RETRY "$PR_STATE_QUERY"
+}
+
+FETCH_ALL_COMMENTS() {
+  local comments_cursor=""
+  local all_comments='[]'
+  local result
+  local page_comments
+  local has_next
+
+  while true; do
+    if [ -n "$comments_cursor" ]; then
+      result=$(FETCH_GRAPHQL_WITH_RETRY "$COMMENTS_QUERY" -F cursor="$comments_cursor")
+    else
+      result=$(FETCH_GRAPHQL_WITH_RETRY "$COMMENTS_QUERY")
+    fi
+
+    if [ "$(echo "$result" | jq -r '.data.repository.pullRequest == null')" = "true" ]; then
+      echo "❌ PR #${PR_NUMBER} does not exist in ${OWNER}/${REPO}." >&2
+      return 1
+    fi
+
+    page_comments=$(echo "$result" | jq '.data.repository.pullRequest.comments.nodes')
+    all_comments=$(jq -cn --argjson all "$all_comments" --argjson page "$page_comments" '$all + $page')
+
+    has_next=$(echo "$result" | jq -r '.data.repository.pullRequest.comments.pageInfo.hasNextPage')
+    if [ "$has_next" != "true" ]; then
+      break
+    fi
+
+    comments_cursor=$(echo "$result" | jq -r '.data.repository.pullRequest.comments.pageInfo.endCursor')
+    if [ -z "$comments_cursor" ] || [ "$comments_cursor" = "null" ]; then
+      echo "❌ Assertion failed: comments pagination cursor missing while hasNextPage=true" >&2
+      return 1
+    fi
+  done
+
+  echo "$all_comments"
+}
+
+FETCH_ALL_THREADS() {
+  local threads_cursor=""
+  local all_threads='[]'
+  local result
+  local page_threads
+  local has_next
+
+  while true; do
+    if [ -n "$threads_cursor" ]; then
+      result=$(FETCH_GRAPHQL_WITH_RETRY "$THREADS_QUERY" -F cursor="$threads_cursor")
+    else
+      result=$(FETCH_GRAPHQL_WITH_RETRY "$THREADS_QUERY")
+    fi
+
+    if [ "$(echo "$result" | jq -r '.data.repository.pullRequest == null')" = "true" ]; then
+      echo "❌ PR #${PR_NUMBER} does not exist in ${OWNER}/${REPO}." >&2
+      return 1
+    fi
+
+    page_threads=$(echo "$result" | jq '.data.repository.pullRequest.reviewThreads.nodes')
+    all_threads=$(jq -cn --argjson all "$all_threads" --argjson page "$page_threads" '$all + $page')
+
+    has_next=$(echo "$result" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage')
+    if [ "$has_next" != "true" ]; then
+      break
+    fi
+
+    threads_cursor=$(echo "$result" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor')
+    if [ -z "$threads_cursor" ] || [ "$threads_cursor" = "null" ]; then
+      echo "❌ Assertion failed: review thread pagination cursor missing while hasNextPage=true" >&2
+      return 1
+    fi
+  done
+
+  echo "$all_threads"
+}
+
 echo "⏳ Waiting for Codex review on PR #$PR_NUMBER..."
-
 echo ""
-
 echo "Tip: after you comment '@codex review', Codex will respond with either:"
-
 echo "  - review comments / threads to address (script exits 1)"
-
 echo "  - an explicit approval comment (script exits 0)"
-
 echo ""
 
 while true; do
-  RESULT=$(FETCH_PR_DATA)
+  PR_STATE_RESULT=$(FETCH_PR_STATE)
+  PR_STATE=$(echo "$PR_STATE_RESULT" | jq -r '.data.repository.pullRequest.state // empty')
 
-  PR_STATE=$(echo "$RESULT" | jq -r '.data.repository.pullRequest.state')
+  if [[ -z "$PR_STATE" ]]; then
+    echo "❌ Unable to fetch PR state for #$PR_NUMBER in ${OWNER}/${REPO}." >&2
+    exit 1
+  fi
 
   if [ "$PR_STATE" = "MERGED" ]; then
     echo "✅ PR #$PR_NUMBER has been merged!"
@@ -180,8 +288,11 @@ while true; do
     exit 1
   fi
 
+  ALL_COMMENTS=$(FETCH_ALL_COMMENTS)
+  ALL_THREADS=$(FETCH_ALL_THREADS)
+
   # Ignore Codex's own comments since they mention "@codex review" in boilerplate.
-  REQUEST_AT=$(echo "$RESULT" | jq -r --arg bot "$BOT_LOGIN_GRAPHQL" '[.data.repository.pullRequest.comments.nodes[] | select(.author.login != $bot and (.body | contains("@codex review")))] | sort_by(.createdAt) | last | .createdAt // empty')
+  REQUEST_AT=$(echo "$ALL_COMMENTS" | jq -r --arg bot "$BOT_LOGIN_GRAPHQL" '[.[] | select(.author.login != $bot and (.body | contains("@codex review")))] | sort_by(.createdAt) | last | .createdAt // empty')
 
   if [[ -z "$REQUEST_AT" ]]; then
     echo "❌ No '@codex review' comment found on PR #$PR_NUMBER." >&2
@@ -196,7 +307,7 @@ while true; do
   fi
 
   # If Codex can't run (usage limits, etc) it posts a comment we shouldn't treat as "approval".
-  RATE_LIMIT_COMMENT=$(echo "$RESULT" | jq -r "[.data.repository.pullRequest.comments.nodes[] | select(.author.login == \"${BOT_LOGIN_GRAPHQL}\" and .createdAt > \"${REQUEST_AT}\" and (.body | test(\"${CODEX_RATE_LIMIT_REGEX}\"))) | {createdAt, body}] | sort_by(.createdAt) | last // empty | .body // empty")
+  RATE_LIMIT_COMMENT=$(echo "$ALL_COMMENTS" | jq -r --arg bot "$BOT_LOGIN_GRAPHQL" --arg request_at "$REQUEST_AT" --arg regex "$CODEX_RATE_LIMIT_REGEX" '[.[] | select(.author.login == $bot and .createdAt > $request_at and (.body | test($regex))) | {createdAt, body}] | sort_by(.createdAt) | last // empty | .body // empty')
 
   if [[ -n "$RATE_LIMIT_COMMENT" ]]; then
     echo ""
@@ -206,7 +317,7 @@ while true; do
     exit 1
   fi
 
-  APPROVAL_COMMENT=$(echo "$RESULT" | jq -r "[.data.repository.pullRequest.comments.nodes[] | select(.author.login == \"${BOT_LOGIN_GRAPHQL}\" and .createdAt > \"${REQUEST_AT}\" and (.body | test(\"${CODEX_APPROVAL_REGEX}\"))) | {createdAt, body}] | sort_by(.createdAt) | last // empty | .body // empty")
+  APPROVAL_COMMENT=$(echo "$ALL_COMMENTS" | jq -r --arg bot "$BOT_LOGIN_GRAPHQL" --arg request_at "$REQUEST_AT" --arg regex "$CODEX_APPROVAL_REGEX" '[.[] | select(.author.login == $bot and .createdAt > $request_at and (.body | test($regex))) | {createdAt, body}] | sort_by(.createdAt) | last // empty | .body // empty')
 
   if [[ -n "$APPROVAL_COMMENT" ]]; then
     echo ""
@@ -216,7 +327,9 @@ while true; do
     exit 0
   fi
 
-  CODEX_RESPONSE_COUNT=$(echo "$RESULT" | jq -r --arg bot "$BOT_LOGIN_GRAPHQL" --arg request_at "$REQUEST_AT" '([.data.repository.pullRequest.comments.nodes[] | select(.author.login == $bot and .createdAt > $request_at)] | length) + ([.data.repository.pullRequest.reviewThreads.nodes[] | select(.comments.nodes[0].author.login == $bot and .comments.nodes[0].createdAt > $request_at)] | length)')
+  CODEX_RESPONSE_COUNT_COMMENTS=$(echo "$ALL_COMMENTS" | jq -r --arg bot "$BOT_LOGIN_GRAPHQL" --arg request_at "$REQUEST_AT" '[.[] | select(.author.login == $bot and .createdAt > $request_at)] | length')
+  CODEX_RESPONSE_COUNT_THREADS=$(echo "$ALL_THREADS" | jq -r --arg bot "$BOT_LOGIN_GRAPHQL" --arg request_at "$REQUEST_AT" '[.[] | select((.comments.nodes | length) > 0 and .comments.nodes[0].author.login == $bot and .comments.nodes[0].createdAt > $request_at)] | length')
+  CODEX_RESPONSE_COUNT=$((CODEX_RESPONSE_COUNT_COMMENTS + CODEX_RESPONSE_COUNT_THREADS))
 
   if [ "$CODEX_RESPONSE_COUNT" -eq 0 ]; then
     echo -ne "\r⏳ Waiting for Codex response... (requested at ${REQUEST_AT})  "
@@ -225,7 +338,7 @@ while true; do
   fi
 
   # Codex responded to the latest @codex review request; defer to check_codex_comments.sh for
-  # unresolved comment/thread detection so we don't duplicate the filtering logic here.
+  # unresolved comment/thread detection so we don't duplicate filtering logic here.
   if ! CHECK_OUTPUT=$(./scripts/check_codex_comments.sh "$PR_NUMBER" 2>&1); then
     echo ""
     echo "$CHECK_OUTPUT"
@@ -236,5 +349,4 @@ while true; do
   echo "❌ Codex responded, but no explicit approval comment was found after the latest '@codex review'."
   echo "   👉 If you expected approval, re-comment '@codex review' and run this script again."
   exit 1
-
 done
