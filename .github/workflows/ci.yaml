@@ -108,15 +108,83 @@ jobs:
           go mod vendor
           git diff --exit-code -- go.mod go.sum vendor/
 
+      - name: Setup envtest assets
+        env:
+          GOFLAGS: -mod=vendor
+        run: |
+          KUBEBUILDER_ASSETS_PATH="$(go run ./vendor/sigs.k8s.io/controller-runtime/tools/setup-envtest use 1.35.x --bin-dir "${{ github.workspace }}/bin/envtest" -p path)"
+          echo "KUBEBUILDER_ASSETS=${KUBEBUILDER_ASSETS_PATH}" >> "$GITHUB_ENV"
+
       - name: Run tests
         env:
           GOFLAGS: -mod=vendor
-        run: go test ./...
+          KUBEBUILDER_ASSETS: ${{ env.KUBEBUILDER_ASSETS }}
+        run: go test ./... -count=1
 
       - name: Build
         env:
           GOFLAGS: -mod=vendor
         run: go build ./...
+
+  e2e-kind:
+    name: E2E Smoke (Kind)
+    needs: [changes, test]
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Create Kind cluster
+        uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
+        with:
+          cluster_name: e2e
+
+      - name: Build binary
+        env:
+          GOFLAGS: -mod=vendor
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: go build -o coder-k8s ./
+
+      - name: Build and load image
+        run: |
+          docker build -f Dockerfile.goreleaser -t ghcr.io/coder/coder-k8s:e2e .
+          kind load docker-image ghcr.io/coder/coder-k8s:e2e --name e2e
+
+      - name: Apply CRDs and RBAC
+        run: |
+          kubectl apply -f config/crd/bases/
+          kubectl apply -f config/rbac/
+
+      - name: Deploy controller
+        run: |
+          kubectl apply -f config/e2e/namespace.yaml
+          kubectl apply -f config/e2e/
+
+      - name: Wait for controller
+        run: kubectl wait --for=condition=Available deploy/coder-k8s -n coder-system --timeout=120s
+
+      - name: Apply sample CR
+        run: kubectl apply -f config/samples/coder_v1alpha1_codercontrolplane.yaml
+
+      - name: Verify CR exists
+        run: |
+          kubectl get codercontrolplanes -A
+          COUNT=$(kubectl get codercontrolplanes -A -o json | jq '.items | length')
+          if [ "$COUNT" -lt 1 ]; then
+            echo "assertion failed: expected at least 1 CoderControlPlane resource" >&2
+            exit 1
+          fi
 
   lint-actions:
     name: Lint GitHub Actions
@@ -167,7 +235,7 @@ jobs:
 
   publish-main:
     name: Publish GHCR :main
-    needs: [changes, test, lint, lint-actions]
+    needs: [changes, test, lint, lint-actions, e2e-kind]
     if: |
       always() &&
       github.event_name == 'push' &&
@@ -175,7 +243,8 @@ jobs:
       needs.changes.outputs.publish == 'true' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       (needs.lint.result == 'success' || needs.lint.result == 'skipped') &&
-      (needs.lint-actions.result == 'success' || needs.lint-actions.result == 'skipped')
+      (needs.lint-actions.result == 'success' || needs.lint-actions.result == 'skipped') &&
+      (needs.e2e-kind.result == 'success' || needs.e2e-kind.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coder-k8s
+  namespace: coder-system
+  labels:
+    app: coder-k8s
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: coder-k8s
+  template:
+    metadata:
+      labels:
+        app: coder-k8s
+    spec:
+      serviceAccountName: coder-k8s
+      containers:
+        - name: manager
+          image: ghcr.io/coder/coder-k8s:e2e
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8081
+              name: health
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10

@@ -1,0 +1,7 @@
+apiVersion: coder.com/v1alpha1
+kind: CoderControlPlane
+metadata:
+  name: codercontrolplane-sample
+  namespace: default
+spec:
+  image: "ghcr.io/coder/coder-k8s:main"

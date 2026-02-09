@@ -1,0 +1,32 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - coder.com
+  resources:
+  - codercontrolplanes
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - coder.com
+  resources:
+  - codercontrolplanes/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - coder.com
+  resources:
+  - codercontrolplanes/status
+  verbs:
+  - get
+  - patch
+  - update
