@@ -103,7 +103,7 @@ jobs:
 
   publish-main:
     name: Publish GHCR :main
-    needs: [test, lint-actions]
+    needs: [test, lint, lint-actions]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
