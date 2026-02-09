@@ -10,7 +10,48 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+      workflows: ${{ steps.filter.outputs.workflows }}
+      publish: ${{ steps.filter.outputs.publish }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        with:
+          filters: |
+            go:
+              - '**/*.go'
+              - 'go.mod'
+              - 'go.sum'
+              - 'vendor/**'
+              - 'Makefile'
+              - '.golangci.yml'
+              - '.golangci.yaml'
+            workflows:
+              - '.github/workflows/**'
+            publish:
+              - '**/*.go'
+              - 'go.mod'
+              - 'go.sum'
+              - 'vendor/**'
+              - 'Dockerfile*'
+              - 'Dockerfile.goreleaser'
+
   lint:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -46,6 +87,8 @@ jobs:
           go-package: ./...
 
   test:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -77,6 +120,8 @@ jobs:
 
   lint-actions:
     name: Lint GitHub Actions
+    needs: changes
+    if: needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -122,8 +167,15 @@ jobs:
 
   publish-main:
     name: Publish GHCR :main
-    needs: [test, lint, lint-actions]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [changes, test, lint, lint-actions]
+    if: |
+      always() &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.changes.outputs.publish == 'true' &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      (needs.lint.result == 'success' || needs.lint.result == 'skipped') &&
+      (needs.lint-actions.result == 'success' || needs.lint-actions.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: read
