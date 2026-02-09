@@ -5,8 +5,8 @@
 package deps
 
 import (
-	_ "k8s.io/apimachinery/pkg/runtime"
-	_ "k8s.io/client-go/kubernetes"
-	_ "k8s.io/code-generator"
-	_ "sigs.k8s.io/controller-runtime/pkg/client"
+	_ "k8s.io/apimachinery/pkg/runtime"           // Keep apimachinery runtime dependency vendored.
+	_ "k8s.io/client-go/kubernetes"               // Keep client-go kubernetes client vendored.
+	_ "k8s.io/code-generator"                     // Keep code-generator scripts vendored.
+	_ "sigs.k8s.io/controller-runtime/pkg/client" // Keep controller-runtime client vendored.
 )

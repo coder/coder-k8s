@@ -1,6 +1,6 @@
 module github.com/coder/coder-k8s
 
-go 1.25.6
+go 1.25.7
 
 require (
 	k8s.io/apimachinery v0.35.0

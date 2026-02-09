@@ -1,3 +1,4 @@
+// Package main provides the entrypoint for the coder-k8s binary.
 package main
 
 import (
