@@ -88,9 +88,20 @@ Run from repository root.
 
 ### Pull request descriptions
 - Include: what changed, why, validation commands run, and any follow-up work.
-- For public mux-generated PRs/commits in this environment, include footer:
+- For public mux-generated PRs/commits in this environment, include the attribution footer defined in `.mux/skills/pull-requests/SKILL.md`.
 
-```md
----
-_Generated with [`mux`](https://github.com/coder/mux) • Model: `<modelString>` • Thinking: `<thinkingLevel>`_
-```
+## PR Workflow (Codex)
+
+- Before creating or updating any PR, commit, or public issue, read `.mux/skills/pull-requests/SKILL.md` and follow it.
+- Use `./scripts/wait_pr_ready.sh <pr_number>` for a one-command wait flow after requesting review.
+- Prefer `gh` CLI for GitHub interactions over manual web/curl flows.
+
+When a PR exists, stay in this loop until ready:
+1. Push your latest fixes.
+2. Run local validation (`make verify-vendor`, `make test`, `make build`).
+3. Request review with `@codex review`.
+4. Run `./scripts/wait_pr_codex.sh <pr_number>` and wait for Codex.
+5. If Codex leaves comments, address them, resolve threads with `./scripts/resolve_pr_comment.sh <thread_id>`, push, and repeat.
+6. After explicit Codex approval, run `./scripts/wait_pr_checks.sh <pr_number>`.
+
+Only stop the loop early if the reviewer is clearly misunderstanding the intended change and further churn would be counterproductive. In that case, leave a clarifying PR comment and wait for human direction.

@@ -101,6 +101,25 @@ jobs:
           advanced-security: false
           inputs: .github/workflows
 
+  codex-comments:
+    name: Codex Comments
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check unresolved Codex comments
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/check_codex_comments.sh ${{ github.event.pull_request.number }}
+
   publish-main:
     name: Publish GHCR :main
     needs: [test, lint, lint-actions]
