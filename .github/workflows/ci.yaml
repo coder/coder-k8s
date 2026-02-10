@@ -54,6 +54,9 @@ jobs:
               - 'Makefile'
               - '.golangci.yml'
               - '.golangci.yaml'
+              - 'hack/update-reference-docs.sh'
+              - 'hack/crd-ref-docs/**'
+              - 'docs/reference/api/**'
             workflows:
               - '.github/workflows/**'
               - '.github/actionlint.yaml'
@@ -88,6 +91,11 @@ jobs:
           go mod tidy
           go mod vendor
           git diff --exit-code -- go.mod go.sum vendor/
+
+      - name: Verify API reference docs are up to date
+        run: |
+          bash ./hack/update-reference-docs.sh
+          git diff --exit-code -- docs/reference/api/
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9

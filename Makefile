@@ -4,7 +4,7 @@ MODULE_FILES := go.mod $(wildcard go.sum)
 ENVTEST_K8S_VERSION ?= 1.35.x
 ENVTEST_ASSETS_DIR := $(shell pwd)/bin/envtest
 
-.PHONY: vendor test test-integration setup-envtest build lint vuln verify-vendor codegen manifests docs-serve docs-build docs-check update-coder-docs-skill
+.PHONY: vendor test test-integration setup-envtest build lint vuln verify-vendor codegen manifests docs-reference docs-reference-check docs-serve docs-build docs-check update-coder-docs-skill
 
 $(VENDOR_STAMP): $(MODULE_FILES)
 	go mod tidy
@@ -47,6 +47,12 @@ codegen: $(VENDOR_STAMP)
 	bash ./hack/update-codegen.sh
 
 
+docs-reference: $(VENDOR_STAMP)
+	bash ./hack/update-reference-docs.sh
+
+docs-reference-check: docs-reference
+	git diff --exit-code -- docs/reference/api/
+
 docs-serve:
 	@command -v mkdocs >/dev/null || (echo "mkdocs not found; use nix develop" && exit 1)
 	mkdocs serve
@@ -55,7 +61,7 @@ docs-build:
 	@command -v mkdocs >/dev/null || (echo "mkdocs not found; use nix develop" && exit 1)
 	mkdocs build
 
-docs-check:
+docs-check: docs-reference-check
 	@command -v mkdocs >/dev/null || (echo "mkdocs not found; use nix develop" && exit 1)
 	mkdocs build --strict
 
