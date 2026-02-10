@@ -86,6 +86,7 @@ Run from repository root.
   **Don’t** silently ignore these paths or convert them to soft failures.
 - **Do** keep vendoring in sync when dependencies change (`go mod tidy`, `go mod vendor`, then verify diff).
   **Don’t** submit dependency changes without updating `vendor/`.
+  **Don’t** manually delete or edit `vendor/modules.txt`; refresh vendoring via `go mod tidy && go mod vendor` (or `make vendor`) instead.
 - **Do** regenerate generated artifacts after API changes (`make codegen`, `make manifests`).
   **Don’t** hand-edit generated files like `zz_generated.deepcopy.go` or CRD/RBAC manifests.
 - **Do** keep controller, aggregated API server, and storage changes paired with focused tests (`main_test.go`, `internal/controller/*_test.go`, and package tests under `internal/app/`/`internal/aggregated/`).
