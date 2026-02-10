@@ -1,18 +1,18 @@
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
 locals {
-  azs = [
-    "eu-central-1a",
-    "eu-central-1b",
-  ]
+  # Keep the default footprint small and EKS-compatible across regions.
+  az_count = 2
 
-  public_subnet_cidrs = [
-    "10.0.1.0/24",
-    "10.0.2.0/24",
-  ]
+  azs = slice(data.aws_availability_zones.available.names, 0, local.az_count)
 
-  private_subnet_cidrs = [
-    "10.0.10.0/24",
-    "10.0.20.0/24",
-  ]
+  # Derive subnet ranges from the configurable VPC CIDR.
+  subnet_cidrs = cidrsubnets(var.vpc_cidr, 4, 4, 4, 4)
+
+  public_subnet_cidrs  = slice(local.subnet_cidrs, 0, local.az_count)
+  private_subnet_cidrs = slice(local.subnet_cidrs, local.az_count, local.az_count * 2)
 }
 
 resource "aws_vpc" "this" {
