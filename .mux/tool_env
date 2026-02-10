@@ -2,6 +2,80 @@
 # Sourced by Mux before every bash tool invocation.
 # Docs: https://mux.coder.com/hooks/tools
 
+mux_use_nix_devshell_path() {
+  local flake_root=""
+
+  # Resolve the flake root from stable workspace signals before considering current cwd.
+  if [[ -n "${MUX_PROJECT_PATH:-}" && -f "${MUX_PROJECT_PATH}/flake.nix" ]]; then
+    flake_root="${MUX_PROJECT_PATH}"
+  elif [[ -f "flake.nix" ]]; then
+    flake_root="$(pwd)"
+  else
+    local git_root=""
+    git_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    if [[ -n "${git_root}" && -f "${git_root}/flake.nix" ]]; then
+      flake_root="${git_root}"
+    else
+      return 0
+    fi
+  fi
+
+  if ! command -v nix >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # Keep cache file workspace-specific to avoid collisions between parallel workspaces.
+  local workspace_cache_tag="${MUX_WORKSPACE_ID:-${MUX_WORKSPACE_NAME:-${flake_root}}}"
+  workspace_cache_tag="$(printf '%s' "${workspace_cache_tag}" | tr -cs 'A-Za-z0-9._-' '_')"
+
+  local cache_file="/tmp/mux-nix-path-${workspace_cache_tag}"
+
+  local should_refresh=0
+  if [[ ! -s "${cache_file}" ]]; then
+    should_refresh=1
+  elif [[ "${flake_root}/flake.nix" -nt "${cache_file}" ]]; then
+    should_refresh=1
+  elif [[ -f "${flake_root}/flake.lock" && "${flake_root}/flake.lock" -nt "${cache_file}" ]]; then
+    should_refresh=1
+  fi
+
+  if [[ "${should_refresh}" -eq 1 ]]; then
+    local tmp_cache_file
+    tmp_cache_file="$(mktemp "${cache_file}.tmp.XXXXXX")"
+
+    if nix develop "${flake_root}" -c bash -c 'echo "$PATH"' >"${tmp_cache_file}" 2>/dev/null; then
+      if [[ ! -s "${tmp_cache_file}" ]]; then
+        rm -f "${tmp_cache_file}"
+        echo "assertion failed: nix develop returned an empty PATH" >&2
+        return 96
+      fi
+      mv "${tmp_cache_file}" "${cache_file}"
+    else
+      rm -f "${tmp_cache_file}"
+      echo "assertion failed: failed to refresh nix devshell PATH cache: ${cache_file}" >&2
+      return 96
+    fi
+  fi
+
+  if [[ -s "${cache_file}" ]]; then
+    export PATH="$(<"${cache_file}")"
+    return 0
+  fi
+
+  echo "assertion failed: nix devshell PATH cache file missing or empty: ${cache_file}" >&2
+  return 96
+}
+
+if mux_use_nix_devshell_path; then
+  :
+else
+  status=$?
+  if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+    return "${status}"
+  fi
+  exit "${status}"
+fi
+
 run_and_report() {
   local step_name="${1:-}"
   if [[ -z "${step_name}" ]]; then
