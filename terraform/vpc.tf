@@ -15,10 +15,13 @@ locals {
   azs = slice(data.aws_availability_zones.available.names, 0, local.az_count)
 
   # Derive /24 subnet ranges from the VPC CIDR.
+  # Compute new-bits dynamically so this works for any VPC prefix, not just /16.
+  subnet_newbits = 24 - tonumber(split("/", var.vpc_cidr)[1])
+
   # Network numbers are intentionally spaced so public (1,2) and private (10,20)
   # blocks don't collide and are easy to identify at a glance.
-  public_subnet_cidrs  = [for i in [1, 2] : cidrsubnet(var.vpc_cidr, 8, i)]
-  private_subnet_cidrs = [for i in [10, 20] : cidrsubnet(var.vpc_cidr, 8, i)]
+  public_subnet_cidrs  = [for i in [1, 2] : cidrsubnet(var.vpc_cidr, local.subnet_newbits, i)]
+  private_subnet_cidrs = [for i in [10, 20] : cidrsubnet(var.vpc_cidr, local.subnet_newbits, i)]
 }
 
 resource "aws_vpc" "this" {
