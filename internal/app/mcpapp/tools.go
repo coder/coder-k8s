@@ -16,6 +16,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const (
+	defaultPodLogTailLines int64 = 2000
+	maxPodLogBytes         int64 = 1 << 20
+	podLogTruncatedSuffix        = "\n(truncated)"
+)
+
 type listControlPlanesInput struct {
 	Namespace string `json:"namespace,omitempty"`
 }
@@ -94,10 +100,11 @@ type getEventsOutput struct {
 }
 
 type getPodLogsInput struct {
-	Namespace string `json:"namespace"`
-	Name      string `json:"name"`
-	TailLines *int64 `json:"tailLines,omitempty"`
-	Container string `json:"container,omitempty"`
+	Namespace  string `json:"namespace"`
+	Name       string `json:"name"`
+	TailLines  *int64 `json:"tailLines,omitempty"`
+	LimitBytes *int64 `json:"limitBytes,omitempty"`
+	Container  string `json:"container,omitempty"`
 }
 
 type getPodLogsOutput struct {
@@ -267,9 +274,21 @@ func registerTools(server *mcp.Server, k8sClient client.Client, clientset kubern
 			return nil, getPodLogsOutput{}, fmt.Errorf("name is required")
 		}
 
+		tailLines := input.TailLines
+		if tailLines == nil {
+			defaultTailLines := defaultPodLogTailLines
+			tailLines = &defaultTailLines
+		}
+
+		limitBytes := maxPodLogBytes
+		if input.LimitBytes != nil && *input.LimitBytes > 0 && *input.LimitBytes < limitBytes {
+			limitBytes = *input.LimitBytes
+		}
+
 		logOptions := &corev1.PodLogOptions{
-			Container: input.Container,
-			TailLines: input.TailLines,
+			Container:  input.Container,
+			TailLines:  tailLines,
+			LimitBytes: &limitBytes,
 		}
 		stream, err := clientset.CoreV1().Pods(input.Namespace).GetLogs(input.Name, logOptions).Stream(ctx)
 		if err != nil {
@@ -279,12 +298,22 @@ func registerTools(server *mcp.Server, k8sClient client.Client, clientset kubern
 			_ = stream.Close()
 		}()
 
-		logs, err := io.ReadAll(stream)
+		logs, err := io.ReadAll(io.LimitReader(stream, limitBytes+1))
 		if err != nil {
 			return nil, getPodLogsOutput{}, fmt.Errorf("read logs for pod %s/%s: %w", input.Namespace, input.Name, err)
 		}
 
-		return nil, getPodLogsOutput{Logs: string(logs)}, nil
+		truncated := int64(len(logs)) > limitBytes
+		if truncated {
+			logs = logs[:limitBytes]
+		}
+
+		outputLogs := string(logs)
+		if truncated {
+			outputLogs += podLogTruncatedSuffix
+		}
+
+		return nil, getPodLogsOutput{Logs: outputLogs}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
