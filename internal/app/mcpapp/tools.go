@@ -20,6 +20,8 @@ const (
 	defaultPodLogTailLines int64 = 2000
 	maxPodLogBytes         int64 = 1 << 20
 	podLogTruncatedSuffix        = "\n(truncated)"
+	defaultEventListLimit  int64 = 200
+	maxEventListLimit      int64 = 1000
 )
 
 type listControlPlanesInput struct {
@@ -82,9 +84,11 @@ type listTemplatesOutput struct {
 }
 
 type getEventsInput struct {
-	Namespace string `json:"namespace,omitempty"`
+	Namespace string `json:"namespace"`
 	Name      string `json:"name,omitempty"`
 	Kind      string `json:"kind,omitempty"`
+	Limit     int64  `json:"limit,omitempty"`
+	Continue  string `json:"continue,omitempty"`
 }
 
 type eventSummary struct {
@@ -96,7 +100,8 @@ type eventSummary struct {
 }
 
 type getEventsOutput struct {
-	Items []eventSummary `json:"items"`
+	Items    []eventSummary `json:"items"`
+	Continue string         `json:"continue,omitempty"`
 }
 
 type getPodLogsInput struct {
@@ -232,6 +237,10 @@ func registerTools(server *mcp.Server, k8sClient client.Client, clientset kubern
 		Name:        "get_events",
 		Description: "Get Kubernetes events for an object.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input getEventsInput) (*mcp.CallToolResult, getEventsOutput, error) {
+		if input.Namespace == "" {
+			return nil, getEventsOutput{}, fmt.Errorf("namespace is required")
+		}
+
 		selector := fields.Set{}
 		if input.Name != "" {
 			selector["involvedObject.name"] = input.Name
@@ -240,7 +249,18 @@ func registerTools(server *mcp.Server, k8sClient client.Client, clientset kubern
 			selector["involvedObject.kind"] = input.Kind
 		}
 
-		listOptions := metav1.ListOptions{}
+		limit := input.Limit
+		if limit <= 0 {
+			limit = defaultEventListLimit
+		}
+		if limit > maxEventListLimit {
+			limit = maxEventListLimit
+		}
+
+		listOptions := metav1.ListOptions{
+			Limit:    limit,
+			Continue: input.Continue,
+		}
 		if len(selector) > 0 {
 			listOptions.FieldSelector = selector.String()
 		}
@@ -250,7 +270,10 @@ func registerTools(server *mcp.Server, k8sClient client.Client, clientset kubern
 			return nil, getEventsOutput{}, fmt.Errorf("list events in namespace %q: %w", input.Namespace, err)
 		}
 
-		output := getEventsOutput{Items: make([]eventSummary, 0, len(eventList.Items))}
+		output := getEventsOutput{
+			Items:    make([]eventSummary, 0, len(eventList.Items)),
+			Continue: eventList.Continue,
+		}
 		for _, event := range eventList.Items {
 			output.Items = append(output.Items, eventSummary{
 				Type:          event.Type,
