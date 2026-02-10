@@ -14,6 +14,8 @@ import (
 const (
 	// DefaultHTTPAddr is the default listen address used by MCP HTTP mode.
 	DefaultHTTPAddr = ":8090"
+	// streamableHTTPSessionTimeout ensures abandoned MCP streamable HTTP sessions are reclaimed.
+	streamableHTTPSessionTimeout = 15 * time.Minute
 )
 
 var setupLog = ctrl.Log.WithName("setup")
@@ -36,7 +38,9 @@ func RunHTTP(ctx context.Context) error {
 
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return server
-	}, nil)
+	}, &mcp.StreamableHTTPOptions{
+		SessionTimeout: streamableHTTPSessionTimeout,
+	})
 	if mcpHandler == nil {
 		return fmt.Errorf("assertion failed: MCP HTTP handler is nil after successful construction")
 	}
