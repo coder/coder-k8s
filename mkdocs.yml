@@ -1,0 +1,48 @@
+site_name: coder-k8s
+repo_url: https://github.com/coder/coder-k8s
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - content.action.edit
+    - search.suggest
+    - search.highlight
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+
+extra_javascript:
+  - https://unpkg.com/mermaid@11/dist/mermaid.min.js
+  - javascripts/mermaid.js
+
+nav:
+  - Home: index.md
+  - Tutorials:
+      - Getting started: tutorials/getting-started.md
+  - How-to guides:
+      - Deploy controller: how-to/deploy-controller.md
+      - Deploy aggregated API server: how-to/deploy-aggregated-apiserver.md
+      - Troubleshooting: how-to/troubleshooting.md
+  - Reference:
+      - API:
+          - CoderControlPlane: reference/api/codercontrolplane.md
+          - CoderWorkspace: reference/api/coderworkspace.md
+          - CoderTemplate: reference/api/codertemplate.md
+  - Explanation:
+      - Architecture: explanation/architecture.md

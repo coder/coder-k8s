@@ -1,0 +1,37 @@
+{
+  "version": "0.2",
+  "language": "en",
+  "words": [
+    "Diátaxis",
+    "GOFLAGS",
+    "apiregistration",
+    "apiserverapp",
+    "apiserver",
+    "apiservice",
+    "clusterrole",
+    "clusterrolebinding",
+    "coder-k8s",
+    "codercontrolplane",
+    "codercontrolplanes",
+    "codertemplate",
+    "codertemplates",
+    "coderworkspace",
+    "coderworkspaces",
+    "controllerapp",
+    "devshell",
+    "gofumpt",
+    "javascripts",
+    "kubeconfig",
+    "kubebuilder",
+    "metav",
+    "mkdocs",
+    "pymdownx",
+    "superfences"
+  ],
+  "ignorePaths": [
+    ".git/**",
+    "node_modules/**",
+    "site/**",
+    "vendor/**"
+  ]
+}

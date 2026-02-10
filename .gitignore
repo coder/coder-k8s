@@ -12,3 +12,7 @@
 
 # Temporary external clones/forks
 /tmpfork/
+
+# MkDocs
+/site/
+/.cache/
