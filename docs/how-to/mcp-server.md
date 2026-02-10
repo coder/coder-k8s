@@ -86,6 +86,8 @@ The server exposes MCP tools for:
 
 ## 5. Health checks
 
+<!-- cspell:ignore healthz readyz -->
+
 The HTTP server exposes standard health endpoints:
 
 - `/healthz`
