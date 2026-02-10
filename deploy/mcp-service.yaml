@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: coder-k8s
+  namespace: coder-system
+spec:
+  selector:
+    app: coder-k8s-mcp
+  ports:
+    - name: mcp
+      port: 8090
+      protocol: TCP
+      targetPort: 8090

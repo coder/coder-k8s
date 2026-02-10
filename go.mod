@@ -5,6 +5,7 @@ go 1.25.7
 require (
 	github.com/coder/coder/v2 v2.30.0
 	github.com/google/uuid v1.6.0
+	github.com/modelcontextprotocol/go-sdk v1.3.0
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da
 	k8s.io/api v0.35.0
@@ -180,6 +181,7 @@ require (
 	github.com/google/cel-go v0.26.0 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
+	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/google/pprof v0.0.0-20250820193118-f64d9cf942d6 // indirect
 	github.com/gordonklaus/ineffassign v0.2.0 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
@@ -332,6 +334,7 @@ require (
 	github.com/yagipy/maintidx v1.0.0 // indirect
 	github.com/yeya24/promlinter v0.3.0 // indirect
 	github.com/ykadowak/zerologlint v0.1.5 // indirect
+	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	github.com/zclconf/go-cty v1.17.0 // indirect
 	github.com/zeebo/errs v1.4.0 // indirect

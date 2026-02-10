@@ -13,6 +13,19 @@ import (
 	"github.com/coder/coder-k8s/internal/controller"
 )
 
+func installMockSignalHandler(t *testing.T) {
+	t.Helper()
+
+	previous := setupSignalHandler
+	t.Cleanup(func() {
+		setupSignalHandler = previous
+	})
+
+	setupSignalHandler = func() context.Context {
+		return context.Background()
+	}
+}
+
 func TestControllerSchemeRegistersCoderControlPlaneKinds(t *testing.T) {
 	t.Helper()
 
@@ -80,6 +93,7 @@ func TestRunRejectsUnknownMode(t *testing.T) {
 
 func TestRunDispatchesAggregatedAPIServerMode(t *testing.T) {
 	t.Helper()
+	installMockSignalHandler(t)
 
 	previous := runAggregatedAPIServerApp
 	t.Cleanup(func() {
@@ -99,6 +113,34 @@ func TestRunDispatchesAggregatedAPIServerMode(t *testing.T) {
 	err := run([]string{"--app=aggregated-apiserver"})
 	if !called {
 		t.Fatal("expected aggregated apiserver runner to be called")
+	}
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("expected sentinel error %v, got %v", expectedErr, err)
+	}
+}
+
+func TestRunDispatchesMCPHTTPMode(t *testing.T) {
+	t.Helper()
+	installMockSignalHandler(t)
+
+	previous := runMCPHTTPApp
+	t.Cleanup(func() {
+		runMCPHTTPApp = previous
+	})
+
+	expectedErr := errors.New("sentinel mcp-http error")
+	called := false
+	runMCPHTTPApp = func(ctx context.Context) error {
+		called = true
+		if ctx == nil {
+			t.Fatal("expected non-nil context passed to MCP HTTP runner")
+		}
+		return expectedErr
+	}
+
+	err := run([]string{"--app=mcp-http"})
+	if !called {
+		t.Fatal("expected MCP HTTP runner to be called")
 	}
 	if !errors.Is(err, expectedErr) {
 		t.Fatalf("expected sentinel error %v, got %v", expectedErr, err)
