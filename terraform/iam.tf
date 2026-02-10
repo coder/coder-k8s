@@ -1,6 +1,6 @@
 data "aws_iam_policy_document" "eks_cluster_assume_role" {
   statement {
-    actions = ["sts:AssumeRole"]
+    actions = ["sts:AssumeRole", "sts:TagSession"]
 
     principals {
       type        = "Service"

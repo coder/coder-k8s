@@ -5,9 +5,13 @@ resource "aws_eks_cluster" "this" {
 
   bootstrap_self_managed_addons = false
 
+  access_config {
+    authentication_mode = "API_AND_CONFIG_MAP"
+  }
+
   compute_config {
     enabled       = true
-    node_pools    = ["general-purpose"]
+    node_pools    = ["general-purpose", "system"]
     node_role_arn = aws_iam_role.auto_mode_node.arn
   }
 
