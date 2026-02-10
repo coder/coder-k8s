@@ -1,5 +1,11 @@
 data "aws_availability_zones" "available" {
   state = "available"
+
+  # Restrict to standard AZs; exclude Local/Wavelength zones not supported for EKS control plane subnets.
+  filter {
+    name   = "zone-type"
+    values = ["availability-zone"]
+  }
 }
 
 locals {
