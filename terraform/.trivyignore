@@ -1,0 +1,9 @@
+# Sandbox EKS clusters intentionally expose the API endpoint publicly for bootstrap simplicity.
+AVD-AWS-0040
+AVD-AWS-0041
+
+# Sandbox configuration intentionally omits EKS secret envelope encryption.
+AVD-AWS-0039
+
+# Public subnets intentionally assign public IPs to support internet-facing resources.
+AVD-AWS-0164
