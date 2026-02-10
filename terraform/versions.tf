@@ -1,5 +1,12 @@
 terraform {
-  required_version = ">= 1.5"
+  required_version = ">= 1.11"
+
+  backend "s3" {
+    region       = "eu-central-1"
+    encrypt      = true
+    use_lockfile = true
+    # bucket and key supplied via -backend-config at init time.
+  }
 
   required_providers {
     aws = {

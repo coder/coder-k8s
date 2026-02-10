@@ -16,3 +16,21 @@
 # MkDocs
 /site/
 /.cache/
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+crash.log
+crash.*.log
+*.tfplan
+*.tfplan.*
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Backend config (local-only, not committed)
+terraform/backend.hcl

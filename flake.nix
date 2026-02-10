@@ -15,7 +15,11 @@
     in {
       devShells = forAllSystems (system:
         let
-          pkgs = import nixpkgs { inherit system; };
+          pkgs = import nixpkgs {
+            inherit system;
+            config.allowUnfreePredicate = pkg:
+              builtins.elem (nixpkgs.lib.getName pkg) [ "terraform" ];
+          };
           docsPython = pkgs.python3.withPackages (ps: [
             ps.mkdocs
             ps."mkdocs-material"
@@ -35,6 +39,7 @@
 
               # Cloud tooling
               awscli2
+              terraform
 
               goreleaser
               actionlint

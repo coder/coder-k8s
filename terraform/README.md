@@ -17,11 +17,11 @@ This directory provisions a cost-optimized Amazon EKS sandbox cluster in region 
   - Disk size: `20 GiB`
   - AMI type: `AL2023_x86_64_STANDARD`
 - EKS managed add-ons: `coredns`, `kube-proxy`, `vpc-cni`
-- Local Terraform state (no remote backend configured)
+- Remote Terraform state in AWS S3 with lockfile-based locking (no DynamoDB)
 
 ## Prerequisites
 
-- Terraform `>= 1.5`
+- Terraform `>= 1.11`
 - AWS CLI v2 installed
 - AWS identity with permissions to create VPC, IAM, EKS, and EC2 resources in your target account
 
@@ -71,10 +71,78 @@ If you prefer not to use `TF_VAR_aws_profile`, pass `-var="aws_profile=<your-ter
 
 > Security note: do not commit `~/.aws/config`, `~/.aws/credentials`, or any copied credential values to git.
 
-## Usage
+## Remote state backend (S3 + lockfile)
+
+Terraform state is stored in an S3 bucket in `eu-central-1`. Locking uses Terraform's native S3 lockfile (`use_lockfile = true` in the backend block), so no DynamoDB lock table is required. The backend configuration committed in this repo only includes shared settings (`region`, `encrypt`, and `use_lockfile`); the bucket name and state key are supplied at init time via `-backend-config`.
+
+### Bootstrap the S3 bucket (one-time)
+
+Terraform cannot create its own backend bucket before backend initialization, so create and secure the bucket once with AWS CLI:
 
 ```bash
-terraform init
+REGION=eu-central-1
+BUCKET=<globally-unique-bucket-name>
+
+# Create bucket
+aws s3api create-bucket \
+  --bucket "$BUCKET" \
+  --region "$REGION" \
+  --create-bucket-configuration LocationConstraint="$REGION"
+
+# Enable versioning (for state recovery)
+aws s3api put-bucket-versioning \
+  --bucket "$BUCKET" \
+  --versioning-configuration Status=Enabled
+
+# Block all public access
+aws s3api put-public-access-block \
+  --bucket "$BUCKET" \
+  --public-access-block-configuration \
+    BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+
+# Default encryption (SSE-S3)
+aws s3api put-bucket-encryption \
+  --bucket "$BUCKET" \
+  --server-side-encryption-configuration '{
+    "Rules": [{
+      "ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}
+    }]
+  }'
+```
+
+### Required IAM permissions
+
+The identity used for Terraform backend access needs S3 permissions for `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` (lockfile lifecycle), and `s3:ListBucket` on the state bucket path.
+
+### Authentication note
+
+The S3 backend authenticates separately from the AWS provider configuration. If you use `TF_VAR_aws_profile` for provider auth, also set `AWS_PROFILE` or add `profile` to `backend.hcl` so `terraform init` can authenticate to S3.
+
+### Migrate existing local state
+
+If you already have a local `.tfstate` file, migrate it into S3 during init:
+
+```bash
+terraform init -migrate-state -backend-config=backend.hcl
+```
+
+## Usage
+
+Create a local backend config file `backend.hcl` in this directory (it is
+git-ignored):
+
+```hcl
+bucket = "<your-tfstate-bucket>"
+key    = "terraform-ncp3/sandbox-eks/terraform.tfstate"
+
+# Optional: set if you use an AWS CLI profile for backend access
+# profile = "terraform"
+```
+
+Then initialize and apply:
+
+```bash
+terraform init -backend-config=backend.hcl
 terraform plan
 terraform apply
 ```
