@@ -33,6 +33,9 @@
               kind
               k9s
 
+              # Cloud tooling
+              awscli2
+
               goreleaser
               actionlint
               zizmor
