@@ -36,11 +36,11 @@ type manifest struct {
 }
 
 type route struct {
-	Title       string  `json:"title"`
-	Description string  `json:"description"`
-	Path        string  `json:"path"`
-	State       string  `json:"state"`
-	Children    []route `json:"children"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Path        string   `json:"path"`
+	State       []string `json:"state"`
+	Children    []route  `json:"children"`
 }
 
 type snapshotMetadata struct {
@@ -246,7 +246,7 @@ func renderDocsTree(routes []route, destDocsRoot string) (string, error) {
 
 func appendRouteLines(routes []route, destDocsRoot string, level int, lines *[]string) error {
 	for _, r := range routes {
-		if r.State == "hidden" {
+		if routeStateContains(r.State, "hidden") {
 			// Hidden routes and their descendants are intentionally omitted from the rendered tree.
 			continue
 		}
@@ -417,6 +417,16 @@ func requireDirExists(pathValue, label string) error {
 		return fmt.Errorf("%s must be a directory: %q", label, pathValue)
 	}
 	return nil
+}
+
+// routeStateContains checks whether the state slice contains the given value.
+func routeStateContains(states []string, target string) bool {
+	for _, s := range states {
+		if s == target {
+			return true
+		}
+	}
+	return false
 }
 
 func requireFileExists(pathValue, label string) error {
