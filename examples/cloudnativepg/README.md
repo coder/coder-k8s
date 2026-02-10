@@ -42,6 +42,8 @@ kubectl rollout status deployment/coder-k8s-controller -n coder-system
 kubectl apply -f examples/cloudnativepg/
 ```
 
+The namespace manifest is prefixed (`00-namespace.yaml`) so `kubectl apply -f` creates `coder` before namespaced resources.
+
 Wait for PostgreSQL and verify the generated Secret:
 
 ```bash
