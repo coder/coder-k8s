@@ -14,9 +14,11 @@ locals {
 
   azs = slice(data.aws_availability_zones.available.names, 0, local.az_count)
 
-  # Match the deployed subnet layout (explicit /24 blocks within the VPC CIDR).
-  public_subnet_cidrs  = ["10.0.1.0/24", "10.0.2.0/24"]
-  private_subnet_cidrs = ["10.0.10.0/24", "10.0.20.0/24"]
+  # Derive /24 subnet ranges from the VPC CIDR.
+  # Network numbers are intentionally spaced so public (1,2) and private (10,20)
+  # blocks don't collide and are easy to identify at a glance.
+  public_subnet_cidrs  = [for i in [1, 2] : cidrsubnet(var.vpc_cidr, 8, i)]
+  private_subnet_cidrs = [for i in [10, 20] : cidrsubnet(var.vpc_cidr, 8, i)]
 }
 
 resource "aws_vpc" "this" {
