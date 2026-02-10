@@ -4,6 +4,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"maps"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -25,6 +26,7 @@ import (
 const (
 	defaultWorkspaceProxyPort = int32(80)
 	workspaceProxyTargetPort  = int32(3001)
+	workspaceProxyNamePrefix  = "wsproxy-"
 )
 
 // WorkspaceProxyReconciler reconciles a WorkspaceProxy object.
@@ -166,7 +168,8 @@ func (r *WorkspaceProxyReconciler) reconcileDeployment(
 	primaryAccessURL string,
 	tokenRef *coderv1alpha1.SecretKeySelector,
 ) (*appsv1.Deployment, error) {
-	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: workspaceProxy.Name, Namespace: workspaceProxy.Namespace}}
+	deploymentName := workspaceProxyResourceName(workspaceProxy.Name)
+	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: deploymentName, Namespace: workspaceProxy.Namespace}}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deployment, func() error {
 		labels := workspaceProxyLabels(workspaceProxy.Name)
@@ -232,7 +235,8 @@ func (r *WorkspaceProxyReconciler) reconcileDeployment(
 }
 
 func (r *WorkspaceProxyReconciler) reconcileService(ctx context.Context, workspaceProxy *coderv1alpha1.WorkspaceProxy) (*corev1.Service, error) {
-	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: workspaceProxy.Name, Namespace: workspaceProxy.Namespace}}
+	serviceName := workspaceProxyResourceName(workspaceProxy.Name)
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: serviceName, Namespace: workspaceProxy.Namespace}}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, service, func() error {
 		labels := workspaceProxyLabels(workspaceProxy.Name)
@@ -266,7 +270,7 @@ func (r *WorkspaceProxyReconciler) reconcileService(ctx context.Context, workspa
 		return nil, fmt.Errorf("reconcile workspace proxy service: %w", err)
 	}
 
-	if err := r.Get(ctx, types.NamespacedName{Name: service.Name, Namespace: service.Namespace}, service); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: service.Namespace}, service); err != nil {
 		return nil, fmt.Errorf("get reconciled service: %w", err)
 	}
 
@@ -373,6 +377,23 @@ func (r *WorkspaceProxyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Secret{}).
 		Named("workspaceproxy").
 		Complete(r)
+}
+
+func workspaceProxyResourceName(name string) string {
+	candidate := workspaceProxyNamePrefix + name
+	if len(candidate) <= 63 {
+		return candidate
+	}
+
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(name))
+	suffix := fmt.Sprintf("%08x", hasher.Sum32())
+	available := 63 - len(workspaceProxyNamePrefix) - len(suffix) - 1
+	if available < 1 {
+		available = 1
+	}
+
+	return fmt.Sprintf("%s%s-%s", workspaceProxyNamePrefix, name[:available], suffix)
 }
 
 func workspaceProxyLabels(name string) map[string]string {

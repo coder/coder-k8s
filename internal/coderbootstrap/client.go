@@ -6,10 +6,15 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"time"
 
 	"golang.org/x/xerrors"
 
 	"github.com/coder/coder/v2/codersdk"
+)
+
+const (
+	coderSDKRequestTimeout = 30 * time.Second
 )
 
 // RegisterWorkspaceProxyRequest describes how to register a workspace proxy in Coder.
@@ -60,6 +65,10 @@ func (c *SDKClient) EnsureWorkspaceProxy(ctx context.Context, req RegisterWorksp
 
 	client := codersdk.New(coderURL)
 	client.SetSessionToken(req.SessionToken)
+	if client.HTTPClient == nil {
+		client.HTTPClient = &http.Client{}
+	}
+	client.HTTPClient.Timeout = coderSDKRequestTimeout
 
 	existing, err := client.WorkspaceProxyByName(ctx, req.ProxyName)
 	if err != nil {

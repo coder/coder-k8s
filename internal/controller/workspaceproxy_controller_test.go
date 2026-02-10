@@ -3,6 +3,7 @@ package controller_test
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -25,6 +26,24 @@ type fakeBootstrapClient struct {
 func (f *fakeBootstrapClient) EnsureWorkspaceProxy(_ context.Context, _ coderbootstrap.RegisterWorkspaceProxyRequest) (coderbootstrap.RegisterWorkspaceProxyResponse, error) {
 	f.calls++
 	return f.response, f.err
+}
+
+func workspaceProxyResourceName(name string) string {
+	const prefix = "wsproxy-"
+	candidate := prefix + name
+	if len(candidate) <= 63 {
+		return candidate
+	}
+
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(name))
+	suffix := fmt.Sprintf("%08x", hasher.Sum32())
+	available := 63 - len(prefix) - len(suffix) - 1
+	if available < 1 {
+		available = 1
+	}
+
+	return fmt.Sprintf("%s%s-%s", prefix, name[:available], suffix)
 }
 
 func TestWorkspaceProxyReconcile_UsingDirectTokenSecret(t *testing.T) {
@@ -73,7 +92,7 @@ func TestWorkspaceProxyReconcile_UsingDirectTokenSecret(t *testing.T) {
 	}
 
 	deployment := &appsv1.Deployment{}
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: workspaceProxy.Name, Namespace: workspaceProxy.Namespace}, deployment); err != nil {
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: workspaceProxyResourceName(workspaceProxy.Name), Namespace: workspaceProxy.Namespace}, deployment); err != nil {
 		t.Fatalf("expected deployment to be reconciled: %v", err)
 	}
 	if len(deployment.Spec.Template.Spec.Containers) != 1 {
@@ -88,13 +107,88 @@ func TestWorkspaceProxyReconcile_UsingDirectTokenSecret(t *testing.T) {
 	}
 
 	service := &corev1.Service{}
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: workspaceProxy.Name, Namespace: workspaceProxy.Namespace}, service); err != nil {
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: workspaceProxyResourceName(workspaceProxy.Name), Namespace: workspaceProxy.Namespace}, service); err != nil {
 		t.Fatalf("expected service to be reconciled: %v", err)
 	}
 	if len(service.Spec.Ports) != 1 || service.Spec.Ports[0].Port != 80 {
 		t.Fatalf("expected default service port 80, got %+v", service.Spec.Ports)
 	}
 }
+
+func TestWorkspaceProxyReconcile_DoesNotCollideWithControlPlaneChildren(t *testing.T) {
+	ctx := context.Background()
+	resourceName := "shared-name"
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "proxy-shared-token", Namespace: "default"},
+		Type:       corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			coderv1alpha1.DefaultTokenSecretKey: []byte("proxy-token"),
+		},
+	}
+	if err := k8sClient.Create(ctx, secret); err != nil {
+		t.Fatalf("create shared secret: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, secret)
+	})
+
+	controlPlane := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "control-plane-image:latest",
+		},
+	}
+	if err := k8sClient.Create(ctx, controlPlane); err != nil {
+		t.Fatalf("create control plane resource: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, controlPlane)
+	})
+
+	workspaceProxy := &coderv1alpha1.WorkspaceProxy{
+		ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: "default"},
+		Spec: coderv1alpha1.WorkspaceProxySpec{
+			Image:            "proxy-image:latest",
+			PrimaryAccessURL: "https://coder.example.com",
+			ProxySessionTokenSecretRef: &coderv1alpha1.SecretKeySelector{
+				Name: secret.Name,
+				Key:  coderv1alpha1.DefaultTokenSecretKey,
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, workspaceProxy); err != nil {
+		t.Fatalf("create workspace proxy resource: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, workspaceProxy)
+	})
+
+	controlPlaneReconciler := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := controlPlaneReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: controlPlane.Name, Namespace: controlPlane.Namespace}}); err != nil {
+		t.Fatalf("reconcile control plane: %v", err)
+	}
+
+	workspaceProxyReconciler := &controller.WorkspaceProxyReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := workspaceProxyReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: workspaceProxy.Name, Namespace: workspaceProxy.Namespace}}); err != nil {
+		t.Fatalf("reconcile workspace proxy: %v", err)
+	}
+
+	controlPlaneDeployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: controlPlane.Name, Namespace: controlPlane.Namespace}, controlPlaneDeployment); err != nil {
+		t.Fatalf("expected control plane deployment: %v", err)
+	}
+
+	workspaceProxyDeploymentName := workspaceProxyResourceName(workspaceProxy.Name)
+	if workspaceProxyDeploymentName == controlPlane.Name {
+		t.Fatalf("expected workspace proxy deployment name to differ from control plane name")
+	}
+	workspaceProxyDeployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: workspaceProxyDeploymentName, Namespace: workspaceProxy.Namespace}, workspaceProxyDeployment); err != nil {
+		t.Fatalf("expected workspace proxy deployment: %v", err)
+	}
+}
+
 
 func TestWorkspaceProxyReconcile_WithBootstrap(t *testing.T) {
 	ctx := context.Background()
