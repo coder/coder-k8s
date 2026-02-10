@@ -5,8 +5,8 @@ This directory provisions a cost-optimized Amazon EKS sandbox cluster in region 
 ## What this sets up
 
 - A VPC (`10.0.0.0/16`) with:
-  - 2 public subnets across the first two availability zones in the selected region
-  - 2 private subnets across the first two availability zones in the selected region
+  - 2 public subnets across the first two standard availability zones in the selected region
+  - 2 private subnets across the first two standard availability zones in the selected region
   - Internet Gateway
   - Single NAT Gateway (lower cost than one per AZ)
 - IAM roles for EKS control plane and worker nodes
