@@ -175,9 +175,9 @@ func syncDocsSnapshot(sourceRoot, destRoot string) error {
 			return nil
 		}
 
-		// Block symlink traversal: a symlinked .md/.json could point outside the docs
-		// root, so we skip any entry that is not a regular file.
-		if d.Type()&fs.ModeSymlink != 0 {
+		// Only copy regular files — skip symlinks, FIFOs, sockets, devices, etc.
+		// Symlinks could escape the docs root; other specials can hang os.ReadFile.
+		if !d.Type().IsRegular() {
 			return nil
 		}
 

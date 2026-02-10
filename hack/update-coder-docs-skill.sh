@@ -24,6 +24,8 @@ else
     echo "Updating existing clone at $CODER_DIR..."
     git -C "$CODER_DIR" fetch origin main --depth=1
     git -C "$CODER_DIR" reset --hard origin/main
+    # Remove untracked files so stale/accidental docs are not copied into the snapshot.
+    git -C "$CODER_DIR" clean -fdx
 fi
 
 CODER_SHA="$(git -C "$CODER_DIR" rev-parse HEAD)"
