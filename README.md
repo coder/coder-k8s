@@ -34,6 +34,10 @@ kubectl apply -f config/samples/coder_v1alpha1_codercontrolplane.yaml
 kubectl get codercontrolplanes -A
 ```
 
+## Examples
+
+- [`examples/cloudnativepg/`](examples/cloudnativepg/) - Deploy a `CoderControlPlane` with a CloudNativePG-managed PostgreSQL backend.
+
 ## KIND development cluster (for k9s demos)
 
 Bootstrap a KIND cluster and install CRDs/RBAC (**this also switches your current kubectl context**):
