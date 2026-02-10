@@ -64,6 +64,9 @@ cmd_up() {
 		kind create cluster --name "${CLUSTER_NAME}"
 	fi
 
+	kind export kubeconfig --name "${CLUSTER_NAME}" >/dev/null
+	kubectl config use-context "${KUBE_CONTEXT}" >/dev/null
+
 	kubectl_ctx wait --for=condition=Ready node --all --timeout="${NODE_READY_TIMEOUT}"
 
 	kubectl_ctx apply -f config/crd/bases/
