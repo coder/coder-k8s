@@ -13,9 +13,6 @@
 # Temporary external clones/forks
 /tmpfork/
 
-# Generated vendor stamp
-/vendor/.modules.stamp
-
 # MkDocs
 /site/
 /.cache/

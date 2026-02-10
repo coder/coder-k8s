@@ -1,5 +1,5 @@
 GOFLAGS ?= -mod=vendor
-VENDOR_STAMP := vendor/.modules.stamp
+VENDOR_STAMP := vendor/modules.txt
 MODULE_FILES := go.mod $(wildcard go.sum)
 ENVTEST_K8S_VERSION ?= 1.35.x
 ENVTEST_ASSETS_DIR := $(shell pwd)/bin/envtest
@@ -9,8 +9,6 @@ ENVTEST_ASSETS_DIR := $(shell pwd)/bin/envtest
 $(VENDOR_STAMP): $(MODULE_FILES)
 	go mod tidy
 	go mod vendor
-	@mkdir -p $(dir $@)
-	@touch $@
 
 vendor: $(VENDOR_STAMP)
 
