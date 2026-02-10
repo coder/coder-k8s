@@ -23,7 +23,27 @@ resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
 }
 
-data "aws_iam_policy_document" "node_group_assume_role" {
+resource "aws_iam_role_policy_attachment" "eks_cluster_compute_policy" {
+  role       = aws_iam_role.eks_cluster.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSComputePolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "eks_cluster_block_storage_policy" {
+  role       = aws_iam_role.eks_cluster.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSBlockStoragePolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "eks_cluster_load_balancing_policy" {
+  role       = aws_iam_role.eks_cluster.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSLoadBalancingPolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "eks_cluster_networking_policy" {
+  role       = aws_iam_role.eks_cluster.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSNetworkingPolicy"
+}
+
+data "aws_iam_policy_document" "auto_mode_node_assume_role" {
   statement {
     actions = ["sts:AssumeRole"]
 
@@ -34,26 +54,21 @@ data "aws_iam_policy_document" "node_group_assume_role" {
   }
 }
 
-resource "aws_iam_role" "node_group" {
-  name               = "${var.cluster_name}-node-role"
-  assume_role_policy = data.aws_iam_policy_document.node_group_assume_role.json
+resource "aws_iam_role" "auto_mode_node" {
+  name               = "${var.cluster_name}-auto-node-role"
+  assume_role_policy = data.aws_iam_policy_document.auto_mode_node_assume_role.json
 
   tags = {
-    Name = "${var.cluster_name}-node-role"
+    Name = "${var.cluster_name}-auto-node-role"
   }
 }
 
-resource "aws_iam_role_policy_attachment" "node_group_worker_policy" {
-  role       = aws_iam_role.node_group.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+resource "aws_iam_role_policy_attachment" "auto_mode_node_worker_minimal" {
+  role       = aws_iam_role.auto_mode_node.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodeMinimalPolicy"
 }
 
-resource "aws_iam_role_policy_attachment" "node_group_cni_policy" {
-  role       = aws_iam_role.node_group.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
-}
-
-resource "aws_iam_role_policy_attachment" "node_group_ecr_readonly" {
-  role       = aws_iam_role.node_group.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+resource "aws_iam_role_policy_attachment" "auto_mode_node_ecr_pull_only" {
+  role       = aws_iam_role.auto_mode_node.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPullOnly"
 }
