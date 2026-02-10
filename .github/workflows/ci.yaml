@@ -74,6 +74,8 @@ jobs:
     if: github.event_name == 'merge_group' || needs.changes.outputs.go == 'true'
     runs-on: depot-ubuntu-24.04-8
     timeout-minutes: 20
+    env:
+      GOFLAGS: -mod=vendor
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -98,33 +100,13 @@ jobs:
           git diff --exit-code -- docs/reference/api/
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9
-        with:
-          version: v2.8
-          args: --timeout=5m ./...
+        run: go tool golangci-lint run --timeout=5m ./...
 
       - name: Run golangci-lint formatter checks
-        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.8.0 fmt --diff
-
-      - name: Detect Go version from go.mod
-        id: govulncheck-go-version
-        # govulncheck-action v1 passes both go-version and go-version-file to setup-go.
-        # setup-go prioritizes go-version and warns when both are set, so we parse
-        # go.mod ourselves and forward it via go-version-input to keep go.mod as the
-        # single source of truth without duplicate-input warnings.
-        run: |
-          GO_VERSION="$(awk '/^go / { print $2; exit }' go.mod)"
-          if [ -z "$GO_VERSION" ]; then
-            echo "assertion failed: expected go.mod to contain a go directive" >&2
-            exit 1
-          fi
-          echo "value=$GO_VERSION" >> "$GITHUB_OUTPUT"
+        run: go tool golangci-lint fmt --diff
 
       - name: Run govulncheck
-        uses: golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee # v1
-        with:
-          go-version-input: ${{ steps.govulncheck-go-version.outputs.value }}
-          go-package: ./...
+        run: go tool govulncheck ./...
 
   test:
     needs: changes
@@ -235,6 +217,8 @@ jobs:
     runs-on: depot-ubuntu-24.04
     permissions:
       contents: read
+    env:
+      GOFLAGS: -mod=vendor
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -248,7 +232,7 @@ jobs:
           cache: true
 
       - name: Run actionlint
-        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.10
+        run: go tool actionlint
 
       - name: Run zizmor
         uses: zizmorcore/zizmor-action@0dce2577a4760a2749d8cfb7a84b7d5585ebcb7d # v0.5.0
