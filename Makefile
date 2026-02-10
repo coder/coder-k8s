@@ -4,7 +4,7 @@ MODULE_FILES := go.mod $(wildcard go.sum)
 ENVTEST_K8S_VERSION ?= 1.35.x
 ENVTEST_ASSETS_DIR := $(shell pwd)/bin/envtest
 
-.PHONY: vendor test test-integration setup-envtest build lint vuln verify-vendor codegen manifests docs-serve docs-build docs-check
+.PHONY: vendor test test-integration setup-envtest build lint vuln verify-vendor codegen manifests docs-serve docs-build docs-check update-coder-docs-skill
 
 $(VENDOR_STAMP): $(MODULE_FILES)
 	go mod tidy
@@ -58,3 +58,6 @@ docs-build:
 docs-check:
 	@command -v mkdocs >/dev/null || (echo "mkdocs not found; use nix develop" && exit 1)
 	mkdocs build --strict
+
+update-coder-docs-skill:
+	bash ./hack/update-coder-docs-skill.sh
