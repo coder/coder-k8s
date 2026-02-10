@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -45,8 +46,9 @@ func TestReconcile_ExistingResource(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
-			Image:    "test-image:latest",
-			Replicas: &replicas,
+			Image:     "test-image:latest",
+			Replicas:  &replicas,
+			ExtraArgs: []string{"--prometheus-enable=false"},
 			Service: coderv1alpha1.ServiceSpec{
 				Port: 8080,
 			},
@@ -84,6 +86,15 @@ func TestReconcile_ExistingResource(t *testing.T) {
 	}
 	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != replicas {
 		t.Fatalf("expected deployment replicas %d, got %#v", replicas, deployment.Spec.Replicas)
+	}
+
+	if len(deployment.Spec.Template.Spec.Containers) != 1 {
+		t.Fatalf("expected one container in deployment pod spec, got %d", len(deployment.Spec.Template.Spec.Containers))
+	}
+	container := deployment.Spec.Template.Spec.Containers[0]
+	expectedArgs := []string{"--http-address=0.0.0.0:3000", "--prometheus-enable=false"}
+	if !reflect.DeepEqual(container.Args, expectedArgs) {
+		t.Fatalf("expected container args %v, got %v", expectedArgs, container.Args)
 	}
 
 	service := &corev1.Service{}

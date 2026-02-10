@@ -98,7 +98,7 @@ func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, c
 			image = defaultCoderImage
 		}
 
-		args := []string{"server", "--http-address=0.0.0.0:3000"}
+		args := []string{"--http-address=0.0.0.0:3000"}
 		args = append(args, coderControlPlane.Spec.ExtraArgs...)
 
 		deployment.Spec.Replicas = &replicas
