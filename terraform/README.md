@@ -1,6 +1,6 @@
 # Terraform EKS Sandbox Configuration
 
-This directory provisions a cost-optimized Amazon EKS sandbox cluster in AWS account `112158171837` (`sandbox-hackaton-coder-api-49999b4a`) in region `eu-central-1`.
+This directory provisions a cost-optimized Amazon EKS sandbox cluster in region `eu-central-1`.
 
 ## What this sets up
 
@@ -22,8 +22,43 @@ This directory provisions a cost-optimized Amazon EKS sandbox cluster in AWS acc
 ## Prerequisites
 
 - Terraform `>= 1.5`
-- AWS CLI installed and configured
-- AWS credentials with permissions to create VPC, IAM, EKS, and EC2 resources in account `112158171837`
+- AWS CLI v2 installed
+- AWS identity with permissions to create VPC, IAM, EKS, and EC2 resources in your target account
+
+## AWS authentication (required before `terraform plan` / `terraform apply`)
+
+If you are using `aws login` and your AWS profile uses `login_session`, Terraform may not detect credentials directly. Use a Terraform-specific wrapper profile via `credential_process`.
+
+1. Sign in to your normal AWS login profile:
+
+```bash
+aws login --profile <your-login-profile>
+```
+
+2. Add a Terraform wrapper profile in `~/.aws/config`:
+
+```ini
+[profile terraform]
+credential_process = aws configure export-credentials --profile <your-login-profile> --format process
+region = eu-central-1
+```
+
+3. In the shell where you run Terraform, point tooling at that profile:
+
+```bash
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+export AWS_PROFILE=terraform
+export AWS_REGION=eu-central-1
+export AWS_SDK_LOAD_CONFIG=1
+```
+
+4. Verify credentials before running Terraform:
+
+```bash
+aws sts get-caller-identity
+```
+
+> Security note: do not commit `~/.aws/config`, `~/.aws/credentials`, or any copied credential values to git.
 
 ## Usage
 
