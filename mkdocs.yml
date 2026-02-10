@@ -38,6 +38,7 @@ nav:
   - How-to guides:
       - Deploy controller: how-to/deploy-controller.md
       - Deploy aggregated API server: how-to/deploy-aggregated-apiserver.md
+      - MCP server: how-to/mcp-server.md
       - Troubleshooting: how-to/troubleshooting.md
   - Reference:
       - API:
