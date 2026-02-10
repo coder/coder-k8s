@@ -9,13 +9,12 @@ This directory provisions a cost-optimized Amazon EKS sandbox cluster in region 
   - 2 private subnets across the first two standard availability zones in the selected region
   - Internet Gateway
   - Single NAT Gateway (lower cost than one per AZ)
-- IAM roles for EKS control plane and worker nodes
+- IAM roles for the EKS control plane and EKS Auto Mode managed instances
 - EKS cluster (`sandbox-eks`, Kubernetes `1.35`) with public and private API endpoint access
-- One managed node group:
-  - Instance type: `t3.medium`
-  - Desired/min/max size: `2/1/3`
-  - Disk size: `20 GiB`
-  - AMI type: `AL2023_x86_64_STANDARD`
+- EKS Auto Mode enabled for:
+  - Compute (`general-purpose` node pool)
+  - Elastic Load Balancing integration
+  - Block storage integration (EBS CSI managed by EKS)
 - EKS managed add-ons: `coredns`, `kube-proxy`, `vpc-cni`
 - Remote Terraform state in AWS S3 with lockfile-based locking (no DynamoDB)
 
@@ -164,11 +163,11 @@ aws eks update-kubeconfig --region eu-central-1 --name sandbox-eks
 ## Estimated cost (rough)
 
 - EKS control plane: **~$0.10/hour**
-- 2x `t3.medium` worker nodes: **~$0.08/hour**
-- 1x NAT Gateway: **~$0.045/hour**
-- **Total: ~ $0.225/hour (~$5.40/day)**
+- EKS Auto Mode: additional per-instance management fee (see current EKS pricing for your region)
+- EC2 and EBS usage: varies with actual workload and Auto Mode scaling behavior
+- 1x NAT Gateway: **~$0.045/hour** (plus data processing)
 
-> Note: Data transfer and NAT data processing charges are additional.
+> Note: Data transfer, NAT data processing, and workload-driven compute/storage usage are additional.
 
 ## Cleanup
 
