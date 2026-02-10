@@ -318,7 +318,7 @@ jobs:
 
   publish-main:
     name: Publish GHCR :main
-    needs: [changes, test, lint, lint-actions, e2e-kind]
+    needs: [changes, test, lint, lint-actions, e2e-kind, terraform]
     if: |
       always() &&
       github.event_name == 'push' &&
@@ -327,7 +327,8 @@ jobs:
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       (needs.lint.result == 'success' || needs.lint.result == 'skipped') &&
       (needs.lint-actions.result == 'success' || needs.lint-actions.result == 'skipped') &&
-      (needs.e2e-kind.result == 'success' || needs.e2e-kind.result == 'skipped')
+      (needs.e2e-kind.result == 'success' || needs.e2e-kind.result == 'skipped') &&
+      (needs.terraform.result == 'success' || needs.terraform.result == 'skipped')
     runs-on: depot-ubuntu-24.04-8
     timeout-minutes: 30
     permissions:
