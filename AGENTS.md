@@ -42,6 +42,7 @@ You are an experienced, pragmatic software engineering AI agent. Do not over-eng
 - `scripts/`: PR workflow automation and review/check helpers.
 - `.github/workflows/`: CI and release automation.
 - `vendor/`: checked-in module dependencies (required by project workflow).
+- `.mux/skills/coder-docs/`: Mux agent skill with offline coder/coder docs snapshot (update: `make update-coder-docs-skill`).
 
 ### Architecture notes
 - `main` delegates to `run(...)`, which requires `--app=<controller|aggregated-apiserver>`.
@@ -70,6 +71,7 @@ Run from repository root.
 - **Docs (strict build):** `make docs-check`
 - **Clean:** `go clean -cache -testcache && rm -f ./coder-k8s && rm -rf ./dist`
 - **Shell scripts:** `find . -type f -name '*.sh' -not -path './vendor/*'`
+- **Update coder-docs skill:** `make update-coder-docs-skill`
 
 ## Mux Tooling Helpers
 
