@@ -32,6 +32,57 @@ kubectl apply -f config/samples/coder_v1alpha1_codercontrolplane.yaml
 kubectl get codercontrolplanes -A
 ```
 
+## KIND development cluster (for k9s demos)
+
+Bootstrap a KIND cluster and install CRDs/RBAC (**this also switches your current kubectl context**):
+
+```bash
+make kind-dev-up
+```
+
+> Tip: to run multiple clusters in parallel, override the name:
+>
+> ```bash
+> CLUSTER_NAME=my-cluster make kind-dev-up
+> ```
+
+If you need to switch your kubectl context later:
+
+```bash
+make kind-dev-ctx
+# or: CLUSTER_NAME=my-cluster make kind-dev-ctx
+```
+
+Start the controller (pick one):
+
+- Out-of-cluster (fast iteration):
+
+  ```bash
+  GOFLAGS=-mod=vendor go run . --app=controller
+  ```
+
+- In-cluster (closer to CI):
+
+  ```bash
+  make kind-dev-load-image
+  kubectl apply -f config/e2e/deployment.yaml
+  kubectl -n coder-system wait --for=condition=Available deploy/coder-k8s --timeout=120s
+  ```
+
+Demo:
+
+```bash
+make kind-dev-k9s
+```
+
+Cleanup:
+
+```bash
+make kind-dev-down
+```
+
+Mux users: there is an optional agent skill (`kind-dev`) under `.mux/skills/` with agent-oriented instructions for running per-workspace KIND clusters.
+
 ## Essential commands
 
 | Command | Description |
