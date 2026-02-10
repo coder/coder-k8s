@@ -111,16 +111,6 @@ func (r *WorkspaceProxyReconciler) resolveProxyCredentials(
 	}
 
 	bootstrap := workspaceProxy.Spec.Bootstrap
-	secretKey := bootstrap.CredentialsSecretRef.Key
-	if secretKey == "" {
-		secretKey = coderv1alpha1.DefaultTokenSecretKey
-	}
-
-	credentials, err := r.readSecretValue(ctx, workspaceProxy.Namespace, bootstrap.CredentialsSecretRef.Name, secretKey)
-	if err != nil {
-		return "", nil, false, fmt.Errorf("read bootstrap credentials: %w", err)
-	}
-
 	tokenSecretName := bootstrap.GeneratedTokenSecretName
 	if tokenSecretName == "" {
 		tokenSecretName = fmt.Sprintf("%s-proxy-token", workspaceProxy.Name)
@@ -132,6 +122,16 @@ func (r *WorkspaceProxyReconciler) resolveProxyCredentials(
 			primary = bootstrap.CoderURL
 		}
 		return primary, &coderv1alpha1.SecretKeySelector{Name: tokenSecretName, Key: proxyTokenKey}, true, nil
+	}
+
+	secretKey := bootstrap.CredentialsSecretRef.Key
+	if secretKey == "" {
+		secretKey = coderv1alpha1.DefaultTokenSecretKey
+	}
+
+	credentials, err := r.readSecretValue(ctx, workspaceProxy.Namespace, bootstrap.CredentialsSecretRef.Name, secretKey)
+	if err != nil {
+		return "", nil, false, fmt.Errorf("read bootstrap credentials: %w", err)
 	}
 
 	proxyName := bootstrap.ProxyName
