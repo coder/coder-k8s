@@ -4,6 +4,12 @@ variable "aws_region" {
   default     = "eu-central-1"
 }
 
+variable "aws_profile" {
+  description = "AWS shared config profile used by Terraform. Use a profile backed by credential_process for auto-refresh."
+  type        = string
+  default     = "terraform"
+}
+
 variable "cluster_name" {
   description = "Name of the EKS cluster."
   type        = string

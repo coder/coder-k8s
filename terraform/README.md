@@ -25,9 +25,9 @@ This directory provisions a cost-optimized Amazon EKS sandbox cluster in region 
 - AWS CLI v2 installed
 - AWS identity with permissions to create VPC, IAM, EKS, and EC2 resources in your target account
 
-## AWS authentication (required before `terraform plan` / `terraform apply`)
+## AWS authentication with auto-refresh (required before `terraform plan` / `terraform apply`)
 
-If you are using `aws login` and your AWS profile uses `login_session`, Terraform may not detect credentials directly. Use a Terraform-specific wrapper profile via `credential_process`.
+If you use AWS CLI v2 `aws login` (`login_session` profiles), configure Terraform to use a wrapper profile backed by `credential_process`. This lets AWS CLI refresh credentials during long-running Terraform operations instead of relying on manually exported temporary keys.
 
 1. Sign in to your normal AWS login profile:
 
@@ -43,19 +43,30 @@ credential_process = aws configure export-credentials --profile <your-login-prof
 region = eu-central-1
 ```
 
-3. In the shell where you run Terraform, point tooling at that profile:
+3. Keep temporary key env vars unset (so Terraform uses profile-based auth):
 
 ```bash
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
-export AWS_PROFILE=terraform
-export AWS_REGION=eu-central-1
-export AWS_SDK_LOAD_CONFIG=1
 ```
 
-4. Verify credentials before running Terraform:
+4. Verify the wrapper profile works and refresh path is available:
 
 ```bash
-aws sts get-caller-identity
+aws sts get-caller-identity --profile terraform
+```
+
+5. Run Terraform (this config defaults `aws_profile = "terraform"`):
+
+```bash
+terraform init
+terraform plan
+terraform apply
+```
+
+If you use a different wrapper profile name, set it explicitly:
+
+```bash
+terraform plan -var="aws_profile=<your-terraform-profile>"
 ```
 
 > Security note: do not commit `~/.aws/config`, `~/.aws/credentials`, or any copied credential values to git.
