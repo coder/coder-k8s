@@ -25,9 +25,11 @@ This directory provisions a cost-optimized Amazon EKS sandbox cluster in region 
 - AWS CLI v2 installed
 - AWS identity with permissions to create VPC, IAM, EKS, and EC2 resources in your target account
 
-## AWS authentication with auto-refresh (required before `terraform plan` / `terraform apply`)
+## AWS authentication with auto-refresh
 
-If you use AWS CLI v2 `aws login` (`login_session` profiles), configure Terraform to use a wrapper profile backed by `credential_process`. This lets AWS CLI refresh credentials during long-running Terraform operations instead of relying on manually exported temporary keys.
+By default, this Terraform config uses the normal AWS SDK credential chain (`aws_profile = null`), so CI/role-based credentials continue to work without local profile setup.
+
+If you use AWS CLI v2 `aws login` (`login_session` profiles) and want automatic refresh during long `terraform apply` runs, use a wrapper profile backed by `credential_process`:
 
 1. Sign in to your normal AWS login profile:
 
@@ -43,31 +45,29 @@ credential_process = aws configure export-credentials --profile <your-login-prof
 region = eu-central-1
 ```
 
-3. Keep temporary key env vars unset (so Terraform uses profile-based auth):
+3. Keep temporary key env vars unset (so Terraform can use profile/SDK auth):
 
 ```bash
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 ```
 
-4. Verify the wrapper profile works and refresh path is available:
+4. Verify the wrapper profile works:
 
 ```bash
 aws sts get-caller-identity --profile terraform
 ```
 
-5. Run Terraform (this config defaults `aws_profile = "terraform"`):
+5. Set the profile once for all Terraform commands that talk to AWS:
 
 ```bash
+export TF_VAR_aws_profile=terraform
 terraform init
 terraform plan
 terraform apply
+terraform destroy
 ```
 
-If you use a different wrapper profile name, set it explicitly:
-
-```bash
-terraform plan -var="aws_profile=<your-terraform-profile>"
-```
+If you prefer not to use `TF_VAR_aws_profile`, pass `-var="aws_profile=<your-terraform-profile>"` to each AWS-authenticated command (`plan`, `apply`, `destroy`).
 
 > Security note: do not commit `~/.aws/config`, `~/.aws/credentials`, or any copied credential values to git.
 

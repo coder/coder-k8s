@@ -5,9 +5,9 @@ variable "aws_region" {
 }
 
 variable "aws_profile" {
-  description = "AWS shared config profile used by Terraform. Use a profile backed by credential_process for auto-refresh."
+  description = "Optional AWS shared config profile used by Terraform. Leave null to use the default AWS credential chain."
   type        = string
-  default     = "terraform"
+  default     = null
 }
 
 variable "cluster_name" {
