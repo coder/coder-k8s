@@ -22,6 +22,7 @@ jobs:
       go: ${{ steps.merge_group_defaults.outputs.go || steps.filter.outputs.go }}
       workflows: ${{ steps.merge_group_defaults.outputs.workflows || steps.filter.outputs.workflows }}
       publish: ${{ steps.merge_group_defaults.outputs.publish || steps.filter.outputs.publish }}
+      terraform: ${{ steps.merge_group_defaults.outputs.terraform || steps.filter.outputs.terraform }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -38,6 +39,7 @@ jobs:
             echo "go=true"
             echo "workflows=true"
             echo "publish=false"
+            echo "terraform=true"
           } >> "$GITHUB_OUTPUT"
 
       - name: Detect changed paths
@@ -68,6 +70,9 @@ jobs:
               - 'vendor/**'
               - 'Dockerfile*'
               - 'Dockerfile.goreleaser'
+            terraform:
+              - 'terraform/**'
+              - '.github/workflows/ci.yaml'
 
   lint:
     needs: changes
@@ -209,6 +214,57 @@ jobs:
             echo "assertion failed: expected at least 1 CoderControlPlane resource" >&2
             exit 1
           fi
+
+  terraform:
+    name: Terraform (fmt/validate/tflint/trivy)
+    needs: changes
+    if: github.event_name == 'merge_group' || (needs.changes.outputs.terraform == 'true' && (github.event_name != 'push' || github.actor != 'github-merge-queue[bot]'))
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: 1.11.4
+
+      - name: terraform fmt (check)
+        working-directory: terraform
+        run: terraform fmt -check -diff -recursive
+
+      - name: terraform init (backend disabled)
+        working-directory: terraform
+        run: terraform init -backend=false -lockfile=readonly -input=false
+
+      - name: terraform validate
+        working-directory: terraform
+        run: terraform validate -no-color
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@4cb9feea73331a35b422df102992a03a44a3bb33 # v6.2.1
+        with:
+          tflint_version: v0.61.0
+
+      - name: tflint
+        working-directory: terraform
+        run: |
+          tflint --init
+          tflint --recursive
+
+      - name: Trivy config scan (Terraform)
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          scan-type: config
+          scan-ref: terraform/
+          trivyignores: terraform/.trivyignore
+          severity: HIGH,CRITICAL
+          exit-code: '1'
 
   lint-actions:
     name: Lint GitHub Actions
