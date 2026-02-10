@@ -174,6 +174,13 @@ func syncDocsSnapshot(sourceRoot, destRoot string) error {
 		if d.IsDir() {
 			return nil
 		}
+
+		// Block symlink traversal: a symlinked .md/.json could point outside the docs
+		// root, so we skip any entry that is not a regular file.
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+
 		if !shouldCopyFile(currentPath) {
 			return nil
 		}
