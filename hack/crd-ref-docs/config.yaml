@@ -1,0 +1,8 @@
+processor:
+  # Exclude list wrappers; we only publish docs for top-level resources.
+  ignoreTypes:
+    - ".*List$"
+  useRawDocstring: true
+
+render:
+  kubernetesVersion: "1.35"
