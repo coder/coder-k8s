@@ -119,34 +119,6 @@ func TestRunDispatchesAggregatedAPIServerMode(t *testing.T) {
 	}
 }
 
-func TestRunDispatchesMCPStdioMode(t *testing.T) {
-	t.Helper()
-	installMockSignalHandler(t)
-
-	previous := runMCPStdioApp
-	t.Cleanup(func() {
-		runMCPStdioApp = previous
-	})
-
-	expectedErr := errors.New("sentinel mcp-stdio error")
-	called := false
-	runMCPStdioApp = func(ctx context.Context) error {
-		called = true
-		if ctx == nil {
-			t.Fatal("expected non-nil context passed to MCP stdio runner")
-		}
-		return expectedErr
-	}
-
-	err := run([]string{"--app=mcp-stdio"})
-	if !called {
-		t.Fatal("expected MCP stdio runner to be called")
-	}
-	if !errors.Is(err, expectedErr) {
-		t.Fatalf("expected sentinel error %v, got %v", expectedErr, err)
-	}
-}
-
 func TestRunDispatchesMCPHTTPMode(t *testing.T) {
 	t.Helper()
 	installMockSignalHandler(t)

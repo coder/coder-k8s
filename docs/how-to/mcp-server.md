@@ -2,10 +2,7 @@
 
 This guide shows how to run the `coder-k8s` **MCP server** for local development and in-cluster access.
 
-The MCP server supports two app modes:
-
-- `mcp-stdio` for stdio-based MCP clients (for example, Mux).
-- `mcp-http` for HTTP-based MCP clients.
+The MCP server runs in HTTP mode (`--app=mcp-http`).
 
 ## 1. Overview
 
@@ -17,43 +14,7 @@ The MCP server provides tools for inspecting Kubernetes resources managed by `co
 - Namespace events
 - Pod logs
 
-## 2. Stdio mode (Mux / local development)
-
-Run stdio mode locally from this repository:
-
-```bash
-GOFLAGS=-mod=vendor go run . --app=mcp-stdio
-```
-
-Run stdio mode in-cluster via `kubectl exec`:
-
-```bash
-kubectl exec -i -n coder-system deploy/coder-k8s-mcp -- /coder-k8s --app=mcp-stdio
-```
-
-Example Mux MCP configuration (`~/.mux/mcp.jsonc`):
-
-```jsonc
-{
-  "mcpServers": {
-    "coder-k8s": {
-      "command": "kubectl",
-      "args": [
-        "exec",
-        "-i",
-        "-n",
-        "coder-system",
-        "deploy/coder-k8s-mcp",
-        "--",
-        "/coder-k8s",
-        "--app=mcp-stdio"
-      ]
-    }
-  }
-}
-```
-
-## 3. HTTP mode (port-forward / remote clients)
+## 2. HTTP mode (port-forward / remote clients)
 
 Apply RBAC, deployment, and service manifests:
 
@@ -75,7 +36,7 @@ Connect MCP clients to:
 http://127.0.0.1:8090/mcp
 ```
 
-## 4. Available tools
+## 3. Available tools
 
 The server exposes MCP tools for:
 
@@ -84,7 +45,7 @@ The server exposes MCP tools for:
 - Listing namespace events for troubleshooting
 - Reading pod logs for debugging
 
-## 5. Health checks
+## 4. Health checks
 
 <!-- cspell:ignore healthz readyz -->
 

@@ -11,12 +11,11 @@ import (
 	"github.com/coder/coder-k8s/internal/app/mcpapp"
 )
 
-const supportedAppModes = "controller, aggregated-apiserver, mcp-stdio, mcp-http"
+const supportedAppModes = "controller, aggregated-apiserver, mcp-http"
 
 var (
 	runControllerApp          = controllerapp.Run
 	runAggregatedAPIServerApp = apiserverapp.Run
-	runMCPStdioApp            = mcpapp.RunStdio
 	runMCPHTTPApp             = mcpapp.RunHTTP
 	setupSignalHandler        = ctrl.SetupSignalHandler
 )
@@ -24,7 +23,7 @@ var (
 func run(args []string) error {
 	fs := flag.NewFlagSet("coder-k8s", flag.ContinueOnError)
 	var appMode string
-	fs.StringVar(&appMode, "app", "", "Application mode (controller, aggregated-apiserver, mcp-stdio, mcp-http)")
+	fs.StringVar(&appMode, "app", "", "Application mode (controller, aggregated-apiserver, mcp-http)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -34,8 +33,6 @@ func run(args []string) error {
 		return runControllerApp(setupSignalHandler())
 	case "aggregated-apiserver":
 		return runAggregatedAPIServerApp(setupSignalHandler())
-	case "mcp-stdio":
-		return runMCPStdioApp(setupSignalHandler())
 	case "mcp-http":
 		return runMCPHTTPApp(setupSignalHandler())
 	case "":
