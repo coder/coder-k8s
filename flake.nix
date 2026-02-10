@@ -16,6 +16,11 @@
       devShells = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
+          docsPython = pkgs.python3.withPackages (ps: [
+            ps.mkdocs
+            ps."mkdocs-material"
+            ps."pymdown-extensions"
+          ]);
         in {
           default = pkgs.mkShell {
             packages = with pkgs; [
@@ -27,6 +32,8 @@
               zizmor
               golangci-lint
               govulncheck
+
+              docsPython
             ];
           };
         }

@@ -2,7 +2,10 @@
 
 ## Project description
 
-`coder-k8s` is a Go-based Kubernetes operator for managing `CoderControlPlane` resources (`coder.com/v1alpha1`). It is built with `sigs.k8s.io/controller-runtime`.
+`coder-k8s` is a Go-based Kubernetes control-plane project with two app modes:
+
+- A `controller-runtime` operator for managing `CoderControlPlane` resources (`coder.com/v1alpha1`).
+- An aggregated API server for `CoderWorkspace` and `CoderTemplate` resources (`aggregation.coder.com/v1alpha1`).
 
 ## Prerequisites
 
@@ -20,7 +23,7 @@ make manifests
 kubectl apply -f config/crd/bases/
 
 # Run the controller locally (uses your kubeconfig context)
-GOFLAGS=-mod=vendor go run .
+GOFLAGS=-mod=vendor go run . --app=controller
 
 # In another terminal: apply the sample CR
 kubectl apply -f config/samples/coder_v1alpha1_codercontrolplane.yaml
@@ -40,6 +43,8 @@ kubectl get codercontrolplanes -A
 | `make verify-vendor` | Verify vendor consistency |
 | `make lint` | Run linter (requires `golangci-lint`) |
 | `make vuln` | Run vulnerability check (requires `govulncheck`) |
+| `make docs-serve` | Serve the documentation site locally (requires `mkdocs`) |
+| `make docs-check` | Build docs in strict mode (CI-equivalent) |
 
 ## Testing strategy
 

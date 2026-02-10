@@ -66,6 +66,8 @@ Run from repository root.
 - **Vendor consistency:** `make verify-vendor`
 - **Manifest generation:** `make manifests` (or `bash ./hack/update-manifests.sh`)
 - **Code generation:** `make codegen` (or `bash ./hack/update-codegen.sh`)
+- **Docs (serve):** `make docs-serve`
+- **Docs (strict build):** `make docs-check`
 - **Clean:** `go clean -cache -testcache && rm -f ./coder-k8s && rm -rf ./dist`
 - **Shell scripts:** `find . -type f -name '*.sh' -not -path './vendor/*'`
 
@@ -89,6 +91,9 @@ Run from repository root.
 - **Do** keep controller, aggregated API server, and storage changes paired with focused tests (`main_test.go`, `internal/controller/*_test.go`, and package tests under `internal/app/`/`internal/aggregated/`).
   **Don’t** add behavior without coverage for critical assumptions.
 
+- **Do** update the docs in `docs/` when you change user-facing behavior (APIs, flags, manifests, deployment).
+  **Don’t** let docs drift from the implementation.
+
 ## Anti-patterns
 
 - Unpinned GitHub Action versions in workflow files (CI uses SHA-pinned actions).
@@ -111,6 +116,8 @@ Run from repository root.
 4. Run `make lint` (or explain why it was skipped).
 5. If API types changed, run `make codegen` and `make manifests`, then include generated updates.
 6. If `.github/workflows/*` changed, run `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.10`.
+7. If your change affects user-facing behavior (APIs, flags, manifests, deployment), update the documentation in `docs/` and run `make docs-check`.
+
 
 ### Commit messages
 - Match repository history style: short imperative summary, optionally prefixed by type (e.g., `chore: ...`).
