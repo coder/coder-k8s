@@ -59,7 +59,9 @@ jobs:
             --accept 200,429
             --max-retries 2
             --retry-wait-time 2
-            docs/**/*.md
+            --exclude '^https://github.com/coder/coder-k8s$'
+            docs/*.md docs/*/*.md docs/*/*/*.md
+            mkdocs.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
