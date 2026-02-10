@@ -3,6 +3,8 @@ resource "aws_eks_cluster" "this" {
   role_arn = aws_iam_role.eks_cluster.arn
   version  = var.cluster_version
 
+  bootstrap_self_managed_addons = false
+
   vpc_config {
     subnet_ids              = aws_subnet.private[*].id
     endpoint_public_access  = true
