@@ -25,4 +25,5 @@
 
 - Go type: `api/aggregation/v1alpha1/types.go`
 - Storage implementation: `internal/aggregated/storage/template.go`
+
 - APIService registration manifest: `deploy/apiserver-apiservice.yaml`

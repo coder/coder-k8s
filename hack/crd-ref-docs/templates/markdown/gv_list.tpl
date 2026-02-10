@@ -88,15 +88,15 @@
 
 - Go type: `{{ $goType }}`
 {{- $generatedCRD := markdownTemplateValue "generatedCRD" -}}
-{{- if ne $generatedCRD "" }}
+{{ if ne $generatedCRD "" }}
 - Generated CRD: `{{ $generatedCRD }}`
-{{- end }}
+{{ end }}
 {{- $storage := markdownTemplateValue "storage" -}}
-{{- if ne $storage "" }}
+{{ if ne $storage "" }}
 - Storage implementation: `{{ $storage }}`
-{{- end }}
+{{ end }}
 {{- $apiServiceManifest := markdownTemplateValue "apiServiceManifest" -}}
-{{- if ne $apiServiceManifest "" }}
+{{ if ne $apiServiceManifest "" }}
 - APIService registration manifest: `{{ $apiServiceManifest }}`
-{{- end }}
-{{- end }}
+{{ end }}
+{{- end -}}
