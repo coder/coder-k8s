@@ -309,9 +309,8 @@ func registerTools(server *mcp.Server, k8sClient client.Client, clientset kubern
 		}
 
 		logOptions := &corev1.PodLogOptions{
-			Container:  input.Container,
-			TailLines:  tailLines,
-			LimitBytes: &limitBytes,
+			Container: input.Container,
+			TailLines: tailLines,
 		}
 		stream, err := clientset.CoreV1().Pods(input.Namespace).GetLogs(input.Name, logOptions).Stream(ctx)
 		if err != nil {
