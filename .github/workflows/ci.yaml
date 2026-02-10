@@ -98,10 +98,24 @@ jobs:
       - name: Run golangci-lint formatter checks
         run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.8.0 fmt --diff
 
+      - name: Detect Go version from go.mod
+        id: govulncheck-go-version
+        # govulncheck-action v1 passes both go-version and go-version-file to setup-go.
+        # setup-go prioritizes go-version and warns when both are set, so we parse
+        # go.mod ourselves and forward it via go-version-input to keep go.mod as the
+        # single source of truth without duplicate-input warnings.
+        run: |
+          GO_VERSION="$(awk '/^go / { print $2; exit }' go.mod)"
+          if [ -z "$GO_VERSION" ]; then
+            echo "assertion failed: expected go.mod to contain a go directive" >&2
+            exit 1
+          fi
+          echo "value=$GO_VERSION" >> "$GITHUB_OUTPUT"
+
       - name: Run govulncheck
         uses: golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee # v1
         with:
-          go-version-file: go.mod
+          go-version-input: ${{ steps.govulncheck-go-version.outputs.value }}
           go-package: ./...
 
   test:
