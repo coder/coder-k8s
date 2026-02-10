@@ -24,6 +24,8 @@ func TestControllerSchemeRegistersCoderControlPlaneKinds(t *testing.T) {
 	for _, gvk := range []schema.GroupVersionKind{
 		coderv1alpha1.GroupVersion.WithKind("CoderControlPlane"),
 		coderv1alpha1.GroupVersion.WithKind("CoderControlPlaneList"),
+		coderv1alpha1.GroupVersion.WithKind("WorkspaceProxy"),
+		coderv1alpha1.GroupVersion.WithKind("WorkspaceProxyList"),
 	} {
 		if !scheme.Recognizes(gvk) {
 			t.Fatalf("expected scheme to recognize %s", gvk.String())

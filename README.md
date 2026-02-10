@@ -4,8 +4,10 @@
 
 `coder-k8s` is a Go-based Kubernetes control-plane project with two app modes:
 
-- A `controller-runtime` operator for managing `CoderControlPlane` resources (`coder.com/v1alpha1`).
-- An aggregated API server for `CoderWorkspace` and `CoderTemplate` resources (`aggregation.coder.com/v1alpha1`).
+- A `controller-runtime` operator for managing `CoderControlPlane` and
+  `WorkspaceProxy` resources (`coder.com/v1alpha1`).
+- An aggregated API server for `CoderWorkspace` and `CoderTemplate` resources
+  (`aggregation.coder.com/v1alpha1`).
 
 ## Prerequisites
 

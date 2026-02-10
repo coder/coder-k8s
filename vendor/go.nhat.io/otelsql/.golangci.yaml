@@ -1,0 +1,75 @@
+version: "2"
+run:
+  tests: true
+linters:
+  default: all
+  disable:
+    - contextcheck
+    - copyloopvar
+    - depguard
+    - err113
+    - exhaustruct
+    - forbidigo
+    - forcetypeassert
+    - funcorder
+    - gochecknoglobals
+    - gomoddirectives
+    - intrange
+    - ireturn
+    - lll
+    - mnd
+    - nolintlint
+    - nonamedreturns
+    - paralleltest
+    - perfsprint
+    - rowserrcheck
+    - sqlclosecheck
+    - tagalign
+    - tagliatelle
+    - testifylint
+    - testpackage
+    - varnamelen
+    - wastedassign
+    - wrapcheck
+  settings:
+    dupl:
+      threshold: 100
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    gocyclo:
+      min-complexity: 20
+    misspell:
+      locale: US
+    unparam:
+      check-exported: true
+  exclusions:
+    generated: lax
+    rules:
+      - linters:
+          - containedctx
+          - dupl
+          - execinquery
+          - funlen
+          - goconst
+          - maintidx
+          - mnd
+          - nilnil
+          - noctx
+          - rowserrcheck
+        path: _test.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofmt
+    - gofumpt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
