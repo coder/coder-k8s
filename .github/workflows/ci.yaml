@@ -71,7 +71,7 @@ jobs:
 
   lint:
     needs: changes
-    if: github.event_name == 'merge_group' || needs.changes.outputs.go == 'true'
+    if: github.event_name == 'merge_group' || (needs.changes.outputs.go == 'true' && (github.event_name != 'push' || github.actor != 'github-merge-queue[bot]'))
     runs-on: depot-ubuntu-24.04-8
     timeout-minutes: 20
     env:
@@ -110,7 +110,7 @@ jobs:
 
   test:
     needs: changes
-    if: github.event_name == 'merge_group' || needs.changes.outputs.go == 'true'
+    if: github.event_name == 'merge_group' || (needs.changes.outputs.go == 'true' && (github.event_name != 'push' || github.actor != 'github-merge-queue[bot]'))
     runs-on: depot-ubuntu-24.04-8
     timeout-minutes: 30
     steps:
@@ -152,7 +152,7 @@ jobs:
   e2e-kind:
     name: E2E Smoke (Kind)
     needs: [changes, test]
-    if: needs.changes.outputs.go == 'true'
+    if: needs.changes.outputs.go == 'true' && (github.event_name != 'push' || github.actor != 'github-merge-queue[bot]')
     runs-on: depot-ubuntu-24.04-8
     timeout-minutes: 45
     steps:
@@ -213,7 +213,7 @@ jobs:
   lint-actions:
     name: Lint GitHub Actions
     needs: changes
-    if: github.event_name == 'merge_group' || needs.changes.outputs.workflows == 'true'
+    if: github.event_name == 'merge_group' || (needs.changes.outputs.workflows == 'true' && (github.event_name != 'push' || github.actor != 'github-merge-queue[bot]'))
     runs-on: depot-ubuntu-24.04
     permissions:
       contents: read
