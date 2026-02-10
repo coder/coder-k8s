@@ -44,6 +44,15 @@ You are an experienced, pragmatic software engineering AI agent. Do not over-eng
 - `vendor/`: checked-in module dependencies (required by project workflow).
 - `.mux/skills/coder-docs/`: Mux agent skill with offline coder/coder docs snapshot (update: `make update-coder-docs-skill`).
 
+### Terraform Backend Reference (Agents)
+- Keep Terraform backend values out of committed `.tf` code beyond shared backend settings in `terraform/versions.tf`.
+- Shared sandbox EKS state location:
+  - S3 bucket: `coder-k8s-tfstate-112158171837`
+  - State key: `terraform-ncp3/sandbox-eks/terraform.tfstate`
+- Initialize Terraform against that backend with explicit config flags (example):
+  - `nix develop -c terraform -chdir=terraform init -reconfigure -backend-config="bucket=coder-k8s-tfstate-112158171837" -backend-config="key=terraform-ncp3/sandbox-eks/terraform.tfstate"`
+- When AWS CLI access is needed, run commands through the Nix dev shell (`nix develop -c ...`).
+
 ### Architecture notes
 - `main` delegates to `run(...)`, which requires `--app=<controller|aggregated-apiserver>`.
 - `controller` mode registers core Kubernetes + `coder.com/v1alpha1` schemes, starts the controller-runtime manager, and wires health/readiness probes.

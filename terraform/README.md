@@ -10,7 +10,7 @@ This directory provisions a cost-optimized Amazon EKS sandbox cluster in region 
   - Internet Gateway
   - Single NAT Gateway (lower cost than one per AZ)
 - IAM roles for EKS control plane and worker nodes
-- EKS cluster (`sandbox-eks`, Kubernetes `1.31`) with public and private API endpoint access
+- EKS cluster (`sandbox-eks`, Kubernetes `1.35`) with public and private API endpoint access
 - One managed node group:
   - Instance type: `t3.medium`
   - Desired/min/max size: `2/1/3`
@@ -21,7 +21,7 @@ This directory provisions a cost-optimized Amazon EKS sandbox cluster in region 
 
 ## Prerequisites
 
-- Terraform `>= 1.11`
+- Terraform `>= 1.14`
 - AWS CLI v2 installed
 - AWS identity with permissions to create VPC, IAM, EKS, and EC2 resources in your target account
 
