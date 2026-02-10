@@ -72,7 +72,7 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-{{ range $member := $specMembers -}}
+{{- range $member := $specMembers }}
 | `spec.{{ $member.Name }}` | `{{ template "typeName" $member.Type }}` | {{ markdownRenderFieldDoc $member.Doc }} |
 {{- end }}
 
@@ -80,7 +80,7 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-{{ range $member := $statusMembers -}}
+{{- range $member := $statusMembers }}
 | `status.{{ $member.Name }}` | `{{ template "typeName" $member.Type }}` | {{ markdownRenderFieldDoc $member.Doc }} |
 {{- end }}
 

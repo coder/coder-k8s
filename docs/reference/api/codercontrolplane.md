@@ -13,13 +13,22 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `spec.image` | `string` | Image is the container image used for the Coder control plane pod. || `spec.replicas` | `int32` | Replicas is the desired number of control plane pods. || `spec.service` | `github.com/coder/coder-k8s/api/v1alpha1.ServiceSpec` | Service controls the service created in front of the control plane. || `spec.extraArgs` | `[]string` | ExtraArgs are appended to the default Coder server arguments. || `spec.extraEnv` | `[]k8s.io/api/core/v1.EnvVar` | ExtraEnv are injected into the Coder control plane container. || `spec.imagePullSecrets` | `[]k8s.io/api/core/v1.LocalObjectReference` | ImagePullSecrets are used by the pod to pull private images. |
+| `spec.image` | `string` | Image is the container image used for the Coder control plane pod. |
+| `spec.replicas` | `int32` | Replicas is the desired number of control plane pods. |
+| `spec.service` | `github.com/coder/coder-k8s/api/v1alpha1.ServiceSpec` | Service controls the service created in front of the control plane. |
+| `spec.extraArgs` | `[]string` | ExtraArgs are appended to the default Coder server arguments. |
+| `spec.extraEnv` | `[]k8s.io/api/core/v1.EnvVar` | ExtraEnv are injected into the Coder control plane container. |
+| `spec.imagePullSecrets` | `[]k8s.io/api/core/v1.LocalObjectReference` | ImagePullSecrets are used by the pod to pull private images. |
 
 ## Status
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `status.observedGeneration` | `int64` | ObservedGeneration tracks the spec generation this status reflects. || `status.readyReplicas` | `int32` | ReadyReplicas is the number of ready pods observed in the deployment. || `status.url` | `string` | URL is the in-cluster URL for the control plane service. || `status.phase` | `string` | Phase is a high-level readiness indicator. || `status.conditions` | `[]metav1.Condition` | Conditions are Kubernetes-standard conditions for this resource. |
+| `status.observedGeneration` | `int64` | ObservedGeneration tracks the spec generation this status reflects. |
+| `status.readyReplicas` | `int32` | ReadyReplicas is the number of ready pods observed in the deployment. |
+| `status.url` | `string` | URL is the in-cluster URL for the control plane service. |
+| `status.phase` | `string` | Phase is a high-level readiness indicator. |
+| `status.conditions` | `[]metav1.Condition` | Conditions are Kubernetes-standard conditions for this resource. |
 
 ## Source
 
