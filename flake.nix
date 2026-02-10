@@ -27,6 +27,12 @@
               go
               gnumake
               git
+
+              # Kubernetes dev/demo tools
+              kubectl
+              kind
+              k9s
+
               goreleaser
               actionlint
               zizmor

@@ -4,7 +4,7 @@ MODULE_FILES := go.mod $(wildcard go.sum)
 ENVTEST_K8S_VERSION ?= 1.35.x
 ENVTEST_ASSETS_DIR := $(shell pwd)/bin/envtest
 
-.PHONY: vendor test test-integration setup-envtest build lint vuln verify-vendor codegen manifests docs-reference docs-reference-check docs-serve docs-build docs-check update-coder-docs-skill
+.PHONY: vendor test test-integration setup-envtest build lint vuln verify-vendor codegen manifests docs-reference docs-reference-check docs-serve docs-build docs-check update-coder-docs-skill kind-dev-up kind-dev-ctx kind-dev-load-image kind-dev-status kind-dev-k9s kind-dev-down
 
 $(VENDOR_STAMP): $(MODULE_FILES)
 	go mod tidy
@@ -67,3 +67,21 @@ docs-check: docs-reference-check
 
 update-coder-docs-skill:
 	bash ./hack/update-coder-docs-skill.sh
+
+kind-dev-up:
+	./hack/kind-dev.sh up
+
+kind-dev-ctx:
+	./hack/kind-dev.sh ctx
+
+kind-dev-load-image:
+	./hack/kind-dev.sh load-image
+
+kind-dev-status:
+	./hack/kind-dev.sh status
+
+kind-dev-k9s:
+	./hack/kind-dev.sh k9s
+
+kind-dev-down:
+	./hack/kind-dev.sh down
