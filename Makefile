@@ -51,7 +51,7 @@ docs-reference: $(VENDOR_STAMP)
 	bash ./hack/update-reference-docs.sh
 
 docs-reference-check: docs-reference
-	git diff --exit-code -- docs/reference/api/
+	git diff --exit-code -- docs/reference/api/ mkdocs.yml
 
 docs-serve:
 	@command -v mkdocs >/dev/null || (echo "mkdocs not found; use nix develop" && exit 1)

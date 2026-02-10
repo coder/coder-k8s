@@ -31,6 +31,11 @@
 {{- $scope = "namespaced" -}}
 {{- end -}}
 
+{{- $resource := markdownTemplateValue "resource" -}}
+{{- if eq $resource "" -}}
+{{- $resource = printf "%ss" (lower $kind) -}}
+{{- end -}}
+
 {{- $gv := index $groupVersions 0 -}}
 {{- $rootType := $gv.TypeForKind $kind -}}
 {{- if not $rootType -}}
@@ -65,7 +70,7 @@
 
 - Group/version: `{{ $rootType.GVK.Group }}/{{ $rootType.GVK.Version }}`
 - Kind: `{{ $rootType.GVK.Kind }}`
-- Resource: `{{ printf "%ss" (lower $kind) }}`
+- Resource: `{{ $resource }}`
 - Scope: {{ $scope }}
 
 ## Spec

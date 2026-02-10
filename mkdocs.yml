@@ -41,8 +41,11 @@ nav:
       - Troubleshooting: how-to/troubleshooting.md
   - Reference:
       - API:
+          # BEGIN GENERATED API NAV
           - CoderControlPlane: reference/api/codercontrolplane.md
-          - CoderWorkspace: reference/api/coderworkspace.md
+          - WorkspaceProxy: reference/api/workspaceproxy.md
           - CoderTemplate: reference/api/codertemplate.md
+          - CoderWorkspace: reference/api/coderworkspace.md
+          # END GENERATED API NAV
   - Explanation:
       - Architecture: explanation/architecture.md
