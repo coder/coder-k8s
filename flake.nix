@@ -35,6 +35,7 @@
 
               # Cloud tooling
               awscli2
+              terraform
 
               goreleaser
               actionlint
