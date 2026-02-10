@@ -38,7 +38,7 @@ This skill bundles a text-only snapshot of the documentation from
 
 <!-- BEGIN SNAPSHOT -->
 - **Upstream**: `coder/coder@342d2e4bedf6`
-- **Generated**: `2026-02-10T08:17:11Z`
+- **Generated**: `2026-02-10T08:26:19Z`
 <!-- END SNAPSHOT -->
 
 ## Docs tree (auto-generated)

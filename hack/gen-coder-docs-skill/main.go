@@ -1,3 +1,6 @@
+// Package main implements a CLI tool that generates the coder-docs Mux agent
+// skill by syncing a text-only snapshot of the coder/coder documentation and
+// injecting a navigation tree into SKILL.md.
 package main
 
 import (
@@ -144,7 +147,7 @@ func syncDocsSnapshot(sourceRoot, destRoot string) error {
 	if err := os.RemoveAll(destRoot); err != nil {
 		return fmt.Errorf("remove destination root %q: %w", destRoot, err)
 	}
-	if err := os.MkdirAll(destRoot, 0o755); err != nil {
+	if err := os.MkdirAll(destRoot, 0o750); err != nil {
 		return fmt.Errorf("create destination root %q: %w", destRoot, err)
 	}
 
@@ -176,7 +179,7 @@ func syncDocsSnapshot(sourceRoot, destRoot string) error {
 		}
 
 		destPath := filepath.Join(destRoot, relPath)
-		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(destPath), 0o750); err != nil {
 			return fmt.Errorf("create parent directory for %q: %w", destPath, err)
 		}
 		if err := copyTextFileWithNormalizedLF(currentPath, destPath); err != nil {
@@ -212,19 +215,19 @@ func hasPathComponent(relPath, component string) bool {
 }
 
 func copyTextFileWithNormalizedLF(srcPath, destPath string) error {
-	content, err := os.ReadFile(srcPath)
+	content, err := os.ReadFile(srcPath) //nolint:gosec // G304: paths are constructed from trusted CLI flags + walkdir
 	if err != nil {
 		return fmt.Errorf("read source file %q: %w", srcPath, err)
 	}
 	content = bytes.ReplaceAll(content, []byte("\r\n"), []byte("\n"))
-	if err := os.WriteFile(destPath, content, 0o644); err != nil {
+	if err := os.WriteFile(destPath, content, 0o600); err != nil {
 		return fmt.Errorf("write destination file %q: %w", destPath, err)
 	}
 	return nil
 }
 
 func parseManifest(manifestPath string) (manifest, error) {
-	data, err := os.ReadFile(manifestPath)
+	data, err := os.ReadFile(manifestPath) //nolint:gosec // G304: path built from validated CLI flag
 	if err != nil {
 		return manifest{}, fmt.Errorf("read manifest %q: %w", manifestPath, err)
 	}
@@ -322,7 +325,7 @@ func assertRouteFileExists(destDocsRoot, routePath string) error {
 }
 
 func injectGeneratedSections(skillMDPath, docsTree, coderSHA, generatedAt string) error {
-	contentBytes, err := os.ReadFile(skillMDPath)
+	contentBytes, err := os.ReadFile(skillMDPath) //nolint:gosec // G304: path from validated CLI flag
 	if err != nil {
 		return fmt.Errorf("read SKILL.md %q: %w", skillMDPath, err)
 	}
@@ -339,7 +342,7 @@ func injectGeneratedSections(skillMDPath, docsTree, coderSHA, generatedAt string
 		return fmt.Errorf("replace SNAPSHOT block: %w", err)
 	}
 
-	if err := os.WriteFile(skillMDPath, []byte(updated), 0o644); err != nil {
+	if err := os.WriteFile(skillMDPath, []byte(updated), 0o600); err != nil {
 		return fmt.Errorf("write SKILL.md %q: %w", skillMDPath, err)
 	}
 	return nil
@@ -396,10 +399,10 @@ func writeSnapshot(snapshotOut, coderSHA, generatedAt string) error {
 	}
 	data = append(data, '\n')
 
-	if err := os.MkdirAll(filepath.Dir(snapshotOut), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(snapshotOut), 0o750); err != nil {
 		return fmt.Errorf("create snapshot parent directory for %q: %w", snapshotOut, err)
 	}
-	if err := os.WriteFile(snapshotOut, data, 0o644); err != nil {
+	if err := os.WriteFile(snapshotOut, data, 0o600); err != nil {
 		return fmt.Errorf("write snapshot json %q: %w", snapshotOut, err)
 	}
 	return nil
