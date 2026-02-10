@@ -399,7 +399,23 @@ func workspaceProxyResourceName(name string) string {
 func workspaceProxyLabels(name string) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       "coder-workspace-proxy",
-		"app.kubernetes.io/instance":   name,
+		"app.kubernetes.io/instance":   workspaceProxyInstanceLabelValue(name),
 		"app.kubernetes.io/managed-by": "coder-k8s",
 	}
+}
+
+func workspaceProxyInstanceLabelValue(name string) string {
+	if len(name) <= 63 {
+		return name
+	}
+
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(name))
+	suffix := fmt.Sprintf("%08x", hasher.Sum32())
+	available := 63 - len(suffix) - 1
+	if available < 1 {
+		available = 1
+	}
+
+	return fmt.Sprintf("%s-%s", name[:available], suffix)
 }

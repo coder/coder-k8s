@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -44,6 +45,22 @@ func workspaceProxyResourceName(name string) string {
 	}
 
 	return fmt.Sprintf("%s%s-%s", prefix, name[:available], suffix)
+}
+
+func workspaceProxyInstanceLabelValue(name string) string {
+	if len(name) <= 63 {
+		return name
+	}
+
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(name))
+	suffix := fmt.Sprintf("%08x", hasher.Sum32())
+	available := 63 - len(suffix) - 1
+	if available < 1 {
+		available = 1
+	}
+
+	return fmt.Sprintf("%s-%s", name[:available], suffix)
 }
 
 func TestWorkspaceProxyReconcile_UsingDirectTokenSecret(t *testing.T) {
@@ -186,6 +203,76 @@ func TestWorkspaceProxyReconcile_DoesNotCollideWithControlPlaneChildren(t *testi
 	workspaceProxyDeployment := &appsv1.Deployment{}
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: workspaceProxyDeploymentName, Namespace: workspaceProxy.Namespace}, workspaceProxyDeployment); err != nil {
 		t.Fatalf("expected workspace proxy deployment: %v", err)
+	}
+}
+
+func TestWorkspaceProxyReconcile_TruncatesLongInstanceLabelValue(t *testing.T) {
+	ctx := context.Background()
+	resourceName := strings.Repeat("a", 70)
+	secretName := "proxy-long-name-token"
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: "default"},
+		Type:       corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			coderv1alpha1.DefaultTokenSecretKey: []byte("token-value"),
+		},
+	}
+	if err := k8sClient.Create(ctx, secret); err != nil {
+		t.Fatalf("create proxy secret: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, secret)
+	})
+
+	workspaceProxy := &coderv1alpha1.WorkspaceProxy{
+		ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: "default"},
+		Spec: coderv1alpha1.WorkspaceProxySpec{
+			Image:            "proxy-image:latest",
+			PrimaryAccessURL: "https://coder.example.com",
+			ProxySessionTokenSecretRef: &coderv1alpha1.SecretKeySelector{
+				Name: secretName,
+				Key:  coderv1alpha1.DefaultTokenSecretKey,
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, workspaceProxy); err != nil {
+		t.Fatalf("create workspace proxy resource: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, workspaceProxy)
+	})
+
+	reconciler := &controller.WorkspaceProxyReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: workspaceProxy.Name, Namespace: workspaceProxy.Namespace}}); err != nil {
+		t.Fatalf("reconcile workspace proxy: %v", err)
+	}
+
+	expectedInstanceLabel := workspaceProxyInstanceLabelValue(resourceName)
+	if len(expectedInstanceLabel) > 63 {
+		t.Fatalf("expected test helper to produce <=63 label length, got %d", len(expectedInstanceLabel))
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: workspaceProxyResourceName(resourceName), Namespace: workspaceProxy.Namespace}, deployment); err != nil {
+		t.Fatalf("get workspace proxy deployment: %v", err)
+	}
+	if got := deployment.Labels["app.kubernetes.io/instance"]; got != expectedInstanceLabel {
+		t.Fatalf("expected deployment instance label %q, got %q", expectedInstanceLabel, got)
+	}
+	if got := deployment.Spec.Template.Labels["app.kubernetes.io/instance"]; got != expectedInstanceLabel {
+		t.Fatalf("expected pod template instance label %q, got %q", expectedInstanceLabel, got)
+	}
+
+	service := &corev1.Service{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: workspaceProxyResourceName(resourceName), Namespace: workspaceProxy.Namespace}, service); err != nil {
+		t.Fatalf("get workspace proxy service: %v", err)
+	}
+	if got := service.Labels["app.kubernetes.io/instance"]; got != expectedInstanceLabel {
+		t.Fatalf("expected service instance label %q, got %q", expectedInstanceLabel, got)
+	}
+	if got := service.Spec.Selector["app.kubernetes.io/instance"]; got != expectedInstanceLabel {
+		t.Fatalf("expected service selector instance label %q, got %q", expectedInstanceLabel, got)
 	}
 }
 
