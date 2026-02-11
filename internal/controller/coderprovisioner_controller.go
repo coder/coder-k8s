@@ -209,11 +209,49 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		keyMaterial = response.Key
 		if keyMaterial == "" {
-			setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
-				metav1.ConditionFalse, "ProvisionerKeyFailed",
-				fmt.Sprintf("Provisioner key %q returned empty material after drift rotation", keyName))
-			_ = r.Status().Update(ctx, provisioner)
-			return ctrl.Result{}, fmt.Errorf("assertion failed: provisioner key returned empty material after drift rotation")
+			log.Info("drift-rotated key exists in coderd but returned no plaintext, rotating to recover",
+				"keyName", keyName)
+
+			if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
+				ctx, controlPlane.Status.URL, sessionToken, organizationName, keyName,
+			); deleteErr != nil {
+				setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+					metav1.ConditionFalse, "ProvisionerKeyFailed",
+					fmt.Sprintf("Failed to delete provisioner key %q for drift recovery", keyName))
+				_ = r.Status().Update(ctx, provisioner)
+				return ctrl.Result{}, fmt.Errorf("delete provisioner key %q for drift recovery: %w", keyName, deleteErr)
+			}
+			rotated, rotateErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
+				CoderURL:         controlPlane.Status.URL,
+				SessionToken:     sessionToken,
+				OrganizationName: organizationName,
+				KeyName:          keyName,
+				Tags:             provisioner.Spec.Tags,
+			})
+			if rotateErr != nil {
+				setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+					metav1.ConditionFalse, "ProvisionerKeyFailed",
+					fmt.Sprintf("Failed to recreate provisioner key %q after drift recovery", keyName))
+				_ = r.Status().Update(ctx, provisioner)
+				return ctrl.Result{}, fmt.Errorf("recreate provisioner key %q after drift recovery: %w", keyName, rotateErr)
+			}
+			if rotated.OrganizationID != uuid.Nil {
+				organizationID = rotated.OrganizationID.String()
+			}
+			if rotated.KeyID != uuid.Nil {
+				provisionerKeyID = rotated.KeyID.String()
+			}
+			if rotated.KeyName != "" {
+				provisionerKeyName = rotated.KeyName
+			}
+			keyMaterial = rotated.Key
+			if keyMaterial == "" {
+				setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+					metav1.ConditionFalse, "ProvisionerKeyFailed",
+					fmt.Sprintf("Provisioner key %q returned empty material after drift recovery rotation", keyName))
+				_ = r.Status().Update(ctx, provisioner)
+				return ctrl.Result{}, fmt.Errorf("assertion failed: provisioner key %q returned empty material after drift recovery rotation", keyName)
+			}
 		}
 		appliedOrgName = organizationName
 		appliedTagsHash = desiredTagsHash
@@ -920,6 +958,18 @@ func provisionerKeyConfig(provisioner *coderv1alpha1.CoderProvisioner) (string, 
 	keyName := provisioner.Spec.Key.Name
 	if keyName == "" {
 		keyName = provisioner.Name
+	}
+
+	const maxKeyNameLength = 128
+	if len(keyName) > maxKeyNameLength {
+		hasher := fnv.New32a()
+		_, _ = hasher.Write([]byte(keyName))
+		suffix := fmt.Sprintf("%08x", hasher.Sum32())
+		available := maxKeyNameLength - len(suffix) - 1
+		if available < 1 {
+			available = 1
+		}
+		keyName = fmt.Sprintf("%s-%s", keyName[:available], suffix)
 	}
 
 	secretName := provisioner.Spec.Key.SecretName

@@ -117,6 +117,23 @@ func expectedProvisionerServiceAccountName(name string) string {
 	return fmt.Sprintf("%s-%s%s", name[:available], hashSuffix, suffix)
 }
 
+func expectedProvisionerKeyName(name string) string {
+	const maxKeyNameLength = 128
+	if len(name) <= maxKeyNameLength {
+		return name
+	}
+
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(name))
+	suffix := fmt.Sprintf("%08x", hasher.Sum32())
+	available := maxKeyNameLength - len(suffix) - 1
+	if available < 1 {
+		available = 1
+	}
+
+	return fmt.Sprintf("%s-%s", name[:available], suffix)
+}
+
 func reconcileProvisioner(ctx context.Context, t *testing.T, reconciler *controller.CoderProvisionerReconciler, namespacedName types.NamespacedName) {
 	t.Helper()
 
@@ -681,6 +698,7 @@ func TestCoderProvisionerReconciler_TagsDrift(t *testing.T) {
 	bootstrapClient := &fakeBootstrapClient{
 		provisionerKeyResponses: []coderbootstrap.EnsureProvisionerKeyResponse{
 			{KeyName: "tags-drift-key", Key: "initial-key-material"},
+			{KeyName: "tags-drift-key", Key: ""},
 			{KeyName: "tags-drift-key", Key: "rotated-key-material"},
 		},
 	}
@@ -700,8 +718,11 @@ func TestCoderProvisionerReconciler_TagsDrift(t *testing.T) {
 
 	reconcileProvisioner(ctx, t, reconciler, request)
 
-	require.Equal(t, 2, bootstrapClient.provisionerKeyCalls)
-	require.GreaterOrEqual(t, bootstrapClient.deleteKeyCalls, 1)
+	require.Equal(t, 3, bootstrapClient.provisionerKeyCalls)
+	require.Equal(t, 2, bootstrapClient.deleteKeyCalls)
+	require.Len(t, bootstrapClient.deleteKeyRequests, 2)
+	require.Equal(t, "tags-drift-key", bootstrapClient.deleteKeyRequests[0].KeyName)
+	require.Equal(t, "tags-drift-key", bootstrapClient.deleteKeyRequests[1].KeyName)
 
 	keySecret := &corev1.Secret{}
 	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: fmt.Sprintf("%s-provisioner-key", provisioner.Name), Namespace: provisioner.Namespace}, keySecret))
@@ -917,11 +938,15 @@ func TestCoderProvisionerReconciler_LongNameTruncation(t *testing.T) {
 	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-longname", "https://coder.example.com")
 	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
-	provisionerName := strings.Repeat("a", 70)
+	provisionerName := strings.Repeat("a", 180)
 	deploymentCandidateName := fmt.Sprintf("provisioner-%s", provisionerName)
 	serviceAccountCandidateName := fmt.Sprintf("%s-provisioner", provisionerName)
+	keyNameCandidate := provisionerName
+	expectedKeyName := expectedProvisionerKeyName(provisionerName)
 	require.Greater(t, len(deploymentCandidateName), 63)
 	require.Greater(t, len(serviceAccountCandidateName), 63)
+	require.Greater(t, len(keyNameCandidate), 128)
+	require.Len(t, expectedKeyName, 128)
 
 	provisioner := &coderv1alpha1.CoderProvisioner{
 		ObjectMeta: metav1.ObjectMeta{Name: provisionerName, Namespace: namespace},
@@ -939,7 +964,7 @@ func TestCoderProvisionerReconciler_LongNameTruncation(t *testing.T) {
 
 	bootstrapClient := &fakeBootstrapClient{
 		provisionerKeyResponses: []coderbootstrap.EnsureProvisionerKeyResponse{{
-			KeyName: provisionerName,
+			KeyName: expectedKeyName,
 			Key:     "provisioner-key-material",
 		}},
 	}
@@ -953,6 +978,14 @@ func TestCoderProvisionerReconciler_LongNameTruncation(t *testing.T) {
 	serviceAccountName := expectedProvisionerServiceAccountName(provisionerName)
 	require.LessOrEqual(t, len(deploymentName), 63)
 	require.LessOrEqual(t, len(serviceAccountName), 63)
+
+	require.Len(t, bootstrapClient.provisionerKeyRequests, 1)
+	require.Equal(t, expectedKeyName, bootstrapClient.provisionerKeyRequests[0].KeyName)
+
+	reconciledProvisioner := &coderv1alpha1.CoderProvisioner{}
+	require.NoError(t, k8sClient.Get(ctx, request, reconciledProvisioner))
+	require.Equal(t, expectedKeyName, reconciledProvisioner.Status.ProvisionerKeyName)
+	require.LessOrEqual(t, len(reconciledProvisioner.Status.ProvisionerKeyName), 128)
 
 	deployment := &appsv1.Deployment{}
 	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: namespace}, deployment))
