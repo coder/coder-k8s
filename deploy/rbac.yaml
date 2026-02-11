@@ -43,10 +43,10 @@ rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Controller: events
+  # Controller + MCP: events
   - apiGroups: [""]
     resources: ["events"]
-    verbs: ["create", "patch"]
+    verbs: ["get", "list", "watch", "create", "patch"]
   # Controller: manage deployments and services for control planes
   - apiGroups: ["apps"]
     resources: ["deployments"]
