@@ -65,13 +65,13 @@ type CoderProvisionerSpec struct {
 
 // CoderProvisionerStatus defines the observed state of a CoderProvisioner.
 type CoderProvisionerStatus struct {
-	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
-	ReadyReplicas      int32 `json:"readyReplicas,omitempty"`
-	Phase              string `json:"phase,omitempty"`
+	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
+	ReadyReplicas      int32              `json:"readyReplicas,omitempty"`
+	Phase              string             `json:"phase,omitempty"`
 	Conditions         []metav1.Condition `json:"conditions,omitempty"`
-	OrganizationID     string `json:"organizationID,omitempty"`
-	ProvisionerKeyID   string `json:"provisionerKeyID,omitempty"`
-	ProvisionerKeyName string `json:"provisionerKeyName,omitempty"`
+	OrganizationID     string             `json:"organizationID,omitempty"`
+	ProvisionerKeyID   string             `json:"provisionerKeyID,omitempty"`
+	ProvisionerKeyName string             `json:"provisionerKeyName,omitempty"`
 	SecretRef          *SecretKeySelector `json:"secretRef,omitempty"`
 }
 
