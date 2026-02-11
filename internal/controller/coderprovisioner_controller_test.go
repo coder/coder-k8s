@@ -24,7 +24,7 @@ import (
 	"github.com/coder/coder-k8s/internal/controller"
 )
 
-func createTestNamespace(t *testing.T, ctx context.Context, prefix string) string {
+func createTestNamespace(ctx context.Context, t *testing.T, prefix string) string {
 	t.Helper()
 
 	namespaceName := fmt.Sprintf("%s-%s", prefix, strings.ToLower(uuid.NewString()[:8]))
@@ -38,7 +38,7 @@ func createTestNamespace(t *testing.T, ctx context.Context, prefix string) strin
 }
 
 // createTestControlPlane creates a test CoderControlPlane and optionally sets status.url.
-func createTestControlPlane(t *testing.T, ctx context.Context, namespace, name, url string) *coderv1alpha1.CoderControlPlane {
+func createTestControlPlane(ctx context.Context, t *testing.T, namespace, name, url string) *coderv1alpha1.CoderControlPlane {
 	t.Helper()
 
 	controlPlane := &coderv1alpha1.CoderControlPlane{
@@ -60,7 +60,7 @@ func createTestControlPlane(t *testing.T, ctx context.Context, namespace, name, 
 }
 
 // createBootstrapSecret creates the bootstrap credentials secret used by provisioner reconciliation.
-func createBootstrapSecret(t *testing.T, ctx context.Context, namespace, name, key, value string) *corev1.Secret {
+func createBootstrapSecret(ctx context.Context, t *testing.T, namespace, name, key, value string) *corev1.Secret {
 	t.Helper()
 
 	if key == "" {
@@ -103,7 +103,7 @@ func expectedProvisionerServiceAccountName(name string) string {
 	return fmt.Sprintf("%s-provisioner", name)
 }
 
-func reconcileProvisioner(t *testing.T, ctx context.Context, reconciler *controller.CoderProvisionerReconciler, namespacedName types.NamespacedName) {
+func reconcileProvisioner(ctx context.Context, t *testing.T, reconciler *controller.CoderProvisionerReconciler, namespacedName types.NamespacedName) {
 	t.Helper()
 
 	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
@@ -111,7 +111,7 @@ func reconcileProvisioner(t *testing.T, ctx context.Context, reconciler *control
 	require.Equal(t, ctrl.Result{}, result)
 }
 
-func requireOwnerReference(t *testing.T, owner metav1.Object, child metav1.Object) {
+func requireOwnerReference(t *testing.T, owner, child metav1.Object) {
 	t.Helper()
 
 	ownerReferences := child.GetOwnerReferences()
@@ -130,9 +130,9 @@ func TestCoderProvisionerReconciler_BasicCreate(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	namespace := createTestNamespace(t, ctx, "coderprov-basic")
-	controlPlane := createTestControlPlane(t, ctx, namespace, "controlplane-basic", "https://coder.example.com")
-	bootstrapSecret := createBootstrapSecret(t, ctx, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
+	namespace := createTestNamespace(ctx, t, "coderprov-basic")
+	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-basic", "https://coder.example.com")
+	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 	organizationID := uuid.New()
 	provisionerKeyID := uuid.New()
@@ -186,8 +186,8 @@ func TestCoderProvisionerReconciler_BasicCreate(t *testing.T) {
 	})
 
 	namespacedName := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
-	reconcileProvisioner(t, ctx, reconciler, namespacedName)
-	reconcileProvisioner(t, ctx, reconciler, namespacedName)
+	reconcileProvisioner(ctx, t, reconciler, namespacedName)
+	reconcileProvisioner(ctx, t, reconciler, namespacedName)
 
 	reconciledProvisioner := &coderv1alpha1.CoderProvisioner{}
 	require.NoError(t, k8sClient.Get(ctx, namespacedName, reconciledProvisioner))
@@ -275,9 +275,9 @@ func TestCoderProvisionerReconciler_ExistingSecret(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	namespace := createTestNamespace(t, ctx, "coderprov-existing")
-	controlPlane := createTestControlPlane(t, ctx, namespace, "controlplane-existing", "https://coder.example.com")
-	bootstrapSecret := createBootstrapSecret(t, ctx, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
+	namespace := createTestNamespace(ctx, t, "coderprov-existing")
+	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-existing", "https://coder.example.com")
+	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 	provisionerName := "provisioner-existing"
 	secretName := fmt.Sprintf("%s-provisioner-key", provisionerName)
@@ -319,8 +319,8 @@ func TestCoderProvisionerReconciler_ExistingSecret(t *testing.T) {
 	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
 
 	namespacedName := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
-	reconcileProvisioner(t, ctx, reconciler, namespacedName)
-	reconcileProvisioner(t, ctx, reconciler, namespacedName)
+	reconcileProvisioner(ctx, t, reconciler, namespacedName)
+	reconcileProvisioner(ctx, t, reconciler, namespacedName)
 
 	require.Equal(t, 0, bootstrapClient.provisionerKeyCalls)
 	require.Equal(t, 0, bootstrapClient.deleteKeyCalls)
@@ -357,9 +357,9 @@ func TestCoderProvisionerReconciler_Deletion(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	namespace := createTestNamespace(t, ctx, "coderprov-delete")
-	controlPlane := createTestControlPlane(t, ctx, namespace, "controlplane-delete", "https://coder.example.com")
-	bootstrapSecret := createBootstrapSecret(t, ctx, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
+	namespace := createTestNamespace(ctx, t, "coderprov-delete")
+	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-delete", "https://coder.example.com")
+	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 	provisioner := &coderv1alpha1.CoderProvisioner{
 		ObjectMeta: metav1.ObjectMeta{Name: "provisioner-delete", Namespace: namespace},
@@ -382,8 +382,8 @@ func TestCoderProvisionerReconciler_Deletion(t *testing.T) {
 	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
 
 	namespacedName := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
-	reconcileProvisioner(t, ctx, reconciler, namespacedName)
-	reconcileProvisioner(t, ctx, reconciler, namespacedName)
+	reconcileProvisioner(ctx, t, reconciler, namespacedName)
+	reconcileProvisioner(ctx, t, reconciler, namespacedName)
 	require.Equal(t, 1, bootstrapClient.provisionerKeyCalls)
 
 	latest := &coderv1alpha1.CoderProvisioner{}
@@ -395,7 +395,7 @@ func TestCoderProvisionerReconciler_Deletion(t *testing.T) {
 	require.NoError(t, k8sClient.Get(ctx, namespacedName, markedForDeletion))
 	require.False(t, markedForDeletion.DeletionTimestamp.IsZero())
 
-	reconcileProvisioner(t, ctx, reconciler, namespacedName)
+	reconcileProvisioner(ctx, t, reconciler, namespacedName)
 	require.Equal(t, 1, bootstrapClient.deleteKeyCalls)
 
 	require.Eventually(t, func() bool {
@@ -478,9 +478,9 @@ func TestCoderProvisionerReconciler_ControlPlaneNotReady(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	namespace := createTestNamespace(t, ctx, "coderprov-cpnotready")
-	controlPlane := createTestControlPlane(t, ctx, namespace, "controlplane-notready", "")
-	bootstrapSecret := createBootstrapSecret(t, ctx, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
+	namespace := createTestNamespace(ctx, t, "coderprov-cpnotready")
+	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-notready", "")
+	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 	provisioner := &coderv1alpha1.CoderProvisioner{
 		ObjectMeta: metav1.ObjectMeta{Name: "provisioner-notready", Namespace: namespace},
@@ -500,7 +500,7 @@ func TestCoderProvisionerReconciler_ControlPlaneNotReady(t *testing.T) {
 	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
 	namespacedName := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
 
-	reconcileProvisioner(t, ctx, reconciler, namespacedName)
+	reconcileProvisioner(ctx, t, reconciler, namespacedName)
 
 	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
 	require.ErrorContains(t, err, fmt.Sprintf("codercontrolplane %s/%s status.url is empty", controlPlane.Namespace, controlPlane.Name))
