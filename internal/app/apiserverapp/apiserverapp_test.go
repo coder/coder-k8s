@@ -151,6 +151,36 @@ func TestBuildClientProviderDefersMissingCoderConfigAsServiceUnavailable(t *test
 	}
 }
 
+func TestBuildClientProviderRejectsMissingCoderNamespaceWhenBackendConfigured(t *testing.T) {
+	t.Parallel()
+
+	_, err := buildClientProvider(Options{
+		CoderURL:          "https://coder.example.com",
+		CoderSessionToken: "test-session-token",
+	}, 30*time.Second)
+	if err == nil {
+		t.Fatal("expected missing coder namespace to fail when backend is otherwise configured")
+	}
+	if !strings.Contains(err.Error(), "configure --coder-namespace") {
+		t.Fatalf("expected missing namespace error to mention --coder-namespace, got %v", err)
+	}
+}
+
+func TestRunWithOptionsRejectsMissingCoderNamespaceWhenBackendConfigured(t *testing.T) {
+	t.Parallel()
+
+	err := RunWithOptions(context.Background(), Options{
+		CoderURL:          "https://coder.example.com",
+		CoderSessionToken: "test-session-token",
+	})
+	if err == nil {
+		t.Fatal("expected missing coder namespace to fail startup when backend is otherwise configured")
+	}
+	if !strings.Contains(err.Error(), "configure --coder-namespace") {
+		t.Fatalf("expected missing namespace startup error to mention --coder-namespace, got %v", err)
+	}
+}
+
 func TestRunWithOptionsStartsWithMissingCoderConfig(t *testing.T) {
 	t.Parallel()
 

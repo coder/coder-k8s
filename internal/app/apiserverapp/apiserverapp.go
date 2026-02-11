@@ -100,6 +100,11 @@ func buildClientProvider(opts Options, requestTimeout time.Duration) (coder.Clie
 		}, nil
 	}
 
+	coderNamespace := strings.TrimSpace(opts.CoderNamespace)
+	if coderNamespace == "" {
+		return nil, fmt.Errorf("coder client provider namespace is not configured: configure --coder-namespace")
+	}
+
 	parsedCoderURL, err := url.Parse(coderURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse coder URL %q: %w", coderURL, err)
@@ -114,7 +119,7 @@ func buildClientProvider(opts Options, requestTimeout time.Duration) (coder.Clie
 			SessionToken:   sessionToken,
 			RequestTimeout: requestTimeout,
 		},
-		opts.CoderNamespace,
+		coderNamespace,
 	)
 	if err != nil {
 		return nil, err
