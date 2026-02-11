@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"maps"
 	"slices"
+	"time"
 
 	"github.com/google/uuid"
 	appsv1 "k8s.io/api/apps/v1"
@@ -360,69 +361,75 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			Tags:             provisioner.Spec.Tags,
 		})
 		if ensureErr != nil {
-			log.Info("failed to verify provisioner key metadata, will retry",
-				"keyName", keyName, "error", ensureErr)
+			// Return a requeue so metadata population retries.
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, fmt.Errorf("verify provisioner key metadata: %w", ensureErr)
+		}
+		if response.OrganizationID != uuid.Nil {
+			organizationID = response.OrganizationID.String()
+		}
+		if response.KeyID != uuid.Nil {
+			provisionerKeyID = response.KeyID.String()
+		}
+		if response.KeyName != "" {
+			provisionerKeyName = response.KeyName
+		}
+		if response.Key != "" {
+			// Key was freshly created with desired tags; capture material and stamp baseline.
+			keyMaterial = response.Key
+			appliedOrgName = organizationName
+			appliedTagsHash = desiredTagsHash
 		} else {
-			if response.OrganizationID != uuid.Nil {
-				organizationID = response.OrganizationID.String()
-			}
-			if response.KeyID != uuid.Nil {
-				provisionerKeyID = response.KeyID.String()
-			}
-			if response.KeyName != "" {
-				provisionerKeyName = response.KeyName
-			}
-			if response.Key != "" {
-				// Key was freshly created with desired tags; capture material and stamp baseline.
-				keyMaterial = response.Key
+			// Key already exists; tags may be stale. Rotate to ensure desired tags are applied.
+			log.Info("existing key found during metadata backfill, rotating to ensure desired tags",
+				"keyName", keyName)
+			if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
+				ctx, controlPlane.Status.URL, sessionToken, organizationName, keyName,
+			); deleteErr != nil {
+				log.Info("failed to delete key for metadata backfill rotation, will retry",
+					"keyName", keyName, "error", deleteErr)
+			} else {
+				rotated, rotateErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
+					CoderURL:         controlPlane.Status.URL,
+					SessionToken:     sessionToken,
+					OrganizationName: organizationName,
+					KeyName:          keyName,
+					Tags:             provisioner.Spec.Tags,
+				})
+				if rotateErr != nil {
+					setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+						metav1.ConditionFalse, "ProvisionerKeyFailed",
+						fmt.Sprintf("Failed to recreate provisioner key %q after metadata backfill rotation", keyName))
+					_ = r.Status().Update(ctx, provisioner)
+					return ctrl.Result{}, fmt.Errorf("recreate provisioner key %q after metadata backfill rotation: %w", keyName, rotateErr)
+				}
+				if rotated.OrganizationID != uuid.Nil {
+					organizationID = rotated.OrganizationID.String()
+				}
+				if rotated.KeyID != uuid.Nil {
+					provisionerKeyID = rotated.KeyID.String()
+				}
+				if rotated.KeyName != "" {
+					provisionerKeyName = rotated.KeyName
+				}
+				keyMaterial = rotated.Key
+				if keyMaterial == "" {
+					setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+						metav1.ConditionFalse, "ProvisionerKeyFailed",
+						fmt.Sprintf("Provisioner key %q returned empty material after metadata backfill rotation", keyName))
+					_ = r.Status().Update(ctx, provisioner)
+					return ctrl.Result{}, fmt.Errorf("assertion failed: provisioner key %q returned empty material after metadata backfill rotation", keyName)
+				}
 				appliedOrgName = organizationName
 				appliedTagsHash = desiredTagsHash
-			} else {
-				// Key already exists; tags may be stale. Rotate to ensure desired tags are applied.
-				log.Info("existing key found during metadata backfill, rotating to ensure desired tags",
-					"keyName", keyName)
-				if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
-					ctx, controlPlane.Status.URL, sessionToken, organizationName, keyName,
-				); deleteErr != nil {
-					log.Info("failed to delete key for metadata backfill rotation, will retry",
-						"keyName", keyName, "error", deleteErr)
-				} else {
-					rotated, rotateErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
-						CoderURL:         controlPlane.Status.URL,
-						SessionToken:     sessionToken,
-						OrganizationName: organizationName,
-						KeyName:          keyName,
-						Tags:             provisioner.Spec.Tags,
-					})
-					if rotateErr != nil {
-						setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
-							metav1.ConditionFalse, "ProvisionerKeyFailed",
-							fmt.Sprintf("Failed to recreate provisioner key %q after metadata backfill rotation", keyName))
-						_ = r.Status().Update(ctx, provisioner)
-						return ctrl.Result{}, fmt.Errorf("recreate provisioner key %q after metadata backfill rotation: %w", keyName, rotateErr)
-					}
-					if rotated.OrganizationID != uuid.Nil {
-						organizationID = rotated.OrganizationID.String()
-					}
-					if rotated.KeyID != uuid.Nil {
-						provisionerKeyID = rotated.KeyID.String()
-					}
-					if rotated.KeyName != "" {
-						provisionerKeyName = rotated.KeyName
-					}
-					keyMaterial = rotated.Key
-					appliedOrgName = organizationName
-					appliedTagsHash = desiredTagsHash
-				}
 			}
-			setCondition(
-				provisioner,
-				coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
-				metav1.ConditionTrue,
-				"ProvisionerKeyReady",
-				"Provisioner key is available in coderd",
-			)
 		}
+		setCondition(
+			provisioner,
+			coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+			metav1.ConditionTrue,
+			"ProvisionerKeyReady",
+			"Provisioner key is available in coderd",
+		)
 	}
 
 	provisionerKeySecret, err := r.ensureProvisionerKeySecret(ctx, provisioner, keySecretName, keySecretKey, keyMaterial)
