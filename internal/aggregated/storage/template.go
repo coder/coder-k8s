@@ -92,7 +92,7 @@ func (s *TemplateStorage) Get(ctx context.Context, name string, _ *metav1.GetOpt
 
 	sdk, err := s.clientForNamespace(ctx, namespace)
 	if err != nil {
-		return nil, apierrors.NewInternalError(err)
+		return nil, wrapClientError(err)
 	}
 
 	org, err := sdk.OrganizationByName(ctx, orgName)
@@ -124,7 +124,7 @@ func (s *TemplateStorage) List(ctx context.Context, _ *metainternalversion.ListO
 
 	sdk, err := s.clientForNamespace(ctx, namespace)
 	if err != nil {
-		return nil, apierrors.NewInternalError(err)
+		return nil, wrapClientError(err)
 	}
 
 	templates, err := sdk.Templates(ctx, codersdk.TemplateFilter{})
@@ -203,7 +203,7 @@ func (s *TemplateStorage) Create(
 
 	sdk, err := s.clientForNamespace(ctx, namespace)
 	if err != nil {
-		return nil, apierrors.NewInternalError(err)
+		return nil, wrapClientError(err)
 	}
 
 	org, err := sdk.OrganizationByName(ctx, orgName)
@@ -331,7 +331,7 @@ func (s *TemplateStorage) Delete(
 
 	sdk, err := s.clientForNamespace(ctx, namespace)
 	if err != nil {
-		return nil, false, apierrors.NewInternalError(err)
+		return nil, false, wrapClientError(err)
 	}
 
 	org, err := sdk.OrganizationByName(ctx, orgName)

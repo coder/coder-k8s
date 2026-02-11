@@ -123,6 +123,30 @@ func TestTemplateStorageListRequiresNamespace(t *testing.T) {
 	}
 }
 
+func TestTemplateStorageListPreservesProviderStatusErrors(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newMockCoderServer(t)
+	defer server.Close()
+
+	parsedURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse mock server URL %q: %v", server.URL, err)
+	}
+	client := codersdk.New(parsedURL)
+	client.SetSessionToken("test-session-token")
+
+	templateStorage := NewTemplateStorage(&coder.StaticClientProvider{
+		Client:    client,
+		Namespace: "control-plane",
+	})
+
+	_, err = templateStorage.List(namespacedContext("other-namespace"), nil)
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected BadRequest from provider namespace restriction, got %v", err)
+	}
+}
+
 func TestTemplateStorageUpdateReturnsDesiredObjectForLegacyRunningField(t *testing.T) {
 	t.Parallel()
 
@@ -324,6 +348,45 @@ func TestWorkspaceStorageCRUDWithCoderSDK(t *testing.T) {
 	}
 }
 
+func TestWorkspaceStorageUpdateRejectsNonRunningSpecChanges(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newMockCoderServer(t)
+	defer server.Close()
+
+	workspaceStorage := NewWorkspaceStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	currentObj, err := workspaceStorage.Get(ctx, "acme.alice.dev-workspace", nil)
+	if err != nil {
+		t.Fatalf("expected workspace get to succeed: %v", err)
+	}
+
+	currentWorkspace, ok := currentObj.(*aggregationv1alpha1.CoderWorkspace)
+	if !ok {
+		t.Fatalf("expected *CoderWorkspace from get, got %T", currentObj)
+	}
+
+	desiredWorkspace := currentWorkspace.DeepCopy()
+	desiredWorkspace.Spec.TemplateName = "renamed-template"
+
+	_, _, err = workspaceStorage.Update(
+		ctx,
+		desiredWorkspace.Name,
+		testUpdatedObjectInfo{obj: desiredWorkspace},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected BadRequest when changing immutable workspace spec fields, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "spec.running") {
+		t.Fatalf("expected immutable-field error mentioning spec.running, got %v", err)
+	}
+}
+
 func TestWorkspaceStorageCreateRunningFalseReturnsWorkspaceWhenStopBuildFails(t *testing.T) {
 	t.Parallel()
 
@@ -390,6 +453,30 @@ func TestWorkspaceStorageListRequiresNamespace(t *testing.T) {
 	_, err := workspaceStorage.List(context.Background(), nil)
 	if !apierrors.IsBadRequest(err) {
 		t.Fatalf("expected BadRequest for missing namespace, got %v", err)
+	}
+}
+
+func TestWorkspaceStorageListPreservesProviderStatusErrors(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newMockCoderServer(t)
+	defer server.Close()
+
+	parsedURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse mock server URL %q: %v", server.URL, err)
+	}
+	client := codersdk.New(parsedURL)
+	client.SetSessionToken("test-session-token")
+
+	workspaceStorage := NewWorkspaceStorage(&coder.StaticClientProvider{
+		Client:    client,
+		Namespace: "control-plane",
+	})
+
+	_, err = workspaceStorage.List(namespacedContext("other-namespace"), nil)
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected BadRequest from provider namespace restriction, got %v", err)
 	}
 }
 

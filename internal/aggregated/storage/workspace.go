@@ -93,7 +93,7 @@ func (s *WorkspaceStorage) Get(ctx context.Context, name string, _ *metav1.GetOp
 
 	sdk, err := s.clientForNamespace(ctx, namespace)
 	if err != nil {
-		return nil, apierrors.NewInternalError(err)
+		return nil, wrapClientError(err)
 	}
 
 	workspace, err := sdk.WorkspaceByOwnerAndName(ctx, userName, workspaceName, codersdk.WorkspaceOptions{})
@@ -123,7 +123,7 @@ func (s *WorkspaceStorage) List(ctx context.Context, _ *metainternalversion.List
 
 	sdk, err := s.clientForNamespace(ctx, namespace)
 	if err != nil {
-		return nil, apierrors.NewInternalError(err)
+		return nil, wrapClientError(err)
 	}
 
 	workspacesResponse, err := sdk.Workspaces(ctx, codersdk.WorkspaceFilter{})
@@ -205,7 +205,7 @@ func (s *WorkspaceStorage) Create(
 
 	sdk, err := s.clientForNamespace(ctx, namespace)
 	if err != nil {
-		return nil, apierrors.NewInternalError(err)
+		return nil, wrapClientError(err)
 	}
 
 	org, err := sdk.OrganizationByName(ctx, orgName)
@@ -291,7 +291,7 @@ func (s *WorkspaceStorage) Update(
 
 	sdk, err := s.clientForNamespace(ctx, namespace)
 	if err != nil {
-		return nil, false, apierrors.NewInternalError(err)
+		return nil, false, wrapClientError(err)
 	}
 
 	currentWorkspace, err := sdk.WorkspaceByOwnerAndName(ctx, userName, workspaceName, codersdk.WorkspaceOptions{})
@@ -332,6 +332,18 @@ func (s *WorkspaceStorage) Update(
 		if err := updateValidation(ctx, desiredObj, currentK8sObj); err != nil {
 			return nil, false, err
 		}
+	}
+
+	// Workspace updates via codersdk are currently limited to workspace build
+	// transitions, which map only to spec.running toggles in this API.
+	if desiredObj.Spec.Organization != currentK8sObj.Spec.Organization ||
+		desiredObj.Spec.TemplateName != currentK8sObj.Spec.TemplateName ||
+		desiredObj.Spec.TemplateVersionID != currentK8sObj.Spec.TemplateVersionID ||
+		!equalInt64Ptr(desiredObj.Spec.TTLMillis, currentK8sObj.Spec.TTLMillis) ||
+		!equalStringPtr(desiredObj.Spec.AutostartSchedule, currentK8sObj.Spec.AutostartSchedule) {
+		return nil, false, apierrors.NewBadRequest(
+			"workspace update only supports changing spec.running; other spec fields are immutable",
+		)
 	}
 
 	if desiredObj.Spec.Running == currentK8sObj.Spec.Running {
@@ -387,7 +399,7 @@ func (s *WorkspaceStorage) Delete(
 
 	sdk, err := s.clientForNamespace(ctx, namespace)
 	if err != nil {
-		return nil, false, apierrors.NewInternalError(err)
+		return nil, false, wrapClientError(err)
 	}
 
 	workspace, err := sdk.WorkspaceByOwnerAndName(ctx, userName, workspaceName, codersdk.WorkspaceOptions{})
@@ -453,4 +465,26 @@ func namespaceFromRequestContext(ctx context.Context) (string, error) {
 	}
 
 	return namespace, nil
+}
+
+func equalInt64Ptr(a, b *int64) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+
+	return *a == *b
+}
+
+func equalStringPtr(a, b *string) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+
+	return *a == *b
 }
