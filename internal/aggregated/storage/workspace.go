@@ -355,7 +355,7 @@ func (s *WorkspaceStorage) Update(
 	// transitions, which map only to spec.running toggles in this API.
 	if desiredObj.Spec.Organization != currentK8sObj.Spec.Organization ||
 		desiredObj.Spec.TemplateName != currentK8sObj.Spec.TemplateName ||
-		desiredObj.Spec.TemplateVersionID != currentK8sObj.Spec.TemplateVersionID ||
+		(desiredObj.Spec.TemplateVersionID != "" && desiredObj.Spec.TemplateVersionID != currentK8sObj.Spec.TemplateVersionID) ||
 		!equalInt64Ptr(desiredObj.Spec.TTLMillis, currentK8sObj.Spec.TTLMillis) ||
 		!equalStringPtr(desiredObj.Spec.AutostartSchedule, currentK8sObj.Spec.AutostartSchedule) {
 		return nil, false, apierrors.NewBadRequest(

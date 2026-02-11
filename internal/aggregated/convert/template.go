@@ -35,6 +35,7 @@ func TemplateToK8s(namespace string, t codersdk.Template) *aggregationv1alpha1.C
 		},
 		Spec: aggregationv1alpha1.CoderTemplateSpec{
 			Organization: t.OrganizationName,
+			VersionID:    t.ActiveVersionID.String(),
 			DisplayName:  t.DisplayName,
 			Description:  t.Description,
 			Icon:         t.Icon,

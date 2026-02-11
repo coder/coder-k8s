@@ -53,6 +53,9 @@ func TestTemplateToK8s(t *testing.T) {
 	if converted.Spec.Organization != "acme" {
 		t.Fatalf("expected spec organization acme, got %q", converted.Spec.Organization)
 	}
+	if converted.Spec.VersionID != activeVersionID.String() {
+		t.Fatalf("expected spec version ID %q, got %q", activeVersionID.String(), converted.Spec.VersionID)
+	}
 	if converted.Spec.DisplayName != "Starter Template" {
 		t.Fatalf("expected spec display name Starter Template, got %q", converted.Spec.DisplayName)
 	}

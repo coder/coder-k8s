@@ -290,7 +290,7 @@ func (s *TemplateStorage) Update(
 	// Coder backend. Reject updates to all other spec fields to avoid drift between
 	// accepted update payloads and persisted backend state.
 	if updatedTemplate.Spec.Organization != currentTemplate.Spec.Organization ||
-		updatedTemplate.Spec.VersionID != currentTemplate.Spec.VersionID ||
+		(updatedTemplate.Spec.VersionID != "" && updatedTemplate.Spec.VersionID != currentTemplate.Spec.VersionID) ||
 		updatedTemplate.Spec.DisplayName != currentTemplate.Spec.DisplayName ||
 		updatedTemplate.Spec.Description != currentTemplate.Spec.Description ||
 		updatedTemplate.Spec.Icon != currentTemplate.Spec.Icon {
