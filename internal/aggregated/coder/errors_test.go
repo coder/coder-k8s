@@ -44,6 +44,58 @@ func TestMapCoderError(t *testing.T) {
 			},
 		},
 		{
+			name: "maps bad request",
+			err: withCoderMessage(
+				codersdk.NewTestError(http.StatusBadRequest, http.MethodGet, "https://coder.example.com"),
+				"bad workspace request",
+			),
+			assertMapping: func(t *testing.T, err error) {
+				t.Helper()
+				if !apierrors.IsBadRequest(err) {
+					t.Fatalf("expected BadRequest, got %v", err)
+				}
+			},
+		},
+		{
+			name: "maps unprocessable entity to bad request",
+			err: withCoderMessage(
+				codersdk.NewTestError(http.StatusUnprocessableEntity, http.MethodGet, "https://coder.example.com"),
+				"invalid workspace transition",
+			),
+			assertMapping: func(t *testing.T, err error) {
+				t.Helper()
+				if !apierrors.IsBadRequest(err) {
+					t.Fatalf("expected BadRequest, got %v", err)
+				}
+			},
+		},
+		{
+			name: "maps unauthorized",
+			err: withCoderMessage(
+				codersdk.NewTestError(http.StatusUnauthorized, http.MethodGet, "https://coder.example.com"),
+				"invalid session token",
+			),
+			assertMapping: func(t *testing.T, err error) {
+				t.Helper()
+				if !apierrors.IsUnauthorized(err) {
+					t.Fatalf("expected Unauthorized, got %v", err)
+				}
+			},
+		},
+		{
+			name: "maps other client errors to bad request",
+			err: withCoderMessage(
+				codersdk.NewTestError(http.StatusTooManyRequests, http.MethodGet, "https://coder.example.com"),
+				"rate limited",
+			),
+			assertMapping: func(t *testing.T, err error) {
+				t.Helper()
+				if !apierrors.IsBadRequest(err) {
+					t.Fatalf("expected BadRequest, got %v", err)
+				}
+			},
+		},
+		{
 			name: "maps create conflict to already exists",
 			err: withCoderMessage(
 				codersdk.NewTestError(http.StatusConflict, http.MethodPost, "https://coder.example.com"),

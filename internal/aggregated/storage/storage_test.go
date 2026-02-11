@@ -235,6 +235,46 @@ func TestWorkspaceStorageCRUDWithCoderSDK(t *testing.T) {
 	}
 }
 
+func TestWorkspaceStorageCreateRunningFalseReturnsWorkspaceWhenStopBuildFails(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	state.setBuildTransitionFailure(codersdk.WorkspaceTransitionStop, http.StatusBadRequest)
+
+	workspaceStorage := NewWorkspaceStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	createObj := &aggregationv1alpha1.CoderWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme.alice.ops-workspace"},
+		Spec: aggregationv1alpha1.CoderWorkspaceSpec{
+			Organization: "acme",
+			TemplateName: "starter-template",
+			Running:      false,
+		},
+	}
+
+	createdObj, err := workspaceStorage.Create(ctx, createObj, rest.ValidateAllObjectFunc, nil)
+	if err != nil {
+		t.Fatalf("expected workspace create to succeed even when stop build fails: %v", err)
+	}
+
+	createdWorkspace, ok := createdObj.(*aggregationv1alpha1.CoderWorkspace)
+	if !ok {
+		t.Fatalf("expected *CoderWorkspace from create, got %T", createdObj)
+	}
+	if !createdWorkspace.Spec.Running {
+		t.Fatal("expected created workspace to remain running when stop build fails")
+	}
+	if !state.hasWorkspace("alice", "ops-workspace") {
+		t.Fatal("expected workspace to be persisted in mock server state")
+	}
+	if containsTransition(state.buildTransitionsSnapshot(), codersdk.WorkspaceTransitionStop) {
+		t.Fatal("expected failed stop transition to be absent from transition history")
+	}
+}
+
 func TestWorkspaceStorageGetOrgMismatchReturnsNotFound(t *testing.T) {
 	t.Parallel()
 
@@ -294,7 +334,8 @@ type mockCoderServerState struct {
 	workspacesByID     map[uuid.UUID]codersdk.Workspace
 	workspaceIDsByUser map[string]map[string]uuid.UUID
 
-	buildTransitions []codersdk.WorkspaceTransition
+	buildTransitions     []codersdk.WorkspaceTransition
+	failBuildTransitions map[codersdk.WorkspaceTransition]int
 }
 
 func newMockCoderServer(t *testing.T) (*httptest.Server, *mockCoderServerState) {
@@ -376,7 +417,8 @@ func newMockCoderServer(t *testing.T) (*httptest.Server, *mockCoderServerState) 
 				workspace.Name: workspace.ID,
 			},
 		},
-		buildTransitions: []codersdk.WorkspaceTransition{},
+		buildTransitions:     []codersdk.WorkspaceTransition{},
+		failBuildTransitions: map[codersdk.WorkspaceTransition]int{},
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -660,6 +702,11 @@ func (s *mockCoderServerState) handleCreateWorkspaceBuild(w http.ResponseWriter,
 		return
 	}
 
+	if statusCode, shouldFail := s.failBuildTransitions[request.Transition]; shouldFail {
+		writeCoderError(w, statusCode, fmt.Sprintf("forced failure for transition %q", request.Transition))
+		return
+	}
+
 	now := time.Now().UTC()
 	build := codersdk.WorkspaceBuild{
 		ID:                 uuid.New(),
@@ -712,6 +759,20 @@ func (s *mockCoderServerState) buildTransitionsSnapshot() []codersdk.WorkspaceTr
 	transitions := make([]codersdk.WorkspaceTransition, len(s.buildTransitions))
 	copy(transitions, s.buildTransitions)
 	return transitions
+}
+
+func (s *mockCoderServerState) setBuildTransitionFailure(transition codersdk.WorkspaceTransition, statusCode int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if transition == "" {
+		panic("assertion failed: transition must not be empty")
+	}
+	if statusCode < http.StatusBadRequest || statusCode > http.StatusNetworkAuthenticationRequired {
+		panic(fmt.Sprintf("assertion failed: invalid HTTP status code %d", statusCode))
+	}
+
+	s.failBuildTransitions[transition] = statusCode
 }
 
 func newTestClientProvider(t *testing.T, serverURL string) coder.ClientProvider {

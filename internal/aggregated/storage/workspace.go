@@ -236,13 +236,15 @@ func (s *WorkspaceStorage) Create(
 		stopBuild, stopErr := sdk.CreateWorkspaceBuild(ctx, createdWorkspace.ID, codersdk.CreateWorkspaceBuildRequest{
 			Transition: codersdk.WorkspaceTransitionStop,
 		})
-		if stopErr != nil {
-			return nil, coder.MapCoderError(stopErr, aggregationv1alpha1.Resource("coderworkspaces"), workspaceObj.Name)
+		if stopErr == nil {
+			createdWorkspace.LatestBuild = stopBuild
+			if !stopBuild.UpdatedAt.IsZero() {
+				createdWorkspace.UpdatedAt = stopBuild.UpdatedAt
+			}
 		}
-		createdWorkspace.LatestBuild = stopBuild
-		if !stopBuild.UpdatedAt.IsZero() {
-			createdWorkspace.UpdatedAt = stopBuild.UpdatedAt
-		}
+		// The workspace creation already succeeded. Returning a stop transition error here
+		// would cause client retries to fail with AlreadyExists, while the desired stop
+		// transition can be retried safely via a subsequent Update.
 	}
 
 	return convert.WorkspaceToK8s(namespace, createdWorkspace), nil

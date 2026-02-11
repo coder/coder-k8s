@@ -28,7 +28,10 @@ func MapCoderError(err error, resource schema.GroupResource, name string) error 
 		return apierrors.NewInternalError(err)
 	}
 
-	switch coderErr.StatusCode() {
+	statusCode := coderErr.StatusCode()
+	message := coderErrorMessage(coderErr, err)
+
+	switch statusCode {
 	case http.StatusNotFound:
 		return apierrors.NewNotFound(resource, name)
 	case http.StatusForbidden:
@@ -38,9 +41,33 @@ func MapCoderError(err error, resource schema.GroupResource, name string) error 
 			return apierrors.NewAlreadyExists(resource, name)
 		}
 		return apierrors.NewConflict(resource, name, err)
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		return apierrors.NewBadRequest(message)
+	case http.StatusUnauthorized:
+		return apierrors.NewUnauthorized(message)
 	default:
+		if statusCode >= http.StatusBadRequest && statusCode < http.StatusInternalServerError {
+			return apierrors.NewBadRequest(message)
+		}
+
 		return apierrors.NewInternalError(err)
 	}
+}
+
+func coderErrorMessage(coderErr *codersdk.Error, fallback error) string {
+	if coderErr == nil {
+		panic("assertion failed: coder error must not be nil")
+	}
+	if fallback == nil {
+		panic("assertion failed: fallback error must not be nil")
+	}
+
+	message := strings.TrimSpace(coderErr.Message)
+	if message != "" {
+		return message
+	}
+
+	return fallback.Error()
 }
 
 func isAlreadyExistsConflict(err *codersdk.Error) bool {
