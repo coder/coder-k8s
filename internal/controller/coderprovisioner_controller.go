@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"hash/fnv"
 	"maps"
+	"slices"
 
 	"github.com/google/uuid"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -86,16 +87,53 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	controlPlane, err := r.fetchControlPlane(ctx, provisioner)
 	if err != nil {
+		setCondition(
+			provisioner,
+			coderv1alpha1.CoderProvisionerConditionControlPlaneReady,
+			metav1.ConditionFalse,
+			"ControlPlaneUnavailable",
+			fmt.Sprintf("Failed to fetch control plane: %v", err),
+		)
+		_ = r.Status().Update(ctx, provisioner)
 		return ctrl.Result{}, err
 	}
+	setCondition(
+		provisioner,
+		coderv1alpha1.CoderProvisionerConditionControlPlaneReady,
+		metav1.ConditionTrue,
+		"ControlPlaneAvailable",
+		"Referenced control plane is available and has a URL",
+	)
 
 	organizationName := provisionerOrganizationName(provisioner.Spec.OrganizationName)
 	keyName, keySecretName, keySecretKey := provisionerKeyConfig(provisioner)
 
 	sessionToken, err := r.readBootstrapSessionToken(ctx, provisioner)
 	if err != nil {
+		setCondition(
+			provisioner,
+			coderv1alpha1.CoderProvisionerConditionBootstrapSecretReady,
+			metav1.ConditionFalse,
+			"BootstrapSecretUnavailable",
+			fmt.Sprintf("Failed to read bootstrap credentials: %v", err),
+		)
+		_ = r.Status().Update(ctx, provisioner)
 		return ctrl.Result{}, err
 	}
+	setCondition(
+		provisioner,
+		coderv1alpha1.CoderProvisionerConditionBootstrapSecretReady,
+		metav1.ConditionTrue,
+		"BootstrapSecretAvailable",
+		"Bootstrap credentials secret is available",
+	)
+
+	desiredTagsHash := hashProvisionerTags(provisioner.Spec.Tags)
+	status := provisioner.Status
+	orgDrift := status.OrganizationName != "" && status.OrganizationName != organizationName
+	keyNameDrift := status.ProvisionerKeyName != "" && status.ProvisionerKeyName != keyName
+	tagsDrift := status.TagsHash != "" && status.TagsHash != desiredTagsHash
+	driftDetected := orgDrift || keyNameDrift || tagsDrift
 
 	// Check whether a usable provisioner key secret already exists.
 	// The secret is considered "usable" only if the Secret object exists
@@ -118,8 +156,56 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		provisionerKeyName = keyName
 	}
 
+	log := ctrl.LoggerFrom(ctx)
 	keyMaterial := ""
-	if !secretUsable {
+	if driftDetected {
+		log.Info("spec drift detected, rotating provisioner key",
+			"orgDrift", orgDrift, "keyNameDrift", keyNameDrift, "tagsDrift", tagsDrift)
+
+		oldOrg := provisioner.Status.OrganizationName
+		if oldOrg == "" {
+			oldOrg = organizationName
+		}
+		oldKeyName := provisioner.Status.ProvisionerKeyName
+		if oldKeyName == "" {
+			oldKeyName = keyName
+		}
+
+		if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
+			ctx,
+			controlPlane.Status.URL,
+			sessionToken,
+			oldOrg,
+			oldKeyName,
+		); deleteErr != nil {
+			log.Info("failed to delete old provisioner key during drift rotation, creating new key anyway",
+				"oldKeyName", oldKeyName, "error", deleteErr)
+		}
+
+		response, ensureErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
+			CoderURL:         controlPlane.Status.URL,
+			SessionToken:     sessionToken,
+			OrganizationName: organizationName,
+			KeyName:          keyName,
+			Tags:             provisioner.Spec.Tags,
+		})
+		if ensureErr != nil {
+			return ctrl.Result{}, fmt.Errorf("ensure provisioner key %q: %w", keyName, ensureErr)
+		}
+		if response.OrganizationID != uuid.Nil {
+			organizationID = response.OrganizationID.String()
+		}
+		if response.KeyID != uuid.Nil {
+			provisionerKeyID = response.KeyID.String()
+		}
+		if response.KeyName != "" {
+			provisionerKeyName = response.KeyName
+		}
+		keyMaterial = response.Key
+		if keyMaterial == "" {
+			return ctrl.Result{}, fmt.Errorf("assertion failed: provisioner key returned empty material after drift rotation")
+		}
+	} else if !secretUsable {
 		response, ensureErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
 			CoderURL:         controlPlane.Status.URL,
 			SessionToken:     sessionToken,
@@ -145,7 +231,6 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// deleted), coderd won't return plaintext again. Rotate the key
 		// by deleting and recreating it to obtain fresh material.
 		if keyMaterial == "" {
-			log := ctrl.LoggerFrom(ctx)
 			log.Info("provisioner key exists in coderd but secret is missing, rotating key to recover",
 				"keyName", keyName, "secretName", keySecretName)
 
@@ -179,6 +264,13 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			}
 		}
 	}
+	setCondition(
+		provisioner,
+		coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+		metav1.ConditionTrue,
+		"ProvisionerKeyReady",
+		"Provisioner key is available in coderd",
+	)
 
 	provisionerKeySecret, err := r.ensureProvisionerKeySecret(ctx, provisioner, keySecretName, keySecretKey, keyMaterial)
 	if err != nil {
@@ -193,6 +285,14 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, fmt.Errorf("assertion failed: provisioner key secret %q key %q is empty after reconciliation", keySecretName, keySecretKey)
 	}
 	secretChecksum := hashProvisionerSecret(secretValue)
+
+	setCondition(
+		provisioner,
+		coderv1alpha1.CoderProvisionerConditionProvisionerKeySecretReady,
+		metav1.ConditionTrue,
+		"SecretReady",
+		"Provisioner key secret is available",
+	)
 
 	serviceAccountName := provisionerServiceAccountName(provisioner.Name)
 	if _, err := r.reconcileServiceAccount(ctx, provisioner, serviceAccountName); err != nil {
@@ -222,7 +322,17 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
-	if err := r.reconcileStatus(ctx, provisioner, deployment, secretRef, organizationID, provisionerKeyID, provisionerKeyName); err != nil {
+	if err := r.reconcileStatus(
+		ctx,
+		provisioner,
+		deployment,
+		secretRef,
+		organizationID,
+		organizationName,
+		provisionerKeyID,
+		provisionerKeyName,
+		desiredTagsHash,
+	); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -567,31 +677,47 @@ func (r *CoderProvisionerReconciler) reconcileStatus(
 	deployment *appsv1.Deployment,
 	secretRef *coderv1alpha1.SecretKeySelector,
 	organizationID string,
+	organizationName string,
 	provisionerKeyID string,
 	provisionerKeyName string,
+	tagsHash string,
 ) error {
 	phase := coderv1alpha1.CoderProvisionerPhasePending
 	if deployment.Status.ReadyReplicas > 0 {
 		phase = coderv1alpha1.CoderProvisionerPhaseReady
 	}
 
-	nextStatus := coderv1alpha1.CoderProvisionerStatus{
-		ObservedGeneration: provisioner.Generation,
-		ReadyReplicas:      deployment.Status.ReadyReplicas,
-		Phase:              phase,
-		OrganizationID:     organizationID,
-		ProvisionerKeyID:   provisionerKeyID,
-		ProvisionerKeyName: provisionerKeyName,
-		SecretRef: &coderv1alpha1.SecretKeySelector{
-			Name: secretRef.Name,
-			Key:  secretRef.Key,
-		},
-	}
-	if equality.Semantic.DeepEqual(provisioner.Status, nextStatus) {
-		return nil
+	provisioner.Status.ObservedGeneration = provisioner.Generation
+	provisioner.Status.ReadyReplicas = deployment.Status.ReadyReplicas
+	provisioner.Status.Phase = phase
+	provisioner.Status.OrganizationID = organizationID
+	provisioner.Status.OrganizationName = organizationName
+	provisioner.Status.ProvisionerKeyID = provisionerKeyID
+	provisioner.Status.ProvisionerKeyName = provisionerKeyName
+	provisioner.Status.TagsHash = tagsHash
+	provisioner.Status.SecretRef = &coderv1alpha1.SecretKeySelector{
+		Name: secretRef.Name,
+		Key:  secretRef.Key,
 	}
 
-	provisioner.Status = nextStatus
+	if deployment.Status.ReadyReplicas > 0 {
+		setCondition(
+			provisioner,
+			coderv1alpha1.CoderProvisionerConditionDeploymentReady,
+			metav1.ConditionTrue,
+			"MinimumReplicasReady",
+			"At least one provisioner pod is ready",
+		)
+	} else {
+		setCondition(
+			provisioner,
+			coderv1alpha1.CoderProvisionerConditionDeploymentReady,
+			metav1.ConditionFalse,
+			"NoReplicasReady",
+			"No provisioner pods are ready yet",
+		)
+	}
+
 	if err := r.Status().Update(ctx, provisioner); err != nil {
 		return fmt.Errorf("update coderprovisioner status: %w", err)
 	}
@@ -727,8 +853,38 @@ func provisionerKeyConfig(provisioner *coderv1alpha1.CoderProvisioner) (string, 
 	return keyName, secretName, secretKey
 }
 
+func hashProvisionerTags(tags map[string]string) string {
+	keys := slices.Collect(maps.Keys(tags))
+	slices.Sort(keys)
+	hasher := fnv.New32a()
+	for _, key := range keys {
+		_, _ = hasher.Write([]byte(key))
+		_, _ = hasher.Write([]byte{0})
+		_, _ = hasher.Write([]byte(tags[key]))
+		_, _ = hasher.Write([]byte{0})
+	}
+
+	return fmt.Sprintf("%08x", hasher.Sum32())
+}
+
 func hashProvisionerSecret(secretValue []byte) string {
 	hasher := fnv.New32a()
 	_, _ = hasher.Write(secretValue)
 	return fmt.Sprintf("%08x", hasher.Sum32())
+}
+
+func setCondition(
+	provisioner *coderv1alpha1.CoderProvisioner,
+	conditionType string,
+	status metav1.ConditionStatus,
+	reason string,
+	message string,
+) {
+	meta.SetStatusCondition(&provisioner.Status.Conditions, metav1.Condition{
+		Type:               conditionType,
+		Status:             status,
+		ObservedGeneration: provisioner.Generation,
+		Reason:             reason,
+		Message:            message,
+	})
 }
