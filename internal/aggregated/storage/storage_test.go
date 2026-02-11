@@ -190,6 +190,9 @@ func TestTemplateStorageUpdateReturnsDesiredObjectForLegacyRunningField(t *testi
 	if !ok {
 		t.Fatalf("expected *CoderTemplate from get, got %T", currentObj)
 	}
+	if currentTemplate.ResourceVersion == "" {
+		t.Fatal("expected current template resourceVersion to be populated")
+	}
 
 	desiredTemplate := currentTemplate.DeepCopy()
 	desiredTemplate.Spec.Running = !currentTemplate.Spec.Running
@@ -355,6 +358,89 @@ func TestTemplateStorageUpdateRejectsNonRunningSpecChanges(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "spec.running") {
 		t.Fatalf("expected immutable-field error mentioning spec.running, got %v", err)
+	}
+}
+
+func TestTemplateStorageUpdateRejectsMissingResourceVersion(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	currentObj, err := templateStorage.Get(ctx, "acme.starter-template", nil)
+	if err != nil {
+		t.Fatalf("expected template get to succeed: %v", err)
+	}
+
+	currentTemplate, ok := currentObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from get, got %T", currentObj)
+	}
+	if currentTemplate.ResourceVersion == "" {
+		t.Fatal("expected current template resourceVersion to be populated")
+	}
+
+	desiredTemplate := currentTemplate.DeepCopy()
+	desiredTemplate.Spec.Running = !currentTemplate.Spec.Running
+	desiredTemplate.ResourceVersion = ""
+
+	_, _, err = templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected BadRequest for missing resourceVersion, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "metadata.resourceVersion is required for update") {
+		t.Fatalf("expected missing resourceVersion error message, got %v", err)
+	}
+}
+
+func TestTemplateStorageUpdateRejectsStaleResourceVersion(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	currentObj, err := templateStorage.Get(ctx, "acme.starter-template", nil)
+	if err != nil {
+		t.Fatalf("expected template get to succeed: %v", err)
+	}
+
+	currentTemplate, ok := currentObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from get, got %T", currentObj)
+	}
+
+	desiredTemplate := currentTemplate.DeepCopy()
+	desiredTemplate.Spec.Running = !currentTemplate.Spec.Running
+	desiredTemplate.ResourceVersion = currentTemplate.ResourceVersion + "-stale"
+
+	_, _, err = templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if !apierrors.IsConflict(err) {
+		t.Fatalf("expected Conflict for stale resourceVersion, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "resource version mismatch") {
+		t.Fatalf("expected stale resourceVersion error message, got %v", err)
 	}
 }
 

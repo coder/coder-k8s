@@ -29,7 +29,6 @@ import (
 	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
 	"github.com/coder/coder-k8s/internal/aggregated/coder"
 	"github.com/coder/coder-k8s/internal/aggregated/storage"
-	"github.com/coder/coder/v2/codersdk"
 )
 
 const (
@@ -55,29 +54,6 @@ type Options struct {
 	CoderRequestTimeout time.Duration
 }
 
-type errClientProvider struct {
-	err error
-}
-
-var _ coder.ClientProvider = (*errClientProvider)(nil)
-
-func (p *errClientProvider) ClientForNamespace(ctx context.Context, namespace string) (*codersdk.Client, error) {
-	if p == nil {
-		return nil, fmt.Errorf("assertion failed: error client provider must not be nil")
-	}
-	if ctx == nil {
-		return nil, fmt.Errorf("assertion failed: context must not be nil")
-	}
-	if namespace == "" {
-		return nil, fmt.Errorf("assertion failed: namespace must not be empty")
-	}
-	if p.err == nil {
-		return nil, fmt.Errorf("assertion failed: error client provider error must not be nil")
-	}
-
-	return nil, p.err
-}
-
 func buildClientProvider(opts Options, requestTimeout time.Duration) (coder.ClientProvider, error) {
 	if requestTimeout <= 0 {
 		return nil, fmt.Errorf("assertion failed: request timeout must be positive")
@@ -93,15 +69,10 @@ func buildClientProvider(opts Options, requestTimeout time.Duration) (coder.Clie
 		missing = append(missing, "coder session token")
 	}
 	if len(missing) > 0 {
-		provider := &errClientProvider{err: fmt.Errorf(
-			"coder client provider is not configured: missing %s; configure --coder-url and --coder-session-token to enable coderworkspaces and codertemplates operations",
+		return nil, fmt.Errorf(
+			"coder client provider is not configured: missing %s; configure --coder-url and --coder-session-token",
 			strings.Join(missing, " and "),
-		)}
-		if provider.err == nil {
-			return nil, fmt.Errorf("assertion failed: fallback error client provider error is nil after successful construction")
-		}
-
-		return provider, nil
+		)
 	}
 
 	parsedCoderURL, err := url.Parse(coderURL)

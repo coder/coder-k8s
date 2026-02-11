@@ -285,6 +285,21 @@ func (s *TemplateStorage) Update(
 		return nil, false, fmt.Errorf("assertion failed: expected *CoderTemplate, got %T", currentObj)
 	}
 
+	if updatedTemplate.ResourceVersion == "" {
+		return nil, false, apierrors.NewBadRequest("metadata.resourceVersion is required for update")
+	}
+	if updatedTemplate.ResourceVersion != currentTemplate.ResourceVersion {
+		return nil, false, apierrors.NewConflict(
+			aggregationv1alpha1.Resource("codertemplates"),
+			name,
+			fmt.Errorf(
+				"resource version mismatch: got %q, current is %q",
+				updatedTemplate.ResourceVersion,
+				currentTemplate.ResourceVersion,
+			),
+		)
+	}
+
 	// Template updates via codersdk are currently limited. The legacy spec.running
 	// field remains for compatibility with in-repo callers and is a no-op in the
 	// Coder backend. Reject updates to all other spec fields to avoid drift between

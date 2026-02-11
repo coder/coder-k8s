@@ -127,23 +127,33 @@ func TestInstallAPIGroupRegistersDiscovery(t *testing.T) {
 	}
 }
 
-func TestBuildClientProviderReturnsDeferredErrorWithoutCoderConfig(t *testing.T) {
+func TestBuildClientProviderRejectsMissingCoderConfig(t *testing.T) {
 	t.Parallel()
 
 	provider, err := buildClientProvider(Options{}, 30*time.Second)
-	if err != nil {
-		t.Fatalf("build client provider: %v", err)
-	}
-	if provider == nil {
-		t.Fatal("expected non-nil provider")
-	}
-
-	_, err = provider.ClientForNamespace(context.Background(), "control-plane")
 	if err == nil {
-		t.Fatal("expected deferred client error when coder config is missing")
+		t.Fatal("expected missing coder config to return an error")
+	}
+	if provider != nil {
+		t.Fatalf("expected nil provider when coder config is missing, got %T", provider)
 	}
 	if !strings.Contains(err.Error(), "missing coder URL and coder session token") {
 		t.Fatalf("expected missing-config error, got %q", err)
+	}
+}
+
+func TestRunWithOptionsRejectsMissingCoderConfig(t *testing.T) {
+	t.Parallel()
+
+	err := RunWithOptions(context.Background(), Options{})
+	if err == nil {
+		t.Fatal("expected missing coder config to fail aggregated apiserver startup")
+	}
+	if !strings.Contains(err.Error(), "build coder client provider") {
+		t.Fatalf("expected startup error to identify client provider construction, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "configure --coder-url and --coder-session-token") {
+		t.Fatalf("expected startup error to mention required coder flags, got %v", err)
 	}
 }
 
