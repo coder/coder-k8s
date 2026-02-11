@@ -202,6 +202,7 @@ spec:
                   type: object
                 type: array
               image:
+                default: ghcr.io/coder/coder:latest
                 description: Image is the container image used for the Coder control
                   plane pod.
                 type: string
@@ -226,10 +227,12 @@ spec:
                   x-kubernetes-map-type: atomic
                 type: array
               replicas:
+                default: 1
                 description: Replicas is the desired number of control plane pods.
                 format: int32
                 type: integer
               service:
+                default: {}
                 description: Service controls the service created in front of the
                   control plane.
                 properties:
@@ -240,10 +243,12 @@ spec:
                       object.
                     type: object
                   port:
+                    default: 80
                     description: Port controls the exposed service port.
                     format: int32
                     type: integer
                   type:
+                    default: ClusterIP
                     description: Type controls the Kubernetes service type.
                     type: string
                 type: object

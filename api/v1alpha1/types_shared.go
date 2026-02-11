@@ -10,8 +10,10 @@ const (
 // ServiceSpec defines the Service configuration reconciled by the operator.
 type ServiceSpec struct {
 	// Type controls the Kubernetes service type.
+	// +kubebuilder:default="ClusterIP"
 	Type corev1.ServiceType `json:"type,omitempty"`
 	// Port controls the exposed service port.
+	// +kubebuilder:default=80
 	Port int32 `json:"port,omitempty"`
 	// Annotations are applied to the reconciled service object.
 	Annotations map[string]string `json:"annotations,omitempty"`

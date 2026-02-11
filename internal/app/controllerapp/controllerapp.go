@@ -4,6 +4,10 @@ package controllerapp
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"os"
+	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -19,6 +23,17 @@ import (
 const (
 	// HealthProbeBindAddress exposes /healthz and /readyz checks for kube probes.
 	HealthProbeBindAddress = ":8081"
+
+	// leaderElectionID is the stable identity used for leader-election lease objects.
+	leaderElectionID = "coder-k8s-controller.coder.com"
+
+	// defaultLeaderElectionNamespace is used when the pod namespace cannot be
+	// detected (e.g. out-of-cluster development runs).
+	defaultLeaderElectionNamespace = "kube-system"
+
+	// inClusterNamespacePath is the standard path where Kubernetes injects the
+	// pod namespace when running inside a cluster.
+	inClusterNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 )
 
 var setupLog = ctrl.Log.WithName("setup")
@@ -30,6 +45,9 @@ func NewScheme() *runtime.Scheme {
 	utilruntime.Must(coderv1alpha1.AddToScheme(scheme))
 	return scheme
 }
+
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Run starts the controller-runtime manager for the controller application mode.
 func Run(ctx context.Context) error {
@@ -43,8 +61,12 @@ func Run(ctx context.Context) error {
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		HealthProbeBindAddress: HealthProbeBindAddress,
+		Scheme:                        scheme,
+		HealthProbeBindAddress:        HealthProbeBindAddress,
+		LeaderElection:                true,
+		LeaderElectionID:              leaderElectionID,
+		LeaderElectionNamespace:       detectLeaderElectionNamespace(),
+		LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
 		return fmt.Errorf("unable to start manager: %w", err)
@@ -83,7 +105,14 @@ func Run(ctx context.Context) error {
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return fmt.Errorf("unable to set up health check: %w", err)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	if err := mgr.AddReadyzCheck("readyz", func(req *http.Request) error {
+		ctx, cancel := context.WithTimeout(req.Context(), 2*time.Second)
+		defer cancel()
+		if synced := mgr.GetCache().WaitForCacheSync(ctx); !synced {
+			return fmt.Errorf("informer caches not synced")
+		}
+		return nil
+	}); err != nil {
 		return fmt.Errorf("unable to set up ready check: %w", err)
 	}
 
@@ -92,4 +121,22 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("problem running manager: %w", err)
 	}
 	return nil
+}
+
+// detectLeaderElectionNamespace returns the namespace to use for leader-election
+// lease objects. Resolution order:
+//  1. POD_NAMESPACE env var (allows explicit override for any environment).
+//  2. In-cluster namespace file (standard Kubernetes downward API path).
+//  3. defaultLeaderElectionNamespace as a last-resort fallback.
+func detectLeaderElectionNamespace() string {
+	if ns := strings.TrimSpace(os.Getenv("POD_NAMESPACE")); ns != "" {
+		return ns
+	}
+	data, err := os.ReadFile(inClusterNamespacePath)
+	if err == nil {
+		if ns := strings.TrimSpace(string(data)); ns != "" {
+			return ns
+		}
+	}
+	return defaultLeaderElectionNamespace
 }

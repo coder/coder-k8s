@@ -293,6 +293,7 @@ spec:
                 format: int32
                 type: integer
               service:
+                default: {}
                 description: Service controls the service created in front of the
                   workspace proxy.
                 properties:
@@ -303,10 +304,12 @@ spec:
                       object.
                     type: object
                   port:
+                    default: 80
                     description: Port controls the exposed service port.
                     format: int32
                     type: integer
                   type:
+                    default: ClusterIP
                     description: Type controls the Kubernetes service type.
                     type: string
                 type: object
