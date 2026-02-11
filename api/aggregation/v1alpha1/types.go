@@ -4,14 +4,34 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 // CoderWorkspaceSpec defines the desired state of a CoderWorkspace.
 type CoderWorkspaceSpec struct {
-	// Running indicates whether the workspace should be running.
+	// Organization is the Coder organization name.
+	Organization string `json:"organization,omitempty"`
+
+	// TemplateName resolves via TemplateByName(organization, templateName).
+	TemplateName string `json:"templateName,omitempty"`
+
+	// TemplateVersionID optionally pins to a specific template version.
+	TemplateVersionID string `json:"templateVersionID,omitempty"`
+
+	// Running drives start/stop via CreateWorkspaceBuild.
 	Running bool `json:"running"`
+
+	TTLMillis         *int64  `json:"ttlMillis,omitempty"`
+	AutostartSchedule *string `json:"autostartSchedule,omitempty"`
 }
 
 // CoderWorkspaceStatus defines the observed state of a CoderWorkspace.
 type CoderWorkspaceStatus struct {
-	// AutoShutdown is the next planned shutdown time for the workspace.
+	ID               string `json:"id,omitempty"`
+	OwnerName        string `json:"ownerName,omitempty"`
+	OrganizationName string `json:"organizationName,omitempty"`
+	TemplateName     string `json:"templateName,omitempty"`
+
+	LatestBuildID     string `json:"latestBuildID,omitempty"`
+	LatestBuildStatus string `json:"latestBuildStatus,omitempty"`
+
 	AutoShutdown *metav1.Time `json:"autoShutdown,omitempty"`
+	LastUsedAt   *metav1.Time `json:"lastUsedAt,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -19,6 +39,7 @@ type CoderWorkspaceStatus struct {
 // +kubebuilder:subresource:status
 
 // CoderWorkspace is the schema for Coder workspace resources.
+// metadata.name is <organization>.<user>.<workspace-name>.
 type CoderWorkspace struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -39,13 +60,29 @@ type CoderWorkspaceList struct {
 
 // CoderTemplateSpec defines the desired state of a CoderTemplate.
 type CoderTemplateSpec struct {
-	// Running indicates whether the template should be marked as running.
-	Running bool `json:"running"`
+	// Organization is the Coder organization name (must match the organization prefix in metadata.name).
+	Organization string `json:"organization"`
+
+	// VersionID is the Coder template version UUID used on creation (required for CREATE).
+	VersionID string `json:"versionID"`
+
+	DisplayName string `json:"displayName,omitempty"`
+	Description string `json:"description,omitempty"`
+	Icon        string `json:"icon,omitempty"`
+
+	// Running is a legacy flag retained temporarily for in-repo callers that still read template run-state directly.
+	Running bool `json:"running,omitempty"`
 }
 
 // CoderTemplateStatus defines the observed state of a CoderTemplate.
 type CoderTemplateStatus struct {
-	// AutoShutdown is the next planned shutdown time for workspaces created by this template.
+	ID               string       `json:"id,omitempty"`
+	OrganizationName string       `json:"organizationName,omitempty"`
+	ActiveVersionID  string       `json:"activeVersionID,omitempty"`
+	Deprecated       bool         `json:"deprecated,omitempty"`
+	UpdatedAt        *metav1.Time `json:"updatedAt,omitempty"`
+
+	// AutoShutdown is a legacy timestamp retained temporarily for in-repo callers that still surface template shutdown timestamps.
 	AutoShutdown *metav1.Time `json:"autoShutdown,omitempty"`
 }
 
@@ -54,6 +91,7 @@ type CoderTemplateStatus struct {
 // +kubebuilder:subresource:status
 
 // CoderTemplate is the schema for Coder template resources.
+// metadata.name is <organization>.<template-name>.
 type CoderTemplate struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

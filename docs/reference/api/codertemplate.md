@@ -13,17 +13,25 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `spec.running` | `bool` | Running indicates whether the template should be marked as running. |
+| `spec.organization` | `string` | Organization is the Coder organization name (must match the organization prefix in metadata.name). |
+| `spec.versionID` | `string` | VersionID is the Coder template version UUID used on creation (required for CREATE). |
+| `spec.displayName` | `string` |  |
+| `spec.description` | `string` |  |
+| `spec.icon` | `string` |  |
+| `spec.running` | `bool` | Running is a legacy flag retained temporarily for in-repo callers that still read template run-state directly. |
 
 ## Status
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `status.autoShutdown` | `metav1.Time` | AutoShutdown is the next planned shutdown time for workspaces created by this template. |
+| `status.id` | `string` |  |
+| `status.organizationName` | `string` |  |
+| `status.activeVersionID` | `string` |  |
+| `status.deprecated` | `bool` |  |
+| `status.updatedAt` | `metav1.Time` |  |
+| `status.autoShutdown` | `metav1.Time` | AutoShutdown is a legacy timestamp retained temporarily for in-repo callers that still surface template shutdown timestamps. |
 
 ## Source
 
 - Go type: `api/aggregation/v1alpha1/types.go`
-- Storage implementation: `internal/aggregated/storage/template.go`
-
 - APIService registration manifest: `deploy/apiserver-apiservice.yaml`

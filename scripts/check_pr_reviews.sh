@@ -47,7 +47,9 @@ GRAPHQL_QUERY='query($owner: String!, $repo: String!, $pr: Int!, $cursor: String
 }'
 
 THREAD_CURSOR=""
-ALL_THREADS='[]'
+ALL_THREADS_FILE=$(mktemp)
+trap 'rm -f "$ALL_THREADS_FILE"' EXIT
+printf '[]\n' >"$ALL_THREADS_FILE"
 
 while true; do
   if [ -n "$THREAD_CURSOR" ]; then
@@ -71,7 +73,10 @@ while true; do
   fi
 
   PAGE_THREADS=$(echo "$RESULT" | jq '.data.repository.pullRequest.reviewThreads.nodes')
-  ALL_THREADS=$(jq -cn --argjson all "$ALL_THREADS" --argjson page "$PAGE_THREADS" '$all + $page')
+
+  MERGED_THREADS_FILE=$(mktemp)
+  jq -s '.[0] + .[1]' "$ALL_THREADS_FILE" <(printf '%s\n' "$PAGE_THREADS") >"$MERGED_THREADS_FILE"
+  mv "$MERGED_THREADS_FILE" "$ALL_THREADS_FILE"
 
   HAS_NEXT=$(echo "$RESULT" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage')
   if [ "$HAS_NEXT" != "true" ]; then
@@ -85,7 +90,7 @@ while true; do
   fi
 done
 
-UNRESOLVED=$(echo "$ALL_THREADS" | jq -c '.[] | select(.isResolved == false) | {thread_id: .id, user: (.comments.nodes[0].author.login // "unknown"), body: (.comments.nodes[0].body // ""), diff_hunk: (.comments.nodes[0].diffHunk // ""), commit_id: (.comments.nodes[0].commit.oid // "")}')
+UNRESOLVED=$(jq -c '.[] | select(.isResolved == false) | {thread_id: .id, user: (.comments.nodes[0].author.login // "unknown"), body: (.comments.nodes[0].body // ""), diff_hunk: (.comments.nodes[0].diffHunk // ""), commit_id: (.comments.nodes[0].commit.oid // "")}' "$ALL_THREADS_FILE")
 
 if [ -n "$UNRESOLVED" ]; then
   echo "❌ Unresolved review comments found:"

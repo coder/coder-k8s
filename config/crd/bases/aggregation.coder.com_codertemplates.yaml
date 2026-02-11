@@ -17,7 +17,9 @@ spec:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: CoderTemplate is the schema for Coder template resources.
+        description: |-
+          CoderTemplate is the schema for Coder template resources.
+          metadata.name is <organization>.<template-name>.
         properties:
           apiVersion:
             description: |-
@@ -39,19 +41,45 @@ spec:
           spec:
             description: CoderTemplateSpec defines the desired state of a CoderTemplate.
             properties:
+              description:
+                type: string
+              displayName:
+                type: string
+              icon:
+                type: string
+              organization:
+                description: Organization is the Coder organization name (must match
+                  the organization prefix in metadata.name).
+                type: string
               running:
-                description: Running indicates whether the template should be marked
-                  as running.
+                description: Running is a legacy flag retained temporarily for in-repo
+                  callers that still read template run-state directly.
                 type: boolean
+              versionID:
+                description: VersionID is the Coder template version UUID used on
+                  creation (required for CREATE).
+                type: string
             required:
-            - running
+            - organization
+            - versionID
             type: object
           status:
             description: CoderTemplateStatus defines the observed state of a CoderTemplate.
             properties:
+              activeVersionID:
+                type: string
               autoShutdown:
-                description: AutoShutdown is the next planned shutdown time for workspaces
-                  created by this template.
+                description: AutoShutdown is a legacy timestamp retained temporarily
+                  for in-repo callers that still surface template shutdown timestamps.
+                format: date-time
+                type: string
+              deprecated:
+                type: boolean
+              id:
+                type: string
+              organizationName:
+                type: string
+              updatedAt:
                 format: date-time
                 type: string
             type: object
