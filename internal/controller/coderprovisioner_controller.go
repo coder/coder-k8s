@@ -232,42 +232,34 @@ func (r *CoderProvisionerReconciler) reconcileDeletion(ctx context.Context, prov
 	}
 
 	log := ctrl.LoggerFrom(ctx)
-	organizationName := provisionerOrganizationName(provisioner.Spec.OrganizationName)
 
-	// Prefer the key name persisted in status (reflects what was actually
-	// created in coderd) over the current spec value, which may have been
+	// Prefer persisted identity from status (reflects what was actually
+	// created in coderd) over the current spec values, which may have been
 	// edited after initial provisioning.
+	organizationName := provisioner.Status.OrganizationID
+	if organizationName == "" {
+		organizationName = provisionerOrganizationName(provisioner.Spec.OrganizationName)
+	}
 	keyName := provisioner.Status.ProvisionerKeyName
 	if keyName == "" {
 		keyName, _, _ = provisionerKeyConfig(provisioner)
 	}
 
 	// Best-effort remote key cleanup: if the referenced control plane,
-	// its URL, or the bootstrap credentials are unavailable (common during
-	// namespace teardown or when the control plane was never ready), log a
-	// warning and proceed to finalizer removal so the CR does not get
-	// stuck in Terminating.
+	// its URL, bootstrap credentials, or any other prerequisite is
+	// unavailable, log a warning and proceed to finalizer removal so the
+	// CR does not get stuck in Terminating. This is common during
+	// namespace teardown, when the control plane was never ready, or
+	// when credentials were misconfigured.
 	controlPlane, err := r.fetchControlPlane(ctx, provisioner)
 	if err != nil {
-		// fetchControlPlane returns a plain error (not apierrors) when
-		// status.url is empty, and wraps the k8s API error with %w when
-		// the object is missing. Treat both cases as non-blocking.
-		if apierrors.IsNotFound(err) {
-			log.Info("referenced CoderControlPlane not found during deletion, skipping remote key cleanup",
-				"controlPlaneRef", provisioner.Spec.ControlPlaneRef.Name)
-		} else {
-			log.Info("unable to reach referenced CoderControlPlane during deletion, skipping remote key cleanup",
-				"controlPlaneRef", provisioner.Spec.ControlPlaneRef.Name, "error", err)
-		}
+		log.Info("unable to reach referenced CoderControlPlane during deletion, skipping remote key cleanup",
+			"controlPlaneRef", provisioner.Spec.ControlPlaneRef.Name, "error", err)
 	} else {
 		sessionToken, tokenErr := r.readBootstrapSessionToken(ctx, provisioner)
 		if tokenErr != nil {
-			if apierrors.IsNotFound(tokenErr) {
-				log.Info("bootstrap credentials secret not found during deletion, skipping remote key cleanup",
-					"credentialsSecretRef", provisioner.Spec.Bootstrap.CredentialsSecretRef.Name)
-			} else {
-				return ctrl.Result{}, tokenErr
-			}
+			log.Info("unable to read bootstrap credentials during deletion, skipping remote key cleanup",
+				"credentialsSecretRef", provisioner.Spec.Bootstrap.CredentialsSecretRef.Name, "error", tokenErr)
 		} else {
 			if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
 				ctx,
