@@ -358,12 +358,20 @@ func TestCoderProvisionerReconciler_ExistingSecret(t *testing.T) {
 	})
 
 	bootstrapClient := &fakeBootstrapClient{
-		provisionerKeyResponses: []coderbootstrap.EnsureProvisionerKeyResponse{{
-			OrganizationID: uuid.New(),
-			KeyID:          uuid.New(),
-			KeyName:        provisionerName,
-			Key:            "", // Empty: coderd returns no plaintext for existing keys.
-		}},
+		provisionerKeyResponses: []coderbootstrap.EnsureProvisionerKeyResponse{
+			{
+				OrganizationID: uuid.New(),
+				KeyID:          uuid.New(),
+				KeyName:        provisionerName,
+				Key:            "", // Empty: coderd returns no plaintext for existing keys.
+			},
+			{
+				OrganizationID: uuid.New(),
+				KeyID:          uuid.New(),
+				KeyName:        provisionerName,
+				Key:            "rotated-key-material",
+			},
+		},
 	}
 	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
 
@@ -373,13 +381,14 @@ func TestCoderProvisionerReconciler_ExistingSecret(t *testing.T) {
 
 	// The first real reconcile triggers a metadata-only EnsureProvisionerKey
 	// call because status.OrganizationName and status.TagsHash are empty.
+	// The empty key response rotates by deleting and recreating the key.
 	// The second reconcile skips since metadata is now populated.
-	require.Equal(t, 1, bootstrapClient.provisionerKeyCalls)
-	require.Equal(t, 0, bootstrapClient.deleteKeyCalls)
+	require.Equal(t, 2, bootstrapClient.provisionerKeyCalls)
+	require.Equal(t, 1, bootstrapClient.deleteKeyCalls)
 
 	reconciledSecret := &corev1.Secret{}
 	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: namespace}, reconciledSecret))
-	require.Equal(t, "existing-key-material", string(reconciledSecret.Data[coderv1alpha1.DefaultProvisionerKeySecretKey]))
+	require.Equal(t, "rotated-key-material", string(reconciledSecret.Data[coderv1alpha1.DefaultProvisionerKeySecretKey]))
 
 	deployment := &appsv1.Deployment{}
 	resourceName := expectedProvisionerResourceName(provisioner.Name)
