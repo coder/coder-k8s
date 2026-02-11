@@ -7,7 +7,6 @@ import (
 	"hash/fnv"
 	"maps"
 	"slices"
-	"time"
 
 	"github.com/google/uuid"
 	appsv1 "k8s.io/api/apps/v1"
@@ -362,7 +361,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		})
 		if ensureErr != nil {
 			// Return a requeue so metadata population retries.
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, fmt.Errorf("verify provisioner key metadata: %w", ensureErr)
+			return ctrl.Result{}, fmt.Errorf("verify provisioner key metadata: %w", ensureErr)
 		}
 		if response.OrganizationID != uuid.Nil {
 			organizationID = response.OrganizationID.String()
@@ -385,7 +384,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
 				ctx, controlPlane.Status.URL, sessionToken, organizationName, keyName,
 			); deleteErr != nil {
-				return ctrl.Result{RequeueAfter: 10 * time.Second}, fmt.Errorf("delete provisioner key %q for metadata backfill rotation: %w", keyName, deleteErr)
+				return ctrl.Result{}, fmt.Errorf("delete provisioner key %q for metadata backfill rotation: %w", keyName, deleteErr)
 			}
 			rotated, rotateErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
 				CoderURL:         controlPlane.Status.URL,
