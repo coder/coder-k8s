@@ -354,7 +354,10 @@ func TestCoderProvisionerReconciler_ExistingSecret(t *testing.T) {
 	reconcileProvisioner(ctx, t, reconciler, namespacedName)
 	reconcileProvisioner(ctx, t, reconciler, namespacedName)
 
-	require.Equal(t, 0, bootstrapClient.provisionerKeyCalls)
+	// The first real reconcile triggers a metadata-only EnsureProvisionerKey
+	// call because status.OrganizationName and status.TagsHash are empty.
+	// The second reconcile skips since metadata is now populated.
+	require.Equal(t, 1, bootstrapClient.provisionerKeyCalls)
 	require.Equal(t, 0, bootstrapClient.deleteKeyCalls)
 
 	reconciledSecret := &corev1.Secret{}

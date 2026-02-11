@@ -307,6 +307,41 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			"ProvisionerKeyReady",
 			"Provisioner key is available in coderd",
 		)
+	} else if status.OrganizationName == "" || status.TagsHash == "" {
+		// Secret is usable and no drift detected, but status metadata
+		// is empty (e.g. upgrade from older version). Call EnsureProvisionerKey
+		// to populate IDs/name and establish the baseline for future drift detection.
+		// The key material will be empty (already exists), but that's OK.
+		response, ensureErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
+			CoderURL:         controlPlane.Status.URL,
+			SessionToken:     sessionToken,
+			OrganizationName: organizationName,
+			KeyName:          keyName,
+			Tags:             provisioner.Spec.Tags,
+		})
+		if ensureErr != nil {
+			log.Info("failed to verify provisioner key metadata, will retry",
+				"keyName", keyName, "error", ensureErr)
+		} else {
+			if response.OrganizationID != uuid.Nil {
+				organizationID = response.OrganizationID.String()
+			}
+			if response.KeyID != uuid.Nil {
+				provisionerKeyID = response.KeyID.String()
+			}
+			if response.KeyName != "" {
+				provisionerKeyName = response.KeyName
+			}
+			appliedOrgName = organizationName
+			appliedTagsHash = desiredTagsHash
+			setCondition(
+				provisioner,
+				coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+				metav1.ConditionTrue,
+				"ProvisionerKeyReady",
+				"Provisioner key is available in coderd",
+			)
+		}
 	}
 
 	provisionerKeySecret, err := r.ensureProvisionerKeySecret(ctx, provisioner, keySecretName, keySecretKey, keyMaterial)
