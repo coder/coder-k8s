@@ -311,7 +311,8 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// Secret is usable and no drift detected, but status metadata
 		// is empty (e.g. upgrade from older version). Call EnsureProvisionerKey
 		// to populate IDs/name and establish the baseline for future drift detection.
-		// The key material will be empty (already exists), but that's OK.
+		// Typically the key already exists and Key will be empty, but if the
+		// remote key was deleted we capture the new key material too.
 		response, ensureErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
 			CoderURL:         controlPlane.Status.URL,
 			SessionToken:     sessionToken,
@@ -331,6 +332,11 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			}
 			if response.KeyName != "" {
 				provisionerKeyName = response.KeyName
+			}
+			// If coderd created a new key (remote was missing), capture the
+			// material so ensureProvisionerKeySecret writes it to the Secret.
+			if response.Key != "" {
+				keyMaterial = response.Key
 			}
 			appliedOrgName = organizationName
 			appliedTagsHash = desiredTagsHash

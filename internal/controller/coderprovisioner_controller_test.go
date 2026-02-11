@@ -345,7 +345,7 @@ func TestCoderProvisionerReconciler_ExistingSecret(t *testing.T) {
 			OrganizationID: uuid.New(),
 			KeyID:          uuid.New(),
 			KeyName:        provisionerName,
-			Key:            "new-key-material",
+			Key:            "", // Empty: coderd returns no plaintext for existing keys.
 		}},
 	}
 	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
