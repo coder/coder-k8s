@@ -22,11 +22,28 @@ type fakeBootstrapClient struct {
 	response coderbootstrap.RegisterWorkspaceProxyResponse
 	err      error
 	calls    int
+
+	// Provisioner key support (for interface compliance).
+	provisionerKeyResponse coderbootstrap.EnsureProvisionerKeyResponse
+	provisionerKeyErr      error
+	provisionerKeyCalls    int
+	deleteKeyErr           error
+	deleteKeyCalls         int
 }
 
 func (f *fakeBootstrapClient) EnsureWorkspaceProxy(_ context.Context, _ coderbootstrap.RegisterWorkspaceProxyRequest) (coderbootstrap.RegisterWorkspaceProxyResponse, error) {
 	f.calls++
 	return f.response, f.err
+}
+
+func (f *fakeBootstrapClient) EnsureProvisionerKey(_ context.Context, _ coderbootstrap.EnsureProvisionerKeyRequest) (coderbootstrap.EnsureProvisionerKeyResponse, error) {
+	f.provisionerKeyCalls++
+	return f.provisionerKeyResponse, f.provisionerKeyErr
+}
+
+func (f *fakeBootstrapClient) DeleteProvisionerKey(_ context.Context, _, _, _, _ string) error {
+	f.deleteKeyCalls++
+	return f.deleteKeyErr
 }
 
 func workspaceProxyResourceName(name string) string {
