@@ -367,9 +367,32 @@ WHERE deleted = false
 	if err != nil {
 		return fmt.Errorf("list organizations: %w", err)
 	}
-	defer func() {
+
+	organizationIDs := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var organizationID uuid.UUID
+		if err := rows.Scan(&organizationID); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan organization ID: %w", err)
+		}
+		if organizationID == uuid.Nil {
+			_ = rows.Close()
+			return fmt.Errorf("assertion failed: organization ID must not be nil")
+		}
+
+		organizationIDs = append(organizationIDs, organizationID)
+	}
+	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-	}()
+		return fmt.Errorf("iterate organizations: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close organizations rows: %w", err)
+	}
+
+	if len(organizationIDs) == 0 {
+		return fmt.Errorf("assertion failed: expected at least one organization")
+	}
 
 	const upsertOrganizationMemberQuery = `
 INSERT INTO organization_members (
@@ -392,27 +415,10 @@ SET
 	roles = ARRAY['organization-admin']
 `
 
-	organizationCount := 0
-	for rows.Next() {
-		organizationCount++
-
-		var organizationID uuid.UUID
-		if err := rows.Scan(&organizationID); err != nil {
-			return fmt.Errorf("scan organization ID: %w", err)
-		}
-		if organizationID == uuid.Nil {
-			return fmt.Errorf("assertion failed: organization ID must not be nil")
-		}
-
+	for _, organizationID := range organizationIDs {
 		if _, execErr := tx.ExecContext(ctx, upsertOrganizationMemberQuery, organizationID, userID, now); execErr != nil {
 			return fmt.Errorf("upsert operator organization membership for org %q: %w", organizationID.String(), execErr)
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate organizations: %w", err)
-	}
-	if organizationCount == 0 {
-		return fmt.Errorf("assertion failed: expected at least one organization")
 	}
 
 	return nil
