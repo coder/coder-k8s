@@ -80,7 +80,7 @@ func (s *TemplateStorage) Get(ctx context.Context, name string, _ *metav1.GetOpt
 		return nil, fmt.Errorf("assertion failed: template name must not be empty")
 	}
 
-	namespace, badNamespaceErr := namespaceFromRequestContext(ctx)
+	namespace, badNamespaceErr := requiredNamespaceFromRequestContext(ctx)
 	if badNamespaceErr != nil {
 		return nil, badNamespaceErr
 	}
@@ -122,6 +122,11 @@ func (s *TemplateStorage) List(ctx context.Context, _ *metainternalversion.ListO
 		return nil, badNamespaceErr
 	}
 
+	responseNamespace, responseNamespaceErr := namespaceForListConversion(namespace, s.provider)
+	if responseNamespaceErr != nil {
+		return nil, responseNamespaceErr
+	}
+
 	sdk, err := s.clientForNamespace(ctx, namespace)
 	if err != nil {
 		return nil, wrapClientError(err)
@@ -141,7 +146,7 @@ func (s *TemplateStorage) List(ctx context.Context, _ *metainternalversion.ListO
 	}
 
 	for _, template := range templates {
-		list.Items = append(list.Items, *convert.TemplateToK8s(namespace, template))
+		list.Items = append(list.Items, *convert.TemplateToK8s(responseNamespace, template))
 	}
 
 	return list, nil
@@ -177,7 +182,7 @@ func (s *TemplateStorage) Create(
 		return nil, apierrors.NewBadRequest("metadata.name must not be empty")
 	}
 
-	namespace, badNamespaceErr := namespaceFromRequestContext(ctx)
+	namespace, badNamespaceErr := requiredNamespaceFromRequestContext(ctx)
 	if badNamespaceErr != nil {
 		return nil, badNamespaceErr
 	}
@@ -279,7 +284,7 @@ func (s *TemplateStorage) Update(
 		return nil, false, fmt.Errorf("assertion failed: expected *CoderTemplate, got %T", currentObj)
 	}
 
-	namespace, badNamespaceErr := namespaceFromRequestContext(ctx)
+	namespace, badNamespaceErr := requiredNamespaceFromRequestContext(ctx)
 	if badNamespaceErr != nil {
 		return nil, false, badNamespaceErr
 	}
@@ -347,7 +352,7 @@ func (s *TemplateStorage) Delete(
 		return nil, false, fmt.Errorf("assertion failed: template name must not be empty")
 	}
 
-	namespace, badNamespaceErr := namespaceFromRequestContext(ctx)
+	namespace, badNamespaceErr := requiredNamespaceFromRequestContext(ctx)
 	if badNamespaceErr != nil {
 		return nil, false, badNamespaceErr
 	}

@@ -82,7 +82,7 @@ func (s *WorkspaceStorage) Get(ctx context.Context, name string, _ *metav1.GetOp
 		return nil, fmt.Errorf("assertion failed: workspace name must not be empty")
 	}
 
-	namespace, badNamespaceErr := namespaceFromRequestContext(ctx)
+	namespace, badNamespaceErr := requiredNamespaceFromRequestContext(ctx)
 	if badNamespaceErr != nil {
 		return nil, badNamespaceErr
 	}
@@ -122,6 +122,11 @@ func (s *WorkspaceStorage) List(ctx context.Context, _ *metainternalversion.List
 		return nil, badNamespaceErr
 	}
 
+	responseNamespace, responseNamespaceErr := namespaceForListConversion(namespace, s.provider)
+	if responseNamespaceErr != nil {
+		return nil, responseNamespaceErr
+	}
+
 	sdk, err := s.clientForNamespace(ctx, namespace)
 	if err != nil {
 		return nil, wrapClientError(err)
@@ -141,7 +146,7 @@ func (s *WorkspaceStorage) List(ctx context.Context, _ *metainternalversion.List
 	}
 
 	for _, workspace := range workspacesResponse.Workspaces {
-		list.Items = append(list.Items, *convert.WorkspaceToK8s(namespace, workspace))
+		list.Items = append(list.Items, *convert.WorkspaceToK8s(responseNamespace, workspace))
 	}
 
 	return list, nil
@@ -177,7 +182,7 @@ func (s *WorkspaceStorage) Create(
 		return nil, apierrors.NewBadRequest("metadata.name must not be empty")
 	}
 
-	namespace, badNamespaceErr := namespaceFromRequestContext(ctx)
+	namespace, badNamespaceErr := requiredNamespaceFromRequestContext(ctx)
 	if badNamespaceErr != nil {
 		return nil, badNamespaceErr
 	}
@@ -312,7 +317,7 @@ func (s *WorkspaceStorage) Update(
 		)
 	}
 
-	namespace, badNamespaceErr := namespaceFromRequestContext(ctx)
+	namespace, badNamespaceErr := requiredNamespaceFromRequestContext(ctx)
 	if badNamespaceErr != nil {
 		return nil, false, badNamespaceErr
 	}
@@ -440,7 +445,7 @@ func (s *WorkspaceStorage) Delete(
 		return nil, false, fmt.Errorf("assertion failed: workspace name must not be empty")
 	}
 
-	namespace, badNamespaceErr := namespaceFromRequestContext(ctx)
+	namespace, badNamespaceErr := requiredNamespaceFromRequestContext(ctx)
 	if badNamespaceErr != nil {
 		return nil, false, badNamespaceErr
 	}
@@ -512,12 +517,37 @@ func namespaceFromRequestContext(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("assertion failed: context must not be nil")
 	}
 
-	namespace := genericapirequest.NamespaceValue(ctx)
+	return genericapirequest.NamespaceValue(ctx), nil
+}
+
+func requiredNamespaceFromRequestContext(ctx context.Context) (string, error) {
+	namespace, err := namespaceFromRequestContext(ctx)
+	if err != nil {
+		return "", err
+	}
 	if namespace == "" {
 		return "", apierrors.NewBadRequest("namespace is required")
 	}
 
 	return namespace, nil
+}
+
+func namespaceForListConversion(requestNamespace string, provider coder.ClientProvider) (string, error) {
+	if requestNamespace != "" {
+		return requestNamespace, nil
+	}
+	if provider == nil {
+		return "", fmt.Errorf("assertion failed: client provider must not be nil")
+	}
+
+	staticProvider, ok := provider.(*coder.StaticClientProvider)
+	if !ok || staticProvider.Namespace == "" {
+		return "", apierrors.NewServiceUnavailable(
+			"all-namespaces list requires a namespace-pinned static provider; configure --coder-namespace",
+		)
+	}
+
+	return staticProvider.Namespace, nil
 }
 
 func equalInt64Ptr(a, b *int64) bool {

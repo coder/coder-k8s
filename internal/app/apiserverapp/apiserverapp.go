@@ -63,15 +63,12 @@ type errClientProvider struct {
 
 var _ coder.ClientProvider = (*errClientProvider)(nil)
 
-func (p *errClientProvider) ClientForNamespace(ctx context.Context, namespace string) (*codersdk.Client, error) {
+func (p *errClientProvider) ClientForNamespace(ctx context.Context, _ string) (*codersdk.Client, error) {
 	if p == nil {
 		return nil, fmt.Errorf("assertion failed: err client provider must not be nil")
 	}
 	if ctx == nil {
 		return nil, fmt.Errorf("assertion failed: context must not be nil")
-	}
-	if namespace == "" {
-		return nil, fmt.Errorf("assertion failed: namespace must not be empty")
 	}
 	if p.serviceUnavailableMessage == "" {
 		return nil, fmt.Errorf("assertion failed: service unavailable message must not be empty")

@@ -42,7 +42,7 @@ func TestIntegrationAggregatedAPIServerBootstrapAndList(t *testing.T) {
 	}
 	sdkClient.SetSessionToken("test-token")
 
-	provider := &coder.StaticClientProvider{Client: sdkClient}
+	provider := &coder.StaticClientProvider{Client: sdkClient, Namespace: "test-ns"}
 	if provider.Client == nil {
 		t.Fatal("assertion failed: provider client must not be nil")
 	}

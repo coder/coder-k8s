@@ -111,7 +111,7 @@ func TestTemplateStorageCRUDWithCoderSDK(t *testing.T) {
 	}
 }
 
-func TestTemplateStorageListRequiresNamespace(t *testing.T) {
+func TestTemplateStorageListAllowsAllNamespacesRequest(t *testing.T) {
 	t.Parallel()
 
 	server, _ := newMockCoderServer(t)
@@ -119,9 +119,16 @@ func TestTemplateStorageListRequiresNamespace(t *testing.T) {
 
 	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
 
-	_, err := templateStorage.List(context.Background(), nil)
-	if !apierrors.IsBadRequest(err) {
-		t.Fatalf("expected BadRequest for missing namespace, got %v", err)
+	listObj, err := templateStorage.List(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("expected all-namespaces list to succeed, got %v", err)
+	}
+	list, ok := listObj.(*aggregationv1alpha1.CoderTemplateList)
+	if !ok {
+		t.Fatalf("expected *CoderTemplateList, got %T", listObj)
+	}
+	if len(list.Items) == 0 {
+		t.Fatal("expected at least one template in list")
 	}
 }
 
@@ -1322,7 +1329,7 @@ func TestWorkspaceStorageGetOrgMismatchReturnsNotFound(t *testing.T) {
 	}
 }
 
-func TestWorkspaceStorageListRequiresNamespace(t *testing.T) {
+func TestWorkspaceStorageListAllowsAllNamespacesRequest(t *testing.T) {
 	t.Parallel()
 
 	server, _ := newMockCoderServer(t)
@@ -1330,9 +1337,16 @@ func TestWorkspaceStorageListRequiresNamespace(t *testing.T) {
 
 	workspaceStorage := NewWorkspaceStorage(newTestClientProvider(t, server.URL))
 
-	_, err := workspaceStorage.List(context.Background(), nil)
-	if !apierrors.IsBadRequest(err) {
-		t.Fatalf("expected BadRequest for missing namespace, got %v", err)
+	listObj, err := workspaceStorage.List(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("expected all-namespaces list to succeed, got %v", err)
+	}
+	list, ok := listObj.(*aggregationv1alpha1.CoderWorkspaceList)
+	if !ok {
+		t.Fatalf("expected *CoderWorkspaceList, got %T", listObj)
+	}
+	if len(list.Items) == 0 {
+		t.Fatal("expected at least one workspace in list")
 	}
 }
 
@@ -1981,7 +1995,7 @@ func newTestClientProvider(t *testing.T, serverURL string) coder.ClientProvider 
 	client := codersdk.New(parsedURL)
 	client.SetSessionToken("test-session-token")
 
-	return &coder.StaticClientProvider{Client: client}
+	return &coder.StaticClientProvider{Client: client, Namespace: "control-plane"}
 }
 
 func namespacedContext(namespace string) context.Context {

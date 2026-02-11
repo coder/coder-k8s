@@ -19,7 +19,7 @@ func TestStaticClientProviderClientForNamespace(t *testing.T) {
 		t.Fatalf("create SDK client: %v", err)
 	}
 
-	provider := &StaticClientProvider{Client: client}
+	provider := &StaticClientProvider{Client: client, Namespace: "default"}
 	resolvedClient, err := provider.ClientForNamespace(context.Background(), "default")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -69,11 +69,11 @@ func TestStaticClientProviderClientForNamespaceAssertions(t *testing.T) {
 			wantErrContains: "assertion failed: static client provider client must not be nil",
 		},
 		{
-			name:            "rejects empty namespace",
+			name:            "rejects unpinned provider",
 			provider:        &StaticClientProvider{Client: validClient},
 			ctx:             context.Background(),
-			namespace:       "",
-			wantErrContains: "assertion failed: namespace must not be empty",
+			namespace:       "default",
+			wantErrContains: "static coder client provider is not namespace-pinned; configure --coder-namespace",
 		},
 	}
 
@@ -130,7 +130,7 @@ func TestStaticClientProviderClientForNamespaceNamespaceRestriction(t *testing.T
 	}
 }
 
-func TestStaticClientProviderClientForNamespaceAllowsAllNamespacesWhenUnset(t *testing.T) {
+func TestStaticClientProviderClientForNamespaceAllowsClusterScopedListNamespace(t *testing.T) {
 	t.Parallel()
 
 	client, err := NewSDKClient(Config{
@@ -141,21 +141,17 @@ func TestStaticClientProviderClientForNamespaceAllowsAllNamespacesWhenUnset(t *t
 		t.Fatalf("create SDK client: %v", err)
 	}
 
-	provider := &StaticClientProvider{Client: client}
+	provider := &StaticClientProvider{
+		Client:    client,
+		Namespace: "control-plane",
+	}
 
-	for _, namespace := range []string{"control-plane", "default"} {
-		namespace := namespace
-		t.Run(namespace, func(t *testing.T) {
-			t.Parallel()
-
-			resolvedClient, err := provider.ClientForNamespace(context.Background(), namespace)
-			if err != nil {
-				t.Fatalf("expected no error for namespace %q, got %v", namespace, err)
-			}
-			if resolvedClient != client {
-				t.Fatalf("expected provider to return static client %p, got %p", client, resolvedClient)
-			}
-		})
+	resolvedClient, err := provider.ClientForNamespace(context.Background(), "")
+	if err != nil {
+		t.Fatalf("expected no error for empty namespace when provider is pinned, got %v", err)
+	}
+	if resolvedClient != client {
+		t.Fatalf("expected provider to return static client %p, got %p", client, resolvedClient)
 	}
 }
 

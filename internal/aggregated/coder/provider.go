@@ -33,10 +33,15 @@ func (p *StaticClientProvider) ClientForNamespace(ctx context.Context, namespace
 	if p.Client == nil {
 		return nil, fmt.Errorf("assertion failed: static client provider client must not be nil")
 	}
-	if namespace == "" {
-		return nil, fmt.Errorf("assertion failed: namespace must not be empty")
+	if p.Namespace == "" {
+		return nil, apierrors.NewServiceUnavailable(
+			"static coder client provider is not namespace-pinned; configure --coder-namespace",
+		)
 	}
-	if p.Namespace != "" && namespace != p.Namespace {
+	if namespace == "" {
+		namespace = p.Namespace
+	}
+	if namespace != p.Namespace {
 		return nil, apierrors.NewBadRequest(
 			fmt.Sprintf(
 				"namespace %q is not served by this aggregated API server (configured for %q)",
