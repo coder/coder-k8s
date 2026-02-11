@@ -23,7 +23,10 @@ type ControlPlaneClientProvider struct {
 	requestTimeout time.Duration
 }
 
-var _ ClientProvider = (*ControlPlaneClientProvider)(nil)
+var (
+	_ ClientProvider    = (*ControlPlaneClientProvider)(nil)
+	_ NamespaceResolver = (*ControlPlaneClientProvider)(nil)
+)
 
 // NewControlPlaneClientProvider constructs a dynamic ClientProvider backed by CoderControlPlane resources.
 func NewControlPlaneClientProvider(
@@ -64,51 +67,13 @@ func (p *ControlPlaneClientProvider) ClientForNamespace(ctx context.Context, nam
 	if ctx == nil {
 		return nil, fmt.Errorf("assertion failed: context must not be nil")
 	}
-	if p.cpReader == nil {
-		return nil, fmt.Errorf("assertion failed: control plane reader must not be nil")
-	}
 	if p.secretReader == nil {
 		return nil, fmt.Errorf("assertion failed: secret reader must not be nil")
 	}
 
-	controlPlaneList := &coderv1alpha1.CoderControlPlaneList{}
-	listOptions := make([]client.ListOption, 0, 1)
-	if namespace != "" {
-		listOptions = append(listOptions, client.InNamespace(namespace))
-	}
-	if err := p.cpReader.List(ctx, controlPlaneList, listOptions...); err != nil {
-		if namespace == "" {
-			return nil, fmt.Errorf("list CoderControlPlane resources across all namespaces: %w", err)
-		}
-
-		return nil, fmt.Errorf("list CoderControlPlane resources in namespace %q: %w", namespace, err)
-	}
-
-	eligible := make([]coderv1alpha1.CoderControlPlane, 0, 1)
-	for i := range controlPlaneList.Items {
-		controlPlane := controlPlaneList.Items[i]
-		if strings.Contains(controlPlane.Name, ".") {
-			log.Printf(
-				"warning: skipping CoderControlPlane %s/%s: names containing '.' are incompatible with aggregated naming",
-				controlPlane.Namespace,
-				controlPlane.Name,
-			)
-			continue
-		}
-		if controlPlane.Spec.OperatorAccess.Disabled {
-			continue
-		}
-		if !controlPlane.Status.OperatorAccessReady {
-			continue
-		}
-		if controlPlane.Status.OperatorTokenSecretRef == nil {
-			continue
-		}
-		if strings.TrimSpace(controlPlane.Status.URL) == "" {
-			continue
-		}
-
-		eligible = append(eligible, controlPlane)
+	eligible, err := p.findEligibleControlPlanes(ctx, namespace)
+	if err != nil {
+		return nil, err
 	}
 
 	switch len(eligible) {
@@ -218,6 +183,84 @@ func (p *ControlPlaneClientProvider) ClientForNamespace(ctx context.Context, nam
 	}
 
 	return sdkClient, nil
+}
+
+// DefaultNamespace resolves the namespace for all-namespaces LIST requests.
+func (p *ControlPlaneClientProvider) DefaultNamespace(ctx context.Context) (string, error) {
+	eligible, err := p.findEligibleControlPlanes(ctx, "")
+	if err != nil {
+		return "", err
+	}
+
+	switch len(eligible) {
+	case 0:
+		return "", apierrors.NewServiceUnavailable(noEligibleControlPlaneMessage(""))
+	case 1:
+		resolvedNamespace := strings.TrimSpace(eligible[0].Namespace)
+		if resolvedNamespace == "" {
+			return "", fmt.Errorf("assertion failed: eligible CoderControlPlane namespace must not be empty")
+		}
+		return resolvedNamespace, nil
+	default:
+		return "", apierrors.NewBadRequest(multipleEligibleControlPlaneMessage(""))
+	}
+}
+
+func (p *ControlPlaneClientProvider) findEligibleControlPlanes(
+	ctx context.Context,
+	namespace string,
+) ([]coderv1alpha1.CoderControlPlane, error) {
+	if p == nil {
+		return nil, fmt.Errorf("assertion failed: control plane client provider must not be nil")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("assertion failed: context must not be nil")
+	}
+	if p.cpReader == nil {
+		return nil, fmt.Errorf("assertion failed: control plane reader must not be nil")
+	}
+
+	controlPlaneList := &coderv1alpha1.CoderControlPlaneList{}
+	listOptions := make([]client.ListOption, 0, 1)
+	if namespace != "" {
+		listOptions = append(listOptions, client.InNamespace(namespace))
+	}
+	if err := p.cpReader.List(ctx, controlPlaneList, listOptions...); err != nil {
+		if namespace == "" {
+			return nil, fmt.Errorf("list CoderControlPlane resources across all namespaces: %w", err)
+		}
+
+		return nil, fmt.Errorf("list CoderControlPlane resources in namespace %q: %w", namespace, err)
+	}
+
+	eligible := make([]coderv1alpha1.CoderControlPlane, 0, 1)
+	for i := range controlPlaneList.Items {
+		controlPlane := controlPlaneList.Items[i]
+		if strings.Contains(controlPlane.Name, ".") {
+			log.Printf(
+				"warning: skipping CoderControlPlane %s/%s: names containing '.' are incompatible with aggregated naming",
+				controlPlane.Namespace,
+				controlPlane.Name,
+			)
+			continue
+		}
+		if controlPlane.Spec.OperatorAccess.Disabled {
+			continue
+		}
+		if !controlPlane.Status.OperatorAccessReady {
+			continue
+		}
+		if controlPlane.Status.OperatorTokenSecretRef == nil {
+			continue
+		}
+		if strings.TrimSpace(controlPlane.Status.URL) == "" {
+			continue
+		}
+
+		eligible = append(eligible, controlPlane)
+	}
+
+	return eligible, nil
 }
 
 func noEligibleControlPlaneMessage(namespace string) string {

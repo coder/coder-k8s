@@ -122,7 +122,7 @@ func (s *WorkspaceStorage) List(ctx context.Context, _ *metainternalversion.List
 		return nil, badNamespaceErr
 	}
 
-	responseNamespace, responseNamespaceErr := namespaceForListConversion(namespace, s.provider)
+	responseNamespace, responseNamespaceErr := namespaceForListConversion(ctx, namespace, s.provider)
 	if responseNamespaceErr != nil {
 		return nil, responseNamespaceErr
 	}
@@ -534,7 +534,14 @@ func requiredNamespaceFromRequestContext(ctx context.Context) (string, error) {
 	return namespace, nil
 }
 
-func namespaceForListConversion(requestNamespace string, provider coder.ClientProvider) (string, error) {
+func namespaceForListConversion(
+	ctx context.Context,
+	requestNamespace string,
+	provider coder.ClientProvider,
+) (string, error) {
+	if ctx == nil {
+		return "", fmt.Errorf("assertion failed: context must not be nil")
+	}
 	if requestNamespace != "" {
 		return requestNamespace, nil
 	}
@@ -542,14 +549,22 @@ func namespaceForListConversion(requestNamespace string, provider coder.ClientPr
 		return "", fmt.Errorf("assertion failed: client provider must not be nil")
 	}
 
-	staticProvider, ok := provider.(*coder.StaticClientProvider)
-	if !ok || staticProvider.Namespace == "" {
+	resolver, ok := provider.(coder.NamespaceResolver)
+	if !ok {
 		return "", apierrors.NewServiceUnavailable(
-			"all-namespaces list requires a namespace-pinned static provider; configure --coder-namespace",
+			"all-namespaces list requires a provider that implements namespace resolution",
 		)
 	}
 
-	return staticProvider.Namespace, nil
+	resolvedNamespace, err := resolver.DefaultNamespace(ctx)
+	if err != nil {
+		return "", err
+	}
+	if resolvedNamespace == "" {
+		return "", fmt.Errorf("assertion failed: namespace resolver returned an empty namespace")
+	}
+
+	return resolvedNamespace, nil
 }
 
 func equalInt64Ptr(a, b *int64) bool {

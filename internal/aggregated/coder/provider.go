@@ -14,13 +14,24 @@ type ClientProvider interface {
 	ClientForNamespace(ctx context.Context, namespace string) (*codersdk.Client, error)
 }
 
+// NamespaceResolver can be implemented by ClientProvider implementations that
+// support resolving a default namespace when the request namespace is empty.
+type NamespaceResolver interface {
+	// DefaultNamespace returns the namespace to use for object metadata when the
+	// request namespace is empty (all-namespaces LIST).
+	DefaultNamespace(ctx context.Context) (string, error)
+}
+
 // StaticClientProvider returns one static client, optionally restricted to one namespace.
 type StaticClientProvider struct {
 	Client    *codersdk.Client
 	Namespace string // If non-empty, only this namespace is allowed.
 }
 
-var _ ClientProvider = (*StaticClientProvider)(nil)
+var (
+	_ ClientProvider    = (*StaticClientProvider)(nil)
+	_ NamespaceResolver = (*StaticClientProvider)(nil)
+)
 
 // ClientForNamespace returns the static client.
 func (p *StaticClientProvider) ClientForNamespace(ctx context.Context, namespace string) (*codersdk.Client, error) {
@@ -52,6 +63,18 @@ func (p *StaticClientProvider) ClientForNamespace(ctx context.Context, namespace
 	}
 
 	return p.Client, nil
+}
+
+// DefaultNamespace resolves the pinned namespace for all-namespaces LIST requests.
+func (p *StaticClientProvider) DefaultNamespace(_ context.Context) (string, error) {
+	if p == nil {
+		return "", fmt.Errorf("assertion failed: static client provider must not be nil")
+	}
+	if p.Namespace == "" {
+		return "", apierrors.NewServiceUnavailable("static provider has no default namespace")
+	}
+
+	return p.Namespace, nil
 }
 
 // NewStaticClientProvider creates a StaticClientProvider from cfg and optional namespace restriction.

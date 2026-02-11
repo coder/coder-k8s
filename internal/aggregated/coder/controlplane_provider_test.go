@@ -204,6 +204,68 @@ func TestControlPlaneClientProviderClientForNamespaceReturnsBadRequestForMultipl
 	}
 }
 
+func TestControlPlaneClientProviderDefaultNamespaceHappyPath(t *testing.T) {
+	t.Parallel()
+
+	provider, secretReader := newControlPlaneProviderForTest(
+		t,
+		[]coderv1alpha1.CoderControlPlane{eligibleControlPlane("team-a", "coder")},
+		nil,
+	)
+
+	resolvedNamespace, err := provider.DefaultNamespace(context.Background())
+	if err != nil {
+		t.Fatalf("resolve default namespace: %v", err)
+	}
+	if got, want := resolvedNamespace, "team-a"; got != want {
+		t.Fatalf("expected default namespace %q, got %q", want, got)
+	}
+	if got, want := secretReader.getCalls, 0; got != want {
+		t.Fatalf("expected %d secret reads, got %d", want, got)
+	}
+}
+
+func TestControlPlaneClientProviderDefaultNamespaceReturnsServiceUnavailableWhenNoEligibleControlPlane(t *testing.T) {
+	t.Parallel()
+
+	provider, _ := newControlPlaneProviderForTest(t, nil, nil)
+
+	_, err := provider.DefaultNamespace(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !apierrors.IsServiceUnavailable(err) {
+		t.Fatalf("expected ServiceUnavailable, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "no eligible CoderControlPlane") {
+		t.Fatalf("expected no-eligible message, got %v", err)
+	}
+}
+
+func TestControlPlaneClientProviderDefaultNamespaceReturnsBadRequestForMultipleEligibleControlPlanes(t *testing.T) {
+	t.Parallel()
+
+	provider, _ := newControlPlaneProviderForTest(
+		t,
+		[]coderv1alpha1.CoderControlPlane{
+			eligibleControlPlane("team-a", "coder-a"),
+			eligibleControlPlane("team-b", "coder-b"),
+		},
+		nil,
+	)
+
+	_, err := provider.DefaultNamespace(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected BadRequest, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "multi-instance support is planned") {
+		t.Fatalf("expected multi-instance message, got %v", err)
+	}
+}
+
 func TestControlPlaneClientProviderClientForNamespaceDefaultsSecretKeyToToken(t *testing.T) {
 	t.Parallel()
 

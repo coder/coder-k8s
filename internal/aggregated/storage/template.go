@@ -122,7 +122,7 @@ func (s *TemplateStorage) List(ctx context.Context, _ *metainternalversion.ListO
 		return nil, badNamespaceErr
 	}
 
-	responseNamespace, responseNamespaceErr := namespaceForListConversion(namespace, s.provider)
+	responseNamespace, responseNamespaceErr := namespaceForListConversion(ctx, namespace, s.provider)
 	if responseNamespaceErr != nil {
 		return nil, responseNamespaceErr
 	}
