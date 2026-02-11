@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -21,6 +23,17 @@ import (
 const (
 	// HealthProbeBindAddress exposes /healthz and /readyz checks for kube probes.
 	HealthProbeBindAddress = ":8081"
+
+	// leaderElectionID is the stable identity used for leader-election lease objects.
+	leaderElectionID = "coder-k8s-controller.coder.com"
+
+	// defaultLeaderElectionNamespace is used when the pod namespace cannot be
+	// detected (e.g. out-of-cluster development runs).
+	defaultLeaderElectionNamespace = "kube-system"
+
+	// inClusterNamespacePath is the standard path where Kubernetes injects the
+	// pod namespace when running inside a cluster.
+	inClusterNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 )
 
 var setupLog = ctrl.Log.WithName("setup")
@@ -51,7 +64,8 @@ func Run(ctx context.Context) error {
 		Scheme:                        scheme,
 		HealthProbeBindAddress:        HealthProbeBindAddress,
 		LeaderElection:                true,
-		LeaderElectionID:              "coder-k8s-controller.coder.com",
+		LeaderElectionID:              leaderElectionID,
+		LeaderElectionNamespace:       detectLeaderElectionNamespace(),
 		LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
@@ -107,4 +121,18 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("problem running manager: %w", err)
 	}
 	return nil
+}
+
+// detectLeaderElectionNamespace returns the namespace to use for leader-election
+// lease objects. It reads the in-cluster namespace file first; if that is not
+// available (e.g. during out-of-cluster development), it falls back to
+// defaultLeaderElectionNamespace so the controller can still start.
+func detectLeaderElectionNamespace() string {
+	data, err := os.ReadFile(inClusterNamespacePath)
+	if err == nil {
+		if ns := strings.TrimSpace(string(data)); ns != "" {
+			return ns
+		}
+	}
+	return defaultLeaderElectionNamespace
 }
