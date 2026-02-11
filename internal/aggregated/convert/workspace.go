@@ -18,6 +18,11 @@ func WorkspaceToK8s(namespace string, w codersdk.Workspace) *aggregationv1alpha1
 		panic("assertion failed: namespace must not be empty")
 	}
 
+	var autoShutdown *metav1.Time
+	if w.LatestBuild.Deadline.Valid && !w.LatestBuild.Deadline.Time.IsZero() {
+		autoShutdownTime := metav1.NewTime(w.LatestBuild.Deadline.Time)
+		autoShutdown = &autoShutdownTime
+	}
 	lastUsedAt := metav1.NewTime(w.LastUsedAt)
 
 	return &aggregationv1alpha1.CoderWorkspace{
@@ -47,6 +52,7 @@ func WorkspaceToK8s(namespace string, w codersdk.Workspace) *aggregationv1alpha1
 			TemplateName:      w.TemplateName,
 			LatestBuildID:     w.LatestBuild.ID.String(),
 			LatestBuildStatus: string(w.LatestBuild.Status),
+			AutoShutdown:      autoShutdown,
 			LastUsedAt:        &lastUsedAt,
 		},
 	}

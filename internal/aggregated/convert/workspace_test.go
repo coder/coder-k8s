@@ -17,6 +17,7 @@ func TestWorkspaceToK8s(t *testing.T) {
 	createdAt := time.Date(2025, time.February, 2, 3, 4, 5, 0, time.UTC)
 	updatedAt := createdAt.Add(4 * time.Hour)
 	lastUsedAt := createdAt.Add(3 * time.Hour)
+	autoShutdownAt := createdAt.Add(6 * time.Hour)
 	ttlMillis := int64(3600000)
 	autostartSchedule := "CRON_TZ=UTC 0 9 * * 1-5"
 
@@ -35,6 +36,7 @@ func TestWorkspaceToK8s(t *testing.T) {
 			ID:         buildID,
 			Transition: codersdk.WorkspaceTransitionStart,
 			Status:     codersdk.WorkspaceStatusStarting,
+			Deadline:   codersdk.NewNullTime(autoShutdownAt, true),
 		},
 	}
 
@@ -80,6 +82,12 @@ func TestWorkspaceToK8s(t *testing.T) {
 	}
 	if converted.Status.LatestBuildStatus != string(codersdk.WorkspaceStatusStarting) {
 		t.Fatalf("expected status latest build status %q, got %q", codersdk.WorkspaceStatusStarting, converted.Status.LatestBuildStatus)
+	}
+	if converted.Status.AutoShutdown == nil {
+		t.Fatal("expected status autoShutdown to be set")
+	}
+	if !converted.Status.AutoShutdown.Time.Equal(autoShutdownAt) {
+		t.Fatalf("expected status autoShutdown %s, got %s", autoShutdownAt, converted.Status.AutoShutdown.Time)
 	}
 	if converted.Status.LastUsedAt == nil {
 		t.Fatal("expected status lastUsedAt to be set")
