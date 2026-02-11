@@ -1,5 +1,6 @@
 # Go
 /bin/
+/coder-k8s
 *.test
 *.out
 
