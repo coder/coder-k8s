@@ -394,22 +394,24 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 						Tags:             provisioner.Spec.Tags,
 					})
 					if rotateErr != nil {
-						log.Info("failed to recreate key for metadata backfill rotation, will retry",
-							"keyName", keyName, "error", rotateErr)
-					} else {
-						if rotated.OrganizationID != uuid.Nil {
-							organizationID = rotated.OrganizationID.String()
-						}
-						if rotated.KeyID != uuid.Nil {
-							provisionerKeyID = rotated.KeyID.String()
-						}
-						if rotated.KeyName != "" {
-							provisionerKeyName = rotated.KeyName
-						}
-						keyMaterial = rotated.Key
-						appliedOrgName = organizationName
-						appliedTagsHash = desiredTagsHash
+						setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+							metav1.ConditionFalse, "ProvisionerKeyFailed",
+							fmt.Sprintf("Failed to recreate provisioner key %q after metadata backfill rotation", keyName))
+						_ = r.Status().Update(ctx, provisioner)
+						return ctrl.Result{}, fmt.Errorf("recreate provisioner key %q after metadata backfill rotation: %w", keyName, rotateErr)
 					}
+					if rotated.OrganizationID != uuid.Nil {
+						organizationID = rotated.OrganizationID.String()
+					}
+					if rotated.KeyID != uuid.Nil {
+						provisionerKeyID = rotated.KeyID.String()
+					}
+					if rotated.KeyName != "" {
+						provisionerKeyName = rotated.KeyName
+					}
+					keyMaterial = rotated.Key
+					appliedOrgName = organizationName
+					appliedTagsHash = desiredTagsHash
 				}
 			}
 			setCondition(
