@@ -574,6 +574,59 @@ func TestReconcile_OperatorAccess_Disabled_DoesNotDeleteUnmanagedSecret(t *testi
 	}
 }
 
+func TestReconcile_OperatorAccess_Disabled_RevokesWithoutStatusOrManagedSecret(t *testing.T) {
+	ctx := context.Background()
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-operator-access-disabled-revoke-without-status",
+			Namespace: "default",
+		},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-operator-disabled-revoke-without-status:latest",
+			ExtraEnv: []corev1.EnvVar{{
+				Name:  "CODER_PG_CONNECTION_URL",
+				Value: "postgres://example.disabled.revoke/coder",
+			}},
+			OperatorAccess: coderv1alpha1.OperatorAccessSpec{Disabled: true},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("failed to create test CoderControlPlane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	provisioner := &fakeOperatorAccessProvisioner{}
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+
+	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}})
+	if err != nil {
+		t.Fatalf("reconcile disabled control plane without status ref: %v", err)
+	}
+	if result != (ctrl.Result{}) {
+		t.Fatalf("expected empty reconcile result, got %+v", result)
+	}
+	if provisioner.revokeCalls != 1 {
+		t.Fatalf("expected revoke to run even without managed secret/status ref, got %d calls", provisioner.revokeCalls)
+	}
+	if got := provisioner.revokeRequests[0].PostgresURL; got != "postgres://example.disabled.revoke/coder" {
+		t.Fatalf("expected revoke Postgres URL %q, got %q", "postgres://example.disabled.revoke/coder", got)
+	}
+
+	reconciled := &coderv1alpha1.CoderControlPlane{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, reconciled); err != nil {
+		t.Fatalf("get reconciled control plane: %v", err)
+	}
+	if reconciled.Status.OperatorAccessReady {
+		t.Fatalf("expected operator access ready=false when disabled")
+	}
+	if reconciled.Status.OperatorTokenSecretRef != nil {
+		t.Fatalf("expected operator token secret ref to be nil when disabled")
+	}
+}
+
 func TestReconcile_OperatorAccess_Disabled_RevokesTokenAndDeletesSecret(t *testing.T) {
 	ctx := context.Background()
 

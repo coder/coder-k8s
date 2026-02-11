@@ -352,9 +352,6 @@ func (r *CoderControlPlaneReconciler) cleanupDisabledOperatorAccess(
 
 	managedSecretExists := secretExists && isManagedOperatorTokenSecret(secret, coderControlPlane)
 	cleanupRequired := managedSecretExists || coderControlPlane.Status.OperatorTokenSecretRef != nil
-	if !cleanupRequired {
-		return nil
-	}
 
 	if managedSecretExists {
 		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
@@ -362,13 +359,16 @@ func (r *CoderControlPlaneReconciler) cleanupDisabledOperatorAccess(
 		}
 	}
 
-	if r.OperatorAccessProvisioner == nil {
-		return fmt.Errorf("assertion failed: operator access provisioner must not be nil while disabling managed credentials")
-	}
-
 	postgresURL, err := r.resolvePostgresURLFromExtraEnv(ctx, coderControlPlane)
 	if err != nil {
-		return fmt.Errorf("resolve postgres URL while disabling operator access: %w", err)
+		if cleanupRequired {
+			return fmt.Errorf("resolve postgres URL while disabling operator access: %w", err)
+		}
+		return nil
+	}
+
+	if r.OperatorAccessProvisioner == nil {
+		return fmt.Errorf("assertion failed: operator access provisioner must not be nil while disabling managed credentials")
 	}
 	if err := r.OperatorAccessProvisioner.RevokeOperatorToken(ctx, coderbootstrap.RevokeOperatorTokenRequest{
 		PostgresURL:      postgresURL,
