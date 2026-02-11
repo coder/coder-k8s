@@ -35,3 +35,15 @@ variable "vpc_cidr" {
   }
 }
 
+variable "cluster_admin_namespace" {
+  description = "Namespace for the long-lived cluster-admin service account."
+  type        = string
+  default     = "k8s-auth"
+}
+
+variable "cluster_admin_service_account_name" {
+  description = "Service account name used for long-lived cluster-admin access (backed by a token Secret)."
+  type        = string
+  default     = "mux-admin-tf"
+}
+
