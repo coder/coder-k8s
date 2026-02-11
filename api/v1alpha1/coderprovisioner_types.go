@@ -11,12 +11,16 @@ const (
 	// CoderProvisionerPhaseReady indicates at least one provisioner pod is ready.
 	CoderProvisionerPhaseReady = "Ready"
 
-	// Condition types for CoderProvisioner status.
-	CoderProvisionerConditionControlPlaneReady        = "ControlPlaneReady"
-	CoderProvisionerConditionBootstrapSecretReady     = "BootstrapSecretReady"
-	CoderProvisionerConditionProvisionerKeyReady      = "ProvisionerKeyReady"
+	// CoderProvisionerConditionControlPlaneReady indicates whether the referenced control plane is reachable.
+	CoderProvisionerConditionControlPlaneReady = "ControlPlaneReady"
+	// CoderProvisionerConditionBootstrapSecretReady indicates whether the bootstrap credentials secret is available.
+	CoderProvisionerConditionBootstrapSecretReady = "BootstrapSecretReady"
+	// CoderProvisionerConditionProvisionerKeyReady indicates whether the provisioner key exists in coderd.
+	CoderProvisionerConditionProvisionerKeyReady = "ProvisionerKeyReady"
+	// CoderProvisionerConditionProvisionerKeySecretReady indicates whether the provisioner key secret is populated.
 	CoderProvisionerConditionProvisionerKeySecretReady = "ProvisionerKeySecretReady"
-	CoderProvisionerConditionDeploymentReady          = "DeploymentReady"
+	// CoderProvisionerConditionDeploymentReady indicates whether the provisioner deployment has ready replicas.
+	CoderProvisionerConditionDeploymentReady = "DeploymentReady"
 
 	// DefaultProvisionerKeySecretKey is the default data key for provisioner key secrets.
 	DefaultProvisionerKeySecretKey = "key"
