@@ -75,10 +75,13 @@ func TestInstallAPIGroupRegistersDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse test coder URL: %v", err)
 	}
-	provider, err := coderhelper.NewStaticClientProvider(coderhelper.Config{
-		CoderURL:     coderURL,
-		SessionToken: "test-session-token",
-	})
+	provider, err := coderhelper.NewStaticClientProvider(
+		coderhelper.Config{
+			CoderURL:     coderURL,
+			SessionToken: "test-session-token",
+		},
+		"",
+	)
 	if err != nil {
 		t.Fatalf("build static client provider: %v", err)
 	}

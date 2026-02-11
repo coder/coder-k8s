@@ -109,11 +109,14 @@ func buildClientProvider(opts Options, requestTimeout time.Duration) (coder.Clie
 		return nil, fmt.Errorf("assertion failed: parsed coder URL must not be nil")
 	}
 
-	provider, err := coder.NewStaticClientProvider(coder.Config{
-		CoderURL:       parsedCoderURL,
-		SessionToken:   sessionToken,
-		RequestTimeout: requestTimeout,
-	})
+	provider, err := coder.NewStaticClientProvider(
+		coder.Config{
+			CoderURL:       parsedCoderURL,
+			SessionToken:   sessionToken,
+			RequestTimeout: requestTimeout,
+		},
+		"",
+	)
 	if err != nil {
 		return nil, err
 	}

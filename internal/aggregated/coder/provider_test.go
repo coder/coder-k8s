@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 func TestStaticClientProviderClientForNamespace(t *testing.T) {
@@ -76,6 +78,7 @@ func TestStaticClientProviderClientForNamespaceAssertions(t *testing.T) {
 	}
 
 	for _, testCase := range tests {
+		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -90,12 +93,79 @@ func TestStaticClientProviderClientForNamespaceAssertions(t *testing.T) {
 	}
 }
 
+func TestStaticClientProviderClientForNamespaceNamespaceRestriction(t *testing.T) {
+	t.Parallel()
+
+	client, err := NewSDKClient(Config{
+		CoderURL:     mustParseURL(t, "https://coder.example.com"),
+		SessionToken: "session-token",
+	})
+	if err != nil {
+		t.Fatalf("create SDK client: %v", err)
+	}
+
+	provider := &StaticClientProvider{
+		Client:    client,
+		Namespace: "control-plane",
+	}
+
+	resolvedClient, err := provider.ClientForNamespace(context.Background(), "control-plane")
+	if err != nil {
+		t.Fatalf("expected no error for matching namespace, got %v", err)
+	}
+	if resolvedClient != client {
+		t.Fatalf("expected provider to return static client %p, got %p", client, resolvedClient)
+	}
+
+	_, err = provider.ClientForNamespace(context.Background(), "default")
+	if err == nil {
+		t.Fatal("expected namespace mismatch to fail")
+	}
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected BadRequest for namespace mismatch, got %v", err)
+	}
+	wantErrContains := "namespace \"default\" is not served by this aggregated API server (configured for \"control-plane\")"
+	if !strings.Contains(err.Error(), wantErrContains) {
+		t.Fatalf("expected error containing %q, got %q", wantErrContains, err.Error())
+	}
+}
+
+func TestStaticClientProviderClientForNamespaceAllowsAllNamespacesWhenUnset(t *testing.T) {
+	t.Parallel()
+
+	client, err := NewSDKClient(Config{
+		CoderURL:     mustParseURL(t, "https://coder.example.com"),
+		SessionToken: "session-token",
+	})
+	if err != nil {
+		t.Fatalf("create SDK client: %v", err)
+	}
+
+	provider := &StaticClientProvider{Client: client}
+
+	for _, namespace := range []string{"control-plane", "default"} {
+		namespace := namespace
+		t.Run(namespace, func(t *testing.T) {
+			t.Parallel()
+
+			resolvedClient, err := provider.ClientForNamespace(context.Background(), namespace)
+			if err != nil {
+				t.Fatalf("expected no error for namespace %q, got %v", namespace, err)
+			}
+			if resolvedClient != client {
+				t.Fatalf("expected provider to return static client %p, got %p", client, resolvedClient)
+			}
+		})
+	}
+}
+
 func TestNewStaticClientProvider(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name            string
 		cfg             Config
+		namespace       string
 		wantErrContains string
 	}{
 		{
@@ -104,21 +174,24 @@ func TestNewStaticClientProvider(t *testing.T) {
 				CoderURL:     mustParseURL(t, "https://coder.example.com"),
 				SessionToken: "session-token",
 			},
+			namespace: "control-plane",
 		},
 		{
 			name: "surfaces SDK config assertion",
 			cfg: Config{
 				SessionToken: "session-token",
 			},
+			namespace:       "control-plane",
 			wantErrContains: "new SDK client: assertion failed: coder URL must not be nil",
 		},
 	}
 
 	for _, testCase := range tests {
+		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
-			provider, err := NewStaticClientProvider(testCase.cfg)
+			provider, err := NewStaticClientProvider(testCase.cfg, testCase.namespace)
 			if testCase.wantErrContains != "" {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", testCase.wantErrContains)
@@ -137,6 +210,9 @@ func TestNewStaticClientProvider(t *testing.T) {
 			}
 			if provider.Client == nil {
 				t.Fatal("expected non-nil provider client")
+			}
+			if provider.Namespace != testCase.namespace {
+				t.Fatalf("expected provider namespace %q, got %q", testCase.namespace, provider.Namespace)
 			}
 		})
 	}

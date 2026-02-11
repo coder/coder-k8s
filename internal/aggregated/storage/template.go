@@ -21,6 +21,7 @@ var (
 	_ rest.Getter               = (*TemplateStorage)(nil)
 	_ rest.Lister               = (*TemplateStorage)(nil)
 	_ rest.Creater              = (*TemplateStorage)(nil) //nolint:misspell // Kubernetes rest interface name is Creater.
+	_ rest.Updater              = (*TemplateStorage)(nil)
 	_ rest.GracefulDeleter      = (*TemplateStorage)(nil)
 	_ rest.Scoper               = (*TemplateStorage)(nil)
 	_ rest.SingularNameProvider = (*TemplateStorage)(nil)
@@ -221,6 +222,64 @@ func (s *TemplateStorage) Create(
 	}
 
 	return convert.TemplateToK8s(namespace, createdTemplate), nil
+}
+
+// Update applies a legacy-compatible template update.
+func (s *TemplateStorage) Update(
+	ctx context.Context,
+	name string,
+	objInfo rest.UpdatedObjectInfo,
+	_ rest.ValidateObjectFunc,
+	updateValidation rest.ValidateObjectUpdateFunc,
+	forceAllowCreate bool,
+	_ *metav1.UpdateOptions,
+) (runtime.Object, bool, error) {
+	if s == nil {
+		return nil, false, fmt.Errorf("assertion failed: template storage must not be nil")
+	}
+	if ctx == nil {
+		return nil, false, fmt.Errorf("assertion failed: context must not be nil")
+	}
+	if name == "" {
+		return nil, false, fmt.Errorf("assertion failed: template name must not be empty")
+	}
+	if objInfo == nil {
+		return nil, false, fmt.Errorf("assertion failed: updated object info must not be nil")
+	}
+	if forceAllowCreate {
+		return nil, false, apierrors.NewMethodNotSupported(
+			aggregationv1alpha1.Resource("codertemplates"),
+			"create on update",
+		)
+	}
+
+	currentObj, err := s.Get(ctx, name, nil)
+	if err != nil {
+		return nil, false, err
+	}
+
+	currentObjForUpdate := currentObj.DeepCopyObject()
+	if currentObjForUpdate == nil {
+		return nil, false, fmt.Errorf("assertion failed: current template object deep copy must not be nil")
+	}
+
+	updatedObj, err := objInfo.UpdatedObject(ctx, currentObjForUpdate)
+	if err != nil {
+		return nil, false, err
+	}
+	if updatedObj == nil {
+		return nil, false, fmt.Errorf("assertion failed: updated template object must not be nil")
+	}
+	if updateValidation != nil {
+		if err := updateValidation(ctx, updatedObj, currentObj); err != nil {
+			return nil, false, err
+		}
+	}
+
+	// Template updates via codersdk are currently limited. The legacy spec.running
+	// field remains for compatibility with in-repo callers and is a no-op in the
+	// Coder backend. Return the desired object as-is.
+	return updatedObj, false, nil
 }
 
 // Delete deletes a CoderTemplate through codersdk.
