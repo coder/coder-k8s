@@ -192,6 +192,10 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			Tags:             provisioner.Spec.Tags,
 		})
 		if ensureErr != nil {
+			setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+				metav1.ConditionFalse, "ProvisionerKeyFailed",
+				fmt.Sprintf("Failed to ensure provisioner key %q after drift rotation", keyName))
+			_ = r.Status().Update(ctx, provisioner)
 			return ctrl.Result{}, fmt.Errorf("ensure provisioner key %q: %w", keyName, ensureErr)
 		}
 		if response.OrganizationID != uuid.Nil {
@@ -205,6 +209,10 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		keyMaterial = response.Key
 		if keyMaterial == "" {
+			setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+				metav1.ConditionFalse, "ProvisionerKeyFailed",
+				fmt.Sprintf("Provisioner key %q returned empty material after drift rotation", keyName))
+			_ = r.Status().Update(ctx, provisioner)
 			return ctrl.Result{}, fmt.Errorf("assertion failed: provisioner key returned empty material after drift rotation")
 		}
 		appliedOrgName = organizationName
@@ -225,6 +233,10 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			Tags:             provisioner.Spec.Tags,
 		})
 		if ensureErr != nil {
+			setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+				metav1.ConditionFalse, "ProvisionerKeyFailed",
+				fmt.Sprintf("Failed to ensure provisioner key %q", keyName))
+			_ = r.Status().Update(ctx, provisioner)
 			return ctrl.Result{}, fmt.Errorf("ensure provisioner key %q: %w", keyName, ensureErr)
 		}
 		if response.OrganizationID != uuid.Nil {
@@ -248,6 +260,10 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
 				ctx, controlPlane.Status.URL, sessionToken, organizationName, keyName,
 			); deleteErr != nil {
+				setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+					metav1.ConditionFalse, "ProvisionerKeyFailed",
+					fmt.Sprintf("Failed to delete stale provisioner key %q for rotation", keyName))
+				_ = r.Status().Update(ctx, provisioner)
 				return ctrl.Result{}, fmt.Errorf("delete stale provisioner key %q for rotation: %w", keyName, deleteErr)
 			}
 			rotated, rotateErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
@@ -258,6 +274,10 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				Tags:             provisioner.Spec.Tags,
 			})
 			if rotateErr != nil {
+				setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+					metav1.ConditionFalse, "ProvisionerKeyFailed",
+					fmt.Sprintf("Failed to recreate provisioner key %q after rotation", keyName))
+				_ = r.Status().Update(ctx, provisioner)
 				return ctrl.Result{}, fmt.Errorf("recreate provisioner key %q after rotation: %w", keyName, rotateErr)
 			}
 			if rotated.OrganizationID != uuid.Nil {
@@ -271,6 +291,10 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			}
 			keyMaterial = rotated.Key
 			if keyMaterial == "" {
+				setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+					metav1.ConditionFalse, "ProvisionerKeyFailed",
+					fmt.Sprintf("Provisioner key %q returned empty key material after rotation", keyName))
+				_ = r.Status().Update(ctx, provisioner)
 				return ctrl.Result{}, fmt.Errorf("assertion failed: provisioner key %q returned empty key material after rotation", keyName)
 			}
 		}
@@ -359,9 +383,13 @@ func (r *CoderProvisionerReconciler) reconcileDeletion(ctx context.Context, prov
 
 	log := ctrl.LoggerFrom(ctx)
 
-	// DeleteProvisionerKey resolves organizations by name, so always pass the
-	// spec-derived organization name here instead of the persisted organization ID.
-	organizationName := provisionerOrganizationName(provisioner.Spec.OrganizationName)
+	// Use the last-applied organization name from status so we target the
+	// correct org even if spec was changed but never successfully rotated.
+	// Fall back to the spec-derived name only when status is empty.
+	organizationName := provisioner.Status.OrganizationName
+	if organizationName == "" {
+		organizationName = provisionerOrganizationName(provisioner.Spec.OrganizationName)
+	}
 	keyName := provisioner.Status.ProvisionerKeyName
 	if keyName == "" {
 		keyName, _, _ = provisionerKeyConfig(provisioner)
