@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -29,6 +31,21 @@ func RunHTTP(ctx context.Context) error {
 	k8sClient, clientset, err := newClients()
 	if err != nil {
 		return err
+	}
+
+	return RunHTTPWithClients(ctx, k8sClient, clientset)
+}
+
+// RunHTTPWithClients starts the MCP server using streamable HTTP transport and the provided Kubernetes clients.
+func RunHTTPWithClients(ctx context.Context, k8sClient client.Client, clientset kubernetes.Interface) error {
+	if ctx == nil {
+		return fmt.Errorf("assertion failed: context must not be nil")
+	}
+	if k8sClient == nil {
+		return fmt.Errorf("assertion failed: Kubernetes client must not be nil")
+	}
+	if clientset == nil {
+		return fmt.Errorf("assertion failed: Kubernetes clientset must not be nil")
 	}
 
 	server := NewServer(k8sClient, clientset)
