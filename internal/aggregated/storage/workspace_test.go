@@ -199,3 +199,33 @@ func TestWorkspaceStorageDeleteAmbiguousWithoutNamespace(t *testing.T) {
 		t.Fatalf("expected BadRequest for ambiguous delete, got %v", err)
 	}
 }
+
+func TestWorkspaceStorageUpdateRequiresResourceVersion(t *testing.T) {
+	t.Helper()
+
+	workspaceStorage := NewWorkspaceStorage()
+	ctx := genericapirequest.WithNamespace(context.Background(), "default")
+
+	currentObj, err := workspaceStorage.Get(ctx, "dev-workspace", nil)
+	if err != nil {
+		t.Fatalf("get workspace: %v", err)
+	}
+	current := currentObj.(*aggregationv1alpha1.CoderWorkspace)
+
+	modified := current.DeepCopy()
+	modified.Spec.Running = !current.Spec.Running
+	modified.ResourceVersion = ""
+
+	_, _, err = workspaceStorage.Update(
+		ctx,
+		modified.Name,
+		rest.DefaultUpdatedObjectInfo(modified),
+		nil,
+		nil,
+		false,
+		nil,
+	)
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected BadRequest when resourceVersion is missing, got %v", err)
+	}
+}

@@ -199,3 +199,33 @@ func TestTemplateStorageDeleteAmbiguousWithoutNamespace(t *testing.T) {
 		t.Fatalf("expected BadRequest for ambiguous delete, got %v", err)
 	}
 }
+
+func TestTemplateStorageUpdateRequiresResourceVersion(t *testing.T) {
+	t.Helper()
+
+	templateStorage := NewTemplateStorage()
+	ctx := genericapirequest.WithNamespace(context.Background(), "default")
+
+	currentObj, err := templateStorage.Get(ctx, "starter-template", nil)
+	if err != nil {
+		t.Fatalf("get template: %v", err)
+	}
+	current := currentObj.(*aggregationv1alpha1.CoderTemplate)
+
+	modified := current.DeepCopy()
+	modified.Spec.Running = !current.Spec.Running
+	modified.ResourceVersion = ""
+
+	_, _, err = templateStorage.Update(
+		ctx,
+		modified.Name,
+		rest.DefaultUpdatedObjectInfo(modified),
+		nil,
+		nil,
+		false,
+		nil,
+	)
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected BadRequest when resourceVersion is missing, got %v", err)
+	}
+}

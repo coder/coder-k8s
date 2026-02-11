@@ -365,7 +365,10 @@ func (s *WorkspaceStorage) Update(
 		)
 	}
 
-	if candidate.ResourceVersion != "" && candidate.ResourceVersion != existing.ResourceVersion {
+	if candidate.ResourceVersion == "" {
+		return nil, false, apierrors.NewBadRequest("metadata.resourceVersion is required for update")
+	}
+	if candidate.ResourceVersion != existing.ResourceVersion {
 		return nil, false, apierrors.NewConflict(
 			aggregationv1alpha1.Resource("coderworkspaces"),
 			name,
