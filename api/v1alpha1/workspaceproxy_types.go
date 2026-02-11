@@ -35,6 +35,7 @@ type WorkspaceProxySpec struct {
 	// Replicas is the desired number of proxy pods.
 	Replicas *int32 `json:"replicas,omitempty"`
 	// Service controls the service created in front of the workspace proxy.
+	// +kubebuilder:default={}
 	Service ServiceSpec `json:"service,omitempty"`
 	// PrimaryAccessURL is the coderd URL the proxy should connect to.
 	PrimaryAccessURL string `json:"primaryAccessURL,omitempty"`

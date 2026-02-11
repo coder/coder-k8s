@@ -21,6 +21,7 @@ type CoderControlPlaneSpec struct {
 	// +kubebuilder:default=1
 	Replicas *int32 `json:"replicas,omitempty"`
 	// Service controls the service created in front of the control plane.
+	// +kubebuilder:default={}
 	Service ServiceSpec `json:"service,omitempty"`
 	// ExtraArgs are appended to the default Coder server arguments.
 	ExtraArgs []string `json:"extraArgs,omitempty"`

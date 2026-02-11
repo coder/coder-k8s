@@ -232,6 +232,7 @@ spec:
                 format: int32
                 type: integer
               service:
+                default: {}
                 description: Service controls the service created in front of the
                   control plane.
                 properties:

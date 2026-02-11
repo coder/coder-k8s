@@ -124,10 +124,14 @@ func Run(ctx context.Context) error {
 }
 
 // detectLeaderElectionNamespace returns the namespace to use for leader-election
-// lease objects. It reads the in-cluster namespace file first; if that is not
-// available (e.g. during out-of-cluster development), it falls back to
-// defaultLeaderElectionNamespace so the controller can still start.
+// lease objects. Resolution order:
+//  1. POD_NAMESPACE env var (allows explicit override for any environment).
+//  2. In-cluster namespace file (standard Kubernetes downward API path).
+//  3. defaultLeaderElectionNamespace as a last-resort fallback.
 func detectLeaderElectionNamespace() string {
+	if ns := strings.TrimSpace(os.Getenv("POD_NAMESPACE")); ns != "" {
+		return ns
+	}
 	data, err := os.ReadFile(inClusterNamespacePath)
 	if err == nil {
 		if ns := strings.TrimSpace(string(data)); ns != "" {
