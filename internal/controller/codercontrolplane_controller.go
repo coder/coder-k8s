@@ -4,7 +4,10 @@ package controller
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"maps"
+	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -12,24 +15,39 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/coderbootstrap"
 )
 
 const (
 	defaultCoderImage       = "ghcr.io/coder/coder:latest"
 	defaultControlPlanePort = int32(80)
 	controlPlaneTargetPort  = int32(3000)
+
+	postgresConnectionURLEnvVar = "CODER_PG_CONNECTION_URL"
+
+	defaultOperatorAccessUsername = "coder-k8s-operator"
+	defaultOperatorAccessEmail    = "coder-k8s-operator@coder-k8s.invalid"
+	// #nosec G101 -- this is a static token label used as a database identifier.
+	defaultOperatorAccessTokenName     = "coder-k8s-operator"
+	defaultOperatorAccessTokenLifetime = 365 * 24 * time.Hour
+
+	operatorAccessRetryInterval = 30 * time.Second
+	operatorTokenSecretSuffix   = "-operator-token"
 )
 
 // CoderControlPlaneReconciler reconciles a CoderControlPlane object.
 type CoderControlPlaneReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	OperatorAccessProvisioner coderbootstrap.OperatorAccessProvisioner
 }
 
 // +kubebuilder:rbac:groups=coder.com,resources=codercontrolplanes,verbs=get;list;watch;create;update;patch;delete
@@ -37,6 +55,7 @@ type CoderControlPlaneReconciler struct {
 // +kubebuilder:rbac:groups=coder.com,resources=codercontrolplanes/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile converges the desired CoderControlPlane spec into Deployment and Service resources.
 func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -69,11 +88,18 @@ func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 
-	if err := r.reconcileStatus(ctx, coderControlPlane, deployment, service); err != nil {
+	nextStatus := r.desiredStatus(coderControlPlane, deployment, service)
+
+	operatorResult, err := r.reconcileOperatorAccess(ctx, coderControlPlane, &nextStatus)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{}, nil
+	if err := r.reconcileStatus(ctx, coderControlPlane, nextStatus); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return operatorResult, nil
 }
 
 func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) (*appsv1.Deployment, error) {
@@ -171,12 +197,13 @@ func (r *CoderControlPlaneReconciler) reconcileService(ctx context.Context, code
 	return service, nil
 }
 
-func (r *CoderControlPlaneReconciler) reconcileStatus(
-	ctx context.Context,
+func (r *CoderControlPlaneReconciler) desiredStatus(
 	coderControlPlane *coderv1alpha1.CoderControlPlane,
 	deployment *appsv1.Deployment,
 	service *corev1.Service,
-) error {
+) coderv1alpha1.CoderControlPlaneStatus {
+	nextStatus := coderControlPlane.Status
+
 	servicePort := coderControlPlane.Spec.Service.Port
 	if servicePort == 0 {
 		servicePort = defaultControlPlanePort
@@ -187,12 +214,259 @@ func (r *CoderControlPlaneReconciler) reconcileStatus(
 		phase = coderv1alpha1.CoderControlPlanePhaseReady
 	}
 
-	nextStatus := coderv1alpha1.CoderControlPlaneStatus{
-		ObservedGeneration: coderControlPlane.Generation,
-		ReadyReplicas:      deployment.Status.ReadyReplicas,
-		URL:                fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", service.Name, service.Namespace, servicePort),
-		Phase:              phase,
+	nextStatus.ObservedGeneration = coderControlPlane.Generation
+	nextStatus.ReadyReplicas = deployment.Status.ReadyReplicas
+	nextStatus.URL = fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", service.Name, service.Namespace, servicePort)
+	nextStatus.Phase = phase
+
+	return nextStatus
+}
+
+func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+	nextStatus *coderv1alpha1.CoderControlPlaneStatus,
+) (ctrl.Result, error) {
+	if coderControlPlane == nil {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: coder control plane must not be nil")
 	}
+	if nextStatus == nil {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: next status must not be nil")
+	}
+
+	if coderControlPlane.Spec.OperatorAccess.Disabled {
+		nextStatus.OperatorTokenSecretRef = nil
+		nextStatus.OperatorAccessReady = false
+		return ctrl.Result{}, nil
+	}
+
+	if r.OperatorAccessProvisioner == nil {
+		nextStatus.OperatorTokenSecretRef = nil
+		nextStatus.OperatorAccessReady = false
+		return ctrl.Result{}, nil
+	}
+
+	operatorTokenSecretName := operatorAccessTokenSecretName(coderControlPlane)
+	if strings.TrimSpace(operatorTokenSecretName) == "" {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: operator token secret name must not be empty")
+	}
+
+	existingToken, err := r.readSecretValue(ctx, coderControlPlane.Namespace, operatorTokenSecretName, coderv1alpha1.DefaultTokenSecretKey)
+	if err == nil && existingToken != "" {
+		nextStatus.OperatorTokenSecretRef = &coderv1alpha1.SecretKeySelector{
+			Name: operatorTokenSecretName,
+			Key:  coderv1alpha1.DefaultTokenSecretKey,
+		}
+		nextStatus.OperatorAccessReady = true
+		return ctrl.Result{}, nil
+	}
+	if err != nil && !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, fmt.Errorf("read operator token secret %q: %w", operatorTokenSecretName, err)
+	}
+
+	postgresURL, resolveErr := r.resolvePostgresURLFromExtraEnv(ctx, coderControlPlane)
+	if resolveErr != nil {
+		nextStatus.OperatorTokenSecretRef = nil
+		nextStatus.OperatorAccessReady = false
+		//nolint:nilerr // missing bootstrap inputs should requeue without surfacing a terminal reconcile error.
+		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+	}
+
+	token, provisionErr := r.OperatorAccessProvisioner.EnsureOperatorToken(ctx, coderbootstrap.EnsureOperatorTokenRequest{
+		PostgresURL:      postgresURL,
+		OperatorUsername: defaultOperatorAccessUsername,
+		OperatorEmail:    defaultOperatorAccessEmail,
+		TokenName:        defaultOperatorAccessTokenName,
+		TokenLifetime:    defaultOperatorAccessTokenLifetime,
+	})
+	if provisionErr != nil {
+		nextStatus.OperatorTokenSecretRef = nil
+		nextStatus.OperatorAccessReady = false
+		//nolint:nilerr // transient provisioning errors should requeue without surfacing a terminal reconcile error.
+		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+	}
+	if token == "" {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: operator access provisioner returned empty token")
+	}
+
+	if err := r.ensureOperatorTokenSecret(
+		ctx,
+		coderControlPlane,
+		operatorTokenSecretName,
+		coderv1alpha1.DefaultTokenSecretKey,
+		token,
+	); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	nextStatus.OperatorTokenSecretRef = &coderv1alpha1.SecretKeySelector{
+		Name: operatorTokenSecretName,
+		Key:  coderv1alpha1.DefaultTokenSecretKey,
+	}
+	nextStatus.OperatorAccessReady = true
+
+	return ctrl.Result{}, nil
+}
+
+func (r *CoderControlPlaneReconciler) resolvePostgresURLFromExtraEnv(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+) (string, error) {
+	if coderControlPlane == nil {
+		return "", fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+
+	pgEnvVar, err := findEnvVar(coderControlPlane.Spec.ExtraEnv, postgresConnectionURLEnvVar)
+	if err != nil {
+		return "", err
+	}
+	if pgEnvVar == nil {
+		return "", fmt.Errorf("%s is not configured", postgresConnectionURLEnvVar)
+	}
+
+	if value := strings.TrimSpace(pgEnvVar.Value); value != "" {
+		return value, nil
+	}
+
+	if pgEnvVar.ValueFrom == nil {
+		return "", fmt.Errorf("%s must define either value or valueFrom.secretKeyRef", postgresConnectionURLEnvVar)
+	}
+	if pgEnvVar.ValueFrom.SecretKeyRef == nil {
+		return "", fmt.Errorf("%s valueFrom must be a secretKeyRef", postgresConnectionURLEnvVar)
+	}
+
+	secretRef := pgEnvVar.ValueFrom.SecretKeyRef
+	if strings.TrimSpace(secretRef.Name) == "" {
+		return "", fmt.Errorf("%s secretKeyRef name must not be empty", postgresConnectionURLEnvVar)
+	}
+	if strings.TrimSpace(secretRef.Key) == "" {
+		return "", fmt.Errorf("%s secretKeyRef key must not be empty", postgresConnectionURLEnvVar)
+	}
+
+	return r.readSecretValue(ctx, coderControlPlane.Namespace, secretRef.Name, secretRef.Key)
+}
+
+func findEnvVar(envVars []corev1.EnvVar, name string) (*corev1.EnvVar, error) {
+	if strings.TrimSpace(name) == "" {
+		return nil, fmt.Errorf("assertion failed: environment variable name must not be empty")
+	}
+
+	var found *corev1.EnvVar
+	for i := range envVars {
+		if envVars[i].Name != name {
+			continue
+		}
+		if found != nil {
+			return nil, fmt.Errorf("%s is configured more than once", name)
+		}
+
+		envVarCopy := envVars[i]
+		found = &envVarCopy
+	}
+
+	return found, nil
+}
+
+func operatorAccessTokenSecretName(coderControlPlane *coderv1alpha1.CoderControlPlane) string {
+	if coderControlPlane == nil {
+		return ""
+	}
+
+	configuredSecretName := strings.TrimSpace(coderControlPlane.Spec.OperatorAccess.GeneratedTokenSecretName)
+	if configuredSecretName != "" {
+		return configuredSecretName
+	}
+
+	candidate := coderControlPlane.Name + operatorTokenSecretSuffix
+	if len(candidate) <= 63 {
+		return candidate
+	}
+
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(coderControlPlane.Name))
+	hashSuffix := fmt.Sprintf("%08x", hasher.Sum32())
+	available := 63 - len(operatorTokenSecretSuffix) - len(hashSuffix) - 1
+	if available < 1 {
+		available = 1
+	}
+
+	return fmt.Sprintf("%s-%s%s", coderControlPlane.Name[:available], hashSuffix, operatorTokenSecretSuffix)
+}
+
+func (r *CoderControlPlaneReconciler) ensureOperatorTokenSecret(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+	name string,
+	key string,
+	token string,
+) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("assertion failed: secret name must not be empty")
+	}
+	if strings.TrimSpace(key) == "" {
+		return fmt.Errorf("assertion failed: secret key must not be empty")
+	}
+	if token == "" {
+		return fmt.Errorf("assertion failed: secret token must not be empty")
+	}
+
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: coderControlPlane.Namespace}}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
+		secret.Labels = maps.Clone(controlPlaneLabels(coderControlPlane.Name))
+		secret.Type = corev1.SecretTypeOpaque
+		if secret.Data == nil {
+			secret.Data = make(map[string][]byte)
+		}
+		secret.Data[key] = []byte(token)
+
+		if err := controllerutil.SetControllerReference(coderControlPlane, secret, r.Scheme); err != nil {
+			return fmt.Errorf("set controller reference: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("reconcile operator token secret %q: %w", name, err)
+	}
+
+	return nil
+}
+
+func (r *CoderControlPlaneReconciler) readSecretValue(ctx context.Context, namespace, name, key string) (string, error) {
+	if strings.TrimSpace(namespace) == "" {
+		return "", fmt.Errorf("assertion failed: secret namespace must not be empty")
+	}
+	if strings.TrimSpace(name) == "" {
+		return "", fmt.Errorf("assertion failed: secret name must not be empty")
+	}
+	if strings.TrimSpace(key) == "" {
+		return "", fmt.Errorf("assertion failed: secret key must not be empty")
+	}
+
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret); err != nil {
+		return "", err
+	}
+
+	value, ok := secret.Data[key]
+	if !ok {
+		return "", fmt.Errorf("secret %q does not contain key %q", name, key)
+	}
+	if len(value) == 0 {
+		return "", fmt.Errorf("secret %q key %q is empty", name, key)
+	}
+
+	return string(value), nil
+}
+
+func (r *CoderControlPlaneReconciler) reconcileStatus(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+	nextStatus coderv1alpha1.CoderControlPlaneStatus,
+) error {
 	if equality.Semantic.DeepEqual(coderControlPlane.Status, nextStatus) {
 		return nil
 	}
@@ -221,6 +495,7 @@ func (r *CoderControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&coderv1alpha1.CoderControlPlane{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
+		Owns(&corev1.Secret{}).
 		Named("codercontrolplane").
 		Complete(r)
 }

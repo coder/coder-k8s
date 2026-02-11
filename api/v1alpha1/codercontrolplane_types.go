@@ -29,6 +29,19 @@ type CoderControlPlaneSpec struct {
 	ExtraEnv []corev1.EnvVar `json:"extraEnv,omitempty"`
 	// ImagePullSecrets are used by the pod to pull private images.
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+	// OperatorAccess configures bootstrap API access to the coderd instance.
+	// +kubebuilder:default={}
+	OperatorAccess OperatorAccessSpec `json:"operatorAccess,omitempty"`
+}
+
+// OperatorAccessSpec configures the controller-managed coderd operator user.
+type OperatorAccessSpec struct {
+	// Disabled turns off creation and management of the `coder-k8s-operator`
+	// user and API token.
+	// +kubebuilder:default=false
+	Disabled bool `json:"disabled,omitempty"`
+	// GeneratedTokenSecretName stores the generated operator API token.
+	GeneratedTokenSecretName string `json:"generatedTokenSecretName,omitempty"`
 }
 
 // CoderControlPlaneStatus defines the observed state of a CoderControlPlane.
@@ -39,6 +52,11 @@ type CoderControlPlaneStatus struct {
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 	// URL is the in-cluster URL for the control plane service.
 	URL string `json:"url,omitempty"`
+	// OperatorTokenSecretRef points to the Secret key containing the
+	// `coder-k8s-operator` API token.
+	OperatorTokenSecretRef *SecretKeySelector `json:"operatorTokenSecretRef,omitempty"`
+	// OperatorAccessReady reports whether operator API access bootstrap succeeded.
+	OperatorAccessReady bool `json:"operatorAccessReady,omitempty"`
 	// Phase is a high-level readiness indicator.
 	Phase string `json:"phase,omitempty"`
 	// Conditions are Kubernetes-standard conditions for this resource.

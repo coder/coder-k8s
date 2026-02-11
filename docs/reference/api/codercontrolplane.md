@@ -19,6 +19,7 @@
 | `spec.extraArgs` | `[]string` | ExtraArgs are appended to the default Coder server arguments. |
 | `spec.extraEnv` | `[]k8s.io/api/core/v1.EnvVar` | ExtraEnv are injected into the Coder control plane container. |
 | `spec.imagePullSecrets` | `[]k8s.io/api/core/v1.LocalObjectReference` | ImagePullSecrets are used by the pod to pull private images. |
+| `spec.operatorAccess` | `github.com/coder/coder-k8s/api/v1alpha1.OperatorAccessSpec` | OperatorAccess configures bootstrap API access to the coderd instance. |
 
 ## Status
 
@@ -27,6 +28,8 @@
 | `status.observedGeneration` | `int64` | ObservedGeneration tracks the spec generation this status reflects. |
 | `status.readyReplicas` | `int32` | ReadyReplicas is the number of ready pods observed in the deployment. |
 | `status.url` | `string` | URL is the in-cluster URL for the control plane service. |
+| `status.operatorTokenSecretRef` | `github.com/coder/coder-k8s/api/v1alpha1.SecretKeySelector` | OperatorTokenSecretRef points to the Secret key containing the<br />`coder-k8s-operator` API token. |
+| `status.operatorAccessReady` | `bool` | OperatorAccessReady reports whether operator API access bootstrap succeeded. |
 | `status.phase` | `string` | Phase is a high-level readiness indicator. |
 | `status.conditions` | `[]metav1.Condition` | Conditions are Kubernetes-standard conditions for this resource. |
 
