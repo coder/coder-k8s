@@ -190,6 +190,8 @@ func getOpenAPIDefinitions(_ openapicommon.ReferenceCallback) map[string]openapi
 
 	boolSchema := spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"boolean"}}}
 	dateTimeSchema := spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"string"}, Format: "date-time"}}
+	int64Schema := spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"integer"}, Format: "int64"}}
+	stringSchema := spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"string"}}}
 
 	workspaceSchema := spec.Schema{
 		SchemaProps: spec.SchemaProps{
@@ -199,7 +201,12 @@ func getOpenAPIDefinitions(_ openapicommon.ReferenceCallback) map[string]openapi
 					SchemaProps: spec.SchemaProps{
 						Type: []string{"object"},
 						Properties: map[string]spec.Schema{
-							"running": boolSchema,
+							"organization":      stringSchema,
+							"templateName":      stringSchema,
+							"templateVersionID": stringSchema,
+							"running":           boolSchema,
+							"ttlMillis":         int64Schema,
+							"autostartSchedule": stringSchema,
 						},
 					},
 				},
@@ -207,7 +214,14 @@ func getOpenAPIDefinitions(_ openapicommon.ReferenceCallback) map[string]openapi
 					SchemaProps: spec.SchemaProps{
 						Type: []string{"object"},
 						Properties: map[string]spec.Schema{
-							"autoShutdown": dateTimeSchema,
+							"id":                stringSchema,
+							"ownerName":         stringSchema,
+							"organizationName":  stringSchema,
+							"templateName":      stringSchema,
+							"latestBuildID":     stringSchema,
+							"latestBuildStatus": stringSchema,
+							"autoShutdown":      dateTimeSchema,
+							"lastUsedAt":        dateTimeSchema,
 						},
 					},
 				},
@@ -223,7 +237,12 @@ func getOpenAPIDefinitions(_ openapicommon.ReferenceCallback) map[string]openapi
 					SchemaProps: spec.SchemaProps{
 						Type: []string{"object"},
 						Properties: map[string]spec.Schema{
-							"running": boolSchema,
+							"organization": stringSchema,
+							"versionID":    stringSchema,
+							"displayName":  stringSchema,
+							"description":  stringSchema,
+							"icon":         stringSchema,
+							"running":      boolSchema,
 						},
 					},
 				},
@@ -231,7 +250,12 @@ func getOpenAPIDefinitions(_ openapicommon.ReferenceCallback) map[string]openapi
 					SchemaProps: spec.SchemaProps{
 						Type: []string{"object"},
 						Properties: map[string]spec.Schema{
-							"autoShutdown": dateTimeSchema,
+							"id":               stringSchema,
+							"organizationName": stringSchema,
+							"activeVersionID":  stringSchema,
+							"deprecated":       boolSchema,
+							"updatedAt":        dateTimeSchema,
+							"autoShutdown":     dateTimeSchema,
 						},
 					},
 				},
