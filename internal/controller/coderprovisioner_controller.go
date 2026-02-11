@@ -137,8 +137,43 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			provisionerKeyName = response.KeyName
 		}
 		keyMaterial = response.Key
+
+		// If the key already exists in coderd (e.g. the K8s secret was
+		// deleted), coderd won't return plaintext again. Rotate the key
+		// by deleting and recreating it to obtain fresh material.
 		if keyMaterial == "" {
-			return ctrl.Result{}, fmt.Errorf("provisioner key %q exists in coderd but no key material is available to create secret %q", keyName, keySecretName)
+			log := ctrl.LoggerFrom(ctx)
+			log.Info("provisioner key exists in coderd but secret is missing, rotating key to recover",
+				"keyName", keyName, "secretName", keySecretName)
+
+			if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
+				ctx, controlPlane.Status.URL, sessionToken, organizationName, keyName,
+			); deleteErr != nil {
+				return ctrl.Result{}, fmt.Errorf("delete stale provisioner key %q for rotation: %w", keyName, deleteErr)
+			}
+			rotated, rotateErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
+				CoderURL:         controlPlane.Status.URL,
+				SessionToken:     sessionToken,
+				OrganizationName: organizationName,
+				KeyName:          keyName,
+				Tags:             provisioner.Spec.Tags,
+			})
+			if rotateErr != nil {
+				return ctrl.Result{}, fmt.Errorf("recreate provisioner key %q after rotation: %w", keyName, rotateErr)
+			}
+			if rotated.OrganizationID != uuid.Nil {
+				organizationID = rotated.OrganizationID.String()
+			}
+			if rotated.KeyID != uuid.Nil {
+				provisionerKeyID = rotated.KeyID.String()
+			}
+			if rotated.KeyName != "" {
+				provisionerKeyName = rotated.KeyName
+			}
+			keyMaterial = rotated.Key
+			if keyMaterial == "" {
+				return ctrl.Result{}, fmt.Errorf("assertion failed: provisioner key %q returned empty key material after rotation", keyName)
+			}
 		}
 	}
 
@@ -196,26 +231,42 @@ func (r *CoderProvisionerReconciler) reconcileDeletion(ctx context.Context, prov
 		return ctrl.Result{}, nil
 	}
 
-	controlPlane, err := r.fetchControlPlane(ctx, provisioner)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	sessionToken, err := r.readBootstrapSessionToken(ctx, provisioner)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
+	log := ctrl.LoggerFrom(ctx)
 	organizationName := provisionerOrganizationName(provisioner.Spec.OrganizationName)
 	keyName, _, _ := provisionerKeyConfig(provisioner)
-	if err := r.BootstrapClient.DeleteProvisionerKey(
-		ctx,
-		controlPlane.Status.URL,
-		sessionToken,
-		organizationName,
-		keyName,
-	); err != nil {
-		return ctrl.Result{}, fmt.Errorf("delete provisioner key %q: %w", keyName, err)
+
+	// Best-effort remote key cleanup: if the referenced control plane or
+	// bootstrap credentials are already gone (common during namespace
+	// teardown), log a warning and proceed to finalizer removal so the CR
+	// does not get stuck in Terminating.
+	controlPlane, err := r.fetchControlPlane(ctx, provisioner)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Info("referenced CoderControlPlane not found during deletion, skipping remote key cleanup",
+				"controlPlaneRef", provisioner.Spec.ControlPlaneRef.Name)
+		} else {
+			return ctrl.Result{}, err
+		}
+	} else {
+		sessionToken, tokenErr := r.readBootstrapSessionToken(ctx, provisioner)
+		if tokenErr != nil {
+			if apierrors.IsNotFound(tokenErr) {
+				log.Info("bootstrap credentials secret not found during deletion, skipping remote key cleanup",
+					"credentialsSecretRef", provisioner.Spec.Bootstrap.CredentialsSecretRef.Name)
+			} else {
+				return ctrl.Result{}, tokenErr
+			}
+		} else {
+			if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
+				ctx,
+				controlPlane.Status.URL,
+				sessionToken,
+				organizationName,
+				keyName,
+			); deleteErr != nil {
+				return ctrl.Result{}, fmt.Errorf("delete provisioner key %q: %w", keyName, deleteErr)
+			}
+		}
 	}
 
 	controllerutil.RemoveFinalizer(provisioner, coderv1alpha1.ProvisionerKeyCleanupFinalizer)
