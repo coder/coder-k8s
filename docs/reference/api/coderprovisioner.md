@@ -30,14 +30,16 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `status.observedGeneration` | `int64` |  |
-| `status.readyReplicas` | `int32` |  |
-| `status.phase` | `string` |  |
-| `status.conditions` | `[]metav1.Condition` |  |
-| `status.organizationID` | `string` |  |
-| `status.provisionerKeyID` | `string` |  |
-| `status.provisionerKeyName` | `string` |  |
-| `status.secretRef` | `github.com/coder/coder-k8s/api/v1alpha1.SecretKeySelector` |  |
+| `status.observedGeneration` | `int64` | ObservedGeneration tracks the spec generation this status reflects. |
+| `status.readyReplicas` | `int32` | ReadyReplicas is the number of ready pods observed in the deployment. |
+| `status.phase` | `string` | Phase is a high-level readiness indicator. |
+| `status.conditions` | `[]metav1.Condition` | Conditions are Kubernetes-standard conditions for this resource. |
+| `status.organizationID` | `string` | OrganizationID is the organization ID last applied to the provisioner key. |
+| `status.organizationName` | `string` | OrganizationName is the organization name last applied to the provisioner key. |
+| `status.provisionerKeyID` | `string` | ProvisionerKeyID is the provisioner key ID last applied in coderd. |
+| `status.provisionerKeyName` | `string` | ProvisionerKeyName is the provisioner key name last applied in coderd. |
+| `status.tagsHash` | `string` | TagsHash is a deterministic hash of spec.tags last applied to the provisioner key. |
+| `status.secretRef` | `github.com/coder/coder-k8s/api/v1alpha1.SecretKeySelector` | SecretRef references the provisioner key secret data currently in use. |
 
 ## Source
 
