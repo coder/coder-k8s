@@ -1,31 +1,34 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: coder-k8s-mcp
+  name: coder-k8s
   namespace: coder-system
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: coder-k8s-mcp
+      app: coder-k8s
   template:
     metadata:
       labels:
-        app: coder-k8s-mcp
+        app: coder-k8s
     spec:
-      serviceAccountName: coder-k8s-mcp
+      serviceAccountName: coder-k8s
       containers:
-        - name: mcp
+        - name: coder-k8s
           image: ghcr.io/coder/coder-k8s:latest
-          args: ["--app=mcp-http"]
           ports:
+            - containerPort: 8081
+              name: health
+            - containerPort: 6443
+              name: https
             - containerPort: 8090
               name: mcp
           livenessProbe:
             httpGet:
               path: /healthz
-              port: mcp
+              port: health
           readinessProbe:
             httpGet:
               path: /readyz
-              port: mcp
+              port: health
