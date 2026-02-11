@@ -186,7 +186,10 @@ func TestWorkspaceCreateRequestFromK8s(t *testing.T) {
 		},
 	}
 
-	request := WorkspaceCreateRequestFromK8s(obj, "dev-workspace", templateID)
+	request, err := WorkspaceCreateRequestFromK8s(obj, "dev-workspace", templateID)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
 	if request.Name != "dev-workspace" {
 		t.Fatalf("expected request name dev-workspace, got %q", request.Name)
 	}
@@ -216,7 +219,10 @@ func TestWorkspaceCreateRequestFromK8sUsesTemplateVersionID(t *testing.T) {
 		},
 	}
 
-	request := WorkspaceCreateRequestFromK8s(obj, "dev-workspace", templateID)
+	request, err := WorkspaceCreateRequestFromK8s(obj, "dev-workspace", templateID)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
 	if request.TemplateVersionID != templateVersionID {
 		t.Fatalf("expected request template version ID %q, got %q", templateVersionID, request.TemplateVersionID)
 	}
@@ -225,7 +231,7 @@ func TestWorkspaceCreateRequestFromK8sUsesTemplateVersionID(t *testing.T) {
 	}
 }
 
-func TestWorkspaceCreateRequestFromK8sFallsBackToTemplateIDForInvalidTemplateVersionID(t *testing.T) {
+func TestWorkspaceCreateRequestFromK8sReturnsErrorForInvalidTemplateVersionID(t *testing.T) {
 	t.Parallel()
 
 	templateID := uuid.New()
@@ -236,11 +242,8 @@ func TestWorkspaceCreateRequestFromK8sFallsBackToTemplateIDForInvalidTemplateVer
 		},
 	}
 
-	request := WorkspaceCreateRequestFromK8s(obj, "dev-workspace", templateID)
-	if request.TemplateID != templateID {
-		t.Fatalf("expected request template ID %q, got %q", templateID, request.TemplateID)
-	}
-	if request.TemplateVersionID != uuid.Nil {
-		t.Fatalf("expected request template version ID %q, got %q", uuid.Nil, request.TemplateVersionID)
+	_, err := WorkspaceCreateRequestFromK8s(obj, "dev-workspace", templateID)
+	if err == nil {
+		t.Fatal("expected error for invalid templateVersionID")
 	}
 }

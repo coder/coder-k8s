@@ -1,6 +1,7 @@
 package convert
 
 import (
+	"fmt"
 	"strconv"
 
 	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
@@ -68,7 +69,7 @@ func WorkspaceCreateRequestFromK8s(
 	obj *aggregationv1alpha1.CoderWorkspace,
 	workspaceName string,
 	templateID uuid.UUID,
-) codersdk.CreateWorkspaceRequest {
+) (codersdk.CreateWorkspaceRequest, error) {
 	if obj == nil {
 		panic("assertion failed: workspace object must not be nil")
 	}
@@ -87,15 +88,14 @@ func WorkspaceCreateRequestFromK8s(
 
 	if obj.Spec.TemplateVersionID == "" {
 		request.TemplateID = templateID
-		return request
+		return request, nil
 	}
 
 	templateVersionID, err := uuid.Parse(obj.Spec.TemplateVersionID)
 	if err != nil {
-		request.TemplateID = templateID
-		return request
+		return codersdk.CreateWorkspaceRequest{}, fmt.Errorf("invalid templateVersionID %q: %w", obj.Spec.TemplateVersionID, err)
 	}
 
 	request.TemplateVersionID = templateVersionID
-	return request
+	return request, nil
 }

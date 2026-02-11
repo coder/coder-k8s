@@ -222,7 +222,11 @@ func (s *WorkspaceStorage) Create(
 		)
 	}
 
-	request := convert.WorkspaceCreateRequestFromK8s(workspaceObj, workspaceName, template.ID)
+	request, err := convert.WorkspaceCreateRequestFromK8s(workspaceObj, workspaceName, template.ID)
+	if err != nil {
+		return nil, apierrors.NewBadRequest(fmt.Sprintf("invalid workspace spec: %v", err))
+	}
+
 	createdWorkspace, err := sdk.CreateUserWorkspace(ctx, userName, request)
 	if err != nil {
 		return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), workspaceObj.Name)
