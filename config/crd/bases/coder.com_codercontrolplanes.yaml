@@ -226,6 +226,22 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
+              operatorAccess:
+                default: {}
+                description: OperatorAccess configures bootstrap API access to the
+                  coderd instance.
+                properties:
+                  disabled:
+                    default: false
+                    description: |-
+                      Disabled turns off creation and management of the `coder-k8s-operator`
+                      user and API token.
+                    type: boolean
+                  generatedTokenSecretName:
+                    description: GeneratedTokenSecretName stores the generated operator
+                      API token.
+                    type: string
+                type: object
               replicas:
                 default: 1
                 description: Replicas is the desired number of control plane pods.
@@ -319,6 +335,24 @@ spec:
                   reflects.
                 format: int64
                 type: integer
+              operatorAccessReady:
+                description: OperatorAccessReady reports whether operator API access
+                  bootstrap succeeded.
+                type: boolean
+              operatorTokenSecretRef:
+                description: |-
+                  OperatorTokenSecretRef points to the Secret key containing the
+                  `coder-k8s-operator` API token.
+                properties:
+                  key:
+                    description: Key is the key inside the Secret data map.
+                    type: string
+                  name:
+                    description: Name is the Kubernetes Secret name.
+                    type: string
+                required:
+                - name
+                type: object
               phase:
                 description: Phase is a high-level readiness indicator.
                 type: string

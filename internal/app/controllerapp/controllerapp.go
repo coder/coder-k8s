@@ -86,8 +86,9 @@ func Run(ctx context.Context) error {
 	}
 
 	reconciler := &controller.CoderControlPlaneReconciler{
-		Client: client,
-		Scheme: managerScheme,
+		Client:                    client,
+		Scheme:                    managerScheme,
+		OperatorAccessProvisioner: coderbootstrap.NewPostgresOperatorAccessProvisioner(),
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create controller: %w", err)
