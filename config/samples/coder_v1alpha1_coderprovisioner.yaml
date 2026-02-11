@@ -1,0 +1,15 @@
+apiVersion: coder.com/v1alpha1
+kind: CoderProvisioner
+metadata:
+  name: coderprovisioner-sample
+  namespace: default
+spec:
+  controlPlaneRef:
+    name: codercontrolplane-sample
+  bootstrap:
+    credentialsSecretRef:
+      name: coder-bootstrap-token
+      key: token
+  tags:
+    scope: organization
+  replicas: 1
