@@ -1,3 +1,14 @@
+# CoderProvisioner sample manifest.
+#
+# Prerequisites:
+#   1. A CoderControlPlane resource must exist in the same namespace.
+#   2. Create the bootstrap credentials Secret with a valid Coder session token:
+#
+#      kubectl create secret generic coder-bootstrap-token \
+#        --namespace=default \
+#        --from-literal=token=<YOUR_SESSION_TOKEN>
+#
+#      IMPORTANT: Never commit real tokens to source control.
 apiVersion: coder.com/v1alpha1
 kind: CoderProvisioner
 metadata:
@@ -10,6 +21,18 @@ spec:
     credentialsSecretRef:
       name: coder-bootstrap-token
       key: token
+  # key:
+  #   name: my-provisioner-key    # Provisioner key name in coderd (defaults to CR name)
+  #   secretName: my-key-secret   # K8s Secret to store the key (defaults to "{name}-provisioner-key")
+  #   secretKey: key              # Data key in the Secret (defaults to "key")
+  # organizationName: default     # Coder organization (defaults to "default")
+  # image: ghcr.io/coder/coder:latest  # Container image (defaults to control plane image)
+  # replicas: 1
+  # extraArgs:
+  #   - --verbose
+  # extraEnv:
+  #   - name: CODER_VERBOSE
+  #     value: "true"
   tags:
     scope: organization
   replicas: 1
