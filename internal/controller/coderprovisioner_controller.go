@@ -97,15 +97,18 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
+	// Check whether a usable provisioner key secret already exists.
+	// The secret is considered "usable" only if the Secret object exists
+	// AND it contains a non-empty value at the configured data key.
 	secretNamespacedName := types.NamespacedName{Name: keySecretName, Namespace: provisioner.Namespace}
 	existingSecret := &corev1.Secret{}
-	secretExists := true
+	secretUsable := false
 	if err := r.Get(ctx, secretNamespacedName, existingSecret); err != nil {
-		if apierrors.IsNotFound(err) {
-			secretExists = false
-		} else {
+		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("get provisioner key secret %s: %w", secretNamespacedName, err)
 		}
+	} else {
+		secretUsable = len(existingSecret.Data[keySecretKey]) > 0
 	}
 
 	organizationID := provisioner.Status.OrganizationID
@@ -116,7 +119,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	keyMaterial := ""
-	if !secretExists {
+	if !secretUsable {
 		response, ensureErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
 			CoderURL:         controlPlane.Status.URL,
 			SessionToken:     sessionToken,
@@ -268,7 +271,12 @@ func (r *CoderProvisionerReconciler) reconcileDeletion(ctx context.Context, prov
 				organizationName,
 				keyName,
 			); deleteErr != nil {
-				return ctrl.Result{}, fmt.Errorf("delete provisioner key %q: %w", keyName, deleteErr)
+				// Treat key deletion failures as best-effort so the
+				// finalizer is still removed. Transient errors, auth
+				// issues, or org-lookup failures should not block CR
+				// cleanup.
+				log.Info("failed to delete remote provisioner key during deletion, proceeding with finalizer removal",
+					"keyName", keyName, "error", deleteErr)
 			}
 		}
 	}
