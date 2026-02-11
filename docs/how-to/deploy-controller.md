@@ -24,19 +24,23 @@ kubectl apply -f config/crd/bases/
 kubectl apply -f deploy/rbac.yaml
 ```
 
-## 4. Deploy the controller
+## 4. Deploy `coder-k8s`
 
 ```bash
-kubectl apply -f deploy/controller-deployment.yaml
+kubectl apply -f deploy/deployment.yaml
 ```
+
+`deploy/deployment.yaml` defaults to `--app=all`, which runs the controller, aggregated API server, and MCP server in a single pod.
+
+For split deployments, you can still run individual components by setting `--app=controller`, `--app=aggregated-apiserver`, or `--app=mcp-http` in the Deployment args.
 
 ## 5. Verify
 
 ```bash
-kubectl rollout status deployment/coder-k8s-controller -n coder-system
+kubectl rollout status deployment/coder-k8s -n coder-system
 kubectl get pods -n coder-system
 ```
 
 ## Customizing the image
 
-By default, `deploy/controller-deployment.yaml` uses `ghcr.io/coder/coder-k8s:latest`. For a different image tag, edit the deployment manifest before applying it.
+By default, `deploy/deployment.yaml` uses `ghcr.io/coder/coder-k8s:latest`. For a different image tag, edit the deployment manifest before applying it.

@@ -24,7 +24,7 @@ helm upgrade --install cnpg cnpg/cloudnative-pg \
   --create-namespace
 ```
 
-## 2. Install the coder-k8s controller
+## 2. Install `coder-k8s`
 
 Follow [Deploy the controller (in-cluster)](../../docs/how-to/deploy-controller.md), or run:
 
@@ -32,9 +32,11 @@ Follow [Deploy the controller (in-cluster)](../../docs/how-to/deploy-controller.
 kubectl create namespace coder-system
 kubectl apply -f config/crd/bases/
 kubectl apply -f deploy/rbac.yaml
-kubectl apply -f deploy/controller-deployment.yaml
-kubectl rollout status deployment/coder-k8s-controller -n coder-system
+kubectl apply -f deploy/deployment.yaml
+kubectl rollout status deployment/coder-k8s -n coder-system
 ```
+
+`deploy/deployment.yaml` defaults to `--app=all`, which runs the controller, aggregated API server, and MCP server in a single pod. For split deployments, you can set `--app=controller`, `--app=aggregated-apiserver`, or `--app=mcp-http` in the Deployment args.
 
 ## 3. Deploy this example
 
