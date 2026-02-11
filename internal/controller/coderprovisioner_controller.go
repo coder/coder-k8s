@@ -544,11 +544,18 @@ func (r *CoderProvisionerReconciler) reconcileDeletion(ctx context.Context, prov
 	// CR does not get stuck in Terminating. This is common during
 	// namespace teardown, when the control plane was never ready, or
 	// when credentials were misconfigured.
-	controlPlane, err := r.fetchControlPlane(ctx, provisioner)
-	if err != nil {
-		log.Info("unable to reach referenced CoderControlPlane during deletion, skipping remote key cleanup",
-			"controlPlaneRef", provisioner.Spec.ControlPlaneRef.Name, "error", err)
-	} else {
+	controlPlaneURL := provisioner.Status.ControlPlaneURL
+	if controlPlaneURL == "" {
+		controlPlane, err := r.fetchControlPlane(ctx, provisioner)
+		if err != nil {
+			log.Info("unable to reach referenced CoderControlPlane during deletion, skipping remote key cleanup",
+				"controlPlaneRef", provisioner.Spec.ControlPlaneRef.Name, "error", err)
+		} else {
+			controlPlaneURL = controlPlane.Status.URL
+		}
+	}
+
+	if controlPlaneURL != "" {
 		sessionToken, tokenErr := r.readBootstrapSessionToken(ctx, provisioner)
 		if tokenErr != nil {
 			log.Info("unable to read bootstrap credentials during deletion, skipping remote key cleanup",
@@ -556,7 +563,7 @@ func (r *CoderProvisionerReconciler) reconcileDeletion(ctx context.Context, prov
 		} else {
 			if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
 				ctx,
-				controlPlane.Status.URL,
+				controlPlaneURL,
 				sessionToken,
 				organizationName,
 				keyName,
