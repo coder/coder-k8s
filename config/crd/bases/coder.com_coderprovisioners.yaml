@@ -14,7 +14,17 @@ spec:
     singular: coderprovisioner
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.readyReplicas
+      name: Replicas
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: CoderProvisioner is the schema for Coder external provisioner
@@ -268,19 +278,23 @@ spec:
                   name:
                     description: Name is the provisioner key name in coderd. Defaults
                       to the CR name.
+                    maxLength: 128
                     type: string
                   secretKey:
                     description: SecretKey is the data key in the Secret. Defaults
                       to "key".
+                    maxLength: 253
                     type: string
                   secretName:
                     description: SecretName is the Kubernetes Secret to store the
                       key. Defaults to "{crName}-provisioner-key".
+                    maxLength: 253
                     type: string
                 type: object
               organizationName:
                 description: OrganizationName is the Coder organization. Defaults
                   to "default".
+                maxLength: 128
                 type: string
               replicas:
                 description: Replicas is the desired number of provisioner pods.
@@ -362,6 +376,8 @@ spec:
             description: CoderProvisionerStatus defines the observed state of a CoderProvisioner.
             properties:
               conditions:
+                description: Conditions are Kubernetes-standard conditions for this
+                  resource.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -418,21 +434,37 @@ spec:
                   type: object
                 type: array
               observedGeneration:
+                description: ObservedGeneration tracks the spec generation this status
+                  reflects.
                 format: int64
                 type: integer
               organizationID:
+                description: OrganizationID is the organization ID last applied to
+                  the provisioner key.
+                type: string
+              organizationName:
+                description: OrganizationName is the organization name last applied
+                  to the provisioner key.
                 type: string
               phase:
+                description: Phase is a high-level readiness indicator.
                 type: string
               provisionerKeyID:
+                description: ProvisionerKeyID is the provisioner key ID last applied
+                  in coderd.
                 type: string
               provisionerKeyName:
+                description: ProvisionerKeyName is the provisioner key name last applied
+                  in coderd.
                 type: string
               readyReplicas:
+                description: ReadyReplicas is the number of ready pods observed in
+                  the deployment.
                 format: int32
                 type: integer
               secretRef:
-                description: SecretKeySelector identifies a key in a Secret.
+                description: SecretRef references the provisioner key secret data
+                  currently in use.
                 properties:
                   key:
                     description: Key is the key inside the Secret data map.
@@ -443,6 +475,10 @@ spec:
                 required:
                 - name
                 type: object
+              tagsHash:
+                description: TagsHash is a deterministic hash of spec.tags last applied
+                  to the provisioner key.
+                type: string
             type: object
         type: object
     served: true
