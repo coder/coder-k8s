@@ -433,6 +433,10 @@ spec:
                   - type
                   type: object
                 type: array
+              controlPlaneRefName:
+                description: ControlPlaneRefName is the control plane ref name last
+                  applied to the provisioner key.
+                type: string
               observedGeneration:
                 description: ObservedGeneration tracks the spec generation this status
                   reflects.

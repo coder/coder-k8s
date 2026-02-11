@@ -130,13 +130,16 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	)
 
 	desiredTagsHash := hashProvisionerTags(provisioner.Spec.Tags)
+	desiredControlPlaneRefName := provisioner.Spec.ControlPlaneRef.Name
 	status := provisioner.Status
 	orgDrift := status.OrganizationName != "" && status.OrganizationName != organizationName
 	keyNameDrift := status.ProvisionerKeyName != "" && status.ProvisionerKeyName != keyName
 	tagsDrift := status.TagsHash != "" && status.TagsHash != desiredTagsHash
-	driftDetected := orgDrift || keyNameDrift || tagsDrift
+	controlPlaneRefDrift := status.ControlPlaneRefName != "" && status.ControlPlaneRefName != desiredControlPlaneRefName
+	driftDetected := orgDrift || keyNameDrift || tagsDrift || controlPlaneRefDrift
 	appliedOrgName := provisioner.Status.OrganizationName
 	appliedTagsHash := provisioner.Status.TagsHash
+	appliedControlPlaneRefName := provisioner.Status.ControlPlaneRefName
 
 	// Check whether a usable provisioner key secret already exists.
 	// The secret is considered "usable" only if the Secret object exists
@@ -163,7 +166,8 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	keyMaterial := ""
 	if driftDetected {
 		log.Info("spec drift detected, rotating provisioner key",
-			"orgDrift", orgDrift, "keyNameDrift", keyNameDrift, "tagsDrift", tagsDrift)
+			"orgDrift", orgDrift, "keyNameDrift", keyNameDrift, "tagsDrift", tagsDrift,
+			"controlPlaneRefDrift", controlPlaneRefDrift)
 
 		oldOrg := provisioner.Status.OrganizationName
 		if oldOrg == "" {
@@ -256,6 +260,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		appliedOrgName = organizationName
 		appliedTagsHash = desiredTagsHash
+		appliedControlPlaneRefName = desiredControlPlaneRefName
 		setCondition(
 			provisioner,
 			coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
@@ -339,6 +344,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		appliedOrgName = organizationName
 		appliedTagsHash = desiredTagsHash
+		appliedControlPlaneRefName = desiredControlPlaneRefName
 		setCondition(
 			provisioner,
 			coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
@@ -346,7 +352,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			"ProvisionerKeyReady",
 			"Provisioner key is available in coderd",
 		)
-	} else if status.OrganizationName == "" || status.TagsHash == "" {
+	} else if status.OrganizationName == "" || status.TagsHash == "" || status.ControlPlaneRefName == "" {
 		// Secret is usable and no drift detected, but status metadata is empty
 		// (e.g. upgrade from older version). Call EnsureProvisionerKey to populate
 		// IDs and key name. If coderd reports an existing key (no plaintext key
@@ -377,6 +383,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			keyMaterial = response.Key
 			appliedOrgName = organizationName
 			appliedTagsHash = desiredTagsHash
+			appliedControlPlaneRefName = desiredControlPlaneRefName
 		} else {
 			// Key already exists; tags may be stale. Rotate to ensure desired tags are applied.
 			log.Info("existing key found during metadata backfill, rotating to ensure desired tags",
@@ -419,6 +426,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			}
 			appliedOrgName = organizationName
 			appliedTagsHash = desiredTagsHash
+			appliedControlPlaneRefName = desiredControlPlaneRefName
 		}
 		setCondition(
 			provisioner,
@@ -489,6 +497,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		provisionerKeyID,
 		provisionerKeyName,
 		appliedTagsHash,
+		appliedControlPlaneRefName,
 	); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -643,10 +652,6 @@ func (r *CoderProvisionerReconciler) ensureProvisionerKeySecret(
 		return nil, fmt.Errorf("reconcile provisioner key secret %q: %w", secretName, err)
 	}
 
-	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: provisioner.Namespace}, secret); err != nil {
-		return nil, fmt.Errorf("get reconciled provisioner key secret %q: %w", secretName, err)
-	}
-
 	return secret, nil
 }
 
@@ -668,10 +673,6 @@ func (r *CoderProvisionerReconciler) reconcileServiceAccount(
 	})
 	if err != nil {
 		return nil, fmt.Errorf("reconcile serviceaccount %q: %w", serviceAccountName, err)
-	}
-
-	if err := r.Get(ctx, types.NamespacedName{Name: serviceAccount.Name, Namespace: serviceAccount.Namespace}, serviceAccount); err != nil {
-		return nil, fmt.Errorf("get reconciled serviceaccount %q: %w", serviceAccountName, err)
 	}
 
 	return serviceAccount, nil
@@ -700,10 +701,6 @@ func (r *CoderProvisionerReconciler) reconcileRole(
 	})
 	if err != nil {
 		return nil, fmt.Errorf("reconcile role %q: %w", roleName, err)
-	}
-
-	if err := r.Get(ctx, types.NamespacedName{Name: role.Name, Namespace: role.Namespace}, role); err != nil {
-		return nil, fmt.Errorf("get reconciled role %q: %w", roleName, err)
 	}
 
 	return role, nil
@@ -739,10 +736,6 @@ func (r *CoderProvisionerReconciler) reconcileRoleBinding(
 	})
 	if err != nil {
 		return nil, fmt.Errorf("reconcile rolebinding %q: %w", roleBindingName, err)
-	}
-
-	if err := r.Get(ctx, types.NamespacedName{Name: roleBinding.Name, Namespace: roleBinding.Namespace}, roleBinding); err != nil {
-		return nil, fmt.Errorf("get reconciled rolebinding %q: %w", roleBindingName, err)
 	}
 
 	return roleBinding, nil
@@ -825,10 +818,6 @@ func (r *CoderProvisionerReconciler) reconcileDeployment(
 		return nil, fmt.Errorf("reconcile provisioner deployment: %w", err)
 	}
 
-	if err := r.Get(ctx, types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}, deployment); err != nil {
-		return nil, fmt.Errorf("get reconciled deployment %q: %w", deployment.Name, err)
-	}
-
 	return deployment, nil
 }
 
@@ -842,6 +831,7 @@ func (r *CoderProvisionerReconciler) reconcileStatus(
 	provisionerKeyID string,
 	provisionerKeyName string,
 	tagsHash string,
+	controlPlaneRefName string,
 ) error {
 	// Take a snapshot before mutation so status writes are skipped when no fields changed.
 	previousStatus := provisioner.Status.DeepCopy()
@@ -860,6 +850,7 @@ func (r *CoderProvisionerReconciler) reconcileStatus(
 	provisioner.Status.ProvisionerKeyID = provisionerKeyID
 	provisioner.Status.ProvisionerKeyName = provisionerKeyName
 	provisioner.Status.TagsHash = tagsHash
+	provisioner.Status.ControlPlaneRefName = controlPlaneRefName
 	provisioner.Status.SecretRef = &coderv1alpha1.SecretKeySelector{
 		Name: secretRef.Name,
 		Key:  secretRef.Key,
