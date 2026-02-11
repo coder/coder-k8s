@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -11,6 +12,7 @@ import (
 	genericoptions "k8s.io/apiserver/pkg/server/options"
 
 	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
+	coderhelper "github.com/coder/coder-k8s/internal/aggregated/coder"
 )
 
 func TestNewSchemeRegistersAggregationKinds(t *testing.T) {
@@ -67,7 +69,19 @@ func TestInstallAPIGroupRegistersDiscovery(t *testing.T) {
 	}
 	defer server.Destroy()
 
-	apiGroupInfo, err := NewAPIGroupInfo(scheme, codecs)
+	coderURL, err := url.Parse("http://localhost:8080")
+	if err != nil {
+		t.Fatalf("parse test coder URL: %v", err)
+	}
+	provider, err := coderhelper.NewStaticClientProvider(coderhelper.Config{
+		CoderURL:     coderURL,
+		SessionToken: "test-session-token",
+	})
+	if err != nil {
+		t.Fatalf("build static client provider: %v", err)
+	}
+
+	apiGroupInfo, err := NewAPIGroupInfo(scheme, codecs, provider)
 	if err != nil {
 		t.Fatalf("build API group info: %v", err)
 	}

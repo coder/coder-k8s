@@ -4,6 +4,9 @@ package apiserverapp
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/url"
+	"time"
 
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,6 +26,7 @@ import (
 	"k8s.io/kube-openapi/pkg/validation/spec"
 
 	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
+	"github.com/coder/coder-k8s/internal/aggregated/coder"
 	"github.com/coder/coder-k8s/internal/aggregated/storage"
 )
 
@@ -31,6 +35,20 @@ const (
 	DefaultSecureServingPort = 6443
 	serverName               = "coder-k8s-aggregated-apiserver"
 )
+
+// Options configures aggregated-apiserver bootstrap behavior.
+type Options struct {
+	// SecureServingPort used when Listener is nil. Default: DefaultSecureServingPort.
+	SecureServingPort int
+	// Listener allows tests to bind to 127.0.0.1:0.
+	Listener net.Listener
+	// CoderURL is an optional fallback URL when CoderControlPlane status has no URL.
+	CoderURL string
+	// CoderSessionToken is the admin session token.
+	CoderSessionToken string
+	// CoderRequestTimeout for SDK calls. Default 30s.
+	CoderRequestTimeout time.Duration
+}
 
 // NewScheme builds the runtime scheme used by the aggregated API server.
 func NewScheme() *runtime.Scheme {
@@ -96,9 +114,16 @@ func NewRecommendedConfig(
 }
 
 // NewAPIGroupInfo creates APIGroupInfo for the aggregation.coder.com API group.
-func NewAPIGroupInfo(scheme *runtime.Scheme, codecs serializer.CodecFactory) (*genericapiserver.APIGroupInfo, error) {
+func NewAPIGroupInfo(
+	scheme *runtime.Scheme,
+	codecs serializer.CodecFactory,
+	provider coder.ClientProvider,
+) (*genericapiserver.APIGroupInfo, error) {
 	if scheme == nil {
 		return nil, fmt.Errorf("assertion failed: scheme must not be nil")
+	}
+	if provider == nil {
+		return nil, fmt.Errorf("assertion failed: coder client provider must not be nil")
 	}
 
 	parameterCodec := runtime.NewParameterCodec(scheme)
@@ -109,8 +134,8 @@ func NewAPIGroupInfo(scheme *runtime.Scheme, codecs serializer.CodecFactory) (*g
 		codecs,
 	)
 	apiGroupInfo.VersionedResourcesStorageMap[aggregationv1alpha1.SchemeGroupVersion.Version] = map[string]rest.Storage{
-		"coderworkspaces": storage.NewWorkspaceStorage(),
-		"codertemplates":  storage.NewTemplateStorage(),
+		"coderworkspaces": storage.NewWorkspaceStorage(provider),
+		"codertemplates":  storage.NewTemplateStorage(provider),
 	}
 	return &apiGroupInfo, nil
 }
@@ -146,8 +171,47 @@ func NewGenericAPIServer(recommendedConfig *genericapiserver.RecommendedConfig) 
 
 // Run starts the aggregated API server application mode.
 func Run(ctx context.Context) error {
+	return RunWithOptions(ctx, Options{})
+}
+
+// RunWithOptions starts the aggregated API server application mode.
+func RunWithOptions(ctx context.Context, opts Options) error {
 	if ctx == nil {
 		return fmt.Errorf("assertion failed: context must not be nil")
+	}
+	if opts.CoderURL == "" {
+		return fmt.Errorf("assertion failed: coder URL must not be empty")
+	}
+	if opts.CoderSessionToken == "" {
+		return fmt.Errorf("assertion failed: coder session token must not be empty")
+	}
+	if opts.CoderRequestTimeout < 0 {
+		return fmt.Errorf("assertion failed: coder request timeout must not be negative")
+	}
+
+	parsedCoderURL, err := url.Parse(opts.CoderURL)
+	if err != nil {
+		return fmt.Errorf("parse coder URL %q: %w", opts.CoderURL, err)
+	}
+	if parsedCoderURL == nil {
+		return fmt.Errorf("assertion failed: parsed coder URL must not be nil")
+	}
+
+	requestTimeout := opts.CoderRequestTimeout
+	if requestTimeout == 0 {
+		requestTimeout = 30 * time.Second
+	}
+
+	provider, err := coder.NewStaticClientProvider(coder.Config{
+		CoderURL:       parsedCoderURL,
+		SessionToken:   opts.CoderSessionToken,
+		RequestTimeout: requestTimeout,
+	})
+	if err != nil {
+		return fmt.Errorf("build coder client provider: %w", err)
+	}
+	if provider == nil {
+		return fmt.Errorf("assertion failed: coder client provider is nil after successful construction")
 	}
 
 	scheme := NewScheme()
@@ -157,7 +221,18 @@ func Run(ctx context.Context) error {
 
 	codecs := serializer.NewCodecFactory(scheme)
 	secureServingOptions := genericoptions.NewSecureServingOptions()
-	secureServingOptions.BindPort = DefaultSecureServingPort
+	secureServingPort := opts.SecureServingPort
+	if secureServingPort == 0 {
+		secureServingPort = DefaultSecureServingPort
+	}
+	if secureServingPort < 0 {
+		return fmt.Errorf("assertion failed: secure serving port must not be negative")
+	}
+	secureServingOptions.BindPort = secureServingPort
+	if opts.Listener != nil {
+		secureServingOptions.Listener = opts.Listener
+		secureServingOptions.BindPort = 0
+	}
 	secureServingOptions.ServerCert.CertDirectory = ""
 	secureServingOptions.ServerCert.PairName = ""
 
@@ -171,7 +246,7 @@ func Run(ctx context.Context) error {
 		return err
 	}
 
-	apiGroupInfo, err := NewAPIGroupInfo(scheme, codecs)
+	apiGroupInfo, err := NewAPIGroupInfo(scheme, codecs, provider)
 	if err != nil {
 		return fmt.Errorf("build API group info: %w", err)
 	}

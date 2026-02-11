@@ -5,10 +5,12 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/app/apiserverapp"
 	"github.com/coder/coder-k8s/internal/app/controllerapp"
 	"github.com/coder/coder-k8s/internal/controller"
 )
@@ -102,15 +104,29 @@ func TestRunDispatchesAggregatedAPIServerMode(t *testing.T) {
 
 	expectedErr := errors.New("sentinel aggregated-apiserver error")
 	called := false
-	runAggregatedAPIServerApp = func(ctx context.Context) error {
+	runAggregatedAPIServerApp = func(ctx context.Context, opts apiserverapp.Options) error {
 		called = true
 		if ctx == nil {
 			t.Fatal("expected non-nil context passed to aggregated apiserver runner")
 		}
+		if got, want := opts.CoderURL, "https://coder.example.com"; got != want {
+			t.Fatalf("expected coder URL %q, got %q", want, got)
+		}
+		if got, want := opts.CoderSessionToken, "test-token"; got != want {
+			t.Fatalf("expected coder session token %q, got %q", want, got)
+		}
+		if got, want := opts.CoderRequestTimeout, 45*time.Second; got != want {
+			t.Fatalf("expected coder request timeout %v, got %v", want, got)
+		}
 		return expectedErr
 	}
 
-	err := run([]string{"--app=aggregated-apiserver"})
+	err := run([]string{
+		"--app=aggregated-apiserver",
+		"--coder-url=https://coder.example.com",
+		"--coder-session-token=test-token",
+		"--coder-request-timeout=45s",
+	})
 	if !called {
 		t.Fatal("expected aggregated apiserver runner to be called")
 	}
