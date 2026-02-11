@@ -13,17 +13,27 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `spec.running` | `bool` | Running indicates whether the workspace should be running. |
+| `spec.organization` | `string` | Organization is the Coder organization name. |
+| `spec.templateName` | `string` | TemplateName resolves via TemplateByName(organization, templateName). |
+| `spec.templateVersionID` | `string` | TemplateVersionID optionally pins to a specific template version. |
+| `spec.running` | `bool` | Running drives start/stop via CreateWorkspaceBuild. |
+| `spec.ttlMillis` | `int64` |  |
+| `spec.autostartSchedule` | `string` |  |
 
 ## Status
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `status.autoShutdown` | `metav1.Time` | AutoShutdown is the next planned shutdown time for the workspace. |
+| `status.id` | `string` |  |
+| `status.ownerName` | `string` |  |
+| `status.organizationName` | `string` |  |
+| `status.templateName` | `string` |  |
+| `status.latestBuildID` | `string` |  |
+| `status.latestBuildStatus` | `string` |  |
+| `status.autoShutdown` | `metav1.Time` |  |
+| `status.lastUsedAt` | `metav1.Time` |  |
 
 ## Source
 
 - Go type: `api/aggregation/v1alpha1/types.go`
-- Storage implementation: `internal/aggregated/storage/workspace.go`
-
 - APIService registration manifest: `deploy/apiserver-apiservice.yaml`
