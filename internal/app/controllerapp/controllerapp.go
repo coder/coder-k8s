@@ -102,6 +102,15 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("unable to create workspace proxy controller: %w", err)
 	}
 
+	provisionerReconciler := &controller.CoderProvisionerReconciler{
+		Client:          client,
+		Scheme:          managerScheme,
+		BootstrapClient: coderbootstrap.NewSDKClient(),
+	}
+	if err := provisionerReconciler.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create provisioner controller: %w", err)
+	}
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return fmt.Errorf("unable to set up health check: %w", err)
 	}
