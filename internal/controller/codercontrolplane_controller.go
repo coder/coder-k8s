@@ -350,12 +350,13 @@ func (r *CoderControlPlaneReconciler) cleanupDisabledOperatorAccess(
 		return fmt.Errorf("get operator token secret %q while disabling operator access: %w", operatorTokenSecretName, err)
 	}
 
-	cleanupRequired := secretExists || coderControlPlane.Status.OperatorTokenSecretRef != nil
+	managedSecretExists := secretExists && isManagedOperatorTokenSecret(secret, coderControlPlane)
+	cleanupRequired := managedSecretExists || coderControlPlane.Status.OperatorTokenSecretRef != nil
 	if !cleanupRequired {
 		return nil
 	}
 
-	if secretExists {
+	if managedSecretExists {
 		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("delete operator token secret %q while disabling operator access: %w", operatorTokenSecretName, err)
 		}
@@ -378,6 +379,22 @@ func (r *CoderControlPlaneReconciler) cleanupDisabledOperatorAccess(
 	}
 
 	return nil
+}
+
+func isManagedOperatorTokenSecret(secret *corev1.Secret, coderControlPlane *coderv1alpha1.CoderControlPlane) bool {
+	if secret == nil || coderControlPlane == nil {
+		return false
+	}
+
+	ownerReference := metav1.GetControllerOf(secret)
+	if ownerReference == nil {
+		return false
+	}
+
+	return ownerReference.APIVersion == coderv1alpha1.GroupVersion.String() &&
+		ownerReference.Kind == "CoderControlPlane" &&
+		ownerReference.Name == coderControlPlane.Name &&
+		ownerReference.UID == coderControlPlane.UID
 }
 
 func (r *CoderControlPlaneReconciler) resolvePostgresURLFromExtraEnv(

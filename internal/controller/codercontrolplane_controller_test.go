@@ -505,6 +505,75 @@ func TestReconcile_OperatorAccess_Disabled(t *testing.T) {
 	}
 }
 
+func TestReconcile_OperatorAccess_Disabled_DoesNotDeleteUnmanagedSecret(t *testing.T) {
+	ctx := context.Background()
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-operator-access-disabled-unmanaged-secret",
+			Namespace: "default",
+		},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image:          "test-operator-disabled-unmanaged-secret:latest",
+			OperatorAccess: coderv1alpha1.OperatorAccessSpec{Disabled: true},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("failed to create test CoderControlPlane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	unmanagedSecretName := cp.Name + "-operator-token"
+	unmanagedSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: unmanagedSecretName, Namespace: cp.Namespace},
+		Type:       corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			coderv1alpha1.DefaultTokenSecretKey: []byte("unmanaged-token"),
+		},
+	}
+	if err := k8sClient.Create(ctx, unmanagedSecret); err != nil {
+		t.Fatalf("failed to create unmanaged operator secret: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, unmanagedSecret)
+	})
+
+	provisioner := &fakeOperatorAccessProvisioner{}
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+
+	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}})
+	if err != nil {
+		t.Fatalf("reconcile disabled control plane with unmanaged secret: %v", err)
+	}
+	if result != (ctrl.Result{}) {
+		t.Fatalf("expected empty reconcile result for unmanaged secret, got %+v", result)
+	}
+	if provisioner.revokeCalls != 0 {
+		t.Fatalf("expected revoke not to run for unmanaged secret, got %d calls", provisioner.revokeCalls)
+	}
+
+	reconciledSecret := &corev1.Secret{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: unmanagedSecretName, Namespace: cp.Namespace}, reconciledSecret); err != nil {
+		t.Fatalf("expected unmanaged secret to remain, got error %v", err)
+	}
+	if got := string(reconciledSecret.Data[coderv1alpha1.DefaultTokenSecretKey]); got != "unmanaged-token" {
+		t.Fatalf("expected unmanaged secret token %q, got %q", "unmanaged-token", got)
+	}
+
+	reconciled := &coderv1alpha1.CoderControlPlane{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, reconciled); err != nil {
+		t.Fatalf("get reconciled control plane: %v", err)
+	}
+	if reconciled.Status.OperatorAccessReady {
+		t.Fatalf("expected operator access ready=false when disabled")
+	}
+	if reconciled.Status.OperatorTokenSecretRef != nil {
+		t.Fatalf("expected operator token secret ref to stay nil for unmanaged secret")
+	}
+}
+
 func TestReconcile_OperatorAccess_Disabled_RevokesTokenAndDeletesSecret(t *testing.T) {
 	ctx := context.Background()
 
@@ -530,8 +599,18 @@ func TestReconcile_OperatorAccess_Disabled_RevokesTokenAndDeletesSecret(t *testi
 
 	managedSecretName := cp.Name + "-operator-token"
 	managedSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: managedSecretName, Namespace: cp.Namespace},
-		Type:       corev1.SecretTypeOpaque,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      managedSecretName,
+			Namespace: cp.Namespace,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: coderv1alpha1.GroupVersion.String(),
+				Kind:       "CoderControlPlane",
+				Name:       cp.Name,
+				UID:        cp.UID,
+				Controller: ptrTo(true),
+			}},
+		},
+		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			coderv1alpha1.DefaultTokenSecretKey: []byte("stale-operator-token"),
 		},
@@ -613,8 +692,18 @@ func TestReconcile_OperatorAccess_Disabled_RetriesRevocationAfterFailure(t *test
 
 	managedSecretName := cp.Name + "-operator-token"
 	managedSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: managedSecretName, Namespace: cp.Namespace},
-		Type:       corev1.SecretTypeOpaque,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      managedSecretName,
+			Namespace: cp.Namespace,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: coderv1alpha1.GroupVersion.String(),
+				Kind:       "CoderControlPlane",
+				Name:       cp.Name,
+				UID:        cp.UID,
+				Controller: ptrTo(true),
+			}},
+		},
+		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			coderv1alpha1.DefaultTokenSecretKey: []byte("stale-operator-token"),
 		},
@@ -912,6 +1001,10 @@ func TestReconcile_OperatorAccess_ResolvesPostgresURLFromSecretRef(t *testing.T)
 	if reconciled.Status.OperatorTokenSecretRef.Name != "test-operator-custom-token" {
 		t.Fatalf("expected operator token secret ref name %q, got %q", "test-operator-custom-token", reconciled.Status.OperatorTokenSecretRef.Name)
 	}
+}
+
+func ptrTo[T any](value T) *T {
+	return &value
 }
 
 func assertSingleControllerOwnerReference(t *testing.T, ownerReferences []metav1.OwnerReference, ownerName string) {
