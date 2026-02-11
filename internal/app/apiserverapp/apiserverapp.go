@@ -92,12 +92,15 @@ func buildClientProvider(opts Options, requestTimeout time.Duration) (coder.Clie
 		missing = append(missing, "coder session token")
 	}
 	if len(missing) > 0 {
-		return &errClientProvider{
-			serviceUnavailableMessage: fmt.Sprintf(
-				"coder client provider is not configured: missing %s; configure --coder-url and --coder-session-token",
-				strings.Join(missing, " and "),
-			),
-		}, nil
+		message := fmt.Sprintf(
+			"coder client provider is not configured: missing %s; configure --coder-url and --coder-session-token",
+			strings.Join(missing, " and "),
+		)
+		if len(missing) == 2 {
+			return &errClientProvider{serviceUnavailableMessage: message}, nil
+		}
+
+		return nil, fmt.Errorf("coder client provider is partially configured: %s", message)
 	}
 
 	coderNamespace := strings.TrimSpace(opts.CoderNamespace)

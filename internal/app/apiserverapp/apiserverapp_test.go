@@ -151,6 +151,51 @@ func TestBuildClientProviderDefersMissingCoderConfigAsServiceUnavailable(t *test
 	}
 }
 
+func TestBuildClientProviderRejectsPartialCoderConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		opts Options
+	}{
+		{
+			name: "missing coder URL",
+			opts: Options{CoderSessionToken: "test-session-token"},
+		},
+		{
+			name: "missing coder session token",
+			opts: Options{CoderURL: "https://coder.example.com"},
+		},
+	}
+
+	for _, testCase := range tests {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := buildClientProvider(testCase.opts, 30*time.Second)
+			if err == nil {
+				t.Fatal("expected partial coder config to fail")
+			}
+			if !strings.Contains(err.Error(), "partially configured") {
+				t.Fatalf("expected partial-config error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestRunWithOptionsRejectsPartialCoderConfig(t *testing.T) {
+	t.Parallel()
+
+	err := RunWithOptions(context.Background(), Options{CoderURL: "https://coder.example.com"})
+	if err == nil {
+		t.Fatal("expected partial coder config to fail startup")
+	}
+	if !strings.Contains(err.Error(), "partially configured") {
+		t.Fatalf("expected partial-config startup error, got %v", err)
+	}
+}
+
 func TestBuildClientProviderRejectsMissingCoderNamespaceWhenBackendConfigured(t *testing.T) {
 	t.Parallel()
 
