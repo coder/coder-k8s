@@ -697,8 +697,8 @@ func TestWorkspaceStorageCRUDWithCoderSDK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected workspace delete to succeed: %v", err)
 	}
-	if !deleted {
-		t.Fatal("expected delete to report deleted=true")
+	if deleted {
+		t.Fatal("expected delete to report deleted=false for async delete transition")
 	}
 	if !containsTransition(state.buildTransitionsSnapshot(), codersdk.WorkspaceTransitionDelete) {
 		t.Fatal("expected delete to queue delete transition")

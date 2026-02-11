@@ -481,7 +481,9 @@ func (s *WorkspaceStorage) Delete(
 		return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), name)
 	}
 
-	return &metav1.Status{Status: metav1.StatusSuccess}, true, nil
+	// Deletion is asynchronous in Coder: we only enqueue a delete build transition here.
+	// Report deleted=false so Kubernetes callers know the resource is not gone yet.
+	return &metav1.Status{Status: metav1.StatusSuccess}, false, nil
 }
 
 // ConvertToTable converts a workspace object or list into kubectl table output.
