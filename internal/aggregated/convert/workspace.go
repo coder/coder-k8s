@@ -35,6 +35,7 @@ func WorkspaceToK8s(namespace string, w codersdk.Workspace) *aggregationv1alpha1
 		Spec: aggregationv1alpha1.CoderWorkspaceSpec{
 			Organization:      w.OrganizationName,
 			TemplateName:      w.TemplateName,
+			TemplateVersionID: w.LatestBuild.TemplateVersionID.String(),
 			Running:           workspaceRunning(w),
 			TTLMillis:         w.TTLMillis,
 			AutostartSchedule: w.AutostartSchedule,

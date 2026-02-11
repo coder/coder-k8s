@@ -412,6 +412,77 @@ func TestWorkspaceStorageUpdateRejectsNonRunningSpecChanges(t *testing.T) {
 	}
 }
 
+func TestWorkspaceStorageUpdateAllowsPinnedTemplateVersionIDWhenTogglingRunning(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	workspaceStorage := NewWorkspaceStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	currentObj, err := workspaceStorage.Get(ctx, "acme.alice.dev-workspace", nil)
+	if err != nil {
+		t.Fatalf("expected workspace get to succeed: %v", err)
+	}
+
+	currentWorkspace, ok := currentObj.(*aggregationv1alpha1.CoderWorkspace)
+	if !ok {
+		t.Fatalf("expected *CoderWorkspace from get, got %T", currentObj)
+	}
+
+	templateVersionID, ok := state.workspaceLatestBuildTemplateVersionID("alice", "dev-workspace")
+	if !ok {
+		t.Fatal("expected workspace template version ID in mock server state")
+	}
+	if templateVersionID == uuid.Nil {
+		t.Fatal("expected workspace template version ID to be non-nil")
+	}
+
+	desiredWorkspace := currentWorkspace.DeepCopy()
+	desiredWorkspace.Spec.TemplateVersionID = templateVersionID.String()
+	desiredWorkspace.Spec.Running = !currentWorkspace.Spec.Running
+
+	updatedObj, created, err := workspaceStorage.Update(
+		ctx,
+		desiredWorkspace.Name,
+		testUpdatedObjectInfo{obj: desiredWorkspace},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected workspace update to succeed when templateVersionID is unchanged: %v", err)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+
+	updatedWorkspace, ok := updatedObj.(*aggregationv1alpha1.CoderWorkspace)
+	if !ok {
+		t.Fatalf("expected *CoderWorkspace from update, got %T", updatedObj)
+	}
+	if updatedWorkspace.Spec.Running != desiredWorkspace.Spec.Running {
+		t.Fatalf("expected updated running=%t, got %t", desiredWorkspace.Spec.Running, updatedWorkspace.Spec.Running)
+	}
+	if updatedWorkspace.Spec.TemplateVersionID != templateVersionID.String() {
+		t.Fatalf(
+			"expected updated templateVersionID %q, got %q",
+			templateVersionID.String(),
+			updatedWorkspace.Spec.TemplateVersionID,
+		)
+	}
+
+	expectedTransition := codersdk.WorkspaceTransitionStop
+	if desiredWorkspace.Spec.Running {
+		expectedTransition = codersdk.WorkspaceTransitionStart
+	}
+	if !containsTransition(state.buildTransitionsSnapshot(), expectedTransition) {
+		t.Fatalf("expected update to queue %q transition", expectedTransition)
+	}
+}
+
 func TestWorkspaceStorageUpdateRejectsStaleResourceVersion(t *testing.T) {
 	t.Parallel()
 
@@ -1050,6 +1121,28 @@ func (s *mockCoderServerState) hasWorkspace(owner, workspaceName string) bool {
 	}
 	_, ok = userWorkspaces[workspaceName]
 	return ok
+}
+
+func (s *mockCoderServerState) workspaceLatestBuildTemplateVersionID(owner, workspaceName string) (uuid.UUID, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	userWorkspaces, ok := s.workspaceIDsByUser[owner]
+	if !ok {
+		return uuid.Nil, false
+	}
+
+	workspaceID, ok := userWorkspaces[workspaceName]
+	if !ok {
+		return uuid.Nil, false
+	}
+
+	workspace, ok := s.workspacesByID[workspaceID]
+	if !ok {
+		return uuid.Nil, false
+	}
+
+	return workspace.LatestBuild.TemplateVersionID, true
 }
 
 func (s *mockCoderServerState) buildTransitionsSnapshot() []codersdk.WorkspaceTransition {
