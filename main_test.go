@@ -9,6 +9,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/app/apiserverapp"
 	"github.com/coder/coder-k8s/internal/app/controllerapp"
@@ -41,6 +42,8 @@ func TestControllerSchemeRegistersCoderControlPlaneKinds(t *testing.T) {
 		coderv1alpha1.GroupVersion.WithKind("CoderControlPlaneList"),
 		coderv1alpha1.GroupVersion.WithKind("WorkspaceProxy"),
 		coderv1alpha1.GroupVersion.WithKind("WorkspaceProxyList"),
+		aggregationv1alpha1.SchemeGroupVersion.WithKind("CoderWorkspace"),
+		aggregationv1alpha1.SchemeGroupVersion.WithKind("CoderWorkspaceList"),
 	} {
 		if !scheme.Recognizes(gvk) {
 			t.Fatalf("expected scheme to recognize %s", gvk.String())
