@@ -35,9 +35,11 @@ type RegisterWorkspaceProxyResponse struct {
 // Client provides optional bootstrap operations against the Coder API.
 type Client interface {
 	EnsureWorkspaceProxy(context.Context, RegisterWorkspaceProxyRequest) (RegisterWorkspaceProxyResponse, error)
+	EnsureProvisionerKey(context.Context, EnsureProvisionerKeyRequest) (EnsureProvisionerKeyResponse, error)
+	DeleteProvisionerKey(ctx context.Context, coderURL, sessionToken, orgName, keyName string) error
 }
 
-// SDKClient uses codersdk to register workspace proxies.
+// SDKClient uses codersdk to perform bootstrap operations.
 type SDKClient struct{}
 
 // NewSDKClient returns a bootstrap client backed by codersdk.

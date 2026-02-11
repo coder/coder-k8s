@@ -22,11 +22,56 @@ type fakeBootstrapClient struct {
 	response coderbootstrap.RegisterWorkspaceProxyResponse
 	err      error
 	calls    int
+
+	// Provisioner key support.
+	provisionerKeyResponses []coderbootstrap.EnsureProvisionerKeyResponse
+	provisionerKeyErr       error
+	provisionerKeyCalls     int
+	provisionerKeyRequests  []coderbootstrap.EnsureProvisionerKeyRequest
+	deleteKeyErr            error
+	deleteKeyCalls          int
+	deleteKeyRequests       []deleteKeyRequest
+}
+
+type deleteKeyRequest struct {
+	CoderURL         string
+	SessionToken     string
+	OrganizationName string
+	KeyName          string
 }
 
 func (f *fakeBootstrapClient) EnsureWorkspaceProxy(_ context.Context, _ coderbootstrap.RegisterWorkspaceProxyRequest) (coderbootstrap.RegisterWorkspaceProxyResponse, error) {
 	f.calls++
 	return f.response, f.err
+}
+
+func (f *fakeBootstrapClient) EnsureProvisionerKey(_ context.Context, req coderbootstrap.EnsureProvisionerKeyRequest) (coderbootstrap.EnsureProvisionerKeyResponse, error) {
+	f.provisionerKeyCalls++
+	f.provisionerKeyRequests = append(f.provisionerKeyRequests, req)
+
+	if f.provisionerKeyErr != nil {
+		return coderbootstrap.EnsureProvisionerKeyResponse{}, f.provisionerKeyErr
+	}
+	if len(f.provisionerKeyResponses) == 0 {
+		return coderbootstrap.EnsureProvisionerKeyResponse{}, nil
+	}
+	idx := f.provisionerKeyCalls - 1
+	if idx >= len(f.provisionerKeyResponses) {
+		idx = len(f.provisionerKeyResponses) - 1
+	}
+
+	return f.provisionerKeyResponses[idx], nil
+}
+
+func (f *fakeBootstrapClient) DeleteProvisionerKey(_ context.Context, coderURL, sessionToken, orgName, keyName string) error {
+	f.deleteKeyCalls++
+	f.deleteKeyRequests = append(f.deleteKeyRequests, deleteKeyRequest{
+		CoderURL:         coderURL,
+		SessionToken:     sessionToken,
+		OrganizationName: orgName,
+		KeyName:          keyName,
+	})
+	return f.deleteKeyErr
 }
 
 func workspaceProxyResourceName(name string) string {

@@ -15,6 +15,7 @@ rules:
   - ""
   resources:
   - secrets
+  - serviceaccounts
   - services
   verbs:
   - create
@@ -40,6 +41,7 @@ rules:
   - coder.com
   resources:
   - codercontrolplanes
+  - coderprovisioners
   - workspaceproxies
   verbs:
   - create
@@ -53,6 +55,7 @@ rules:
   - coder.com
   resources:
   - codercontrolplanes/finalizers
+  - coderprovisioners/finalizers
   - workspaceproxies/finalizers
   verbs:
   - update
@@ -60,6 +63,7 @@ rules:
   - coder.com
   resources:
   - codercontrolplanes/status
+  - coderprovisioners/status
   - workspaceproxies/status
   verbs:
   - get
@@ -69,6 +73,19 @@ rules:
   - coordination.k8s.io
   resources:
   - leases
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  - roles
   verbs:
   - create
   - delete

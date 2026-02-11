@@ -35,3 +35,4 @@ terraform.rc
 
 # Backend config (local-only, not committed)
 terraform/backend.hcl
+/coder-k8s
