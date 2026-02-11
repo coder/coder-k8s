@@ -83,15 +83,15 @@ func TestMapCoderError(t *testing.T) {
 			},
 		},
 		{
-			name: "maps other client errors to bad request",
+			name: "maps too many requests",
 			err: withCoderMessage(
 				codersdk.NewTestError(http.StatusTooManyRequests, http.MethodGet, "https://coder.example.com"),
 				"rate limited",
 			),
 			assertMapping: func(t *testing.T, err error) {
 				t.Helper()
-				if !apierrors.IsBadRequest(err) {
-					t.Fatalf("expected BadRequest, got %v", err)
+				if !apierrors.IsTooManyRequests(err) {
+					t.Fatalf("expected TooManyRequests, got %v", err)
 				}
 			},
 		},

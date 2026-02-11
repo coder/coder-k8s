@@ -45,6 +45,8 @@ func MapCoderError(err error, resource schema.GroupResource, name string) error 
 		return apierrors.NewBadRequest(message)
 	case http.StatusUnauthorized:
 		return apierrors.NewUnauthorized(message)
+	case http.StatusTooManyRequests:
+		return apierrors.NewTooManyRequests(message, 0)
 	default:
 		if statusCode >= http.StatusBadRequest && statusCode < http.StatusInternalServerError {
 			return apierrors.NewBadRequest(message)
