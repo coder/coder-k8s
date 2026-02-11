@@ -15,8 +15,10 @@ const (
 // CoderControlPlaneSpec defines the desired state of a CoderControlPlane.
 type CoderControlPlaneSpec struct {
 	// Image is the container image used for the Coder control plane pod.
+	// +kubebuilder:default="ghcr.io/coder/coder:latest"
 	Image string `json:"image,omitempty"`
 	// Replicas is the desired number of control plane pods.
+	// +kubebuilder:default=1
 	Replicas *int32 `json:"replicas,omitempty"`
 	// Service controls the service created in front of the control plane.
 	Service ServiceSpec `json:"service,omitempty"`
