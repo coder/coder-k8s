@@ -10,14 +10,16 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/coder/coder-k8s/internal/app/allapp"
 	"github.com/coder/coder-k8s/internal/app/apiserverapp"
 	"github.com/coder/coder-k8s/internal/app/controllerapp"
 	"github.com/coder/coder-k8s/internal/app/mcpapp"
 )
 
-const supportedAppModes = "controller, aggregated-apiserver, mcp-http"
+const supportedAppModes = "all, controller, aggregated-apiserver, mcp-http"
 
 var (
+	runAllApp                 = allapp.Run
 	runControllerApp          = controllerapp.Run
 	runAggregatedAPIServerApp = func(ctx context.Context, opts apiserverapp.Options) error {
 		return apiserverapp.RunWithOptions(ctx, opts)
@@ -35,7 +37,7 @@ func run(args []string) error {
 		coderNamespace      string
 		coderRequestTimeout time.Duration
 	)
-	fs.StringVar(&appMode, "app", "", "Application mode (controller, aggregated-apiserver, mcp-http)")
+	fs.StringVar(&appMode, "app", "all", "Application mode (all, controller, aggregated-apiserver, mcp-http)")
 	fs.StringVar(
 		&coderSessionToken,
 		"coder-session-token",
@@ -82,6 +84,8 @@ func run(args []string) error {
 	}
 
 	switch appMode {
+	case "all":
+		return runAllApp(setupSignalHandler())
 	case "controller":
 		return runControllerApp(setupSignalHandler())
 	case "aggregated-apiserver":
@@ -94,8 +98,6 @@ func run(args []string) error {
 		return runAggregatedAPIServerApp(setupSignalHandler(), opts)
 	case "mcp-http":
 		return runMCPHTTPApp(setupSignalHandler())
-	case "":
-		return fmt.Errorf("assertion failed: --app flag is required; must be one of: %s", supportedAppModes)
 	default:
 		return fmt.Errorf("assertion failed: unsupported --app value %q; must be one of: %s", appMode, supportedAppModes)
 	}

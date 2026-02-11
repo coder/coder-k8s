@@ -72,15 +72,56 @@ func TestReconcilerSetupWithManagerRequiresManager(t *testing.T) {
 	}
 }
 
-func TestRunRejectsEmptyMode(t *testing.T) {
+func TestRunDefaultsToAllMode(t *testing.T) {
 	t.Helper()
+	installMockSignalHandler(t)
+
+	previous := runAllApp
+	t.Cleanup(func() {
+		runAllApp = previous
+	})
+
+	expectedErr := errors.New("sentinel all error")
+	called := false
+	runAllApp = func(ctx context.Context) error {
+		called = true
+		if ctx == nil {
+			t.Fatal("expected non-nil context")
+		}
+		return expectedErr
+	}
 
 	err := run([]string{})
-	if err == nil {
-		t.Fatal("expected an error when --app is missing")
+	if !called {
+		t.Fatal("expected all runner to be called")
 	}
-	if !strings.Contains(err.Error(), "--app flag is required") {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("expected sentinel, got %v", err)
+	}
+}
+
+func TestRunDispatchesAllMode(t *testing.T) {
+	t.Helper()
+	installMockSignalHandler(t)
+
+	previous := runAllApp
+	t.Cleanup(func() {
+		runAllApp = previous
+	})
+
+	expectedErr := errors.New("sentinel all error")
+	called := false
+	runAllApp = func(context.Context) error {
+		called = true
+		return expectedErr
+	}
+
+	err := run([]string{"--app=all"})
+	if !called {
+		t.Fatal("expected all runner to be called")
+	}
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("expected sentinel, got %v", err)
 	}
 }
 
