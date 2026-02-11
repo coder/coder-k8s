@@ -87,6 +87,7 @@ Run from repository root.
 - `.mux/tool_env` is sourced before every `bash` tool call (Mux docs: `/hooks/tools`).
 - Use `run_and_report <step_name> <command...>` for multi-step validation in one bash invocation.
 - The helper writes full logs to `/tmp/mux-<workspace>-<step>.log`, prints pass/fail markers, and tails failures.
+- Do not pipe, redirect, prepend, append, or otherwise wrap `run_and_report` output. Invoke it directly so the helper’s step markers remain human-readable in the Mux UI.
 - Example:
   - `run_and_report verify-vendor make verify-vendor`
   - `run_and_report test make test`
@@ -113,6 +114,7 @@ Run from repository root.
 - Unpinned GitHub Action versions in workflow files (CI uses SHA-pinned actions).
 - Running CI-sensitive commands without vendoring mode when behavior differs from CI.
 - Removing assertion messages that start with `assertion failed:`; these are deliberate diagnostics.
+- Wrapping `run_and_report` output with shell redirection/pipes or extra surrounding text; this obscures the helper’s built-in markers in the Mux UI.
 
 ## Code Style
 
