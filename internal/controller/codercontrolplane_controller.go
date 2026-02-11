@@ -3,6 +3,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"maps"
@@ -40,6 +41,11 @@ const (
 
 	operatorAccessRetryInterval = 30 * time.Second
 	operatorTokenSecretSuffix   = "-operator-token"
+)
+
+var (
+	errSecretValueMissing = errors.New("secret value missing")
+	errSecretValueEmpty   = errors.New("secret value empty")
 )
 
 // CoderControlPlaneReconciler reconciles a CoderControlPlane object.
@@ -235,8 +241,13 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 	}
 
 	if coderControlPlane.Spec.OperatorAccess.Disabled {
+		cleanupErr := r.cleanupDisabledOperatorAccess(ctx, coderControlPlane)
 		nextStatus.OperatorTokenSecretRef = nil
 		nextStatus.OperatorAccessReady = false
+		if cleanupErr != nil {
+			//nolint:nilerr // disabling operator access should retry cleanup without surfacing a terminal reconcile error.
+			return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -255,7 +266,7 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 	switch {
 	case err == nil:
 		// Existing token is still validated by the provisioner to avoid stale or expired credentials.
-	case apierrors.IsNotFound(err):
+	case apierrors.IsNotFound(err), errors.Is(err, errSecretValueMissing), errors.Is(err, errSecretValueEmpty):
 		existingToken = ""
 	default:
 		return ctrl.Result{}, fmt.Errorf("read operator token secret %q: %w", operatorTokenSecretName, err)
@@ -304,6 +315,61 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 	nextStatus.OperatorAccessReady = true
 
 	return ctrl.Result{}, nil
+}
+
+func (r *CoderControlPlaneReconciler) cleanupDisabledOperatorAccess(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+
+	operatorTokenSecretName := operatorAccessTokenSecretName(coderControlPlane)
+	if strings.TrimSpace(operatorTokenSecretName) == "" {
+		return fmt.Errorf("assertion failed: operator token secret name must not be empty")
+	}
+
+	secret := &corev1.Secret{}
+	err := r.Get(ctx, types.NamespacedName{Name: operatorTokenSecretName, Namespace: coderControlPlane.Namespace}, secret)
+	secretExists := false
+	switch {
+	case err == nil:
+		secretExists = true
+	case apierrors.IsNotFound(err):
+		secretExists = false
+	default:
+		return fmt.Errorf("get operator token secret %q while disabling operator access: %w", operatorTokenSecretName, err)
+	}
+
+	cleanupRequired := secretExists || coderControlPlane.Status.OperatorTokenSecretRef != nil
+	if !cleanupRequired {
+		return nil
+	}
+
+	if secretExists {
+		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete operator token secret %q while disabling operator access: %w", operatorTokenSecretName, err)
+		}
+	}
+
+	if r.OperatorAccessProvisioner == nil {
+		return fmt.Errorf("assertion failed: operator access provisioner must not be nil while disabling managed credentials")
+	}
+
+	postgresURL, err := r.resolvePostgresURLFromExtraEnv(ctx, coderControlPlane)
+	if err != nil {
+		return fmt.Errorf("resolve postgres URL while disabling operator access: %w", err)
+	}
+	if err := r.OperatorAccessProvisioner.RevokeOperatorToken(ctx, coderbootstrap.RevokeOperatorTokenRequest{
+		PostgresURL:      postgresURL,
+		OperatorUsername: defaultOperatorAccessUsername,
+		TokenName:        defaultOperatorAccessTokenName,
+	}); err != nil {
+		return fmt.Errorf("revoke operator token while disabling operator access: %w", err)
+	}
+
+	return nil
 }
 
 func (r *CoderControlPlaneReconciler) resolvePostgresURLFromExtraEnv(
@@ -451,10 +517,10 @@ func (r *CoderControlPlaneReconciler) readSecretValue(ctx context.Context, names
 
 	value, ok := secret.Data[key]
 	if !ok {
-		return "", fmt.Errorf("secret %q does not contain key %q", name, key)
+		return "", fmt.Errorf("%w: secret %q does not contain key %q", errSecretValueMissing, name, key)
 	}
 	if len(value) == 0 {
-		return "", fmt.Errorf("secret %q key %q is empty", name, key)
+		return "", fmt.Errorf("%w: secret %q key %q is empty", errSecretValueEmpty, name, key)
 	}
 
 	return string(value), nil

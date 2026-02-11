@@ -31,9 +31,19 @@ type EnsureOperatorTokenRequest struct {
 	ExistingToken    string
 }
 
-// OperatorAccessProvisioner provisions operator access credentials for coderd.
+// RevokeOperatorTokenRequest defines the input required to revoke the managed
+// operator token from coderd's PostgreSQL database.
+type RevokeOperatorTokenRequest struct {
+	PostgresURL      string
+	OperatorUsername string
+	TokenName        string
+}
+
+// OperatorAccessProvisioner provisions and revokes operator access credentials
+// for coderd.
 type OperatorAccessProvisioner interface {
 	EnsureOperatorToken(context.Context, EnsureOperatorTokenRequest) (string, error)
+	RevokeOperatorToken(context.Context, RevokeOperatorTokenRequest) error
 }
 
 // PostgresOperatorAccessProvisioner provisions operator access credentials by
@@ -146,6 +156,61 @@ func (p *PostgresOperatorAccessProvisioner) EnsureOperatorToken(ctx context.Cont
 	return token, nil
 }
 
+// RevokeOperatorToken deletes the managed operator API token when present.
+func (p *PostgresOperatorAccessProvisioner) RevokeOperatorToken(ctx context.Context, req RevokeOperatorTokenRequest) error {
+	if ctx == nil {
+		return fmt.Errorf("assertion failed: context must not be nil")
+	}
+	if err := req.validate(); err != nil {
+		return err
+	}
+	if p == nil {
+		return fmt.Errorf("assertion failed: provisioner must not be nil")
+	}
+	if p.openDB == nil {
+		return fmt.Errorf("assertion failed: provisioner openDB must not be nil")
+	}
+
+	db, err := p.openDB(req.PostgresURL)
+	if err != nil {
+		return fmt.Errorf("open coderd postgres database: %w", err)
+	}
+	if db == nil {
+		return fmt.Errorf("assertion failed: openDB returned nil db and nil error")
+	}
+	defer func() {
+		_ = db.Close()
+	}()
+
+	if pingErr := db.PingContext(ctx); pingErr != nil {
+		return fmt.Errorf("ping coderd postgres database: %w", pingErr)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin operator access revoke transaction: %w", err)
+	}
+
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		_ = tx.Rollback()
+	}()
+
+	if err := revokeOperatorToken(ctx, tx, req); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit operator access revoke transaction: %w", err)
+	}
+	committed = true
+
+	return nil
+}
+
 func (r EnsureOperatorTokenRequest) validate() error {
 	if strings.TrimSpace(r.PostgresURL) == "" {
 		return fmt.Errorf("operator access postgres URL is required")
@@ -161,6 +226,20 @@ func (r EnsureOperatorTokenRequest) validate() error {
 	}
 	if r.TokenLifetime <= 0 {
 		return fmt.Errorf("operator access token lifetime must be positive")
+	}
+
+	return nil
+}
+
+func (r RevokeOperatorTokenRequest) validate() error {
+	if strings.TrimSpace(r.PostgresURL) == "" {
+		return fmt.Errorf("operator access postgres URL is required")
+	}
+	if strings.TrimSpace(r.OperatorUsername) == "" {
+		return fmt.Errorf("operator access username is required")
+	}
+	if strings.TrimSpace(r.TokenName) == "" {
+		return fmt.Errorf("operator access token name is required")
 	}
 
 	return nil
@@ -530,6 +609,33 @@ VALUES (
 	}
 
 	return token, nil
+}
+
+func revokeOperatorToken(ctx context.Context, tx *sql.Tx, req RevokeOperatorTokenRequest) error {
+	if tx == nil {
+		return fmt.Errorf("assertion failed: transaction must not be nil")
+	}
+	if err := req.validate(); err != nil {
+		return err
+	}
+
+	// #nosec G101 -- token_name here is a column identifier, not a credential.
+	const deleteOperatorTokenByNameQuery = `
+DELETE FROM api_keys
+WHERE login_type = 'token'::login_type
+  AND token_name = $2
+  AND user_id IN (
+	SELECT id
+	FROM users
+	WHERE deleted = false
+	  AND lower(username) = lower($1)
+)
+`
+	if _, err := tx.ExecContext(ctx, deleteOperatorTokenByNameQuery, req.OperatorUsername, req.TokenName); err != nil {
+		return fmt.Errorf("delete operator token %q: %w", req.TokenName, err)
+	}
+
+	return nil
 }
 
 func randomTokenPart(length int) (string, error) {

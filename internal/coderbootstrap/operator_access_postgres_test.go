@@ -27,6 +27,24 @@ func TestEnsureOperatorTokenRequestValidate(t *testing.T) {
 	}
 }
 
+func TestRevokeOperatorTokenRequestValidate(t *testing.T) {
+	t.Parallel()
+
+	req := RevokeOperatorTokenRequest{}
+	if err := req.validate(); err == nil {
+		t.Fatal("expected validate to fail for empty request")
+	}
+
+	req = RevokeOperatorTokenRequest{
+		PostgresURL:      "postgres://example.com/coder",
+		OperatorUsername: "coder-k8s-operator",
+		TokenName:        "coder-k8s-operator",
+	}
+	if err := req.validate(); err != nil {
+		t.Fatalf("expected validate to pass for complete revoke request, got %v", err)
+	}
+}
+
 func TestRandomTokenPart_GeneratesExpectedLengthAndCharset(t *testing.T) {
 	t.Parallel()
 
@@ -84,6 +102,20 @@ func TestSplitOperatorToken(t *testing.T) {
 				t.Fatalf("expected secret %q, got %q", tc.expectedSecret, gotSecret)
 			}
 		})
+	}
+}
+
+func TestRevokeOperatorToken_ValidatesInputsBeforeConnecting(t *testing.T) {
+	t.Parallel()
+
+	provisioner := NewPostgresOperatorAccessProvisioner()
+	if provisioner == nil {
+		t.Fatal("expected non-nil provisioner")
+	}
+
+	err := provisioner.RevokeOperatorToken(context.Background(), RevokeOperatorTokenRequest{})
+	if err == nil {
+		t.Fatal("expected RevokeOperatorToken to fail for invalid request")
 	}
 }
 
