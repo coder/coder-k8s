@@ -12,6 +12,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -838,11 +839,15 @@ func (r *CoderProvisionerReconciler) reconcileStatus(
 	provisionerKeyName string,
 	tagsHash string,
 ) error {
+	// Take a snapshot before mutation so status writes are skipped when no fields changed.
+	previousStatus := provisioner.Status.DeepCopy()
+
 	phase := coderv1alpha1.CoderProvisionerPhasePending
 	if deployment.Status.ReadyReplicas > 0 {
 		phase = coderv1alpha1.CoderProvisionerPhaseReady
 	}
 
+	// Update fields individually so conditions set earlier in reconciliation are preserved.
 	provisioner.Status.ObservedGeneration = provisioner.Generation
 	provisioner.Status.ReadyReplicas = deployment.Status.ReadyReplicas
 	provisioner.Status.Phase = phase
@@ -872,6 +877,10 @@ func (r *CoderProvisionerReconciler) reconcileStatus(
 			"NoReplicasReady",
 			"No provisioner pods are ready yet",
 		)
+	}
+
+	if previousStatus != nil && equality.Semantic.DeepEqual(*previousStatus, provisioner.Status) {
+		return nil
 	}
 
 	if err := r.Status().Update(ctx, provisioner); err != nil {
