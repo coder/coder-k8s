@@ -346,11 +346,11 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			"Provisioner key is available in coderd",
 		)
 	} else if status.OrganizationName == "" || status.TagsHash == "" {
-		// Secret is usable and no drift detected, but status metadata
-		// is empty (e.g. upgrade from older version). Call EnsureProvisionerKey
-		// to populate IDs/name and establish the baseline for future drift detection.
-		// Typically the key already exists and Key will be empty, but if the
-		// remote key was deleted we capture the new key material too.
+		// Secret is usable and no drift detected, but status metadata is empty
+		// (e.g. upgrade from older version). Call EnsureProvisionerKey to populate
+		// IDs and key name. If coderd reports an existing key (no plaintext key
+		// returned), rotate it best-effort so desired tags are applied before
+		// stamping the metadata baseline.
 		response, ensureErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
 			CoderURL:         controlPlane.Status.URL,
 			SessionToken:     sessionToken,
@@ -371,13 +371,47 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			if response.KeyName != "" {
 				provisionerKeyName = response.KeyName
 			}
-			// If coderd created a new key (remote was missing), capture the
-			// material so ensureProvisionerKeySecret writes it to the Secret.
 			if response.Key != "" {
+				// Key was freshly created with desired tags; capture material and stamp baseline.
 				keyMaterial = response.Key
+				appliedOrgName = organizationName
+				appliedTagsHash = desiredTagsHash
+			} else {
+				// Key already exists; tags may be stale. Rotate to ensure desired tags are applied.
+				log.Info("existing key found during metadata backfill, rotating to ensure desired tags",
+					"keyName", keyName)
+				if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
+					ctx, controlPlane.Status.URL, sessionToken, organizationName, keyName,
+				); deleteErr != nil {
+					log.Info("failed to delete key for metadata backfill rotation, will retry",
+						"keyName", keyName, "error", deleteErr)
+				} else {
+					rotated, rotateErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
+						CoderURL:         controlPlane.Status.URL,
+						SessionToken:     sessionToken,
+						OrganizationName: organizationName,
+						KeyName:          keyName,
+						Tags:             provisioner.Spec.Tags,
+					})
+					if rotateErr != nil {
+						log.Info("failed to recreate key for metadata backfill rotation, will retry",
+							"keyName", keyName, "error", rotateErr)
+					} else {
+						if rotated.OrganizationID != uuid.Nil {
+							organizationID = rotated.OrganizationID.String()
+						}
+						if rotated.KeyID != uuid.Nil {
+							provisionerKeyID = rotated.KeyID.String()
+						}
+						if rotated.KeyName != "" {
+							provisionerKeyName = rotated.KeyName
+						}
+						keyMaterial = rotated.Key
+						appliedOrgName = organizationName
+						appliedTagsHash = desiredTagsHash
+					}
+				}
 			}
-			appliedOrgName = organizationName
-			appliedTagsHash = desiredTagsHash
 			setCondition(
 				provisioner,
 				coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
