@@ -236,13 +236,9 @@ func (r *CoderProvisionerReconciler) reconcileDeletion(ctx context.Context, prov
 
 	log := ctrl.LoggerFrom(ctx)
 
-	// Prefer persisted identity from status (reflects what was actually
-	// created in coderd) over the current spec values, which may have been
-	// edited after initial provisioning.
-	organizationName := provisioner.Status.OrganizationID
-	if organizationName == "" {
-		organizationName = provisionerOrganizationName(provisioner.Spec.OrganizationName)
-	}
+	// DeleteProvisionerKey resolves organizations by name, so always pass the
+	// spec-derived organization name here instead of the persisted organization ID.
+	organizationName := provisionerOrganizationName(provisioner.Spec.OrganizationName)
 	keyName := provisioner.Status.ProvisionerKeyName
 	if keyName == "" {
 		keyName, _, _ = provisionerKeyConfig(provisioner)
@@ -688,7 +684,20 @@ func provisionerInstanceLabelValue(name string) string {
 }
 
 func provisionerServiceAccountName(name string) string {
-	return fmt.Sprintf("%s%s", name, provisionerServiceAccountSuffix)
+	candidate := fmt.Sprintf("%s%s", name, provisionerServiceAccountSuffix)
+	if len(candidate) <= 63 {
+		return candidate
+	}
+
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(name))
+	suffix := fmt.Sprintf("%08x", hasher.Sum32())
+	available := 63 - len(provisionerServiceAccountSuffix) - len(suffix) - 1
+	if available < 1 {
+		available = 1
+	}
+
+	return fmt.Sprintf("%s-%s%s", name[:available], suffix, provisionerServiceAccountSuffix)
 }
 
 func provisionerOrganizationName(name string) string {
