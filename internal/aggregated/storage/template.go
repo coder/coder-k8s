@@ -270,12 +270,6 @@ func (s *TemplateStorage) Update(
 	if updatedObj == nil {
 		return nil, false, fmt.Errorf("assertion failed: updated template object must not be nil")
 	}
-	if updateValidation != nil {
-		if err := updateValidation(ctx, updatedObj, currentObj); err != nil {
-			return nil, false, err
-		}
-	}
-
 	updatedTemplate, ok := updatedObj.(*aggregationv1alpha1.CoderTemplate)
 	if !ok {
 		return nil, false, fmt.Errorf("assertion failed: expected *CoderTemplate, got %T", updatedObj)
@@ -285,6 +279,20 @@ func (s *TemplateStorage) Update(
 		return nil, false, fmt.Errorf("assertion failed: expected *CoderTemplate, got %T", currentObj)
 	}
 
+	namespace, badNamespaceErr := namespaceFromRequestContext(ctx)
+	if badNamespaceErr != nil {
+		return nil, false, badNamespaceErr
+	}
+	if updatedTemplate.Name != "" && updatedTemplate.Name != name {
+		return nil, false, apierrors.NewBadRequest(
+			fmt.Sprintf("updated object metadata.name %q must match request name %q", updatedTemplate.Name, name),
+		)
+	}
+	if updatedTemplate.Namespace != "" && updatedTemplate.Namespace != namespace {
+		return nil, false, apierrors.NewBadRequest(
+			fmt.Sprintf("metadata.namespace %q does not match request namespace %q", updatedTemplate.Namespace, namespace),
+		)
+	}
 	if updatedTemplate.ResourceVersion == "" {
 		return nil, false, apierrors.NewBadRequest("metadata.resourceVersion is required for update")
 	}
@@ -298,6 +306,11 @@ func (s *TemplateStorage) Update(
 				currentTemplate.ResourceVersion,
 			),
 		)
+	}
+	if updateValidation != nil {
+		if err := updateValidation(ctx, updatedTemplate, currentTemplate); err != nil {
+			return nil, false, err
+		}
 	}
 
 	// Template updates via codersdk are currently limited. The legacy spec.running

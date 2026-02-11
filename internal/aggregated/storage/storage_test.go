@@ -506,6 +506,86 @@ func TestTemplateStorageUpdateRejectsStaleResourceVersion(t *testing.T) {
 	}
 }
 
+func TestTemplateStorageUpdateRejectsMismatchedName(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	currentObj, err := templateStorage.Get(ctx, "acme.starter-template", nil)
+	if err != nil {
+		t.Fatalf("expected template get to succeed: %v", err)
+	}
+
+	currentTemplate, ok := currentObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from get, got %T", currentObj)
+	}
+
+	desiredTemplate := currentTemplate.DeepCopy()
+	desiredTemplate.Spec.Running = !currentTemplate.Spec.Running
+	desiredTemplate.Name = "acme.other-template"
+
+	_, _, err = templateStorage.Update(
+		ctx,
+		currentTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected BadRequest for mismatched name, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "updated object metadata.name \"acme.other-template\" must match request name \"acme.starter-template\"") {
+		t.Fatalf("expected mismatched name error message, got %v", err)
+	}
+}
+
+func TestTemplateStorageUpdateRejectsMismatchedNamespace(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	currentObj, err := templateStorage.Get(ctx, "acme.starter-template", nil)
+	if err != nil {
+		t.Fatalf("expected template get to succeed: %v", err)
+	}
+
+	currentTemplate, ok := currentObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from get, got %T", currentObj)
+	}
+
+	desiredTemplate := currentTemplate.DeepCopy()
+	desiredTemplate.Spec.Running = !currentTemplate.Spec.Running
+	desiredTemplate.Namespace = "other-namespace"
+
+	_, _, err = templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected BadRequest for mismatched namespace, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "metadata.namespace \"other-namespace\" does not match request namespace \"control-plane\"") {
+		t.Fatalf("expected mismatched namespace error message, got %v", err)
+	}
+}
+
 func TestWorkspaceStorageCRUDWithCoderSDK(t *testing.T) {
 	t.Parallel()
 
