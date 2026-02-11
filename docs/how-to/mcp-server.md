@@ -6,11 +6,12 @@ The MCP server runs in HTTP mode (`--app=mcp-http`).
 
 ## 1. Overview
 
-The MCP server provides tools for inspecting Kubernetes resources managed by `coder-k8s`, including:
+The MCP server provides tools for inspecting and updating Kubernetes resources managed by `coder-k8s`, including:
 
 - `CoderControlPlane` resources
-- `CoderWorkspace` resources
-- `CoderTemplate` resources
+- Control-plane Deployment, Service, and Pod status
+- `CoderWorkspace` resources (including `spec.running` updates)
+- `CoderTemplate` resources (including `spec.running` updates)
 - Namespace events
 - Pod logs
 
@@ -38,12 +39,22 @@ http://127.0.0.1:8090/mcp
 
 ## 3. Available tools
 
-The server exposes MCP tools for:
+The server exposes the following MCP tools:
 
-- Reading `CoderControlPlane` resources and status
-- Listing `CoderWorkspace` and `CoderTemplate` resources
-- Listing namespace events for troubleshooting
-- Reading pod logs for debugging
+- `list_control_planes`
+- `get_control_plane_status`
+- `list_control_plane_pods`
+- `get_control_plane_deployment_status`
+- `get_service_status`
+- `list_workspaces`
+- `get_workspace`
+- `set_workspace_running`
+- `list_templates`
+- `get_template`
+- `set_template_running`
+- `get_events`
+- `get_pod_logs`
+- `check_health`
 
 ## 4. Health checks
 
