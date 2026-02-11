@@ -270,6 +270,11 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 		return ctrl.Result{}, fmt.Errorf("assertion failed: operator token secret name must not be empty")
 	}
 
+	operatorTokenName := operatorAccessDatabaseTokenName(coderControlPlane)
+	if strings.TrimSpace(operatorTokenName) == "" {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: operator token name must not be empty")
+	}
+
 	existingToken, err := r.readSecretValue(ctx, coderControlPlane.Namespace, operatorTokenSecretName, coderv1alpha1.DefaultTokenSecretKey)
 	switch {
 	case err == nil:
@@ -292,7 +297,7 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 		PostgresURL:      postgresURL,
 		OperatorUsername: defaultOperatorAccessUsername,
 		OperatorEmail:    defaultOperatorAccessEmail,
-		TokenName:        defaultOperatorAccessTokenName,
+		TokenName:        operatorTokenName,
 		TokenLifetime:    defaultOperatorAccessTokenLifetime,
 		ExistingToken:    existingToken,
 	})
@@ -338,6 +343,11 @@ func (r *CoderControlPlaneReconciler) cleanupDisabledOperatorAccess(
 		return fmt.Errorf("assertion failed: operator token secret name must not be empty")
 	}
 
+	operatorTokenName := operatorAccessDatabaseTokenName(coderControlPlane)
+	if strings.TrimSpace(operatorTokenName) == "" {
+		return fmt.Errorf("assertion failed: operator token name must not be empty")
+	}
+
 	secret := &corev1.Secret{}
 	err := r.Get(ctx, types.NamespacedName{Name: operatorTokenSecretName, Namespace: coderControlPlane.Namespace}, secret)
 	secretExists := false
@@ -373,7 +383,7 @@ func (r *CoderControlPlaneReconciler) cleanupDisabledOperatorAccess(
 	if err := r.OperatorAccessProvisioner.RevokeOperatorToken(ctx, coderbootstrap.RevokeOperatorTokenRequest{
 		PostgresURL:      postgresURL,
 		OperatorUsername: defaultOperatorAccessUsername,
-		TokenName:        defaultOperatorAccessTokenName,
+		TokenName:        operatorTokenName,
 	}); err != nil {
 		return fmt.Errorf("revoke operator token while disabling operator access: %w", err)
 	}
@@ -454,6 +464,19 @@ func findEnvVar(envVars []corev1.EnvVar, name string) (*corev1.EnvVar, error) {
 	}
 
 	return found, nil
+}
+
+func operatorAccessDatabaseTokenName(coderControlPlane *coderv1alpha1.CoderControlPlane) string {
+	if coderControlPlane == nil {
+		return ""
+	}
+
+	hasher := fnv.New64a()
+	_, _ = hasher.Write([]byte(coderControlPlane.Namespace))
+	_, _ = hasher.Write([]byte{0})
+	_, _ = hasher.Write([]byte(coderControlPlane.Name))
+
+	return fmt.Sprintf("%s-%016x", defaultOperatorAccessTokenName, hasher.Sum64())
 }
 
 func operatorAccessTokenSecretName(coderControlPlane *coderv1alpha1.CoderControlPlane) string {

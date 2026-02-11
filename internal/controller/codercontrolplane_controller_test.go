@@ -614,6 +614,9 @@ func TestReconcile_OperatorAccess_Disabled_RevokesWithoutStatusOrManagedSecret(t
 	if got := provisioner.revokeRequests[0].PostgresURL; got != "postgres://example.disabled.revoke/coder" {
 		t.Fatalf("expected revoke Postgres URL %q, got %q", "postgres://example.disabled.revoke/coder", got)
 	}
+	if got := provisioner.revokeRequests[0].TokenName; !strings.HasPrefix(got, "coder-k8s-operator-") {
+		t.Fatalf("expected revoke token name to be scoped with prefix %q, got %q", "coder-k8s-operator-", got)
+	}
 
 	reconciled := &coderv1alpha1.CoderControlPlane{}
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, reconciled); err != nil {
@@ -697,8 +700,8 @@ func TestReconcile_OperatorAccess_Disabled_RevokesTokenAndDeletesSecret(t *testi
 	if got := provisioner.revokeRequests[0].OperatorUsername; got != "coder-k8s-operator" {
 		t.Fatalf("expected revoke operator username %q, got %q", "coder-k8s-operator", got)
 	}
-	if got := provisioner.revokeRequests[0].TokenName; got != "coder-k8s-operator" {
-		t.Fatalf("expected revoke token name %q, got %q", "coder-k8s-operator", got)
+	if got := provisioner.revokeRequests[0].TokenName; !strings.HasPrefix(got, "coder-k8s-operator-") {
+		t.Fatalf("expected revoke token name to be scoped with prefix %q, got %q", "coder-k8s-operator-", got)
 	}
 
 	secret := &corev1.Secret{}
@@ -878,6 +881,72 @@ func TestReconcile_OperatorAccess_MalformedManagedSecret_ReprovisionsToken(t *te
 	}
 	if got := string(reconciledSecret.Data[coderv1alpha1.DefaultTokenSecretKey]); got != "recovered-operator-token" {
 		t.Fatalf("expected reconciled managed token %q, got %q", "recovered-operator-token", got)
+	}
+}
+
+func TestReconcile_OperatorAccess_UsesDistinctTokenNamesPerControlPlane(t *testing.T) {
+	ctx := context.Background()
+
+	cp1 := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-operator-access-token-name-one", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-operator-token-name-one:latest",
+			ExtraEnv: []corev1.EnvVar{{
+				Name:  "CODER_PG_CONNECTION_URL",
+				Value: "postgres://example.shared/coder",
+			}},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp1); err != nil {
+		t.Fatalf("failed to create first test CoderControlPlane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp1)
+	})
+
+	cp2 := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-operator-access-token-name-two", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-operator-token-name-two:latest",
+			ExtraEnv: []corev1.EnvVar{{
+				Name:  "CODER_PG_CONNECTION_URL",
+				Value: "postgres://example.shared/coder",
+			}},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp2); err != nil {
+		t.Fatalf("failed to create second test CoderControlPlane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp2)
+	})
+
+	provisioner := &fakeOperatorAccessProvisioner{token: "shared-operator-token"}
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp1.Name, Namespace: cp1.Namespace}}); err != nil {
+		t.Fatalf("reconcile first control plane: %v", err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp2.Name, Namespace: cp2.Namespace}}); err != nil {
+		t.Fatalf("reconcile second control plane: %v", err)
+	}
+
+	if provisioner.calls != 2 {
+		t.Fatalf("expected provisioner to be called twice, got %d calls", provisioner.calls)
+	}
+	firstTokenName := provisioner.requests[0].TokenName
+	secondTokenName := provisioner.requests[1].TokenName
+	if firstTokenName == "" || secondTokenName == "" {
+		t.Fatalf("expected non-empty token names, got %q and %q", firstTokenName, secondTokenName)
+	}
+	if !strings.HasPrefix(firstTokenName, "coder-k8s-operator-") {
+		t.Fatalf("expected first token name to be scoped with prefix %q, got %q", "coder-k8s-operator-", firstTokenName)
+	}
+	if !strings.HasPrefix(secondTokenName, "coder-k8s-operator-") {
+		t.Fatalf("expected second token name to be scoped with prefix %q, got %q", "coder-k8s-operator-", secondTokenName)
+	}
+	if firstTokenName == secondTokenName {
+		t.Fatalf("expected distinct token names for different control planes, got %q", firstTokenName)
 	}
 }
 
