@@ -19,14 +19,13 @@ spec:
       containers:
         - name: manager
           image: ghcr.io/coder/coder-k8s:e2e
+          # E2E tests validate controller mode only; all mode requires
+          # additional infrastructure (APIService, TLS) not provisioned here.
+          args: ["--app=controller"]
           imagePullPolicy: Never
           ports:
             - containerPort: 8081
               name: health
-            - containerPort: 6443
-              name: https
-            - containerPort: 8090
-              name: mcp
           livenessProbe:
             httpGet:
               path: /healthz
