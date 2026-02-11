@@ -61,10 +61,10 @@ type CoderWorkspaceList struct {
 // CoderTemplateSpec defines the desired state of a CoderTemplate.
 type CoderTemplateSpec struct {
 	// Organization is the Coder organization name (must match the organization prefix in metadata.name).
-	Organization string `json:"organization,omitempty"`
+	Organization string `json:"organization"`
 
 	// VersionID is the Coder template version UUID used on creation (required for CREATE).
-	VersionID string `json:"versionID,omitempty"`
+	VersionID string `json:"versionID"`
 
 	DisplayName string `json:"displayName,omitempty"`
 	Description string `json:"description,omitempty"`

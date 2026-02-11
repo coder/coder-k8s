@@ -179,7 +179,7 @@ func TestWrapClientErrorReturnsTopLevelStatusError(t *testing.T) {
 	}
 }
 
-func TestTemplateStorageUpdateReturnsDesiredObjectForLegacyRunningField(t *testing.T) {
+func TestTemplateStorageUpdateReturnsCurrentBackendObjectForLegacyRunningField(t *testing.T) {
 	t.Parallel()
 
 	server, _ := newMockCoderServer(t)
@@ -224,11 +224,11 @@ func TestTemplateStorageUpdateReturnsDesiredObjectForLegacyRunningField(t *testi
 	if !ok {
 		t.Fatalf("expected *CoderTemplate from update, got %T", updatedObj)
 	}
-	if updatedTemplate.Spec.Running != desiredTemplate.Spec.Running {
-		t.Fatalf("expected updated running=%t, got %t", desiredTemplate.Spec.Running, updatedTemplate.Spec.Running)
+	if updatedTemplate.Spec.Running != currentTemplate.Spec.Running {
+		t.Fatalf("expected update response running=%t from current backend object, got %t", currentTemplate.Spec.Running, updatedTemplate.Spec.Running)
 	}
-	if updatedTemplate.Name != desiredTemplate.Name {
-		t.Fatalf("expected updated name %q, got %q", desiredTemplate.Name, updatedTemplate.Name)
+	if updatedTemplate.Name != currentTemplate.Name {
+		t.Fatalf("expected updated name %q, got %q", currentTemplate.Name, updatedTemplate.Name)
 	}
 }
 
@@ -278,11 +278,11 @@ func TestTemplateStorageUpdateAllowsEmptyVersionIDWhenTogglingRunning(t *testing
 	if !ok {
 		t.Fatalf("expected *CoderTemplate from update, got %T", updatedObj)
 	}
-	if updatedTemplate.Spec.Running != desiredTemplate.Spec.Running {
-		t.Fatalf("expected updated running=%t, got %t", desiredTemplate.Spec.Running, updatedTemplate.Spec.Running)
+	if updatedTemplate.Spec.Running != currentTemplate.Spec.Running {
+		t.Fatalf("expected update response running=%t from current backend object, got %t", currentTemplate.Spec.Running, updatedTemplate.Spec.Running)
 	}
-	if updatedTemplate.Spec.VersionID != "" {
-		t.Fatalf("expected returned desired spec.versionID to remain empty, got %q", updatedTemplate.Spec.VersionID)
+	if updatedTemplate.Spec.VersionID != currentTemplate.Spec.VersionID {
+		t.Fatalf("expected update response spec.versionID %q from current backend object, got %q", currentTemplate.Spec.VersionID, updatedTemplate.Spec.VersionID)
 	}
 }
 
@@ -334,17 +334,17 @@ func TestTemplateStorageUpdateAllowsEmptyOptionalFieldsWhenTogglingRunning(t *te
 	if !ok {
 		t.Fatalf("expected *CoderTemplate from update, got %T", updatedObj)
 	}
-	if updatedTemplate.Spec.Running != desiredTemplate.Spec.Running {
-		t.Fatalf("expected updated running=%t, got %t", desiredTemplate.Spec.Running, updatedTemplate.Spec.Running)
+	if updatedTemplate.Spec.Running != currentTemplate.Spec.Running {
+		t.Fatalf("expected update response running=%t from current backend object, got %t", currentTemplate.Spec.Running, updatedTemplate.Spec.Running)
 	}
-	if updatedTemplate.Spec.DisplayName != "" {
-		t.Fatalf("expected returned desired spec.displayName to remain empty, got %q", updatedTemplate.Spec.DisplayName)
+	if updatedTemplate.Spec.DisplayName != currentTemplate.Spec.DisplayName {
+		t.Fatalf("expected update response spec.displayName %q from current backend object, got %q", currentTemplate.Spec.DisplayName, updatedTemplate.Spec.DisplayName)
 	}
-	if updatedTemplate.Spec.Description != "" {
-		t.Fatalf("expected returned desired spec.description to remain empty, got %q", updatedTemplate.Spec.Description)
+	if updatedTemplate.Spec.Description != currentTemplate.Spec.Description {
+		t.Fatalf("expected update response spec.description %q from current backend object, got %q", currentTemplate.Spec.Description, updatedTemplate.Spec.Description)
 	}
-	if updatedTemplate.Spec.Icon != "" {
-		t.Fatalf("expected returned desired spec.icon to remain empty, got %q", updatedTemplate.Spec.Icon)
+	if updatedTemplate.Spec.Icon != currentTemplate.Spec.Icon {
+		t.Fatalf("expected update response spec.icon %q from current backend object, got %q", currentTemplate.Spec.Icon, updatedTemplate.Spec.Icon)
 	}
 }
 

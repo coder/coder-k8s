@@ -332,7 +332,7 @@ func (s *TemplateStorage) Update(
 		)
 	}
 
-	return updatedObj, false, nil
+	return currentTemplate, false, nil
 }
 
 // Delete deletes a CoderTemplate through codersdk.
