@@ -98,6 +98,8 @@ type CoderProvisionerStatus struct {
 	ProvisionerKeyName string `json:"provisionerKeyName,omitempty"`
 	// TagsHash is a deterministic hash of spec.tags last applied to the provisioner key.
 	TagsHash string `json:"tagsHash,omitempty"`
+	// ControlPlaneRefName is the control plane ref name last applied to the provisioner key.
+	ControlPlaneRefName string `json:"controlPlaneRefName,omitempty"`
 	// SecretRef references the provisioner key secret data currently in use.
 	SecretRef *SecretKeySelector `json:"secretRef,omitempty"`
 }
