@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	cacheSyncTimeout    = 30 * time.Second
-	coderRequestTimeout = 30 * time.Second
+	cacheSyncTimeout           = 30 * time.Second
+	defaultCoderRequestTimeout = 30 * time.Second
 )
 
 var (
@@ -51,9 +51,17 @@ func (nonLeaderRunnable) NeedLeaderElection() bool {
 }
 
 // Run starts all app modes together using a shared controller-runtime manager/cache.
-func Run(ctx context.Context) error {
+func Run(ctx context.Context, coderRequestTimeout time.Duration) error {
 	if ctx == nil {
 		return fmt.Errorf("assertion failed: context must not be nil")
+	}
+	if coderRequestTimeout < 0 {
+		return fmt.Errorf("assertion failed: coder request timeout must not be negative: %s", coderRequestTimeout)
+	}
+
+	requestTimeout := coderRequestTimeout
+	if requestTimeout == 0 {
+		requestTimeout = defaultCoderRequestTimeout
 	}
 
 	scheme := sharedscheme.New()
@@ -101,7 +109,7 @@ func Run(ctx context.Context) error {
 				return fmt.Errorf("assertion failed: manager API reader is nil")
 			}
 
-			provider, err := coder.NewControlPlaneClientProvider(managerClient, apiReader, coderRequestTimeout)
+			provider, err := coder.NewControlPlaneClientProvider(managerClient, apiReader, requestTimeout)
 			if err != nil {
 				return fmt.Errorf("build control plane client provider: %w", err)
 			}
@@ -109,7 +117,10 @@ func Run(ctx context.Context) error {
 				return fmt.Errorf("assertion failed: control plane client provider is nil after successful construction")
 			}
 
-			return runAggregatedAPIServer(runnableCtx, apiserverapp.Options{ClientProvider: provider})
+			return runAggregatedAPIServer(runnableCtx, apiserverapp.Options{
+				ClientProvider:      provider,
+				CoderRequestTimeout: requestTimeout,
+			})
 		},
 	}); err != nil {
 		return fmt.Errorf("add aggregated-apiserver runnable: %w", err)

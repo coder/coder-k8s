@@ -19,9 +19,9 @@ import (
 const supportedAppModes = "all, controller, aggregated-apiserver, mcp-http"
 
 var (
-	runAllApp                 = allapp.Run
-	runControllerApp          = controllerapp.Run
-	runAggregatedAPIServerApp = func(ctx context.Context, opts apiserverapp.Options) error {
+	runAllApp                 func(context.Context, time.Duration) error = allapp.Run
+	runControllerApp                                                     = controllerapp.Run
+	runAggregatedAPIServerApp                                            = func(ctx context.Context, opts apiserverapp.Options) error {
 		return apiserverapp.RunWithOptions(ctx, opts)
 	}
 	runMCPHTTPApp      = mcpapp.RunHTTP
@@ -85,7 +85,7 @@ func run(args []string) error {
 
 	switch appMode {
 	case "all":
-		return runAllApp(setupSignalHandler())
+		return runAllApp(setupSignalHandler(), coderRequestTimeout)
 	case "controller":
 		return runControllerApp(setupSignalHandler())
 	case "aggregated-apiserver":

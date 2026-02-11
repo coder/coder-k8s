@@ -83,10 +83,13 @@ func TestRunDefaultsToAllMode(t *testing.T) {
 
 	expectedErr := errors.New("sentinel all error")
 	called := false
-	runAllApp = func(ctx context.Context) error {
+	runAllApp = func(ctx context.Context, timeout time.Duration) error {
 		called = true
 		if ctx == nil {
 			t.Fatal("expected non-nil context")
+		}
+		if got, want := timeout, 30*time.Second; got != want {
+			t.Fatalf("expected coder request timeout %v, got %v", want, got)
 		}
 		return expectedErr
 	}
@@ -111,12 +114,18 @@ func TestRunDispatchesAllMode(t *testing.T) {
 
 	expectedErr := errors.New("sentinel all error")
 	called := false
-	runAllApp = func(context.Context) error {
+	runAllApp = func(ctx context.Context, timeout time.Duration) error {
 		called = true
+		if ctx == nil {
+			t.Fatal("expected non-nil context")
+		}
+		if got, want := timeout, 45*time.Second; got != want {
+			t.Fatalf("expected coder request timeout %v, got %v", want, got)
+		}
 		return expectedErr
 	}
 
-	err := run([]string{"--app=all"})
+	err := run([]string{"--app=all", "--coder-request-timeout=45s"})
 	if !called {
 		t.Fatal("expected all runner to be called")
 	}

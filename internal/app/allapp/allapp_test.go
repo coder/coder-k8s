@@ -5,13 +5,14 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunRejectsNilContext(t *testing.T) {
 	t.Helper()
 
 	var nilCtx context.Context
-	err := Run(nilCtx)
+	err := Run(nilCtx, 30*time.Second)
 	if err == nil {
 		t.Fatal("expected an error when context is nil")
 	}
