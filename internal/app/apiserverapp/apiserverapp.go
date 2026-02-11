@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strings"
 	"time"
 
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
@@ -28,6 +29,7 @@ import (
 	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
 	"github.com/coder/coder-k8s/internal/aggregated/coder"
 	"github.com/coder/coder-k8s/internal/aggregated/storage"
+	"github.com/coder/coder/v2/codersdk"
 )
 
 const (
@@ -48,6 +50,78 @@ type Options struct {
 	CoderSessionToken string
 	// CoderRequestTimeout for SDK calls. Default 30s.
 	CoderRequestTimeout time.Duration
+}
+
+type errClientProvider struct {
+	err error
+}
+
+var _ coder.ClientProvider = (*errClientProvider)(nil)
+
+func (p *errClientProvider) ClientForNamespace(ctx context.Context, namespace string) (*codersdk.Client, error) {
+	if p == nil {
+		return nil, fmt.Errorf("assertion failed: error client provider must not be nil")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("assertion failed: context must not be nil")
+	}
+	if namespace == "" {
+		return nil, fmt.Errorf("assertion failed: namespace must not be empty")
+	}
+	if p.err == nil {
+		return nil, fmt.Errorf("assertion failed: error client provider error must not be nil")
+	}
+
+	return nil, p.err
+}
+
+func buildClientProvider(opts Options, requestTimeout time.Duration) (coder.ClientProvider, error) {
+	if requestTimeout <= 0 {
+		return nil, fmt.Errorf("assertion failed: request timeout must be positive")
+	}
+
+	coderURL := strings.TrimSpace(opts.CoderURL)
+	sessionToken := strings.TrimSpace(opts.CoderSessionToken)
+	missing := make([]string, 0, 2)
+	if coderURL == "" {
+		missing = append(missing, "coder URL")
+	}
+	if sessionToken == "" {
+		missing = append(missing, "coder session token")
+	}
+	if len(missing) > 0 {
+		provider := &errClientProvider{err: fmt.Errorf(
+			"coder client provider is not configured: missing %s; configure --coder-url and --coder-session-token to enable coderworkspaces and codertemplates operations",
+			strings.Join(missing, " and "),
+		)}
+		if provider.err == nil {
+			return nil, fmt.Errorf("assertion failed: fallback error client provider error is nil after successful construction")
+		}
+
+		return provider, nil
+	}
+
+	parsedCoderURL, err := url.Parse(coderURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse coder URL %q: %w", coderURL, err)
+	}
+	if parsedCoderURL == nil {
+		return nil, fmt.Errorf("assertion failed: parsed coder URL must not be nil")
+	}
+
+	provider, err := coder.NewStaticClientProvider(coder.Config{
+		CoderURL:       parsedCoderURL,
+		SessionToken:   sessionToken,
+		RequestTimeout: requestTimeout,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if provider == nil {
+		return nil, fmt.Errorf("assertion failed: coder client provider is nil after successful construction")
+	}
+
+	return provider, nil
 }
 
 // NewScheme builds the runtime scheme used by the aggregated API server.
@@ -179,22 +253,8 @@ func RunWithOptions(ctx context.Context, opts Options) error {
 	if ctx == nil {
 		return fmt.Errorf("assertion failed: context must not be nil")
 	}
-	if opts.CoderURL == "" {
-		return fmt.Errorf("assertion failed: coder URL must not be empty")
-	}
-	if opts.CoderSessionToken == "" {
-		return fmt.Errorf("assertion failed: coder session token must not be empty")
-	}
 	if opts.CoderRequestTimeout < 0 {
 		return fmt.Errorf("assertion failed: coder request timeout must not be negative")
-	}
-
-	parsedCoderURL, err := url.Parse(opts.CoderURL)
-	if err != nil {
-		return fmt.Errorf("parse coder URL %q: %w", opts.CoderURL, err)
-	}
-	if parsedCoderURL == nil {
-		return fmt.Errorf("assertion failed: parsed coder URL must not be nil")
 	}
 
 	requestTimeout := opts.CoderRequestTimeout
@@ -202,11 +262,7 @@ func RunWithOptions(ctx context.Context, opts Options) error {
 		requestTimeout = 30 * time.Second
 	}
 
-	provider, err := coder.NewStaticClientProvider(coder.Config{
-		CoderURL:       parsedCoderURL,
-		SessionToken:   opts.CoderSessionToken,
-		RequestTimeout: requestTimeout,
-	})
+	provider, err := buildClientProvider(opts, requestTimeout)
 	if err != nil {
 		return fmt.Errorf("build coder client provider: %w", err)
 	}

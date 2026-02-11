@@ -5,7 +5,9 @@ import (
 	"net"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -118,5 +120,53 @@ func TestInstallAPIGroupRegistersDiscovery(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected discovery registration for group %s", aggregationv1alpha1.SchemeGroupVersion.Group)
+	}
+}
+
+func TestBuildClientProviderReturnsDeferredErrorWithoutCoderConfig(t *testing.T) {
+	t.Parallel()
+
+	provider, err := buildClientProvider(Options{}, 30*time.Second)
+	if err != nil {
+		t.Fatalf("build client provider: %v", err)
+	}
+	if provider == nil {
+		t.Fatal("expected non-nil provider")
+	}
+
+	_, err = provider.ClientForNamespace(context.Background(), "control-plane")
+	if err == nil {
+		t.Fatal("expected deferred client error when coder config is missing")
+	}
+	if !strings.Contains(err.Error(), "missing coder URL and coder session token") {
+		t.Fatalf("expected missing-config error, got %q", err)
+	}
+}
+
+func TestBuildClientProviderReturnsStaticProviderWithCoderConfig(t *testing.T) {
+	t.Parallel()
+
+	provider, err := buildClientProvider(Options{
+		CoderURL:          "https://coder.example.com",
+		CoderSessionToken: "test-session-token",
+	}, 30*time.Second)
+	if err != nil {
+		t.Fatalf("build client provider: %v", err)
+	}
+
+	staticProvider, ok := provider.(*coderhelper.StaticClientProvider)
+	if !ok {
+		t.Fatalf("expected *coder.StaticClientProvider, got %T", provider)
+	}
+
+	sdkClient, err := staticProvider.ClientForNamespace(context.Background(), "control-plane")
+	if err != nil {
+		t.Fatalf("resolve static client for namespace: %v", err)
+	}
+	if sdkClient == nil {
+		t.Fatal("expected non-nil sdk client")
+	}
+	if got, want := sdkClient.URL.String(), "https://coder.example.com"; got != want {
+		t.Fatalf("expected client URL %q, got %q", want, got)
 	}
 }

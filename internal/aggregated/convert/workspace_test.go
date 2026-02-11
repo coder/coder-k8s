@@ -89,28 +89,86 @@ func TestWorkspaceToK8s(t *testing.T) {
 	}
 }
 
-func TestWorkspaceToK8sInfersRunningFromBuildStatus(t *testing.T) {
+func TestWorkspaceToK8sRunningStateFromTransitionAndStatus(t *testing.T) {
 	t.Parallel()
 
-	workspace := codersdk.Workspace{
-		ID:               uuid.New(),
-		CreatedAt:        time.Now().UTC(),
-		UpdatedAt:        time.Now().UTC(),
-		OwnerName:        "alice",
-		OrganizationName: "acme",
-		TemplateName:     "starter-template",
-		Name:             "dev-workspace",
-		LastUsedAt:       time.Now().UTC(),
-		LatestBuild: codersdk.WorkspaceBuild{
-			ID:         uuid.New(),
-			Transition: codersdk.WorkspaceTransitionStop,
-			Status:     codersdk.WorkspaceStatusRunning,
+	testCases := []struct {
+		name       string
+		transition codersdk.WorkspaceTransition
+		status     codersdk.WorkspaceStatus
+		running    bool
+	}{
+		{
+			name:       "start pending",
+			transition: codersdk.WorkspaceTransitionStart,
+			status:     codersdk.WorkspaceStatusPending,
+			running:    true,
+		},
+		{
+			name:       "start starting",
+			transition: codersdk.WorkspaceTransitionStart,
+			status:     codersdk.WorkspaceStatusStarting,
+			running:    true,
+		},
+		{
+			name:       "start running",
+			transition: codersdk.WorkspaceTransitionStart,
+			status:     codersdk.WorkspaceStatusRunning,
+			running:    true,
+		},
+		{
+			name:       "start failed",
+			transition: codersdk.WorkspaceTransitionStart,
+			status:     codersdk.WorkspaceStatusFailed,
+			running:    false,
+		},
+		{
+			name:       "start canceled",
+			transition: codersdk.WorkspaceTransitionStart,
+			status:     codersdk.WorkspaceStatusCanceled,
+			running:    false,
+		},
+		{
+			name:       "stop running",
+			transition: codersdk.WorkspaceTransitionStop,
+			status:     codersdk.WorkspaceStatusRunning,
+			running:    false,
 		},
 	}
 
-	converted := WorkspaceToK8s("control-plane", workspace)
-	if !converted.Spec.Running {
-		t.Fatal("expected running=true when latest build status is running")
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			now := time.Date(2025, time.February, 2, 3, 4, 5, 0, time.UTC)
+			workspace := codersdk.Workspace{
+				ID:               uuid.New(),
+				CreatedAt:        now,
+				UpdatedAt:        now,
+				OwnerName:        "alice",
+				OrganizationName: "acme",
+				TemplateName:     "starter-template",
+				Name:             "dev-workspace",
+				LastUsedAt:       now,
+				LatestBuild: codersdk.WorkspaceBuild{
+					ID:         uuid.New(),
+					Transition: testCase.transition,
+					Status:     testCase.status,
+				},
+			}
+
+			converted := WorkspaceToK8s("control-plane", workspace)
+			if converted.Spec.Running != testCase.running {
+				t.Fatalf(
+					"expected running=%t for transition=%q status=%q, got %t",
+					testCase.running,
+					testCase.transition,
+					testCase.status,
+					converted.Spec.Running,
+				)
+			}
+		})
 	}
 }
 
@@ -135,10 +193,54 @@ func TestWorkspaceCreateRequestFromK8s(t *testing.T) {
 	if request.TemplateID != templateID {
 		t.Fatalf("expected request template ID %q, got %q", templateID, request.TemplateID)
 	}
+	if request.TemplateVersionID != uuid.Nil {
+		t.Fatalf("expected request template version ID %q, got %q", uuid.Nil, request.TemplateVersionID)
+	}
 	if request.TTLMillis == nil || *request.TTLMillis != ttlMillis {
 		t.Fatalf("expected request TTL millis %d, got %+v", ttlMillis, request.TTLMillis)
 	}
 	if request.AutostartSchedule == nil || *request.AutostartSchedule != autostartSchedule {
 		t.Fatalf("expected request autostart schedule %q, got %+v", autostartSchedule, request.AutostartSchedule)
+	}
+}
+
+func TestWorkspaceCreateRequestFromK8sUsesTemplateVersionID(t *testing.T) {
+	t.Parallel()
+
+	templateID := uuid.New()
+	templateVersionID := uuid.New()
+
+	obj := &aggregationv1alpha1.CoderWorkspace{
+		Spec: aggregationv1alpha1.CoderWorkspaceSpec{
+			TemplateVersionID: templateVersionID.String(),
+		},
+	}
+
+	request := WorkspaceCreateRequestFromK8s(obj, "dev-workspace", templateID)
+	if request.TemplateVersionID != templateVersionID {
+		t.Fatalf("expected request template version ID %q, got %q", templateVersionID, request.TemplateVersionID)
+	}
+	if request.TemplateID != uuid.Nil {
+		t.Fatalf("expected request template ID %q, got %q", uuid.Nil, request.TemplateID)
+	}
+}
+
+func TestWorkspaceCreateRequestFromK8sFallsBackToTemplateIDForInvalidTemplateVersionID(t *testing.T) {
+	t.Parallel()
+
+	templateID := uuid.New()
+
+	obj := &aggregationv1alpha1.CoderWorkspace{
+		Spec: aggregationv1alpha1.CoderWorkspaceSpec{
+			TemplateVersionID: "not-a-uuid",
+		},
+	}
+
+	request := WorkspaceCreateRequestFromK8s(obj, "dev-workspace", templateID)
+	if request.TemplateID != templateID {
+		t.Fatalf("expected request template ID %q, got %q", templateID, request.TemplateID)
+	}
+	if request.TemplateVersionID != uuid.Nil {
+		t.Fatalf("expected request template version ID %q, got %q", uuid.Nil, request.TemplateVersionID)
 	}
 }

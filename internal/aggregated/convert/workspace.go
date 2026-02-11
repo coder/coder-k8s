@@ -51,12 +51,16 @@ func WorkspaceToK8s(namespace string, w codersdk.Workspace) *aggregationv1alpha1
 }
 
 func workspaceRunning(workspace codersdk.Workspace) bool {
-	running := workspace.LatestBuild.Transition == codersdk.WorkspaceTransitionStart
-	if workspace.LatestBuild.Status == codersdk.WorkspaceStatusRunning {
-		running = true
+	if workspace.LatestBuild.Transition != codersdk.WorkspaceTransitionStart {
+		return false
 	}
 
-	return running
+	switch workspace.LatestBuild.Status {
+	case codersdk.WorkspaceStatusPending, codersdk.WorkspaceStatusStarting, codersdk.WorkspaceStatusRunning:
+		return true
+	default:
+		return false
+	}
 }
 
 // WorkspaceCreateRequestFromK8s builds a codersdk.CreateWorkspaceRequest.
@@ -75,10 +79,23 @@ func WorkspaceCreateRequestFromK8s(
 		panic("assertion failed: template ID must not be nil")
 	}
 
-	return codersdk.CreateWorkspaceRequest{
+	request := codersdk.CreateWorkspaceRequest{
 		Name:              workspaceName,
-		TemplateID:        templateID,
 		TTLMillis:         obj.Spec.TTLMillis,
 		AutostartSchedule: obj.Spec.AutostartSchedule,
 	}
+
+	if obj.Spec.TemplateVersionID == "" {
+		request.TemplateID = templateID
+		return request
+	}
+
+	templateVersionID, err := uuid.Parse(obj.Spec.TemplateVersionID)
+	if err != nil {
+		request.TemplateID = templateID
+		return request
+	}
+
+	request.TemplateVersionID = templateVersionID
+	return request
 }
