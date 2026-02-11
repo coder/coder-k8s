@@ -233,19 +233,31 @@ func (r *CoderProvisionerReconciler) reconcileDeletion(ctx context.Context, prov
 
 	log := ctrl.LoggerFrom(ctx)
 	organizationName := provisionerOrganizationName(provisioner.Spec.OrganizationName)
-	keyName, _, _ := provisionerKeyConfig(provisioner)
 
-	// Best-effort remote key cleanup: if the referenced control plane or
-	// bootstrap credentials are already gone (common during namespace
-	// teardown), log a warning and proceed to finalizer removal so the CR
-	// does not get stuck in Terminating.
+	// Prefer the key name persisted in status (reflects what was actually
+	// created in coderd) over the current spec value, which may have been
+	// edited after initial provisioning.
+	keyName := provisioner.Status.ProvisionerKeyName
+	if keyName == "" {
+		keyName, _, _ = provisionerKeyConfig(provisioner)
+	}
+
+	// Best-effort remote key cleanup: if the referenced control plane,
+	// its URL, or the bootstrap credentials are unavailable (common during
+	// namespace teardown or when the control plane was never ready), log a
+	// warning and proceed to finalizer removal so the CR does not get
+	// stuck in Terminating.
 	controlPlane, err := r.fetchControlPlane(ctx, provisioner)
 	if err != nil {
+		// fetchControlPlane returns a plain error (not apierrors) when
+		// status.url is empty, and wraps the k8s API error with %w when
+		// the object is missing. Treat both cases as non-blocking.
 		if apierrors.IsNotFound(err) {
 			log.Info("referenced CoderControlPlane not found during deletion, skipping remote key cleanup",
 				"controlPlaneRef", provisioner.Spec.ControlPlaneRef.Name)
 		} else {
-			return ctrl.Result{}, err
+			log.Info("unable to reach referenced CoderControlPlane during deletion, skipping remote key cleanup",
+				"controlPlaneRef", provisioner.Spec.ControlPlaneRef.Name, "error", err)
 		}
 	} else {
 		sessionToken, tokenErr := r.readBootstrapSessionToken(ctx, provisioner)
