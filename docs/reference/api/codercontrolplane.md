@@ -28,7 +28,7 @@
 | `status.observedGeneration` | `int64` | ObservedGeneration tracks the spec generation this status reflects. |
 | `status.readyReplicas` | `int32` | ReadyReplicas is the number of ready pods observed in the deployment. |
 | `status.url` | `string` | URL is the in-cluster URL for the control plane service. |
-| `status.operatorTokenSecretRef` | `github.com/coder/coder-k8s/api/v1alpha1.SecretKeySelector` | OperatorTokenSecretRef points to the Secret key containing the<br />`coder-k8s-operator` API token. |
+| `status.operatorTokenSecretRef` | `github.com/coder/coder-k8s/api/v1alpha1.SecretKeySelector` | OperatorTokenSecretRef points to the Secret key containing the `coder-k8s-operator` API token. |
 | `status.operatorAccessReady` | `bool` | OperatorAccessReady reports whether operator API access bootstrap succeeded. |
 | `status.phase` | `string` | Phase is a high-level readiness indicator. |
 | `status.conditions` | `[]metav1.Condition` | Conditions are Kubernetes-standard conditions for this resource. |

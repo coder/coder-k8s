@@ -52,8 +52,7 @@ type CoderControlPlaneStatus struct {
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 	// URL is the in-cluster URL for the control plane service.
 	URL string `json:"url,omitempty"`
-	// OperatorTokenSecretRef points to the Secret key containing the
-	// `coder-k8s-operator` API token.
+	// OperatorTokenSecretRef points to the Secret key containing the `coder-k8s-operator` API token.
 	OperatorTokenSecretRef *SecretKeySelector `json:"operatorTokenSecretRef,omitempty"`
 	// OperatorAccessReady reports whether operator API access bootstrap succeeded.
 	OperatorAccessReady bool `json:"operatorAccessReady,omitempty"`
