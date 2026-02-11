@@ -55,6 +55,9 @@ type Options struct {
 	CoderNamespace string
 	// CoderRequestTimeout for SDK calls. Default 30s.
 	CoderRequestTimeout time.Duration
+	// ClientProvider overrides the default static provider.
+	// When set, CoderURL/CoderSessionToken/CoderNamespace flags are ignored.
+	ClientProvider coder.ClientProvider
 }
 
 type errClientProvider struct {
@@ -272,9 +275,15 @@ func RunWithOptions(ctx context.Context, opts Options) error {
 		requestTimeout = 30 * time.Second
 	}
 
-	provider, err := buildClientProvider(opts, requestTimeout)
-	if err != nil {
-		return fmt.Errorf("build coder client provider: %w", err)
+	var provider coder.ClientProvider
+	if opts.ClientProvider != nil {
+		provider = opts.ClientProvider
+	} else {
+		var err error
+		provider, err = buildClientProvider(opts, requestTimeout)
+		if err != nil {
+			return fmt.Errorf("build coder client provider: %w", err)
+		}
 	}
 	if provider == nil {
 		return fmt.Errorf("assertion failed: coder client provider is nil after successful construction")
