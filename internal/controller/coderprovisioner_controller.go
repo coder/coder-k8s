@@ -209,6 +209,13 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		appliedOrgName = organizationName
 		appliedTagsHash = desiredTagsHash
+		setCondition(
+			provisioner,
+			coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+			metav1.ConditionTrue,
+			"ProvisionerKeyReady",
+			"Provisioner key is available in coderd",
+		)
 	} else if !secretUsable {
 		response, ensureErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
 			CoderURL:         controlPlane.Status.URL,
@@ -269,14 +276,14 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		appliedOrgName = organizationName
 		appliedTagsHash = desiredTagsHash
+		setCondition(
+			provisioner,
+			coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+			metav1.ConditionTrue,
+			"ProvisionerKeyReady",
+			"Provisioner key is available in coderd",
+		)
 	}
-	setCondition(
-		provisioner,
-		coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
-		metav1.ConditionTrue,
-		"ProvisionerKeyReady",
-		"Provisioner key is available in coderd",
-	)
 
 	provisionerKeySecret, err := r.ensureProvisionerKeySecret(ctx, provisioner, keySecretName, keySecretKey, keyMaterial)
 	if err != nil {
