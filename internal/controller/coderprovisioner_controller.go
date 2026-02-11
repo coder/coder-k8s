@@ -138,10 +138,12 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	keyNameDrift := status.ProvisionerKeyName != "" && status.ProvisionerKeyName != keyName
 	tagsDrift := status.TagsHash != "" && status.TagsHash != desiredTagsHash
 	controlPlaneRefDrift := status.ControlPlaneRefName != "" && status.ControlPlaneRefName != desiredControlPlaneRefName
-	driftDetected := orgDrift || keyNameDrift || tagsDrift || controlPlaneRefDrift
+	controlPlaneURLDrift := status.ControlPlaneURL != "" && status.ControlPlaneURL != controlPlane.Status.URL
+	driftDetected := orgDrift || keyNameDrift || tagsDrift || controlPlaneRefDrift || controlPlaneURLDrift
 	appliedOrgName := provisioner.Status.OrganizationName
 	appliedTagsHash := provisioner.Status.TagsHash
 	appliedControlPlaneRefName := provisioner.Status.ControlPlaneRefName
+	appliedControlPlaneURL := provisioner.Status.ControlPlaneURL
 
 	// Check whether a usable provisioner key secret already exists.
 	// The secret is considered "usable" only if the Secret object exists
@@ -169,7 +171,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if driftDetected {
 		log.Info("spec drift detected, rotating provisioner key",
 			"orgDrift", orgDrift, "keyNameDrift", keyNameDrift, "tagsDrift", tagsDrift,
-			"controlPlaneRefDrift", controlPlaneRefDrift)
+			"controlPlaneRefDrift", controlPlaneRefDrift, "controlPlaneURLDrift", controlPlaneURLDrift)
 
 		oldOrg := provisioner.Status.OrganizationName
 		if oldOrg == "" {
@@ -267,6 +269,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		appliedOrgName = organizationName
 		appliedTagsHash = desiredTagsHash
 		appliedControlPlaneRefName = desiredControlPlaneRefName
+		appliedControlPlaneURL = controlPlane.Status.URL
 		setCondition(
 			provisioner,
 			coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
@@ -351,6 +354,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		appliedOrgName = organizationName
 		appliedTagsHash = desiredTagsHash
 		appliedControlPlaneRefName = desiredControlPlaneRefName
+		appliedControlPlaneURL = controlPlane.Status.URL
 		setCondition(
 			provisioner,
 			coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
@@ -390,6 +394,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			appliedOrgName = organizationName
 			appliedTagsHash = desiredTagsHash
 			appliedControlPlaneRefName = desiredControlPlaneRefName
+			appliedControlPlaneURL = controlPlane.Status.URL
 		} else {
 			// Key already exists; tags may be stale. Rotate to ensure desired tags are applied.
 			log.Info("existing key found during metadata backfill, rotating to ensure desired tags",
@@ -433,6 +438,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			appliedOrgName = organizationName
 			appliedTagsHash = desiredTagsHash
 			appliedControlPlaneRefName = desiredControlPlaneRefName
+			appliedControlPlaneURL = controlPlane.Status.URL
 		}
 		setCondition(
 			provisioner,
@@ -504,7 +510,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		provisionerKeyName,
 		appliedTagsHash,
 		appliedControlPlaneRefName,
-		controlPlane.Status.URL,
+		appliedControlPlaneURL,
 		statusSnapshot,
 	); err != nil {
 		return ctrl.Result{}, err
