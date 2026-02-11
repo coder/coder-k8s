@@ -100,6 +100,8 @@ type CoderProvisionerStatus struct {
 	TagsHash string `json:"tagsHash,omitempty"`
 	// ControlPlaneRefName is the control plane ref name last applied to the provisioner key.
 	ControlPlaneRefName string `json:"controlPlaneRefName,omitempty"`
+	// ControlPlaneURL is the control plane URL last applied to the provisioner key.
+	ControlPlaneURL string `json:"controlPlaneURL,omitempty"`
 	// SecretRef references the provisioner key secret data currently in use.
 	SecretRef *SecretKeySelector `json:"secretRef,omitempty"`
 }

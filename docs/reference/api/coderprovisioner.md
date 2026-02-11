@@ -40,6 +40,7 @@
 | `status.provisionerKeyName` | `string` | ProvisionerKeyName is the provisioner key name last applied in coderd. |
 | `status.tagsHash` | `string` | TagsHash is a deterministic hash of spec.tags last applied to the provisioner key. |
 | `status.controlPlaneRefName` | `string` | ControlPlaneRefName is the control plane ref name last applied to the provisioner key. |
+| `status.controlPlaneURL` | `string` | ControlPlaneURL is the control plane URL last applied to the provisioner key. |
 | `status.secretRef` | `github.com/coder/coder-k8s/api/v1alpha1.SecretKeySelector` | SecretRef references the provisioner key secret data currently in use. |
 
 ## Source

@@ -78,6 +78,8 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return r.reconcileDeletion(ctx, provisioner)
 	}
 
+	statusSnapshot := provisioner.Status.DeepCopy()
+
 	finalizerAdded, err := r.ensureCleanupFinalizer(ctx, provisioner)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -177,10 +179,14 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if oldKeyName == "" {
 			oldKeyName = keyName
 		}
+		oldControlPlaneURL := provisioner.Status.ControlPlaneURL
+		if oldControlPlaneURL == "" {
+			oldControlPlaneURL = controlPlane.Status.URL
+		}
 
 		if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
 			ctx,
-			controlPlane.Status.URL,
+			oldControlPlaneURL,
 			sessionToken,
 			oldOrg,
 			oldKeyName,
@@ -498,6 +504,8 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		provisionerKeyName,
 		appliedTagsHash,
 		appliedControlPlaneRefName,
+		controlPlane.Status.URL,
+		statusSnapshot,
 	); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -832,9 +840,12 @@ func (r *CoderProvisionerReconciler) reconcileStatus(
 	provisionerKeyName string,
 	tagsHash string,
 	controlPlaneRefName string,
+	controlPlaneURL string,
+	statusSnapshot *coderv1alpha1.CoderProvisionerStatus,
 ) error {
-	// Take a snapshot before mutation so status writes are skipped when no fields changed.
-	previousStatus := provisioner.Status.DeepCopy()
+	if statusSnapshot == nil {
+		return fmt.Errorf("assertion failed: status snapshot must not be nil")
+	}
 
 	phase := coderv1alpha1.CoderProvisionerPhasePending
 	if deployment.Status.ReadyReplicas > 0 {
@@ -851,6 +862,7 @@ func (r *CoderProvisionerReconciler) reconcileStatus(
 	provisioner.Status.ProvisionerKeyName = provisionerKeyName
 	provisioner.Status.TagsHash = tagsHash
 	provisioner.Status.ControlPlaneRefName = controlPlaneRefName
+	provisioner.Status.ControlPlaneURL = controlPlaneURL
 	provisioner.Status.SecretRef = &coderv1alpha1.SecretKeySelector{
 		Name: secretRef.Name,
 		Key:  secretRef.Key,
@@ -874,7 +886,7 @@ func (r *CoderProvisionerReconciler) reconcileStatus(
 		)
 	}
 
-	if previousStatus != nil && equality.Semantic.DeepEqual(*previousStatus, provisioner.Status) {
+	if equality.Semantic.DeepEqual(*statusSnapshot, provisioner.Status) {
 		return nil
 	}
 
