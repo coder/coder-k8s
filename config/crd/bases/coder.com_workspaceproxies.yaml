@@ -303,10 +303,12 @@ spec:
                       object.
                     type: object
                   port:
+                    default: 80
                     description: Port controls the exposed service port.
                     format: int32
                     type: integer
                   type:
+                    default: ClusterIP
                     description: Type controls the Kubernetes service type.
                     type: string
                 type: object
