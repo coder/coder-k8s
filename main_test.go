@@ -115,6 +115,9 @@ func TestRunDispatchesAggregatedAPIServerMode(t *testing.T) {
 		if got, want := opts.CoderSessionToken, "test-token"; got != want {
 			t.Fatalf("expected coder session token %q, got %q", want, got)
 		}
+		if got, want := opts.CoderNamespace, "control-plane"; got != want {
+			t.Fatalf("expected coder namespace %q, got %q", want, got)
+		}
 		if got, want := opts.CoderRequestTimeout, 45*time.Second; got != want {
 			t.Fatalf("expected coder request timeout %v, got %v", want, got)
 		}
@@ -125,6 +128,7 @@ func TestRunDispatchesAggregatedAPIServerMode(t *testing.T) {
 		"--app=aggregated-apiserver",
 		"--coder-url=https://coder.example.com",
 		"--coder-session-token=test-token",
+		"--coder-namespace=control-plane",
 		"--coder-request-timeout=45s",
 	})
 	if !called {

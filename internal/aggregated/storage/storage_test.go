@@ -173,6 +173,45 @@ func TestTemplateStorageUpdateReturnsDesiredObjectForLegacyRunningField(t *testi
 	}
 }
 
+func TestTemplateStorageUpdateRejectsNonRunningSpecChanges(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	currentObj, err := templateStorage.Get(ctx, "acme.starter-template", nil)
+	if err != nil {
+		t.Fatalf("expected template get to succeed: %v", err)
+	}
+
+	currentTemplate, ok := currentObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from get, got %T", currentObj)
+	}
+
+	desiredTemplate := currentTemplate.DeepCopy()
+	desiredTemplate.Spec.DisplayName = "Renamed Template"
+
+	_, _, err = templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected BadRequest when changing immutable template spec fields, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "spec.running") {
+		t.Fatalf("expected immutable-field error mentioning spec.running, got %v", err)
+	}
+}
+
 func TestWorkspaceStorageCRUDWithCoderSDK(t *testing.T) {
 	t.Parallel()
 

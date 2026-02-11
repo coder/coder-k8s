@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	genericoptions "k8s.io/apiserver/pkg/server/options"
@@ -152,6 +153,7 @@ func TestBuildClientProviderReturnsStaticProviderWithCoderConfig(t *testing.T) {
 	provider, err := buildClientProvider(Options{
 		CoderURL:          "https://coder.example.com",
 		CoderSessionToken: "test-session-token",
+		CoderNamespace:    "control-plane",
 	}, 30*time.Second)
 	if err != nil {
 		t.Fatalf("build client provider: %v", err)
@@ -160,6 +162,9 @@ func TestBuildClientProviderReturnsStaticProviderWithCoderConfig(t *testing.T) {
 	staticProvider, ok := provider.(*coderhelper.StaticClientProvider)
 	if !ok {
 		t.Fatalf("expected *coder.StaticClientProvider, got %T", provider)
+	}
+	if got, want := staticProvider.Namespace, "control-plane"; got != want {
+		t.Fatalf("expected provider namespace %q, got %q", want, got)
 	}
 
 	sdkClient, err := staticProvider.ClientForNamespace(context.Background(), "control-plane")
@@ -171,5 +176,10 @@ func TestBuildClientProviderReturnsStaticProviderWithCoderConfig(t *testing.T) {
 	}
 	if got, want := sdkClient.URL.String(), "https://coder.example.com"; got != want {
 		t.Fatalf("expected client URL %q, got %q", want, got)
+	}
+
+	_, err = staticProvider.ClientForNamespace(context.Background(), "default")
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected BadRequest for namespace outside provider scope, got %v", err)
 	}
 }

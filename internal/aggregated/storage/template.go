@@ -276,9 +276,29 @@ func (s *TemplateStorage) Update(
 		}
 	}
 
+	updatedTemplate, ok := updatedObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		return nil, false, fmt.Errorf("assertion failed: expected *CoderTemplate, got %T", updatedObj)
+	}
+	currentTemplate, ok := currentObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		return nil, false, fmt.Errorf("assertion failed: expected *CoderTemplate, got %T", currentObj)
+	}
+
 	// Template updates via codersdk are currently limited. The legacy spec.running
 	// field remains for compatibility with in-repo callers and is a no-op in the
-	// Coder backend. Return the desired object as-is.
+	// Coder backend. Reject updates to all other spec fields to avoid drift between
+	// accepted update payloads and persisted backend state.
+	if updatedTemplate.Spec.Organization != currentTemplate.Spec.Organization ||
+		updatedTemplate.Spec.VersionID != currentTemplate.Spec.VersionID ||
+		updatedTemplate.Spec.DisplayName != currentTemplate.Spec.DisplayName ||
+		updatedTemplate.Spec.Description != currentTemplate.Spec.Description ||
+		updatedTemplate.Spec.Icon != currentTemplate.Spec.Icon {
+		return nil, false, apierrors.NewBadRequest(
+			"template update only supports changing spec.running; other spec fields are immutable",
+		)
+	}
+
 	return updatedObj, false, nil
 }
 

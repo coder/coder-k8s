@@ -30,6 +30,7 @@ func run(args []string) error {
 		appMode             string
 		coderURL            string
 		coderSessionToken   string
+		coderNamespace      string
 		coderRequestTimeout time.Duration
 	)
 	fs.StringVar(&appMode, "app", "", "Application mode (controller, aggregated-apiserver, mcp-http)")
@@ -44,6 +45,12 @@ func run(args []string) error {
 		"coder-url",
 		"",
 		"Coder deployment URL (fallback when CoderControlPlane status URL is unavailable)",
+	)
+	fs.StringVar(
+		&coderNamespace,
+		"coder-namespace",
+		"",
+		"Restrict the aggregated API server to serve only this Kubernetes namespace",
 	)
 	fs.DurationVar(
 		&coderRequestTimeout,
@@ -62,6 +69,7 @@ func run(args []string) error {
 		opts := apiserverapp.Options{
 			CoderURL:            coderURL,
 			CoderSessionToken:   coderSessionToken,
+			CoderNamespace:      coderNamespace,
 			CoderRequestTimeout: coderRequestTimeout,
 		}
 		return runAggregatedAPIServerApp(setupSignalHandler(), opts)

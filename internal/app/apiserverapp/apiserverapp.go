@@ -48,6 +48,9 @@ type Options struct {
 	CoderURL string
 	// CoderSessionToken is the admin session token.
 	CoderSessionToken string
+	// CoderNamespace restricts the provider to serve only this namespace.
+	// When non-empty, requests to other namespaces are rejected.
+	CoderNamespace string
 	// CoderRequestTimeout for SDK calls. Default 30s.
 	CoderRequestTimeout time.Duration
 }
@@ -115,7 +118,7 @@ func buildClientProvider(opts Options, requestTimeout time.Duration) (coder.Clie
 			SessionToken:   sessionToken,
 			RequestTimeout: requestTimeout,
 		},
-		"",
+		opts.CoderNamespace,
 	)
 	if err != nil {
 		return nil, err
