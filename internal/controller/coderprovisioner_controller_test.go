@@ -413,6 +413,66 @@ func TestCoderProvisionerReconciler_Deletion(t *testing.T) {
 	}, 5*time.Second, 100*time.Millisecond)
 }
 
+func TestCoderProvisionerReconciler_DeletionControlPlaneGone(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	namespace := createTestNamespace(ctx, t, "coderprov-delete-cpgone")
+	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-cpgone", "https://coder.example.com")
+	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
+
+	provisioner := &coderv1alpha1.CoderProvisioner{
+		ObjectMeta: metav1.ObjectMeta{Name: "provisioner-cpgone", Namespace: namespace},
+		Spec: coderv1alpha1.CoderProvisionerSpec{
+			ControlPlaneRef: corev1.LocalObjectReference{Name: controlPlane.Name},
+			Bootstrap: coderv1alpha1.CoderProvisionerBootstrapSpec{
+				CredentialsSecretRef: coderv1alpha1.SecretKeySelector{Name: bootstrapSecret.Name, Key: coderv1alpha1.DefaultTokenSecretKey},
+			},
+			Image: "provisioner-image:test",
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, provisioner))
+
+	bootstrapClient := &fakeBootstrapClient{
+		provisionerKeyResponse: coderbootstrap.EnsureProvisionerKeyResponse{Key: "provisioner-key-material"},
+	}
+	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
+
+	namespacedName := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
+	reconcileProvisioner(ctx, t, reconciler, namespacedName)
+	reconcileProvisioner(ctx, t, reconciler, namespacedName)
+
+	// Delete the control plane first (common in namespace teardown).
+	require.NoError(t, k8sClient.Delete(ctx, controlPlane))
+
+	// Now delete the provisioner — the finalizer should still be removed
+	// even though the control plane is gone (best-effort cleanup).
+	latest := &coderv1alpha1.CoderProvisioner{}
+	require.NoError(t, k8sClient.Get(ctx, namespacedName, latest))
+	require.NoError(t, k8sClient.Delete(ctx, latest))
+
+	reconcileProvisioner(ctx, t, reconciler, namespacedName)
+
+	// DeleteProvisionerKey should NOT have been called since the control
+	// plane was already gone.
+	require.Equal(t, 0, bootstrapClient.deleteKeyCalls)
+
+	// The finalizer should still be removed.
+	require.Eventually(t, func() bool {
+		reconciled := &coderv1alpha1.CoderProvisioner{}
+		err := k8sClient.Get(ctx, namespacedName, reconciled)
+		if apierrors.IsNotFound(err) {
+			return true
+		}
+		if err != nil {
+			t.Logf("get reconciled provisioner: %v", err)
+			return false
+		}
+
+		return !controllerutil.ContainsFinalizer(reconciled, coderv1alpha1.ProvisionerKeyCleanupFinalizer)
+	}, 5*time.Second, 100*time.Millisecond)
+}
+
 func TestCoderProvisionerReconciler_NotFound(t *testing.T) {
 	t.Parallel()
 
