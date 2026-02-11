@@ -60,20 +60,17 @@ type CoderWorkspaceList struct {
 
 // CoderTemplateSpec defines the desired state of a CoderTemplate.
 type CoderTemplateSpec struct {
-	// Organization is the Coder organization name.
-	// Must match the <organization> prefix in metadata.name.
+	// Organization is the Coder organization name (must match the organization prefix in metadata.name).
 	Organization string `json:"organization,omitempty"`
 
-	// VersionID is the Coder template version UUID used on creation.
-	// Required for CREATE.
+	// VersionID is the Coder template version UUID used on creation (required for CREATE).
 	VersionID string `json:"versionID,omitempty"`
 
 	DisplayName string `json:"displayName,omitempty"`
 	Description string `json:"description,omitempty"`
 	Icon        string `json:"icon,omitempty"`
 
-	// Legacy running flag retained temporarily for in-repo callers that still
-	// read template run-state directly.
+	// Running is a legacy flag retained temporarily for in-repo callers that still read template run-state directly.
 	Running bool `json:"running,omitempty"`
 }
 
@@ -85,8 +82,7 @@ type CoderTemplateStatus struct {
 	Deprecated       bool         `json:"deprecated,omitempty"`
 	UpdatedAt        *metav1.Time `json:"updatedAt,omitempty"`
 
-	// Legacy auto-shutdown timestamp retained temporarily for in-repo callers
-	// that still surface template shutdown timestamps.
+	// AutoShutdown is a legacy timestamp retained temporarily for in-repo callers that still surface template shutdown timestamps.
 	AutoShutdown *metav1.Time `json:"autoShutdown,omitempty"`
 }
 
