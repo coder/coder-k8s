@@ -134,6 +134,8 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	keyNameDrift := status.ProvisionerKeyName != "" && status.ProvisionerKeyName != keyName
 	tagsDrift := status.TagsHash != "" && status.TagsHash != desiredTagsHash
 	driftDetected := orgDrift || keyNameDrift || tagsDrift
+	appliedOrgName := provisioner.Status.OrganizationName
+	appliedTagsHash := provisioner.Status.TagsHash
 
 	// Check whether a usable provisioner key secret already exists.
 	// The secret is considered "usable" only if the Secret object exists
@@ -205,6 +207,8 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if keyMaterial == "" {
 			return ctrl.Result{}, fmt.Errorf("assertion failed: provisioner key returned empty material after drift rotation")
 		}
+		appliedOrgName = organizationName
+		appliedTagsHash = desiredTagsHash
 	} else if !secretUsable {
 		response, ensureErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
 			CoderURL:         controlPlane.Status.URL,
@@ -263,6 +267,8 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				return ctrl.Result{}, fmt.Errorf("assertion failed: provisioner key %q returned empty key material after rotation", keyName)
 			}
 		}
+		appliedOrgName = organizationName
+		appliedTagsHash = desiredTagsHash
 	}
 	setCondition(
 		provisioner,
@@ -328,10 +334,10 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		deployment,
 		secretRef,
 		organizationID,
-		organizationName,
+		appliedOrgName,
 		provisionerKeyID,
 		provisionerKeyName,
-		desiredTagsHash,
+		appliedTagsHash,
 	); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -842,7 +848,20 @@ func provisionerKeyConfig(provisioner *coderv1alpha1.CoderProvisioner) (string, 
 
 	secretName := provisioner.Spec.Key.SecretName
 	if secretName == "" {
-		secretName = fmt.Sprintf("%s-provisioner-key", provisioner.Name)
+		const secretNameSuffix = "-provisioner-key"
+		candidate := provisioner.Name + secretNameSuffix
+		if len(candidate) <= 253 {
+			secretName = candidate
+		} else {
+			hasher := fnv.New32a()
+			_, _ = hasher.Write([]byte(provisioner.Name))
+			suffix := fmt.Sprintf("%08x", hasher.Sum32())
+			available := 253 - len(secretNameSuffix) - len(suffix) - 1
+			if available < 1 {
+				available = 1
+			}
+			secretName = fmt.Sprintf("%s-%s%s", provisioner.Name[:available], suffix, secretNameSuffix)
+		}
 	}
 
 	secretKey := provisioner.Spec.Key.SecretKey
