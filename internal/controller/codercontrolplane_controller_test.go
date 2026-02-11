@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -583,6 +584,94 @@ func TestReconcile_OperatorAccess_Disabled_RevokesTokenAndDeletesSecret(t *testi
 	}
 	if reconciled.Status.OperatorTokenSecretRef != nil {
 		t.Fatalf("expected operator token secret ref to be nil when disabled")
+	}
+}
+
+func TestReconcile_OperatorAccess_Disabled_RetriesRevocationAfterFailure(t *testing.T) {
+	ctx := context.Background()
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-operator-access-disabled-retry-revoke",
+			Namespace: "default",
+		},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-operator-disabled-retry-revoke:latest",
+			ExtraEnv: []corev1.EnvVar{{
+				Name:  "CODER_PG_CONNECTION_URL",
+				Value: "postgres://example.disabled.retry/coder",
+			}},
+			OperatorAccess: coderv1alpha1.OperatorAccessSpec{Disabled: true},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("failed to create test CoderControlPlane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	managedSecretName := cp.Name + "-operator-token"
+	managedSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: managedSecretName, Namespace: cp.Namespace},
+		Type:       corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			coderv1alpha1.DefaultTokenSecretKey: []byte("stale-operator-token"),
+		},
+	}
+	if err := k8sClient.Create(ctx, managedSecret); err != nil {
+		t.Fatalf("failed to create managed operator secret: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, managedSecret)
+	})
+
+	provisioner := &fakeOperatorAccessProvisioner{revokeErr: errors.New("revoke failed")}
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+
+	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}})
+	if err != nil {
+		t.Fatalf("reconcile disabled control plane with revoke error: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("expected requeue when revoke fails, got %+v", result)
+	}
+	if provisioner.revokeCalls != 1 {
+		t.Fatalf("expected revoke to be called once, got %d calls", provisioner.revokeCalls)
+	}
+
+	reconciled := &coderv1alpha1.CoderControlPlane{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, reconciled); err != nil {
+		t.Fatalf("get reconciled control plane: %v", err)
+	}
+	if reconciled.Status.OperatorTokenSecretRef == nil {
+		t.Fatalf("expected status to retain operator token secret ref while cleanup is pending")
+	}
+	if reconciled.Status.OperatorTokenSecretRef.Name != managedSecretName {
+		t.Fatalf("expected pending secret ref name %q, got %q", managedSecretName, reconciled.Status.OperatorTokenSecretRef.Name)
+	}
+	if reconciled.Status.OperatorTokenSecretRef.Key != coderv1alpha1.DefaultTokenSecretKey {
+		t.Fatalf("expected pending secret ref key %q, got %q", coderv1alpha1.DefaultTokenSecretKey, reconciled.Status.OperatorTokenSecretRef.Key)
+	}
+	if reconciled.Status.OperatorAccessReady {
+		t.Fatalf("expected operator access ready=false while cleanup is pending")
+	}
+
+	secret := &corev1.Secret{}
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: managedSecretName, Namespace: cp.Namespace}, secret)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected managed operator secret to be deleted before revoke retry, got error %v", err)
+	}
+
+	result, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}})
+	if err != nil {
+		t.Fatalf("second reconcile disabled control plane with revoke error: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("expected second reconcile to requeue while revoke keeps failing, got %+v", result)
+	}
+	if provisioner.revokeCalls != 2 {
+		t.Fatalf("expected revoke to be retried on second reconcile, got %d calls", provisioner.revokeCalls)
 	}
 }
 

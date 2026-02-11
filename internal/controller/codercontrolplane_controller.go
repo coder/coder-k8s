@@ -242,12 +242,20 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 
 	if coderControlPlane.Spec.OperatorAccess.Disabled {
 		cleanupErr := r.cleanupDisabledOperatorAccess(ctx, coderControlPlane)
-		nextStatus.OperatorTokenSecretRef = nil
 		nextStatus.OperatorAccessReady = false
 		if cleanupErr != nil {
+			pendingSecretName := operatorAccessTokenSecretName(coderControlPlane)
+			if strings.TrimSpace(pendingSecretName) == "" {
+				return ctrl.Result{}, fmt.Errorf("assertion failed: operator token secret name must not be empty")
+			}
+			nextStatus.OperatorTokenSecretRef = &coderv1alpha1.SecretKeySelector{
+				Name: pendingSecretName,
+				Key:  coderv1alpha1.DefaultTokenSecretKey,
+			}
 			//nolint:nilerr // disabling operator access should retry cleanup without surfacing a terminal reconcile error.
 			return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
 		}
+		nextStatus.OperatorTokenSecretRef = nil
 		return ctrl.Result{}, nil
 	}
 
