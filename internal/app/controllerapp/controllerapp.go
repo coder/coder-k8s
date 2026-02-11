@@ -4,6 +4,8 @@ package controllerapp
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -31,6 +33,9 @@ func NewScheme() *runtime.Scheme {
 	return scheme
 }
 
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+
 // Run starts the controller-runtime manager for the controller application mode.
 func Run(ctx context.Context) error {
 	if ctx == nil {
@@ -43,8 +48,11 @@ func Run(ctx context.Context) error {
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		HealthProbeBindAddress: HealthProbeBindAddress,
+		Scheme:                        scheme,
+		HealthProbeBindAddress:        HealthProbeBindAddress,
+		LeaderElection:                true,
+		LeaderElectionID:              "coder-k8s-controller.coder.com",
+		LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
 		return fmt.Errorf("unable to start manager: %w", err)
@@ -83,7 +91,14 @@ func Run(ctx context.Context) error {
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return fmt.Errorf("unable to set up health check: %w", err)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	if err := mgr.AddReadyzCheck("readyz", func(req *http.Request) error {
+		ctx, cancel := context.WithTimeout(req.Context(), 2*time.Second)
+		defer cancel()
+		if synced := mgr.GetCache().WaitForCacheSync(ctx); !synced {
+			return fmt.Errorf("informer caches not synced")
+		}
+		return nil
+	}); err != nil {
 		return fmt.Errorf("unable to set up ready check: %w", err)
 	}
 
