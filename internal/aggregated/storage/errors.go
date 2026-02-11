@@ -13,7 +13,7 @@ func wrapClientError(err error) error {
 
 	var statusErr *apierrors.StatusError
 	if errors.As(err, &statusErr) {
-		return err
+		return statusErr
 	}
 
 	return apierrors.NewInternalError(err)

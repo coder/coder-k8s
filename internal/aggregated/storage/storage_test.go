@@ -3,10 +3,12 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -144,6 +146,29 @@ func TestTemplateStorageListPreservesProviderStatusErrors(t *testing.T) {
 	_, err = templateStorage.List(namespacedContext("other-namespace"), nil)
 	if !apierrors.IsBadRequest(err) {
 		t.Fatalf("expected BadRequest from provider namespace restriction, got %v", err)
+	}
+	assertTopLevelStatusError(t, err)
+}
+
+func TestWrapClientErrorReturnsTopLevelStatusError(t *testing.T) {
+	t.Parallel()
+
+	statusErr := apierrors.NewBadRequest("provider namespace mismatch")
+	wrappedErr := fmt.Errorf("resolve codersdk client for namespace %q: %w", "control-plane", statusErr)
+
+	wrappedClientErr := wrapClientError(wrappedErr)
+	if !apierrors.IsBadRequest(wrappedClientErr) {
+		t.Fatalf("expected BadRequest from wrapped status error, got %v", wrappedClientErr)
+	}
+
+	assertTopLevelStatusError(t, wrappedClientErr)
+
+	var unwrappedStatusErr *apierrors.StatusError
+	if !errors.As(wrappedClientErr, &unwrappedStatusErr) {
+		t.Fatalf("expected *apierrors.StatusError in wrapped client error chain, got %T", wrappedClientErr)
+	}
+	if unwrappedStatusErr != statusErr {
+		t.Fatalf("expected wrapClientError to return original status error pointer")
 	}
 }
 
@@ -387,6 +412,92 @@ func TestWorkspaceStorageUpdateRejectsNonRunningSpecChanges(t *testing.T) {
 	}
 }
 
+func TestWorkspaceStorageUpdateRejectsStaleResourceVersion(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	workspaceStorage := NewWorkspaceStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	currentObj, err := workspaceStorage.Get(ctx, "acme.alice.dev-workspace", nil)
+	if err != nil {
+		t.Fatalf("expected workspace get to succeed: %v", err)
+	}
+
+	currentWorkspace, ok := currentObj.(*aggregationv1alpha1.CoderWorkspace)
+	if !ok {
+		t.Fatalf("expected *CoderWorkspace from get, got %T", currentObj)
+	}
+
+	desiredWorkspace := currentWorkspace.DeepCopy()
+	desiredWorkspace.Spec.Running = !currentWorkspace.Spec.Running
+	desiredWorkspace.ResourceVersion = currentWorkspace.ResourceVersion + "-stale"
+
+	_, _, err = workspaceStorage.Update(
+		ctx,
+		desiredWorkspace.Name,
+		testUpdatedObjectInfo{obj: desiredWorkspace},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if !apierrors.IsConflict(err) {
+		t.Fatalf("expected Conflict for stale resourceVersion, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "resource version mismatch") {
+		t.Fatalf("expected stale resourceVersion error message, got %v", err)
+	}
+	if transitions := state.buildTransitionsSnapshot(); len(transitions) != 0 {
+		t.Fatalf("expected no workspace build transitions on stale resourceVersion conflict, got %v", transitions)
+	}
+}
+
+func TestWorkspaceStorageUpdateRejectsMismatchedNamespace(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	workspaceStorage := NewWorkspaceStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	currentObj, err := workspaceStorage.Get(ctx, "acme.alice.dev-workspace", nil)
+	if err != nil {
+		t.Fatalf("expected workspace get to succeed: %v", err)
+	}
+
+	currentWorkspace, ok := currentObj.(*aggregationv1alpha1.CoderWorkspace)
+	if !ok {
+		t.Fatalf("expected *CoderWorkspace from get, got %T", currentObj)
+	}
+
+	desiredWorkspace := currentWorkspace.DeepCopy()
+	desiredWorkspace.Spec.Running = !currentWorkspace.Spec.Running
+	desiredWorkspace.Namespace = "other-namespace"
+
+	_, _, err = workspaceStorage.Update(
+		ctx,
+		desiredWorkspace.Name,
+		testUpdatedObjectInfo{obj: desiredWorkspace},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected BadRequest for mismatched namespace, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "metadata.namespace \"other-namespace\" does not match request namespace \"control-plane\"") {
+		t.Fatalf("expected mismatched namespace error message, got %v", err)
+	}
+	if transitions := state.buildTransitionsSnapshot(); len(transitions) != 0 {
+		t.Fatalf("expected no workspace build transitions on namespace validation error, got %v", transitions)
+	}
+}
+
 func TestWorkspaceStorageCreateRunningFalseReturnsWorkspaceWhenStopBuildFails(t *testing.T) {
 	t.Parallel()
 
@@ -477,6 +588,19 @@ func TestWorkspaceStorageListPreservesProviderStatusErrors(t *testing.T) {
 	_, err = workspaceStorage.List(namespacedContext("other-namespace"), nil)
 	if !apierrors.IsBadRequest(err) {
 		t.Fatalf("expected BadRequest from provider namespace restriction, got %v", err)
+	}
+	assertTopLevelStatusError(t, err)
+}
+
+func assertTopLevelStatusError(t *testing.T, err error) {
+	t.Helper()
+
+	if err == nil {
+		t.Fatal("expected error to be non-nil")
+	}
+
+	if reflect.TypeOf(err) != reflect.TypeOf(&apierrors.StatusError{}) {
+		t.Fatalf("expected top-level error type *apierrors.StatusError, got %T", err)
 	}
 }
 

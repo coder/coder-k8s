@@ -328,6 +328,23 @@ func (s *WorkspaceStorage) Update(
 			),
 		)
 	}
+	if desiredObj.Namespace != "" && desiredObj.Namespace != namespace {
+		return nil, false, apierrors.NewBadRequest(
+			fmt.Sprintf("metadata.namespace %q does not match request namespace %q", desiredObj.Namespace, namespace),
+		)
+	}
+	if desiredObj.ResourceVersion != "" && desiredObj.ResourceVersion != currentK8sObj.ResourceVersion {
+		return nil, false, apierrors.NewConflict(
+			aggregationv1alpha1.Resource("coderworkspaces"),
+			name,
+			fmt.Errorf(
+				"resource version mismatch: got %q, current is %q",
+				desiredObj.ResourceVersion,
+				currentK8sObj.ResourceVersion,
+			),
+		)
+	}
+
 	if updateValidation != nil {
 		if err := updateValidation(ctx, desiredObj, currentK8sObj); err != nil {
 			return nil, false, err
