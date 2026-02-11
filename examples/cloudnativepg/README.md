@@ -63,12 +63,12 @@ kubectl -n coder get codercontrolplane coder
 In one terminal:
 
 ```bash
-kubectl -n coder port-forward svc/coder 8080:80
+kubectl -n coder port-forward svc/coder 3000:80
 ```
 
 Then open:
 
-- <http://localhost:8080/setup>
+- <http://localhost:3000/setup>
 
 Use the setup flow to create the first admin user.
 
@@ -76,7 +76,7 @@ Use the setup flow to create the first admin user.
 
 This example sets:
 
-- `CODER_ACCESS_URL=http://localhost:8080`
+- `CODER_ACCESS_URL=http://localhost:3000`
 
 That value is convenient for UI smoke tests through `kubectl port-forward`, but it is not suitable for end-to-end workspace connectivity because in-cluster components cannot reach your local `localhost`.
 

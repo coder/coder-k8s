@@ -227,10 +227,8 @@ func (r *WorkspaceProxyReconciler) reconcileDeployment(
 		return nil, fmt.Errorf("reconcile workspace proxy deployment: %w", err)
 	}
 
-	if err := r.Get(ctx, types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}, deployment); err != nil {
-		return nil, fmt.Errorf("get reconciled deployment: %w", err)
-	}
-
+	// Avoid an immediate cached read-after-write here; cache propagation lag can
+	// transiently return NotFound for just-created objects and produce noisy reconcile errors.
 	return deployment, nil
 }
 
@@ -270,10 +268,8 @@ func (r *WorkspaceProxyReconciler) reconcileService(ctx context.Context, workspa
 		return nil, fmt.Errorf("reconcile workspace proxy service: %w", err)
 	}
 
-	if err := r.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: service.Namespace}, service); err != nil {
-		return nil, fmt.Errorf("get reconciled service: %w", err)
-	}
-
+	// Avoid an immediate cached read-after-write here; cache propagation lag can
+	// transiently return NotFound for just-created objects and produce noisy reconcile errors.
 	return service, nil
 }
 
