@@ -28,6 +28,7 @@ type EnsureOperatorTokenRequest struct {
 	OperatorEmail    string
 	TokenName        string
 	TokenLifetime    time.Duration
+	ExistingToken    string
 }
 
 // OperatorAccessProvisioner provisions operator access credentials for coderd.
@@ -68,8 +69,9 @@ func openPostgresDatabase(postgresURL string) (*sql.DB, error) {
 }
 
 // EnsureOperatorToken ensures the operator system user exists, grants
-// organization-admin membership in all organizations, rotates any existing token
-// with the configured token name, and returns the new plaintext API token.
+// organization-admin membership in all organizations, reuses the provided
+// existing token when still valid, and otherwise rotates the token with the
+// configured token name.
 func (p *PostgresOperatorAccessProvisioner) EnsureOperatorToken(ctx context.Context, req EnsureOperatorTokenRequest) (string, error) {
 	if ctx == nil {
 		return "", fmt.Errorf("assertion failed: context must not be nil")
@@ -128,12 +130,12 @@ func (p *PostgresOperatorAccessProvisioner) EnsureOperatorToken(ctx context.Cont
 		return "", err
 	}
 
-	token, err := rotateOperatorToken(ctx, tx, now, userID, req)
+	token, err := ensureOperatorToken(ctx, tx, now, userID, req)
 	if err != nil {
 		return "", err
 	}
 	if token == "" {
-		return "", fmt.Errorf("assertion failed: rotated operator token must not be empty")
+		return "", fmt.Errorf("assertion failed: ensured operator token must not be empty")
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -335,6 +337,105 @@ SET
 	}
 
 	return nil
+}
+
+func ensureOperatorToken(
+	ctx context.Context,
+	tx *sql.Tx,
+	now time.Time,
+	userID uuid.UUID,
+	req EnsureOperatorTokenRequest,
+) (string, error) {
+	if tx == nil {
+		return "", fmt.Errorf("assertion failed: transaction must not be nil")
+	}
+	if userID == uuid.Nil {
+		return "", fmt.Errorf("assertion failed: operator user ID must not be nil")
+	}
+
+	existingToken := strings.TrimSpace(req.ExistingToken)
+	if existingToken != "" {
+		tokenStillValid, err := existingOperatorTokenStillValid(ctx, tx, now, userID, req.TokenName, existingToken)
+		if err != nil {
+			return "", err
+		}
+		if tokenStillValid {
+			return existingToken, nil
+		}
+	}
+
+	return rotateOperatorToken(ctx, tx, now, userID, req)
+}
+
+func existingOperatorTokenStillValid(
+	ctx context.Context,
+	tx *sql.Tx,
+	now time.Time,
+	userID uuid.UUID,
+	tokenName string,
+	existingToken string,
+) (bool, error) {
+	if tx == nil {
+		return false, fmt.Errorf("assertion failed: transaction must not be nil")
+	}
+	if userID == uuid.Nil {
+		return false, fmt.Errorf("assertion failed: operator user ID must not be nil")
+	}
+	if strings.TrimSpace(tokenName) == "" {
+		return false, fmt.Errorf("assertion failed: token name must not be empty")
+	}
+	if strings.TrimSpace(existingToken) == "" {
+		return false, fmt.Errorf("assertion failed: existing token must not be empty")
+	}
+
+	tokenID, tokenSecret, validFormat := splitOperatorToken(existingToken)
+	if !validFormat {
+		return false, nil
+	}
+
+	hashedSecret := sha256.Sum256([]byte(tokenSecret))
+
+	// #nosec G101 -- token_name here is a column identifier, not a credential.
+	const lookupExistingTokenQuery = `
+SELECT expires_at
+FROM api_keys
+WHERE id = $1
+  AND user_id = $2
+  AND login_type = 'token'::login_type
+  AND token_name = $3
+  AND hashed_secret = $4
+LIMIT 1
+`
+	var expiresAt time.Time
+	err := tx.QueryRowContext(ctx, lookupExistingTokenQuery, tokenID, userID, tokenName, hashedSecret[:]).Scan(&expiresAt)
+	switch {
+	case err == nil:
+		if !expiresAt.After(now) {
+			return false, nil
+		}
+		return true, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	default:
+		return false, fmt.Errorf("query existing operator token %q: %w", tokenName, err)
+	}
+}
+
+func splitOperatorToken(token string) (string, string, bool) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "", "", false
+	}
+
+	tokenID, tokenSecret, found := strings.Cut(token, "-")
+	if !found {
+		return "", "", false
+	}
+	if tokenID == "" || tokenSecret == "" {
+		return "", "", false
+	}
+
+	return tokenID, tokenSecret, true
 }
 
 func rotateOperatorToken(

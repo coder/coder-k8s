@@ -252,15 +252,12 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 	}
 
 	existingToken, err := r.readSecretValue(ctx, coderControlPlane.Namespace, operatorTokenSecretName, coderv1alpha1.DefaultTokenSecretKey)
-	if err == nil && existingToken != "" {
-		nextStatus.OperatorTokenSecretRef = &coderv1alpha1.SecretKeySelector{
-			Name: operatorTokenSecretName,
-			Key:  coderv1alpha1.DefaultTokenSecretKey,
-		}
-		nextStatus.OperatorAccessReady = true
-		return ctrl.Result{}, nil
-	}
-	if err != nil && !apierrors.IsNotFound(err) {
+	switch {
+	case err == nil:
+		// Existing token is still validated by the provisioner to avoid stale or expired credentials.
+	case apierrors.IsNotFound(err):
+		existingToken = ""
+	default:
 		return ctrl.Result{}, fmt.Errorf("read operator token secret %q: %w", operatorTokenSecretName, err)
 	}
 
@@ -278,6 +275,7 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 		OperatorEmail:    defaultOperatorAccessEmail,
 		TokenName:        defaultOperatorAccessTokenName,
 		TokenLifetime:    defaultOperatorAccessTokenLifetime,
+		ExistingToken:    existingToken,
 	})
 	if provisionErr != nil {
 		nextStatus.OperatorTokenSecretRef = nil

@@ -45,6 +45,48 @@ func TestRandomTokenPart_GeneratesExpectedLengthAndCharset(t *testing.T) {
 	}
 }
 
+func TestSplitOperatorToken(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		input          string
+		expectedID     string
+		expectedSecret string
+		expectedOK     bool
+	}{
+		{
+			name:           "valid token",
+			input:          "abcdefghij-1234567890123456789012",
+			expectedID:     "abcdefghij",
+			expectedSecret: "1234567890123456789012",
+			expectedOK:     true,
+		},
+		{name: "missing separator", input: "abcdefghij123", expectedOK: false},
+		{name: "missing id", input: "-secret", expectedOK: false},
+		{name: "missing secret", input: "id-", expectedOK: false},
+		{name: "empty token", input: "", expectedOK: false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			gotID, gotSecret, gotOK := splitOperatorToken(tc.input)
+			if gotOK != tc.expectedOK {
+				t.Fatalf("expected ok=%t, got %t", tc.expectedOK, gotOK)
+			}
+			if gotID != tc.expectedID {
+				t.Fatalf("expected id %q, got %q", tc.expectedID, gotID)
+			}
+			if gotSecret != tc.expectedSecret {
+				t.Fatalf("expected secret %q, got %q", tc.expectedSecret, gotSecret)
+			}
+		})
+	}
+}
+
 func TestEnsureOperatorToken_ValidatesInputsBeforeConnecting(t *testing.T) {
 	t.Parallel()
 

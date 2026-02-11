@@ -530,6 +530,9 @@ func TestReconcile_OperatorAccess_ResolvesLiteralPostgresURLAndCreatesTokenSecre
 	if got := provisioner.requests[0].PostgresURL; got != "postgres://example.literal/coder" {
 		t.Fatalf("expected provisioner Postgres URL %q, got %q", "postgres://example.literal/coder", got)
 	}
+	if got := provisioner.requests[0].ExistingToken; got != "" {
+		t.Fatalf("expected first provisioner call existing token to be empty, got %q", got)
+	}
 
 	secret := &corev1.Secret{}
 	secretName := cp.Name + "-operator-token"
@@ -565,8 +568,14 @@ func TestReconcile_OperatorAccess_ResolvesLiteralPostgresURLAndCreatesTokenSecre
 	if result != (ctrl.Result{}) {
 		t.Fatalf("expected empty result on second reconcile, got %+v", result)
 	}
-	if provisioner.calls != 1 {
-		t.Fatalf("expected provisioner to not be called again once token secret exists, got %d calls", provisioner.calls)
+	if provisioner.calls != 2 {
+		t.Fatalf("expected provisioner to be called again to validate existing token, got %d calls", provisioner.calls)
+	}
+	if got := provisioner.requests[1].PostgresURL; got != "postgres://example.literal/coder" {
+		t.Fatalf("expected second provisioner Postgres URL %q, got %q", "postgres://example.literal/coder", got)
+	}
+	if got := provisioner.requests[1].ExistingToken; got != "operator-token-literal" {
+		t.Fatalf("expected second provisioner call existing token %q, got %q", "operator-token-literal", got)
 	}
 }
 
