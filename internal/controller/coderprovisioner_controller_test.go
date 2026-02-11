@@ -514,9 +514,9 @@ func TestCoderProvisionerReconciler_DeletionControlPlaneGone(t *testing.T) {
 
 	reconcileProvisioner(ctx, t, reconciler, namespacedName)
 
-	// DeleteProvisionerKey should NOT have been called since the control
-	// plane was already gone.
-	require.Equal(t, 0, bootstrapClient.deleteKeyCalls)
+	// DeleteProvisionerKey should still be called once using the persisted
+	// status.ControlPlaneURL even when the control plane object is already gone.
+	require.Equal(t, 1, bootstrapClient.deleteKeyCalls)
 
 	// The finalizer should still be removed.
 	require.Eventually(t, func() bool {
