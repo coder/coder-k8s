@@ -15,4 +15,4 @@ spec:
           name: coder-db-app
           key: uri
     - name: CODER_ACCESS_URL
-      value: http://localhost:8080
+      value: http://localhost:3000

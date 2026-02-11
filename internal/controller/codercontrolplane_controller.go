@@ -12,7 +12,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -127,9 +126,8 @@ func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, c
 		return nil, fmt.Errorf("reconcile control plane deployment: %w", err)
 	}
 
-	if err := r.Get(ctx, types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}, deployment); err != nil {
-		return nil, fmt.Errorf("get reconciled deployment: %w", err)
-	}
+	// Avoid an immediate cached read-after-write here; cache propagation lag can
+	// transiently return NotFound for just-created objects and produce noisy reconcile errors.
 	return deployment, nil
 }
 
@@ -168,9 +166,8 @@ func (r *CoderControlPlaneReconciler) reconcileService(ctx context.Context, code
 		return nil, fmt.Errorf("reconcile control plane service: %w", err)
 	}
 
-	if err := r.Get(ctx, types.NamespacedName{Name: service.Name, Namespace: service.Namespace}, service); err != nil {
-		return nil, fmt.Errorf("get reconciled service: %w", err)
-	}
+	// Avoid an immediate cached read-after-write here; cache propagation lag can
+	// transiently return NotFound for just-created objects and produce noisy reconcile errors.
 	return service, nil
 }
 
