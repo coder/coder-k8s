@@ -333,7 +333,10 @@ func (s *WorkspaceStorage) Update(
 			fmt.Sprintf("metadata.namespace %q does not match request namespace %q", desiredObj.Namespace, namespace),
 		)
 	}
-	if desiredObj.ResourceVersion != "" && desiredObj.ResourceVersion != currentK8sObj.ResourceVersion {
+	if desiredObj.ResourceVersion == "" {
+		return nil, false, apierrors.NewBadRequest("metadata.resourceVersion is required for update")
+	}
+	if desiredObj.ResourceVersion != currentK8sObj.ResourceVersion {
 		return nil, false, apierrors.NewConflict(
 			aggregationv1alpha1.Resource("coderworkspaces"),
 			name,

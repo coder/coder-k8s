@@ -4,6 +4,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -60,6 +62,23 @@ func run(args []string) error {
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	if coderURL != "" {
+		parsedCoderURL, err := url.Parse(coderURL)
+		if err != nil {
+			return fmt.Errorf("assertion failed: invalid --coder-url %q: %w", coderURL, err)
+		}
+		if parsedCoderURL.Scheme == "" || parsedCoderURL.Host == "" {
+			return fmt.Errorf(
+				"assertion failed: invalid --coder-url %q: must include scheme and host (for example, https://coder.example.com)",
+				coderURL,
+			)
+		}
+		scheme := strings.ToLower(parsedCoderURL.Scheme)
+		if scheme != "http" && scheme != "https" {
+			return fmt.Errorf("assertion failed: invalid --coder-url %q: scheme must be http or https", coderURL)
+		}
 	}
 
 	switch appMode {

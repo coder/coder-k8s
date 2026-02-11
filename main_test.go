@@ -139,6 +139,66 @@ func TestRunDispatchesAggregatedAPIServerMode(t *testing.T) {
 	}
 }
 
+func TestRunRejectsAggregatedAPIServerModeWithCoderURLMissingScheme(t *testing.T) {
+	t.Helper()
+	installMockSignalHandler(t)
+
+	previous := runAggregatedAPIServerApp
+	t.Cleanup(func() {
+		runAggregatedAPIServerApp = previous
+	})
+
+	called := false
+	runAggregatedAPIServerApp = func(context.Context, apiserverapp.Options) error {
+		called = true
+		return nil
+	}
+
+	err := run([]string{
+		"--app=aggregated-apiserver",
+		"--coder-url=coder.example.com",
+	})
+	if err == nil {
+		t.Fatal("expected an error when --coder-url omits scheme")
+	}
+	if !strings.Contains(err.Error(), "must include scheme and host") {
+		t.Fatalf("expected missing scheme/host validation error, got %v", err)
+	}
+	if called {
+		t.Fatal("expected aggregated apiserver runner not to be called on invalid --coder-url")
+	}
+}
+
+func TestRunRejectsAggregatedAPIServerModeWithUnsupportedCoderURLScheme(t *testing.T) {
+	t.Helper()
+	installMockSignalHandler(t)
+
+	previous := runAggregatedAPIServerApp
+	t.Cleanup(func() {
+		runAggregatedAPIServerApp = previous
+	})
+
+	called := false
+	runAggregatedAPIServerApp = func(context.Context, apiserverapp.Options) error {
+		called = true
+		return nil
+	}
+
+	err := run([]string{
+		"--app=aggregated-apiserver",
+		"--coder-url=ftp://coder.example.com",
+	})
+	if err == nil {
+		t.Fatal("expected an error when --coder-url has unsupported scheme")
+	}
+	if !strings.Contains(err.Error(), "scheme must be http or https") {
+		t.Fatalf("expected scheme validation error, got %v", err)
+	}
+	if called {
+		t.Fatal("expected aggregated apiserver runner not to be called on invalid --coder-url")
+	}
+}
+
 func TestRunDispatchesMCPHTTPMode(t *testing.T) {
 	t.Helper()
 	installMockSignalHandler(t)

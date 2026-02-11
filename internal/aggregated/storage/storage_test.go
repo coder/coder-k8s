@@ -692,6 +692,52 @@ func TestWorkspaceStorageUpdateRejectsDifferentTemplateVersionID(t *testing.T) {
 	}
 }
 
+func TestWorkspaceStorageUpdateRejectsMissingResourceVersion(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	workspaceStorage := NewWorkspaceStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	currentObj, err := workspaceStorage.Get(ctx, "acme.alice.dev-workspace", nil)
+	if err != nil {
+		t.Fatalf("expected workspace get to succeed: %v", err)
+	}
+
+	currentWorkspace, ok := currentObj.(*aggregationv1alpha1.CoderWorkspace)
+	if !ok {
+		t.Fatalf("expected *CoderWorkspace from get, got %T", currentObj)
+	}
+	if currentWorkspace.ResourceVersion == "" {
+		t.Fatal("expected current workspace resourceVersion to be populated")
+	}
+
+	desiredWorkspace := currentWorkspace.DeepCopy()
+	desiredWorkspace.Spec.Running = !currentWorkspace.Spec.Running
+	desiredWorkspace.ResourceVersion = ""
+
+	_, _, err = workspaceStorage.Update(
+		ctx,
+		desiredWorkspace.Name,
+		testUpdatedObjectInfo{obj: desiredWorkspace},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected BadRequest for missing resourceVersion, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "metadata.resourceVersion is required for update") {
+		t.Fatalf("expected missing resourceVersion error message, got %v", err)
+	}
+	if transitions := state.buildTransitionsSnapshot(); len(transitions) != 0 {
+		t.Fatalf("expected no workspace build transitions when resourceVersion is missing, got %v", transitions)
+	}
+}
+
 func TestWorkspaceStorageUpdateRejectsStaleResourceVersion(t *testing.T) {
 	t.Parallel()
 
