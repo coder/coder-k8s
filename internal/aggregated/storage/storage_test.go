@@ -279,6 +279,68 @@ func TestTemplateStorageUpdateAllowsEmptyVersionIDWhenTogglingRunning(t *testing
 	}
 }
 
+func TestTemplateStorageUpdateAllowsEmptyOptionalFieldsWhenTogglingRunning(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	currentObj, err := templateStorage.Get(ctx, "acme.starter-template", nil)
+	if err != nil {
+		t.Fatalf("expected template get to succeed: %v", err)
+	}
+
+	currentTemplate, ok := currentObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from get, got %T", currentObj)
+	}
+	if currentTemplate.Spec.DisplayName == "" || currentTemplate.Spec.Description == "" || currentTemplate.Spec.Icon == "" {
+		t.Fatal("expected current template optional fields to be populated")
+	}
+
+	desiredTemplate := currentTemplate.DeepCopy()
+	desiredTemplate.Spec.Running = !currentTemplate.Spec.Running
+	desiredTemplate.Spec.DisplayName = ""
+	desiredTemplate.Spec.Description = ""
+	desiredTemplate.Spec.Icon = ""
+
+	updatedObj, created, err := templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected template update to succeed when optional fields are empty: %v", err)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+
+	updatedTemplate, ok := updatedObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from update, got %T", updatedObj)
+	}
+	if updatedTemplate.Spec.Running != desiredTemplate.Spec.Running {
+		t.Fatalf("expected updated running=%t, got %t", desiredTemplate.Spec.Running, updatedTemplate.Spec.Running)
+	}
+	if updatedTemplate.Spec.DisplayName != "" {
+		t.Fatalf("expected returned desired spec.displayName to remain empty, got %q", updatedTemplate.Spec.DisplayName)
+	}
+	if updatedTemplate.Spec.Description != "" {
+		t.Fatalf("expected returned desired spec.description to remain empty, got %q", updatedTemplate.Spec.Description)
+	}
+	if updatedTemplate.Spec.Icon != "" {
+		t.Fatalf("expected returned desired spec.icon to remain empty, got %q", updatedTemplate.Spec.Icon)
+	}
+}
+
 func TestTemplateStorageUpdateRejectsDifferentVersionID(t *testing.T) {
 	t.Parallel()
 
@@ -729,6 +791,127 @@ func TestWorkspaceStorageUpdateAllowsEmptyTemplateVersionIDWhenTogglingRunning(t
 	}
 	if !containsTransition(state.buildTransitionsSnapshot(), expectedTransition) {
 		t.Fatalf("expected update to queue %q transition", expectedTransition)
+	}
+}
+
+func TestWorkspaceStorageUpdateAllowsNilOptionalFieldsWhenTogglingRunning(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	workspaceStorage := NewWorkspaceStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	currentObj, err := workspaceStorage.Get(ctx, "acme.alice.dev-workspace", nil)
+	if err != nil {
+		t.Fatalf("expected workspace get to succeed: %v", err)
+	}
+
+	currentWorkspace, ok := currentObj.(*aggregationv1alpha1.CoderWorkspace)
+	if !ok {
+		t.Fatalf("expected *CoderWorkspace from get, got %T", currentObj)
+	}
+	if currentWorkspace.Spec.TTLMillis == nil || currentWorkspace.Spec.AutostartSchedule == nil {
+		t.Fatal("expected current workspace optional fields to be populated")
+	}
+
+	desiredWorkspace := currentWorkspace.DeepCopy()
+	desiredWorkspace.Spec.Running = !currentWorkspace.Spec.Running
+	desiredWorkspace.Spec.TTLMillis = nil
+	desiredWorkspace.Spec.AutostartSchedule = nil
+
+	updatedObj, created, err := workspaceStorage.Update(
+		ctx,
+		desiredWorkspace.Name,
+		testUpdatedObjectInfo{obj: desiredWorkspace},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected workspace update to succeed when optional fields are nil: %v", err)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+
+	updatedWorkspace, ok := updatedObj.(*aggregationv1alpha1.CoderWorkspace)
+	if !ok {
+		t.Fatalf("expected *CoderWorkspace from update, got %T", updatedObj)
+	}
+	if updatedWorkspace.Spec.Running != desiredWorkspace.Spec.Running {
+		t.Fatalf("expected updated running=%t, got %t", desiredWorkspace.Spec.Running, updatedWorkspace.Spec.Running)
+	}
+	if updatedWorkspace.Spec.TTLMillis == nil || *updatedWorkspace.Spec.TTLMillis != *currentWorkspace.Spec.TTLMillis {
+		t.Fatalf(
+			"expected returned spec.ttlMillis to remain %v, got %v",
+			*currentWorkspace.Spec.TTLMillis,
+			updatedWorkspace.Spec.TTLMillis,
+		)
+	}
+	if updatedWorkspace.Spec.AutostartSchedule == nil || *updatedWorkspace.Spec.AutostartSchedule != *currentWorkspace.Spec.AutostartSchedule {
+		t.Fatalf(
+			"expected returned spec.autostartSchedule to remain %q, got %v",
+			*currentWorkspace.Spec.AutostartSchedule,
+			updatedWorkspace.Spec.AutostartSchedule,
+		)
+	}
+
+	expectedTransition := codersdk.WorkspaceTransitionStop
+	if desiredWorkspace.Spec.Running {
+		expectedTransition = codersdk.WorkspaceTransitionStart
+	}
+	if !containsTransition(state.buildTransitionsSnapshot(), expectedTransition) {
+		t.Fatalf("expected update to queue %q transition", expectedTransition)
+	}
+}
+
+func TestWorkspaceStorageUpdateRejectsDifferentTTLMillis(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	workspaceStorage := NewWorkspaceStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	currentObj, err := workspaceStorage.Get(ctx, "acme.alice.dev-workspace", nil)
+	if err != nil {
+		t.Fatalf("expected workspace get to succeed: %v", err)
+	}
+
+	currentWorkspace, ok := currentObj.(*aggregationv1alpha1.CoderWorkspace)
+	if !ok {
+		t.Fatalf("expected *CoderWorkspace from get, got %T", currentObj)
+	}
+	if currentWorkspace.Spec.TTLMillis == nil {
+		t.Fatal("expected current workspace spec.ttlMillis to be populated")
+	}
+
+	differentTTLMillis := *currentWorkspace.Spec.TTLMillis + 60000
+	desiredWorkspace := currentWorkspace.DeepCopy()
+	desiredWorkspace.Spec.Running = !currentWorkspace.Spec.Running
+	desiredWorkspace.Spec.TTLMillis = &differentTTLMillis
+
+	_, _, err = workspaceStorage.Update(
+		ctx,
+		desiredWorkspace.Name,
+		testUpdatedObjectInfo{obj: desiredWorkspace},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected BadRequest when changing spec.ttlMillis, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "spec.running") {
+		t.Fatalf("expected immutable-field error mentioning spec.running, got %v", err)
+	}
+	if transitions := state.buildTransitionsSnapshot(); len(transitions) != 0 {
+		t.Fatalf("expected no workspace build transitions on immutable-field error, got %v", transitions)
 	}
 }
 

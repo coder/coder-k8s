@@ -4,11 +4,14 @@ package apiserverapp
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/coder/coder/v2/codersdk"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -54,6 +57,29 @@ type Options struct {
 	CoderRequestTimeout time.Duration
 }
 
+type errClientProvider struct {
+	serviceUnavailableMessage string
+}
+
+var _ coder.ClientProvider = (*errClientProvider)(nil)
+
+func (p *errClientProvider) ClientForNamespace(ctx context.Context, namespace string) (*codersdk.Client, error) {
+	if p == nil {
+		return nil, fmt.Errorf("assertion failed: err client provider must not be nil")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("assertion failed: context must not be nil")
+	}
+	if namespace == "" {
+		return nil, fmt.Errorf("assertion failed: namespace must not be empty")
+	}
+	if p.serviceUnavailableMessage == "" {
+		return nil, fmt.Errorf("assertion failed: service unavailable message must not be empty")
+	}
+
+	return nil, apierrors.NewServiceUnavailable(p.serviceUnavailableMessage)
+}
+
 func buildClientProvider(opts Options, requestTimeout time.Duration) (coder.ClientProvider, error) {
 	if requestTimeout <= 0 {
 		return nil, fmt.Errorf("assertion failed: request timeout must be positive")
@@ -69,10 +95,12 @@ func buildClientProvider(opts Options, requestTimeout time.Duration) (coder.Clie
 		missing = append(missing, "coder session token")
 	}
 	if len(missing) > 0 {
-		return nil, fmt.Errorf(
-			"coder client provider is not configured: missing %s; configure --coder-url and --coder-session-token",
-			strings.Join(missing, " and "),
-		)
+		return &errClientProvider{
+			serviceUnavailableMessage: fmt.Sprintf(
+				"coder client provider is not configured: missing %s; configure --coder-url and --coder-session-token",
+				strings.Join(missing, " and "),
+			),
+		}, nil
 	}
 
 	parsedCoderURL, err := url.Parse(coderURL)
@@ -245,6 +273,10 @@ func RunWithOptions(ctx context.Context, opts Options) error {
 	}
 	if provider == nil {
 		return fmt.Errorf("assertion failed: coder client provider is nil after successful construction")
+	}
+
+	if errProvider, ok := provider.(*errClientProvider); ok {
+		log.Printf("warning: %s", errProvider.serviceUnavailableMessage)
 	}
 
 	scheme := NewScheme()

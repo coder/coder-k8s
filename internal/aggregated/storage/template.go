@@ -306,9 +306,9 @@ func (s *TemplateStorage) Update(
 	// accepted update payloads and persisted backend state.
 	if updatedTemplate.Spec.Organization != currentTemplate.Spec.Organization ||
 		(updatedTemplate.Spec.VersionID != "" && updatedTemplate.Spec.VersionID != currentTemplate.Spec.VersionID) ||
-		updatedTemplate.Spec.DisplayName != currentTemplate.Spec.DisplayName ||
-		updatedTemplate.Spec.Description != currentTemplate.Spec.Description ||
-		updatedTemplate.Spec.Icon != currentTemplate.Spec.Icon {
+		(updatedTemplate.Spec.DisplayName != "" && updatedTemplate.Spec.DisplayName != currentTemplate.Spec.DisplayName) ||
+		(updatedTemplate.Spec.Description != "" && updatedTemplate.Spec.Description != currentTemplate.Spec.Description) ||
+		(updatedTemplate.Spec.Icon != "" && updatedTemplate.Spec.Icon != currentTemplate.Spec.Icon) {
 		return nil, false, apierrors.NewBadRequest(
 			"template update only supports changing spec.running; other spec fields are immutable",
 		)

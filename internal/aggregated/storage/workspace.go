@@ -359,8 +359,8 @@ func (s *WorkspaceStorage) Update(
 	if desiredObj.Spec.Organization != currentK8sObj.Spec.Organization ||
 		desiredObj.Spec.TemplateName != currentK8sObj.Spec.TemplateName ||
 		(desiredObj.Spec.TemplateVersionID != "" && desiredObj.Spec.TemplateVersionID != currentK8sObj.Spec.TemplateVersionID) ||
-		!equalInt64Ptr(desiredObj.Spec.TTLMillis, currentK8sObj.Spec.TTLMillis) ||
-		!equalStringPtr(desiredObj.Spec.AutostartSchedule, currentK8sObj.Spec.AutostartSchedule) {
+		(desiredObj.Spec.TTLMillis != nil && !equalInt64Ptr(desiredObj.Spec.TTLMillis, currentK8sObj.Spec.TTLMillis)) ||
+		(desiredObj.Spec.AutostartSchedule != nil && !equalStringPtr(desiredObj.Spec.AutostartSchedule, currentK8sObj.Spec.AutostartSchedule)) {
 		return nil, false, apierrors.NewBadRequest(
 			"workspace update only supports changing spec.running; other spec fields are immutable",
 		)

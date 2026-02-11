@@ -2,6 +2,7 @@ package apiserverapp
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http/httptest"
 	"net/url"
@@ -127,33 +128,63 @@ func TestInstallAPIGroupRegistersDiscovery(t *testing.T) {
 	}
 }
 
-func TestBuildClientProviderRejectsMissingCoderConfig(t *testing.T) {
+func TestBuildClientProviderDefersMissingCoderConfigAsServiceUnavailable(t *testing.T) {
 	t.Parallel()
 
 	provider, err := buildClientProvider(Options{}, 30*time.Second)
-	if err == nil {
-		t.Fatal("expected missing coder config to return an error")
+	if err != nil {
+		t.Fatalf("expected missing coder config to return a deferred-error provider, got %v", err)
 	}
-	if provider != nil {
-		t.Fatalf("expected nil provider when coder config is missing, got %T", provider)
+	if provider == nil {
+		t.Fatal("expected non-nil provider when coder config is missing")
 	}
-	if !strings.Contains(err.Error(), "missing coder URL and coder session token") {
-		t.Fatalf("expected missing-config error, got %q", err)
+
+	sdkClient, err := provider.ClientForNamespace(context.Background(), "control-plane")
+	if sdkClient != nil {
+		t.Fatalf("expected nil sdk client when coder config is missing, got %T", sdkClient)
+	}
+	if !apierrors.IsServiceUnavailable(err) {
+		t.Fatalf("expected ServiceUnavailable when provider is not configured, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "configure --coder-url and --coder-session-token") {
+		t.Fatalf("expected missing-config error message, got %v", err)
 	}
 }
 
-func TestRunWithOptionsRejectsMissingCoderConfig(t *testing.T) {
+func TestRunWithOptionsStartsWithMissingCoderConfig(t *testing.T) {
 	t.Parallel()
 
-	err := RunWithOptions(context.Background(), Options{})
-	if err == nil {
-		t.Fatal("expected missing coder config to fail aggregated apiserver startup")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("create test listener: %v", err)
 	}
-	if !strings.Contains(err.Error(), "build coder client provider") {
-		t.Fatalf("expected startup error to identify client provider construction, got %v", err)
+	defer func() {
+		_ = listener.Close()
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunWithOptions(ctx, Options{Listener: listener})
+	}()
+
+	select {
+	case runErr := <-errCh:
+		t.Fatalf("expected startup to continue with deferred coder config, got %v", runErr)
+	case <-time.After(300 * time.Millisecond):
 	}
-	if !strings.Contains(err.Error(), "configure --coder-url and --coder-session-token") {
-		t.Fatalf("expected startup error to mention required coder flags, got %v", err)
+
+	cancel()
+
+	select {
+	case runErr := <-errCh:
+		if runErr != nil && !errors.Is(runErr, context.Canceled) {
+			t.Fatalf("expected graceful shutdown after cancellation, got %v", runErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for aggregated apiserver shutdown")
 	}
 }
 
