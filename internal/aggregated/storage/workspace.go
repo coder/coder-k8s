@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/google/uuid"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -220,6 +221,38 @@ func (s *WorkspaceStorage) Create(
 			aggregationv1alpha1.Resource("codertemplates"),
 			coder.BuildTemplateName(orgName, workspaceObj.Spec.TemplateName),
 		)
+	}
+
+	if workspaceObj.Spec.TemplateVersionID != "" {
+		parsedTemplateVersionID, parseErr := uuid.Parse(workspaceObj.Spec.TemplateVersionID)
+		if parseErr != nil {
+			return nil, apierrors.NewBadRequest(
+				fmt.Sprintf(
+					"invalid workspace spec: invalid templateVersionID %q: %v",
+					workspaceObj.Spec.TemplateVersionID,
+					parseErr,
+				),
+			)
+		}
+
+		templateVersion, templateVersionErr := sdk.TemplateVersion(ctx, parsedTemplateVersionID)
+		if templateVersionErr != nil {
+			return nil, coder.MapCoderError(
+				templateVersionErr,
+				aggregationv1alpha1.Resource("coderworkspaces"),
+				workspaceObj.Name,
+			)
+		}
+
+		if templateVersion.TemplateID == nil || *templateVersion.TemplateID != template.ID {
+			return nil, apierrors.NewBadRequest(
+				fmt.Sprintf(
+					"spec.templateVersionID %q does not belong to template %q",
+					workspaceObj.Spec.TemplateVersionID,
+					workspaceObj.Spec.TemplateName,
+				),
+			)
+		}
 	}
 
 	request, err := convert.WorkspaceCreateRequestFromK8s(workspaceObj, workspaceName, template.ID)

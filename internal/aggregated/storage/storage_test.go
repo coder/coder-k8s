@@ -698,6 +698,100 @@ func TestWorkspaceStorageCRUDWithCoderSDK(t *testing.T) {
 	}
 }
 
+func TestWorkspaceStorageCreateRejectsTemplateVersionIDFromDifferentTemplate(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	workspaceStorage := NewWorkspaceStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	mismatchedTemplateVersionID := uuid.New()
+	state.setTemplateVersionTemplateID(mismatchedTemplateVersionID, uuid.New())
+
+	createObj := &aggregationv1alpha1.CoderWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme.alice.mismatch-template-version-workspace"},
+		Spec: aggregationv1alpha1.CoderWorkspaceSpec{
+			Organization:      "acme",
+			TemplateName:      "starter-template",
+			TemplateVersionID: mismatchedTemplateVersionID.String(),
+			Running:           true,
+		},
+	}
+
+	_, err := workspaceStorage.Create(ctx, createObj, rest.ValidateAllObjectFunc, nil)
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected BadRequest when templateVersionID belongs to a different template, got %v", err)
+	}
+
+	expectedMessage := fmt.Sprintf(
+		"spec.templateVersionID %q does not belong to template %q",
+		mismatchedTemplateVersionID.String(),
+		"starter-template",
+	)
+	if err == nil || !strings.Contains(err.Error(), expectedMessage) {
+		t.Fatalf("expected mismatched templateVersionID error message %q, got %v", expectedMessage, err)
+	}
+	if state.hasWorkspace("alice", "mismatch-template-version-workspace") {
+		t.Fatal("expected workspace create to be rejected before persistence")
+	}
+	if transitions := state.buildTransitionsSnapshot(); len(transitions) != 0 {
+		t.Fatalf("expected no workspace build transitions on mismatched templateVersionID, got %v", transitions)
+	}
+}
+
+func TestWorkspaceStorageCreateAllowsMatchingTemplateVersionID(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	workspaceStorage := NewWorkspaceStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	templateVersionID, ok := state.workspaceLatestBuildTemplateVersionID("alice", "dev-workspace")
+	if !ok {
+		t.Fatal("expected workspace template version ID in mock server state")
+	}
+	if templateVersionID == uuid.Nil {
+		t.Fatal("expected workspace template version ID to be non-nil")
+	}
+
+	createObj := &aggregationv1alpha1.CoderWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme.alice.matching-template-version-workspace"},
+		Spec: aggregationv1alpha1.CoderWorkspaceSpec{
+			Organization:      "acme",
+			TemplateName:      "starter-template",
+			TemplateVersionID: templateVersionID.String(),
+			Running:           true,
+		},
+	}
+
+	createdObj, err := workspaceStorage.Create(ctx, createObj, rest.ValidateAllObjectFunc, nil)
+	if err != nil {
+		t.Fatalf("expected workspace create to succeed for matching templateVersionID: %v", err)
+	}
+
+	createdWorkspace, ok := createdObj.(*aggregationv1alpha1.CoderWorkspace)
+	if !ok {
+		t.Fatalf("expected *CoderWorkspace from create, got %T", createdObj)
+	}
+	if createdWorkspace.Spec.TemplateVersionID != templateVersionID.String() {
+		t.Fatalf(
+			"expected created spec.templateVersionID %q, got %q",
+			templateVersionID.String(),
+			createdWorkspace.Spec.TemplateVersionID,
+		)
+	}
+	if !state.hasWorkspace("alice", "matching-template-version-workspace") {
+		t.Fatal("expected workspace to be persisted in mock server state")
+	}
+	if transitions := state.buildTransitionsSnapshot(); len(transitions) != 0 {
+		t.Fatalf("expected no workspace build transitions when spec.running=true, got %v", transitions)
+	}
+}
+
 func TestWorkspaceStorageUpdateRejectsNonRunningSpecChanges(t *testing.T) {
 	t.Parallel()
 
@@ -1304,10 +1398,11 @@ type mockCoderServerState struct {
 
 	organization codersdk.Organization
 
-	templatesByID      map[uuid.UUID]codersdk.Template
-	templateIDsByOrg   map[string]map[string]uuid.UUID
-	workspacesByID     map[uuid.UUID]codersdk.Workspace
-	workspaceIDsByUser map[string]map[string]uuid.UUID
+	templatesByID        map[uuid.UUID]codersdk.Template
+	templateIDsByOrg     map[string]map[string]uuid.UUID
+	templateVersionsByID map[uuid.UUID]codersdk.TemplateVersion
+	workspacesByID       map[uuid.UUID]codersdk.Workspace
+	workspaceIDsByUser   map[string]map[string]uuid.UUID
 
 	buildTransitions     []codersdk.WorkspaceTransition
 	failBuildTransitions map[codersdk.WorkspaceTransition]int
@@ -1348,6 +1443,17 @@ func newMockCoderServer(t *testing.T) (*httptest.Server, *mockCoderServerState) 
 		ActiveVersionID:  activeVersionID,
 	}
 
+	templateIDForVersion := template.ID
+	templateVersion := codersdk.TemplateVersion{
+		ID:             activeVersionID,
+		TemplateID:     &templateIDForVersion,
+		OrganizationID: orgID,
+		CreatedAt:      now.Add(-11 * time.Hour),
+		UpdatedAt:      now.Add(-2 * time.Hour),
+		Name:           "starter-template-v1",
+		Message:        "initial version",
+	}
+
 	workspace := codersdk.Workspace{
 		ID:                workspaceID,
 		CreatedAt:         now.Add(-8 * time.Hour),
@@ -1383,6 +1489,9 @@ func newMockCoderServer(t *testing.T) (*httptest.Server, *mockCoderServerState) 
 			"acme": {
 				template.Name: template.ID,
 			},
+		},
+		templateVersionsByID: map[uuid.UUID]codersdk.TemplateVersion{
+			templateVersion.ID: templateVersion,
 		},
 		workspacesByID: map[uuid.UUID]codersdk.Workspace{
 			workspace.ID: workspace,
@@ -1423,6 +1532,9 @@ func (s *mockCoderServerState) handleRequest(t *testing.T, w http.ResponseWriter
 		return
 	case r.Method == http.MethodDelete && hasSegments(segments, "api", "v2", "templates") && len(segments) == 4:
 		s.handleDeleteTemplate(w, segments[3])
+		return
+	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templateversions") && len(segments) == 4:
+		s.handleGetTemplateVersion(w, segments[3])
 		return
 	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "workspaces") && len(segments) == 3:
 		s.handleListWorkspaces(w)
@@ -1559,6 +1671,25 @@ func (s *mockCoderServerState) handleDeleteTemplate(w http.ResponseWriter, templ
 	writeJSON(w, http.StatusOK, map[string]string{"message": "template deleted"})
 }
 
+func (s *mockCoderServerState) handleGetTemplateVersion(w http.ResponseWriter, templateVersionIDSegment string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	templateVersionID, err := uuid.Parse(templateVersionIDSegment)
+	if err != nil {
+		writeCoderError(w, http.StatusBadRequest, fmt.Sprintf("invalid template version id %q", templateVersionIDSegment))
+		return
+	}
+
+	templateVersion, ok := s.templateVersionsByID[templateVersionID]
+	if !ok {
+		writeCoderError(w, http.StatusNotFound, "template version not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, templateVersion)
+}
+
 func (s *mockCoderServerState) handleListWorkspaces(w http.ResponseWriter) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1609,10 +1740,50 @@ func (s *mockCoderServerState) handleCreateWorkspace(w http.ResponseWriter, r *h
 		return
 	}
 
-	template, ok := s.templatesByID[request.TemplateID]
+	templateID := request.TemplateID
+	templateVersionID := request.TemplateVersionID
+	if templateID == uuid.Nil && templateVersionID == uuid.Nil {
+		writeCoderError(w, http.StatusBadRequest, "template_id or template_version_id is required")
+		return
+	}
+
+	if templateVersionID != uuid.Nil {
+		templateVersion, ok := s.templateVersionsByID[templateVersionID]
+		if !ok {
+			writeCoderError(w, http.StatusNotFound, "template version not found")
+			return
+		}
+		if templateVersion.TemplateID == nil || *templateVersion.TemplateID == uuid.Nil {
+			writeCoderError(
+				w,
+				http.StatusBadRequest,
+				fmt.Sprintf("template version %q is not associated with a template", templateVersionID.String()),
+			)
+			return
+		}
+		if templateID != uuid.Nil && *templateVersion.TemplateID != templateID {
+			writeCoderError(
+				w,
+				http.StatusBadRequest,
+				fmt.Sprintf(
+					"template version %q does not belong to template %q",
+					templateVersionID.String(),
+					templateID.String(),
+				),
+			)
+			return
+		}
+
+		templateID = *templateVersion.TemplateID
+	}
+
+	template, ok := s.templatesByID[templateID]
 	if !ok {
 		writeCoderError(w, http.StatusNotFound, "template not found")
 		return
+	}
+	if templateVersionID == uuid.Nil {
+		templateVersionID = template.ActiveVersionID
 	}
 
 	now := time.Now().UTC()
@@ -1624,7 +1795,7 @@ func (s *mockCoderServerState) handleCreateWorkspace(w http.ResponseWriter, r *h
 		WorkspaceID:        workspaceID,
 		WorkspaceName:      request.Name,
 		WorkspaceOwnerName: user,
-		TemplateVersionID:  template.ActiveVersionID,
+		TemplateVersionID:  templateVersionID,
 		Transition:         codersdk.WorkspaceTransitionStart,
 		Status:             codersdk.WorkspaceStatusRunning,
 	}
@@ -1713,6 +1884,33 @@ func (s *mockCoderServerState) hasTemplate(organization, templateName string) bo
 	}
 	_, ok = organizationTemplates[templateName]
 	return ok
+}
+
+func (s *mockCoderServerState) setTemplateVersionTemplateID(templateVersionID, templateID uuid.UUID) {
+	if templateVersionID == uuid.Nil {
+		panic("assertion failed: template version ID must not be nil")
+	}
+	if templateID == uuid.Nil {
+		panic("assertion failed: template ID must not be nil")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC()
+	templateIDCopy := templateID
+	version, ok := s.templateVersionsByID[templateVersionID]
+	if !ok {
+		version = codersdk.TemplateVersion{
+			ID:             templateVersionID,
+			OrganizationID: s.organization.ID,
+			CreatedAt:      now,
+		}
+	}
+	version.TemplateID = &templateIDCopy
+	version.UpdatedAt = now
+
+	s.templateVersionsByID[templateVersionID] = version
 }
 
 func (s *mockCoderServerState) hasWorkspace(owner, workspaceName string) bool {
