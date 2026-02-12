@@ -86,16 +86,18 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 
 		backoff := nextProvisionerRateLimitBackoff(req.NamespacedName)
-		message := fmt.Sprintf("Coder API rate limited while reconciling provisioner key; retrying in %s", backoff.Round(time.Second))
+		statusSnapshot := provisioner.Status.DeepCopy()
 		setCondition(
 			provisioner,
 			coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
 			metav1.ConditionFalse,
 			"RateLimited",
-			message,
+			"Coder API rate limited while reconciling provisioner key",
 		)
-		if statusErr := r.Status().Update(ctx, provisioner); statusErr != nil && !apierrors.IsNotFound(statusErr) {
-			ctrl.LoggerFrom(ctx).Error(statusErr, "failed to update coderprovisioner status after rate limit", "name", req.Name, "namespace", req.Namespace)
+		if statusSnapshot != nil && !equality.Semantic.DeepEqual(*statusSnapshot, provisioner.Status) {
+			if statusErr := r.Status().Update(ctx, provisioner); statusErr != nil && !apierrors.IsNotFound(statusErr) {
+				ctrl.LoggerFrom(ctx).Error(statusErr, "failed to update coderprovisioner status after rate limit", "name", req.Name, "namespace", req.Namespace)
+			}
 		}
 
 		ctrl.LoggerFrom(ctx).Info(

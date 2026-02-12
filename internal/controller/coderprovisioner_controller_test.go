@@ -994,7 +994,7 @@ func TestCoderProvisionerReconciler_RateLimitBackoff(t *testing.T) {
 	requireCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady, metav1.ConditionFalse)
 	rateLimitedCondition := findCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady)
 	require.Equal(t, "RateLimited", rateLimitedCondition.Reason)
-	require.Contains(t, rateLimitedCondition.Message, "retrying in")
+	require.Equal(t, "Coder API rate limited while reconciling provisioner key", rateLimitedCondition.Message)
 }
 
 func TestCoderProvisionerReconciler_LongNameTruncation(t *testing.T) {
