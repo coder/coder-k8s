@@ -17,8 +17,9 @@
 {{- $fields := .fields -}}
 {{- $depth := int .depth -}}
 {{- $maxDepth := int .maxDepth -}}
-{{- $indent := repeat $depth "&nbsp;&nbsp;" -}}
-{{- range $field := $fields }}
+{{- $treePrefix := .treePrefix -}}
+{{- $fieldCount := len $fields -}}
+{{- range $index, $field := $fields }}
 {{- if not $field.Type }}{{ fail (printf "field %q is missing type information" $field.Name) }}{{- end }}
 {{- $memberType := $field.Type -}}
 {{- $members := $memberType.Members -}}
@@ -27,11 +28,30 @@
 {{- $isProjectLocal := contains "github.com/coder/coder-k8s/api/" $memberTypeString -}}
 {{- $isLocalObjectRef := contains "k8s.io/api/core/v1.LocalObjectReference" $memberTypeString -}}
 {{- $shouldExpand := and $hasMembers (lt $depth $maxDepth) (or $isProjectLocal $isLocalObjectRef) -}}
+{{- $isLast := eq (add $index 1) $fieldCount -}}
+{{- $branch := "" -}}
+{{- if gt $depth 0 -}}
+{{- if $isLast -}}
+{{- $branch = "└─ " -}}
+{{- else -}}
+{{- $branch = "├─ " -}}
+{{- end -}}
+{{- end -}}
 {{- $fieldDoc := markdownRenderFieldDoc $field.Doc -}}
 {{- $fieldDoc = $fieldDoc | replace "<br />" " " -}}
 {{- $fieldDoc = regexReplaceAll "(https?://[^[:space:]<]+)" $fieldDoc "[$1]($1)" -}}
-| {{ $indent }}`{{ $field.Name }}` | `{{ template "typeName" $memberType }}` | {{ $fieldDoc }} |
-{{ if $shouldExpand }}{{ template "renderFields" (dict "fields" $members "depth" (add $depth 1) "maxDepth" $maxDepth) }}{{ end }}
+| {{ $treePrefix }}{{ $branch }}`{{ $field.Name }}` | `{{ template "typeName" $memberType }}` | {{ $fieldDoc }} |
+{{ $childPrefix := $treePrefix -}}
+{{- if gt $depth 0 -}}
+{{- if $isLast -}}
+{{- $childPrefix = printf "%s   " $treePrefix -}}
+{{- else -}}
+{{- $childPrefix = printf "%s│  " $treePrefix -}}
+{{- end -}}
+{{- else -}}
+{{- $childPrefix = "" -}}
+{{- end -}}
+{{ if $shouldExpand }}{{ template "renderFields" (dict "fields" $members "depth" (add $depth 1) "maxDepth" $maxDepth "treePrefix" $childPrefix) }}{{ end }}
 {{- end -}}
 {{- end -}}
 
@@ -103,12 +123,12 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-{{ template "renderFields" (dict "fields" $specMembers "depth" 0 "maxDepth" $maxFieldDepth) }}
+{{ template "renderFields" (dict "fields" $specMembers "depth" 0 "maxDepth" $maxFieldDepth "treePrefix" "") }}
 ## Status
 
 | Field | Type | Description |
 | --- | --- | --- |
-{{ template "renderFields" (dict "fields" $statusMembers "depth" 0 "maxDepth" $maxFieldDepth) }}
+{{ template "renderFields" (dict "fields" $statusMembers "depth" 0 "maxDepth" $maxFieldDepth "treePrefix" "") }}
 ## Source
 
 - Go type: `{{ $goType }}`
