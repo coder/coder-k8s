@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -985,12 +986,41 @@ func (r *CoderControlPlaneReconciler) reconcileStatus(
 	coderControlPlane *coderv1alpha1.CoderControlPlane,
 	nextStatus coderv1alpha1.CoderControlPlaneStatus,
 ) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+
 	if equality.Semantic.DeepEqual(coderControlPlane.Status, nextStatus) {
 		return nil
 	}
 
-	coderControlPlane.Status = nextStatus
-	if err := r.Status().Update(ctx, coderControlPlane); err != nil {
+	namespacedName := types.NamespacedName{Name: coderControlPlane.Name, Namespace: coderControlPlane.Namespace}
+	if strings.TrimSpace(namespacedName.Name) == "" || strings.TrimSpace(namespacedName.Namespace) == "" {
+		return fmt.Errorf("assertion failed: coder control plane namespaced name must not be empty")
+	}
+
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &coderv1alpha1.CoderControlPlane{}
+		if err := r.Get(ctx, namespacedName, latest); err != nil {
+			return err
+		}
+		if latest.Name != namespacedName.Name || latest.Namespace != namespacedName.Namespace {
+			return fmt.Errorf("assertion failed: fetched object %s/%s does not match expected %s/%s",
+				latest.Namespace, latest.Name, namespacedName.Namespace, namespacedName.Name)
+		}
+		if equality.Semantic.DeepEqual(latest.Status, nextStatus) {
+			coderControlPlane.Status = latest.Status
+			return nil
+		}
+
+		latest.Status = nextStatus
+		if err := r.Status().Update(ctx, latest); err != nil {
+			return err
+		}
+
+		coderControlPlane.Status = nextStatus
+		return nil
+	}); err != nil {
 		return fmt.Errorf("update control plane status: %w", err)
 	}
 
