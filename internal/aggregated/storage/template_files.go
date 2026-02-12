@@ -207,7 +207,11 @@ func buildMergedSourceZip(originalZipBytes []byte, desiredFiles map[string]strin
 		return nil, fmt.Errorf("template source zip contains too many entries: %d > %d", len(archiveReader.File), maxTemplateSourceFiles)
 	}
 
-	preservedBinaryFiles := make(map[string][]byte)
+	type preservedBinaryEntry struct {
+		contents []byte
+		header   zip.FileHeader
+	}
+	preservedBinaryFiles := make(map[string]preservedBinaryEntry)
 	totalUncompressedBytes := int64(0)
 
 	for _, archiveFile := range archiveReader.File {
@@ -266,7 +270,13 @@ func buildMergedSourceZip(originalZipBytes []byte, desiredFiles map[string]strin
 		if _, exists := preservedBinaryFiles[relativePath]; exists {
 			return nil, fmt.Errorf("duplicate normalized template source path %q", relativePath)
 		}
-		preservedBinaryFiles[relativePath] = contents
+
+		header := archiveFile.FileHeader
+		header.Name = relativePath
+		preservedBinaryFiles[relativePath] = preservedBinaryEntry{
+			contents: contents,
+			header:   header,
+		}
 	}
 
 	for sourcePath, content := range normalizedDesiredFiles {
@@ -311,13 +321,8 @@ func buildMergedSourceZip(originalZipBytes []byte, desiredFiles map[string]strin
 	zipWriter := zip.NewWriter(&buffer)
 
 	for _, sourcePath := range paths {
-		fileWriter, err := zipWriter.Create(sourcePath)
-		if err != nil {
-			return nil, fmt.Errorf("create zip entry %q: %w", sourcePath, err)
-		}
-
 		desiredContent, hasDesired := normalizedDesiredFiles[sourcePath]
-		preservedBytes, hasPreservedBinary := preservedBinaryFiles[sourcePath]
+		preservedEntry, hasPreservedBinary := preservedBinaryFiles[sourcePath]
 		if hasDesired == hasPreservedBinary {
 			return nil, fmt.Errorf(
 				"assertion failed: expected exactly one source entry for %q (desired=%t preservedBinary=%t)",
@@ -328,13 +333,23 @@ func buildMergedSourceZip(originalZipBytes []byte, desiredFiles map[string]strin
 		}
 
 		if hasDesired {
+			fileWriter, err := zipWriter.Create(sourcePath)
+			if err != nil {
+				return nil, fmt.Errorf("create zip entry %q: %w", sourcePath, err)
+			}
 			if _, err := fileWriter.Write([]byte(desiredContent)); err != nil {
 				return nil, fmt.Errorf("write zip entry %q: %w", sourcePath, err)
 			}
 			continue
 		}
 
-		if _, err := fileWriter.Write(preservedBytes); err != nil {
+		header := preservedEntry.header
+		header.Name = sourcePath
+		fileWriter, err := zipWriter.CreateHeader(&header)
+		if err != nil {
+			return nil, fmt.Errorf("create zip entry %q from original header: %w", sourcePath, err)
+		}
+		if _, err := fileWriter.Write(preservedEntry.contents); err != nil {
 			return nil, fmt.Errorf("write zip entry %q: %w", sourcePath, err)
 		}
 	}

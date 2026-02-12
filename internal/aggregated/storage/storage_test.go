@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -575,6 +576,13 @@ func TestTemplateStorageUpdatePreservesNonUTF8Files(t *testing.T) {
 	if !bytes.Equal(binaryBytes, expectedBinary) {
 		t.Fatalf("expected preserved binary.dat bytes %v, got %v", expectedBinary, binaryBytes)
 	}
+	binaryMode, ok := zipEntryMode(t, activeSourceZip, "binary.dat")
+	if !ok {
+		t.Fatal("expected merged source zip mode metadata for binary.dat")
+	}
+	if binaryMode.Perm() != fs.FileMode(0o755) {
+		t.Fatalf("expected preserved binary.dat mode 0755, got %v", binaryMode)
+	}
 }
 
 func TestTemplateStorageUpdateNormalizesPathsForNoOp(t *testing.T) {
@@ -839,7 +847,7 @@ func TestTemplateStorageUpdateReturnsCurrentBackendObjectForLegacyRunningField(t
 	}
 }
 
-func TestTemplateStorageUpdateAllowsEmptyVersionIDWhenTogglingRunning(t *testing.T) {
+func TestTemplateStorageUpdateAllowsUnchangedVersionIDWhenTogglingRunning(t *testing.T) {
 	t.Parallel()
 
 	server, _ := newMockCoderServer(t)
@@ -863,7 +871,6 @@ func TestTemplateStorageUpdateAllowsEmptyVersionIDWhenTogglingRunning(t *testing
 
 	desiredTemplate := currentTemplate.DeepCopy()
 	desiredTemplate.Spec.Running = !currentTemplate.Spec.Running
-	desiredTemplate.Spec.VersionID = ""
 
 	updatedObj, created, err := templateStorage.Update(
 		ctx,
@@ -875,7 +882,7 @@ func TestTemplateStorageUpdateAllowsEmptyVersionIDWhenTogglingRunning(t *testing
 		nil,
 	)
 	if err != nil {
-		t.Fatalf("expected template update to succeed when desired spec.versionID is empty: %v", err)
+		t.Fatalf("expected template update to succeed when spec.versionID is unchanged: %v", err)
 	}
 	if created {
 		t.Fatal("expected update created=false")
@@ -955,7 +962,7 @@ func TestTemplateStorageUpdateAllowsEmptyOptionalFieldsWhenTogglingRunning(t *te
 	}
 }
 
-func TestTemplateStorageUpdateIgnoresDifferentVersionID(t *testing.T) {
+func TestTemplateStorageUpdateRejectsVersionIDChange(t *testing.T) {
 	t.Parallel()
 
 	server, _ := newMockCoderServer(t)
@@ -981,7 +988,7 @@ func TestTemplateStorageUpdateIgnoresDifferentVersionID(t *testing.T) {
 		t.Fatal("expected test fixture to use a different spec.versionID")
 	}
 
-	updatedObj, created, err := templateStorage.Update(
+	_, created, err := templateStorage.Update(
 		ctx,
 		desiredTemplate.Name,
 		testUpdatedObjectInfo{obj: desiredTemplate},
@@ -990,19 +997,14 @@ func TestTemplateStorageUpdateIgnoresDifferentVersionID(t *testing.T) {
 		false,
 		nil,
 	)
-	if err != nil {
-		t.Fatalf("expected template update to succeed when changing spec.versionID: %v", err)
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected BadRequest when changing spec.versionID, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "spec.versionID is read-only") {
+		t.Fatalf("expected read-only spec.versionID error, got %v", err)
 	}
 	if created {
 		t.Fatal("expected update created=false")
-	}
-
-	updatedTemplate, ok := updatedObj.(*aggregationv1alpha1.CoderTemplate)
-	if !ok {
-		t.Fatalf("expected *CoderTemplate from update, got %T", updatedObj)
-	}
-	if updatedTemplate.Spec.VersionID != currentTemplate.Spec.VersionID {
-		t.Fatalf("expected returned spec.versionID %q from backend, got %q", currentTemplate.Spec.VersionID, updatedTemplate.Spec.VersionID)
 	}
 }
 
@@ -2932,7 +2934,9 @@ func buildSeededTemplateSourceZip() ([]byte, error) {
 		return nil, fmt.Errorf("write seeded main.tf zip entry: %w", err)
 	}
 
-	binaryWriter, err := zipWriter.Create("binary.dat")
+	binaryHeader := zip.FileHeader{Name: "binary.dat", Method: zip.Deflate}
+	binaryHeader.SetMode(fs.FileMode(0o755))
+	binaryWriter, err := zipWriter.CreateHeader(&binaryHeader)
 	if err != nil {
 		return nil, fmt.Errorf("create seeded binary.dat zip entry: %w", err)
 	}
@@ -2993,6 +2997,33 @@ func unzipEntries(t *testing.T, sourceZip []byte) map[string][]byte {
 	}
 
 	return entries
+}
+
+func zipEntryMode(t *testing.T, sourceZip []byte, path string) (fs.FileMode, bool) {
+	t.Helper()
+
+	if sourceZip == nil {
+		t.Fatal("assertion failed: source zip must not be nil")
+	}
+	if path == "" {
+		t.Fatal("assertion failed: path must not be empty")
+	}
+
+	archiveReader, err := zip.NewReader(bytes.NewReader(sourceZip), int64(len(sourceZip)))
+	if err != nil {
+		t.Fatalf("open source zip: %v", err)
+	}
+
+	for _, archiveFile := range archiveReader.File {
+		if archiveFile == nil {
+			t.Fatal("assertion failed: source zip entry must not be nil")
+		}
+		if archiveFile.Name == path {
+			return archiveFile.Mode(), true
+		}
+	}
+
+	return 0, false
 }
 
 func newTestClientProvider(t *testing.T, serverURL string) coder.ClientProvider {

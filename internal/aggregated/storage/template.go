@@ -372,6 +372,18 @@ func (s *TemplateStorage) Update(
 		)
 	}
 
+	// spec.versionID is informational (populated from the backend active version).
+	// Reject explicit mutations to avoid silent drift when the active version remains unchanged.
+	if updatedTemplate.Spec.VersionID != currentTemplate.Spec.VersionID {
+		return nil, false, apierrors.NewBadRequest(
+			fmt.Sprintf(
+				"spec.versionID is read-only; to change the active version, update spec.files instead (current: %q, requested: %q)",
+				currentTemplate.Spec.VersionID,
+				updatedTemplate.Spec.VersionID,
+			),
+		)
+	}
+
 	templateID, err := uuid.Parse(currentTemplate.Status.ID)
 	if err != nil {
 		return nil, false, fmt.Errorf("parse current template status.id %q: %w", currentTemplate.Status.ID, err)
