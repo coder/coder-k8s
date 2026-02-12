@@ -503,6 +503,18 @@ func TestTemplateStorageUpdatePreservesNonUTF8Files(t *testing.T) {
 		t.Fatal("expected non-UTF8 binary.dat to be omitted from spec.files")
 	}
 
+	originalSourceZip, ok := state.templateActiveSourceZip("acme", "starter-template")
+	if !ok {
+		t.Fatal("expected active source zip for starter-template before update")
+	}
+	mainModeBefore, ok := zipEntryMode(t, originalSourceZip, "main.tf")
+	if !ok {
+		t.Fatal("expected seeded source zip mode metadata for main.tf")
+	}
+	if mainModeBefore.Perm() != fs.FileMode(0o755) {
+		t.Fatalf("expected seeded main.tf mode 0755, got %v", mainModeBefore)
+	}
+
 	updatedMainTF := "resource \"null_resource\" \"updated_binary_preserve\" {}"
 	fileCountBefore := state.fileCount()
 	templateVersionCountBefore := state.templateVersionCount()
@@ -566,6 +578,14 @@ func TestTemplateStorageUpdatePreservesNonUTF8Files(t *testing.T) {
 	}
 	if string(updatedMainBytes) != updatedMainTF {
 		t.Fatalf("expected merged main.tf %q, got %q", updatedMainTF, string(updatedMainBytes))
+	}
+
+	updatedMainMode, ok := zipEntryMode(t, activeSourceZip, "main.tf")
+	if !ok {
+		t.Fatal("expected merged source zip mode metadata for main.tf")
+	}
+	if updatedMainMode.Perm() != fs.FileMode(0o755) {
+		t.Fatalf("expected preserved main.tf mode 0755, got %v", updatedMainMode)
 	}
 
 	expectedBinary := []byte{0x80, 0x81, 0x82}
@@ -2926,7 +2946,9 @@ func buildSeededTemplateSourceZip() ([]byte, error) {
 	var sourceZip bytes.Buffer
 	zipWriter := zip.NewWriter(&sourceZip)
 
-	mainTFWriter, err := zipWriter.Create("main.tf")
+	mainTFHeader := zip.FileHeader{Name: "main.tf", Method: zip.Deflate}
+	mainTFHeader.SetMode(fs.FileMode(0o755))
+	mainTFWriter, err := zipWriter.CreateHeader(&mainTFHeader)
 	if err != nil {
 		return nil, fmt.Errorf("create seeded main.tf zip entry: %w", err)
 	}

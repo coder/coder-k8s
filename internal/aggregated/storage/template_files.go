@@ -212,6 +212,7 @@ func buildMergedSourceZip(originalZipBytes []byte, desiredFiles map[string]strin
 		header   zip.FileHeader
 	}
 	preservedBinaryFiles := make(map[string]preservedBinaryEntry)
+	originalHeaders := make(map[string]zip.FileHeader, len(archiveReader.File))
 	totalUncompressedBytes := int64(0)
 
 	for _, archiveFile := range archiveReader.File {
@@ -226,6 +227,12 @@ func buildMergedSourceZip(originalZipBytes []byte, desiredFiles map[string]strin
 		if err != nil {
 			return nil, fmt.Errorf("validate template source path %q: %w", archiveFile.Name, err)
 		}
+		if _, exists := originalHeaders[relativePath]; exists {
+			return nil, fmt.Errorf("duplicate normalized template source path %q", relativePath)
+		}
+		header := archiveFile.FileHeader
+		header.Name = relativePath
+		originalHeaders[relativePath] = header
 		if _, exists := normalizedDesiredFiles[relativePath]; exists {
 			continue
 		}
@@ -271,11 +278,9 @@ func buildMergedSourceZip(originalZipBytes []byte, desiredFiles map[string]strin
 			return nil, fmt.Errorf("duplicate normalized template source path %q", relativePath)
 		}
 
-		header := archiveFile.FileHeader
-		header.Name = relativePath
 		preservedBinaryFiles[relativePath] = preservedBinaryEntry{
 			contents: contents,
-			header:   header,
+			header:   originalHeaders[relativePath],
 		}
 	}
 
@@ -333,6 +338,26 @@ func buildMergedSourceZip(originalZipBytes []byte, desiredFiles map[string]strin
 		}
 
 		if hasDesired {
+			if originalHeader, exists := originalHeaders[sourcePath]; exists {
+				header := originalHeader
+				header.Name = sourcePath
+				// Header sizes are specific to the original contents. Reset them so
+				// the zip writer recomputes values for the updated file bytes.
+				header.CompressedSize64 = 0
+				header.UncompressedSize64 = 0
+				//nolint:staticcheck // archive/zip still consumes legacy 32-bit size fields.
+				header.CompressedSize = 0
+				//nolint:staticcheck // archive/zip still consumes legacy 32-bit size fields.
+				header.UncompressedSize = 0
+				fileWriter, err := zipWriter.CreateHeader(&header)
+				if err != nil {
+					return nil, fmt.Errorf("create zip entry %q from original header: %w", sourcePath, err)
+				}
+				if _, err := fileWriter.Write([]byte(desiredContent)); err != nil {
+					return nil, fmt.Errorf("write zip entry %q: %w", sourcePath, err)
+				}
+				continue
+			}
 			fileWriter, err := zipWriter.Create(sourcePath)
 			if err != nil {
 				return nil, fmt.Errorf("create zip entry %q: %w", sourcePath, err)
