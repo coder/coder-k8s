@@ -155,6 +155,9 @@ func fetchTemplateSourceFiles(ctx context.Context, sdk *codersdk.Client, version
 		if !utf8.Valid(contents) {
 			continue
 		}
+		if _, exists := files[relativePath]; exists {
+			return nil, fmt.Errorf("duplicate normalized path %q in template source zip", relativePath)
+		}
 		files[relativePath] = string(contents)
 	}
 

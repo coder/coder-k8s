@@ -920,6 +920,60 @@ func TestTemplateStorageUpdateAllowsUnchangedVersionIDWhenTogglingRunning(t *tes
 	}
 }
 
+func TestTemplateStorageUpdateAllowsEmptyVersionIDWhenTogglingRunning(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	currentObj, err := templateStorage.Get(ctx, "acme.starter-template", nil)
+	if err != nil {
+		t.Fatalf("expected template get to succeed: %v", err)
+	}
+
+	currentTemplate, ok := currentObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from get, got %T", currentObj)
+	}
+	if currentTemplate.Spec.VersionID == "" {
+		t.Fatal("expected current template spec.versionID to be populated")
+	}
+
+	desiredTemplate := currentTemplate.DeepCopy()
+	desiredTemplate.Spec.VersionID = ""
+	desiredTemplate.Spec.Running = !currentTemplate.Spec.Running
+
+	updatedObj, created, err := templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected template update to succeed when desired spec.versionID is empty: %v", err)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+
+	updatedTemplate, ok := updatedObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from update, got %T", updatedObj)
+	}
+	if updatedTemplate.Spec.Running != currentTemplate.Spec.Running {
+		t.Fatalf("expected update response running=%t from current backend object, got %t", currentTemplate.Spec.Running, updatedTemplate.Spec.Running)
+	}
+	if updatedTemplate.Spec.VersionID != currentTemplate.Spec.VersionID {
+		t.Fatalf("expected update response spec.versionID %q from current backend object, got %q", currentTemplate.Spec.VersionID, updatedTemplate.Spec.VersionID)
+	}
+}
+
 func TestTemplateStorageUpdateAllowsEmptyOptionalFieldsWhenTogglingRunning(t *testing.T) {
 	t.Parallel()
 

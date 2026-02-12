@@ -373,8 +373,9 @@ func (s *TemplateStorage) Update(
 	}
 
 	// spec.versionID is informational (populated from the backend active version).
-	// Reject explicit mutations to avoid silent drift when the active version remains unchanged.
-	if updatedTemplate.Spec.VersionID != currentTemplate.Spec.VersionID {
+	// Reject explicit non-empty mutations to avoid silent drift when the active version remains unchanged.
+	// Allow empty desired values so GitOps clients can omit this informational field on updates.
+	if updatedTemplate.Spec.VersionID != "" && updatedTemplate.Spec.VersionID != currentTemplate.Spec.VersionID {
 		return nil, false, apierrors.NewBadRequest(
 			fmt.Sprintf(
 				"spec.versionID is read-only; to change the active version, update spec.files instead (current: %q, requested: %q)",
