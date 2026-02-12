@@ -394,6 +394,20 @@ func (s *TemplateStorage) Update(
 		return nil, false, wrapClientError(err)
 	}
 
+	// Pre-validate spec.files before any mutations to avoid partial updates.
+	var normalizedDesiredFiles map[string]string
+	if updatedTemplate.Spec.Files != nil {
+		var normalizeErr error
+		normalizedDesiredFiles, normalizeErr = normalizeFileKeys(updatedTemplate.Spec.Files)
+		if normalizeErr != nil {
+			return nil, false, apierrors.NewBadRequest(fmt.Sprintf("invalid template spec.files: %v", normalizeErr))
+		}
+		// Validate that files can be built into a zip (path/size/UTF-8 checks).
+		if _, buildErr := buildSourceZip(normalizedDesiredFiles); buildErr != nil {
+			return nil, false, apierrors.NewBadRequest(fmt.Sprintf("invalid template spec.files: %v", buildErr))
+		}
+	}
+
 	metadataChanged := updatedTemplate.Spec.DisplayName != currentTemplate.Spec.DisplayName ||
 		updatedTemplate.Spec.Description != currentTemplate.Spec.Description ||
 		updatedTemplate.Spec.Icon != currentTemplate.Spec.Icon
@@ -405,9 +419,8 @@ func (s *TemplateStorage) Update(
 	}
 
 	if updatedTemplate.Spec.Files != nil {
-		normalizedDesiredFiles, err := normalizeFileKeys(updatedTemplate.Spec.Files)
-		if err != nil {
-			return nil, false, apierrors.NewBadRequest(fmt.Sprintf("invalid template spec.files: %v", err))
+		if normalizedDesiredFiles == nil {
+			return nil, false, fmt.Errorf("assertion failed: normalized desired template files must not be nil when spec.files is provided")
 		}
 
 		currentActiveVersionID, err := uuid.Parse(currentTemplate.Status.ActiveVersionID)
