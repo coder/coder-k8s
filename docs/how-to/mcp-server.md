@@ -20,12 +20,12 @@ The MCP server provides tools for inspecting and updating Kubernetes resources m
 Apply RBAC, deployment, and service manifests:
 
 ```bash
-kubectl apply -f deploy/rbac.yaml
+kubectl apply -f config/rbac/
 kubectl apply -f deploy/deployment.yaml
 kubectl apply -f deploy/mcp-service.yaml
 ```
 
-The RBAC manifest creates the unified `coder-k8s` ServiceAccount used by the Deployment.
+The RBAC manifests create the shared `coder-k8s` ServiceAccount and bindings used by the Deployment.
 
 Port-forward the MCP service:
 

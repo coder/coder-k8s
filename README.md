@@ -120,7 +120,7 @@ Mux users: there is an optional agent skill (`kind-dev`) under `.mux/skills/` wi
 - `api/v1alpha1/` — CRD types and generated deepcopy code
 - `internal/controller/` — Reconciliation logic
 - `config/crd/bases/` — Generated CRD manifests
-- `config/rbac/` — Generated RBAC manifests
+- `config/rbac/` — RBAC manifests (generated role + deployment bindings)
 - `config/samples/` — Sample custom resources
 - `hack/` — Code generation and maintenance scripts
 

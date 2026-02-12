@@ -1,6 +1,6 @@
 # Deploy the controller (in-cluster)
 
-This guide shows how to deploy the `coder-k8s` **controller** to a Kubernetes cluster using the manifests in `deploy/`.
+This guide shows how to deploy the `coder-k8s` **controller** to a Kubernetes cluster using manifests from `config/` and `deploy/`.
 
 ## 1. Create the namespace
 
@@ -21,7 +21,7 @@ kubectl apply -f config/crd/bases/
 ## 3. Apply RBAC
 
 ```bash
-kubectl apply -f deploy/rbac.yaml
+kubectl apply -f config/rbac/
 ```
 
 ## 4. Deploy `coder-k8s`

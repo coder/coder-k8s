@@ -10,7 +10,25 @@ rules:
   - events
   verbs:
   - create
+  - get
+  - list
   - patch
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/log
+  verbs:
+  - get
 - apiGroups:
   - ""
   resources:
@@ -20,6 +38,17 @@ rules:
   verbs:
   - create
   - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - aggregation.coder.com
+  resources:
+  - codertemplates
+  - coderworkspaces
+  verbs:
   - get
   - list
   - patch
