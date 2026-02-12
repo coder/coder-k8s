@@ -4,17 +4,20 @@
 {{- "" -}}
 {{- else -}}
 {{- $rendered := markdownRenderFieldDoc $doc -}}
+{{- $rendered = $rendered | replace "<br />" " " -}}
 {{- $rendered = regexReplaceAll "(https?://[^[:space:]<]+)" $rendered "[$1]($1)" -}}
 {{- $rendered -}}
 {{- end -}}
 {{- end -}}
 
 {{- define "renderFieldsTableRows" -}}
-{{- $fields := . -}}
-{{- range $field := $fields }}
-{{- if not $field.Type }}{{ fail (printf "field %q is missing type information" $field.Name) }}{{- end }}
-| `{{ $field.Name }}` | {{ markdownRenderType $field.Type }} | {{ template "fieldDoc" $field.Doc }} |
-{{- end -}}
+{{- range $field := . -}}
+{{- if not $field.Type }}{{ fail (printf "field %q is missing type information" $field.Name) }}{{- end -}}
+{{- $fieldDoc := markdownRenderFieldDoc $field.Doc -}}
+{{- $fieldDoc = $fieldDoc | replace "<br />" " " -}}
+{{- $fieldDoc = regexReplaceAll "(https?://[^[:space:]<]+)" $fieldDoc "[$1]($1)" -}}
+| `{{ $field.Name }}` | {{ markdownRenderType $field.Type }} | {{ $fieldDoc }} |
+{{ end -}}
 {{- end -}}
 
 {{- define "collectReferencedTypes" -}}
@@ -60,28 +63,28 @@
 {{- $type := . -}}
 {{- if not $type -}}
 {{- fail "assertion failed: renderTypeDefinition requires type" -}}
-{{- end }}
+{{- end -}}
 ### {{ $type.Name }}
 
-{{- $typeDoc := trim $type.Doc -}}
-{{- if ne $typeDoc "" }}
+{{ $typeDoc := trim $type.Doc }}
+{{ if ne $typeDoc "" }}
 {{ regexReplaceAll "(https?://[^[:space:]<]+)" $typeDoc "[$1]($1)" }}
 
-{{- end }}
-{{- if gt (len $type.Members) 0 }}
+{{ end }}
+{{ if gt (len $type.Members) 0 }}
 | Field | Type | Description |
 | --- | --- | --- |
 {{ template "renderFieldsTableRows" $type.Members }}
 
-{{- end }}
-{{- if gt (len $type.EnumValues) 0 }}
+{{ end }}
+{{ if gt (len $type.EnumValues) 0 }}
 | Value | Description |
 | --- | --- |
-{{- range $value := $type.EnumValues }}
+{{ range $value := $type.EnumValues }}
 | `{{ $value.Name }}` | {{ template "fieldDoc" $value.Doc }} |
-{{- end }}
+{{ end }}
 
-{{- end }}
+{{ end }}
 {{- end -}}
 
 {{- define "gvList" -}}
@@ -174,8 +177,8 @@
 {{ if gt (len $referencedTypeKeys) 0 }}
 ## Referenced types
 
-{{- range $typeKey := $referencedTypeKeys }}
-{{- $type := index $referencedTypes $typeKey -}}
+{{ range $typeKey := $referencedTypeKeys }}
+{{ $type := index $referencedTypes $typeKey }}
 {{ template "renderTypeDefinition" $type }}
 {{ end }}
 {{ end }}

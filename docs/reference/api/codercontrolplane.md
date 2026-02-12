@@ -13,7 +13,6 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-
 | `image` | string | Image is the container image used for the Coder control plane pod. |
 | `replicas` | integer | Replicas is the desired number of control plane pods. |
 | `service` | [ServiceSpec](#servicespec) | Service controls the service created in front of the control plane. |
@@ -26,7 +25,6 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-
 | `observedGeneration` | integer | ObservedGeneration tracks the spec generation this status reflects. |
 | `readyReplicas` | integer | ReadyReplicas is the number of ready pods observed in the deployment. |
 | `url` | string | URL is the in-cluster URL for the control plane service. |
@@ -35,34 +33,35 @@
 | `phase` | string | Phase is a high-level readiness indicator. |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#condition-v1-meta) array | Conditions are Kubernetes-standard conditions for this resource. |
 
-
 ## Referenced types
+
 ### OperatorAccessSpec
+
 OperatorAccessSpec configures the controller-managed coderd operator user.
+
 | Field | Type | Description |
 | --- | --- | --- |
-
-| `disabled` | boolean | Disabled turns off creation and management of the `coder-k8s-operator`<br />user and API token. |
+| `disabled` | boolean | Disabled turns off creation and management of the `coder-k8s-operator` user and API token. |
 | `generatedTokenSecretName` | string | GeneratedTokenSecretName stores the generated operator API token. |
 
 ### SecretKeySelector
+
 SecretKeySelector identifies a key in a Secret.
+
 | Field | Type | Description |
 | --- | --- | --- |
-
 | `name` | string | Name is the Kubernetes Secret name. |
 | `key` | string | Key is the key inside the Secret data map. |
 
 ### ServiceSpec
+
 ServiceSpec defines the Service configuration reconciled by the operator.
+
 | Field | Type | Description |
 | --- | --- | --- |
-
 | `type` | [ServiceType](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#servicetype-v1-core) | Type controls the Kubernetes service type. |
 | `port` | integer | Port controls the exposed service port. |
 | `annotations` | object (keys:string, values:string) | Annotations are applied to the reconciled service object. |
-
-
 
 ## Source
 

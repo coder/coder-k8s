@@ -13,7 +13,6 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-
 | `organization` | string | Organization is the Coder organization name. |
 | `templateName` | string | TemplateName resolves via TemplateByName(organization, templateName). |
 | `templateVersionID` | string | TemplateVersionID optionally pins to a specific template version. |
@@ -25,7 +24,6 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-
 | `id` | string |  |
 | `ownerName` | string |  |
 | `organizationName` | string |  |
@@ -34,8 +32,6 @@
 | `latestBuildStatus` | string |  |
 | `autoShutdown` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#time-v1-meta) |  |
 | `lastUsedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#time-v1-meta) |  |
-
-
 
 ## Source
 

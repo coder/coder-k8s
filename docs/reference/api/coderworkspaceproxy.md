@@ -13,7 +13,6 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-
 | `image` | string | Image is the container image used for the workspace proxy pod. |
 | `replicas` | integer | Replicas is the desired number of proxy pods. |
 | `service` | [ServiceSpec](#servicespec) | Service controls the service created in front of the workspace proxy. |
@@ -29,7 +28,6 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-
 | `observedGeneration` | integer | ObservedGeneration tracks the spec generation this status reflects. |
 | `readyReplicas` | integer | ReadyReplicas is the number of ready pods observed in the deployment. |
 | `registered` | boolean | Registered reports whether bootstrap registration completed successfully. |
@@ -37,13 +35,14 @@
 | `phase` | string | Phase is a high-level readiness indicator. |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#condition-v1-meta) array | Conditions are Kubernetes-standard conditions for this resource. |
 
-
 ## Referenced types
+
 ### ProxyBootstrapSpec
+
 ProxyBootstrapSpec configures optional registration with the Coder API.
+
 | Field | Type | Description |
 | --- | --- | --- |
-
 | `coderURL` | string | CoderURL is the URL for the primary Coder control plane API. |
 | `credentialsSecretRef` | [SecretKeySelector](#secretkeyselector) | CredentialsSecretRef points to a Secret containing a Coder session token. |
 | `proxyName` | string | ProxyName is the name used when registering the proxy in Coder. |
@@ -52,23 +51,23 @@ ProxyBootstrapSpec configures optional registration with the Coder API.
 | `generatedTokenSecretName` | string | GeneratedTokenSecretName stores the generated proxy token. |
 
 ### SecretKeySelector
+
 SecretKeySelector identifies a key in a Secret.
+
 | Field | Type | Description |
 | --- | --- | --- |
-
 | `name` | string | Name is the Kubernetes Secret name. |
 | `key` | string | Key is the key inside the Secret data map. |
 
 ### ServiceSpec
+
 ServiceSpec defines the Service configuration reconciled by the operator.
+
 | Field | Type | Description |
 | --- | --- | --- |
-
 | `type` | [ServiceType](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#servicetype-v1-core) | Type controls the Kubernetes service type. |
 | `port` | integer | Port controls the exposed service port. |
 | `annotations` | object (keys:string, values:string) | Annotations are applied to the reconciled service object. |
-
-
 
 ## Source
 

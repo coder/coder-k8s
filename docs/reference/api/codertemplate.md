@@ -13,7 +13,6 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-
 | `organization` | string | Organization is the Coder organization name (must match the organization prefix in metadata.name). |
 | `versionID` | string | VersionID is the Coder template version UUID used on creation (required for CREATE). |
 | `displayName` | string |  |
@@ -25,15 +24,12 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-
 | `id` | string |  |
 | `organizationName` | string |  |
 | `activeVersionID` | string |  |
 | `deprecated` | boolean |  |
 | `updatedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#time-v1-meta) |  |
 | `autoShutdown` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#time-v1-meta) | AutoShutdown is a legacy timestamp retained temporarily for in-repo callers that still surface template shutdown timestamps. |
-
-
 
 ## Source
 

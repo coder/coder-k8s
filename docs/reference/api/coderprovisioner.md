@@ -13,7 +13,6 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-
 | `controlPlaneRef` | [LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#localobjectreference-v1-core) | ControlPlaneRef identifies which CoderControlPlane instance to join. |
 | `organizationName` | string | OrganizationName is the Coder organization. Defaults to "default". |
 | `bootstrap` | [CoderProvisionerBootstrapSpec](#coderprovisionerbootstrapspec) | Bootstrap configures credentials for provisioner key management. |
@@ -31,7 +30,6 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-
 | `observedGeneration` | integer | ObservedGeneration tracks the spec generation this status reflects. |
 | `readyReplicas` | integer | ReadyReplicas is the number of ready pods observed in the deployment. |
 | `phase` | string | Phase is a high-level readiness indicator. |
@@ -45,33 +43,34 @@
 | `controlPlaneURL` | string | ControlPlaneURL is the control plane URL last applied to the provisioner key. |
 | `secretRef` | [SecretKeySelector](#secretkeyselector) | SecretRef references the provisioner key secret data currently in use. |
 
-
 ## Referenced types
+
 ### CoderProvisionerBootstrapSpec
+
 CoderProvisionerBootstrapSpec configures credentials for provisioner key management.
+
 | Field | Type | Description |
 | --- | --- | --- |
-
-| `credentialsSecretRef` | [SecretKeySelector](#secretkeyselector) | CredentialsSecretRef points to a Secret containing a Coder session token<br />with permission to manage provisioner keys. |
+| `credentialsSecretRef` | [SecretKeySelector](#secretkeyselector) | CredentialsSecretRef points to a Secret containing a Coder session token with permission to manage provisioner keys. |
 
 ### CoderProvisionerKeySpec
+
 CoderProvisionerKeySpec configures provisioner key naming and storage.
+
 | Field | Type | Description |
 | --- | --- | --- |
-
 | `name` | string | Name is the provisioner key name in coderd. Defaults to the CR name. |
 | `secretName` | string | SecretName is the Kubernetes Secret to store the key. Defaults to "\{crName\}-provisioner-key". |
 | `secretKey` | string | SecretKey is the data key in the Secret. Defaults to "key". |
 
 ### SecretKeySelector
+
 SecretKeySelector identifies a key in a Secret.
+
 | Field | Type | Description |
 | --- | --- | --- |
-
 | `name` | string | Name is the Kubernetes Secret name. |
 | `key` | string | Key is the key inside the Secret data map. |
-
-
 
 ## Source
 
