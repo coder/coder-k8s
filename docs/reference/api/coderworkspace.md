@@ -13,25 +13,25 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `spec.organization` | `string` | Organization is the Coder organization name. |
-| `spec.templateName` | `string` | TemplateName resolves via TemplateByName(organization, templateName). |
-| `spec.templateVersionID` | `string` | TemplateVersionID optionally pins to a specific template version. |
-| `spec.running` | `bool` | Running drives start/stop via CreateWorkspaceBuild. |
-| `spec.ttlMillis` | `int64` |  |
-| `spec.autostartSchedule` | `string` |  |
+| `organization` | `string` | Organization is the Coder organization name. |
+| `templateName` | `string` | TemplateName resolves via TemplateByName(organization, templateName). |
+| `templateVersionID` | `string` | TemplateVersionID optionally pins to a specific template version. |
+| `running` | `bool` | Running drives start/stop via CreateWorkspaceBuild. |
+| `ttlMillis` | `int64` |  |
+| `autostartSchedule` | `string` |  |
 
 ## Status
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `status.id` | `string` |  |
-| `status.ownerName` | `string` |  |
-| `status.organizationName` | `string` |  |
-| `status.templateName` | `string` |  |
-| `status.latestBuildID` | `string` |  |
-| `status.latestBuildStatus` | `string` |  |
-| `status.autoShutdown` | `metav1.Time` |  |
-| `status.lastUsedAt` | `metav1.Time` |  |
+| `id` | `string` |  |
+| `ownerName` | `string` |  |
+| `organizationName` | `string` |  |
+| `templateName` | `string` |  |
+| `latestBuildID` | `string` |  |
+| `latestBuildStatus` | `string` |  |
+| `autoShutdown` | `metav1.Time` |  |
+| `lastUsedAt` | `metav1.Time` |  |
 
 ## Source
 

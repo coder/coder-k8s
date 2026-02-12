@@ -13,23 +13,23 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `spec.organization` | `string` | Organization is the Coder organization name (must match the organization prefix in metadata.name). |
-| `spec.versionID` | `string` | VersionID is the Coder template version UUID used on creation (required for CREATE). |
-| `spec.displayName` | `string` |  |
-| `spec.description` | `string` |  |
-| `spec.icon` | `string` |  |
-| `spec.running` | `bool` | Running is a legacy flag retained temporarily for in-repo callers that still read template run-state directly. |
+| `organization` | `string` | Organization is the Coder organization name (must match the organization prefix in metadata.name). |
+| `versionID` | `string` | VersionID is the Coder template version UUID used on creation (required for CREATE). |
+| `displayName` | `string` |  |
+| `description` | `string` |  |
+| `icon` | `string` |  |
+| `running` | `bool` | Running is a legacy flag retained temporarily for in-repo callers that still read template run-state directly. |
 
 ## Status
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `status.id` | `string` |  |
-| `status.organizationName` | `string` |  |
-| `status.activeVersionID` | `string` |  |
-| `status.deprecated` | `bool` |  |
-| `status.updatedAt` | `metav1.Time` |  |
-| `status.autoShutdown` | `metav1.Time` | AutoShutdown is a legacy timestamp retained temporarily for in-repo callers that still surface template shutdown timestamps. |
+| `id` | `string` |  |
+| `organizationName` | `string` |  |
+| `activeVersionID` | `string` |  |
+| `deprecated` | `bool` |  |
+| `updatedAt` | `metav1.Time` |  |
+| `autoShutdown` | `metav1.Time` | AutoShutdown is a legacy timestamp retained temporarily for in-repo callers that still surface template shutdown timestamps. |
 
 ## Source
 

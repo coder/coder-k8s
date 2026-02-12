@@ -31,6 +31,7 @@
     "javascripts",
     "kubeconfig",
     "kubebuilder",
+    "corev",
     "metav",
     "mkdocs",
     "pymdownx",
