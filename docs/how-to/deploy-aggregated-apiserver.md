@@ -16,7 +16,7 @@ kubectl create namespace coder-system
 
 ## 2. Apply RBAC
 
-The RBAC manifest includes service accounts for both the controller and the aggregated API server.
+The RBAC manifest creates the unified `coder-k8s` ServiceAccount used by all app modes.
 
 ```bash
 kubectl apply -f deploy/rbac.yaml
@@ -26,8 +26,12 @@ kubectl apply -f deploy/rbac.yaml
 
 ```bash
 kubectl apply -f deploy/apiserver-service.yaml
-kubectl apply -f deploy/apiserver-deployment.yaml
+kubectl apply -f deploy/deployment.yaml
 ```
+
+`deploy/deployment.yaml` defaults to `--app=all`, which runs the controller, aggregated API server, and MCP server in a single pod.
+
+For split deployments, you can still run individual components by setting `--app=controller`, `--app=aggregated-apiserver`, or `--app=mcp-http` in the Deployment args.
 
 ## 4. Register the APIService
 
@@ -40,7 +44,7 @@ kubectl apply -f deploy/apiserver-apiservice.yaml
 Wait for the deployment:
 
 ```bash
-kubectl rollout status deployment/coder-k8s-apiserver -n coder-system
+kubectl rollout status deployment/coder-k8s -n coder-system
 ```
 
 Check the APIService:

@@ -70,6 +70,13 @@ func (c *SDKClient) EnsureWorkspaceProxy(ctx context.Context, req RegisterWorksp
 	if client.HTTPClient == nil {
 		client.HTTPClient = &http.Client{}
 	}
+	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return RegisterWorkspaceProxyResponse{}, xerrors.New("assertion failed: http.DefaultTransport is not *http.Transport")
+	}
+	// Use a dedicated transport to avoid sharing http.DefaultTransport's
+	// connection pool across parallel test servers.
+	client.HTTPClient.Transport = defaultTransport.Clone()
 	client.HTTPClient.Timeout = coderSDKRequestTimeout
 
 	existing, err := client.WorkspaceProxyByName(ctx, req.ProxyName)

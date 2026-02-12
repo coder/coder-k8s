@@ -2,7 +2,7 @@
 
 This guide shows how to run the `coder-k8s` **MCP server** for local development and in-cluster access.
 
-The MCP server runs in HTTP mode (`--app=mcp-http`).
+`deploy/deployment.yaml` defaults to `--app=all`, which runs the controller, aggregated API server, and MCP server in a single pod. For split deployments, set `--app=mcp-http` (or `--app=controller` / `--app=aggregated-apiserver`) in the Deployment args.
 
 ## 1. Overview
 
@@ -21,9 +21,11 @@ Apply RBAC, deployment, and service manifests:
 
 ```bash
 kubectl apply -f deploy/rbac.yaml
-kubectl apply -f deploy/mcp-deployment.yaml
+kubectl apply -f deploy/deployment.yaml
 kubectl apply -f deploy/mcp-service.yaml
 ```
+
+The RBAC manifest creates the unified `coder-k8s` ServiceAccount used by the Deployment.
 
 Port-forward the MCP service:
 

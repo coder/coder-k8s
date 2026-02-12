@@ -196,6 +196,62 @@ func TestRunWithOptionsRejectsPartialCoderConfig(t *testing.T) {
 	}
 }
 
+func TestRunWithOptionsUsesClientProviderOverride(t *testing.T) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("create test listener: %v", err)
+	}
+	defer func() {
+		_ = listener.Close()
+	}()
+
+	coderURL, err := url.Parse("https://coder.example.com")
+	if err != nil {
+		t.Fatalf("parse test coder URL: %v", err)
+	}
+	provider, err := coderhelper.NewStaticClientProvider(
+		coderhelper.Config{
+			CoderURL:     coderURL,
+			SessionToken: "test-session-token",
+		},
+		"control-plane",
+	)
+	if err != nil {
+		t.Fatalf("build static client provider: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunWithOptions(ctx, Options{
+			Listener:       listener,
+			CoderURL:       "https://coder.example.com",
+			ClientProvider: provider,
+		})
+	}()
+
+	select {
+	case runErr := <-errCh:
+		t.Fatalf("expected startup to continue with provider override, got %v", runErr)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	cancel()
+
+	select {
+	case runErr := <-errCh:
+		if runErr != nil && !errors.Is(runErr, context.Canceled) {
+			t.Fatalf("expected graceful shutdown after cancellation, got %v", runErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for aggregated apiserver shutdown")
+	}
+}
+
 func TestBuildClientProviderRejectsMissingCoderNamespaceWhenBackendConfigured(t *testing.T) {
 	t.Parallel()
 

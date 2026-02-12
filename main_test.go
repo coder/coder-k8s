@@ -9,6 +9,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/app/apiserverapp"
 	"github.com/coder/coder-k8s/internal/app/controllerapp"
@@ -41,6 +42,8 @@ func TestControllerSchemeRegistersCoderControlPlaneKinds(t *testing.T) {
 		coderv1alpha1.GroupVersion.WithKind("CoderControlPlaneList"),
 		coderv1alpha1.GroupVersion.WithKind("WorkspaceProxy"),
 		coderv1alpha1.GroupVersion.WithKind("WorkspaceProxyList"),
+		aggregationv1alpha1.SchemeGroupVersion.WithKind("CoderWorkspace"),
+		aggregationv1alpha1.SchemeGroupVersion.WithKind("CoderWorkspaceList"),
 	} {
 		if !scheme.Recognizes(gvk) {
 			t.Fatalf("expected scheme to recognize %s", gvk.String())
@@ -69,15 +72,65 @@ func TestReconcilerSetupWithManagerRequiresManager(t *testing.T) {
 	}
 }
 
-func TestRunRejectsEmptyMode(t *testing.T) {
+func TestRunDefaultsToAllMode(t *testing.T) {
 	t.Helper()
+	installMockSignalHandler(t)
+
+	previous := runAllApp
+	t.Cleanup(func() {
+		runAllApp = previous
+	})
+
+	expectedErr := errors.New("sentinel all error")
+	called := false
+	runAllApp = func(ctx context.Context, timeout time.Duration) error {
+		called = true
+		if ctx == nil {
+			t.Fatal("expected non-nil context")
+		}
+		if got, want := timeout, 30*time.Second; got != want {
+			t.Fatalf("expected coder request timeout %v, got %v", want, got)
+		}
+		return expectedErr
+	}
 
 	err := run([]string{})
-	if err == nil {
-		t.Fatal("expected an error when --app is missing")
+	if !called {
+		t.Fatal("expected all runner to be called")
 	}
-	if !strings.Contains(err.Error(), "--app flag is required") {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("expected sentinel, got %v", err)
+	}
+}
+
+func TestRunDispatchesAllMode(t *testing.T) {
+	t.Helper()
+	installMockSignalHandler(t)
+
+	previous := runAllApp
+	t.Cleanup(func() {
+		runAllApp = previous
+	})
+
+	expectedErr := errors.New("sentinel all error")
+	called := false
+	runAllApp = func(ctx context.Context, timeout time.Duration) error {
+		called = true
+		if ctx == nil {
+			t.Fatal("expected non-nil context")
+		}
+		if got, want := timeout, 45*time.Second; got != want {
+			t.Fatalf("expected coder request timeout %v, got %v", want, got)
+		}
+		return expectedErr
+	}
+
+	err := run([]string{"--app=all", "--coder-request-timeout=45s"})
+	if !called {
+		t.Fatal("expected all runner to be called")
+	}
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("expected sentinel, got %v", err)
 	}
 }
 

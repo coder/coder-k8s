@@ -160,6 +160,13 @@ func newAuthenticatedClient(coderURL, sessionToken string) (*codersdk.Client, er
 	if client.HTTPClient == nil {
 		client.HTTPClient = &http.Client{}
 	}
+	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, xerrors.New("assertion failed: http.DefaultTransport is not *http.Transport")
+	}
+	// Use a dedicated transport to avoid sharing http.DefaultTransport's
+	// connection pool across parallel test servers.
+	client.HTTPClient.Transport = defaultTransport.Clone()
 	client.HTTPClient.Timeout = coderSDKRequestTimeout
 
 	return client, nil

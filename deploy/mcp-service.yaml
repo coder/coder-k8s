@@ -5,7 +5,7 @@ metadata:
   namespace: coder-system
 spec:
   selector:
-    app: coder-k8s-mcp
+    app: coder-k8s
   ports:
     - name: mcp
       port: 8090

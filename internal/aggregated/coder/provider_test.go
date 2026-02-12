@@ -155,6 +155,60 @@ func TestStaticClientProviderClientForNamespaceAllowsClusterScopedListNamespace(
 	}
 }
 
+func TestStaticClientProviderDefaultNamespace(t *testing.T) {
+	t.Parallel()
+
+	provider := &StaticClientProvider{Namespace: "control-plane"}
+	resolvedNamespace, err := provider.DefaultNamespace(context.Background())
+	if err != nil {
+		t.Fatalf("resolve default namespace: %v", err)
+	}
+	if got, want := resolvedNamespace, "control-plane"; got != want {
+		t.Fatalf("expected default namespace %q, got %q", want, got)
+	}
+}
+
+func TestStaticClientProviderDefaultNamespaceAssertions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		provider        *StaticClientProvider
+		wantErrContains string
+		wantServiceDown bool
+	}{
+		{
+			name:            "rejects nil provider",
+			provider:        nil,
+			wantErrContains: "assertion failed: static client provider must not be nil",
+		},
+		{
+			name:            "rejects unpinned provider",
+			provider:        &StaticClientProvider{},
+			wantErrContains: "static provider has no default namespace",
+			wantServiceDown: true,
+		},
+	}
+
+	for _, testCase := range tests {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := testCase.provider.DefaultNamespace(context.Background())
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", testCase.wantErrContains)
+			}
+			if !strings.Contains(err.Error(), testCase.wantErrContains) {
+				t.Fatalf("expected error containing %q, got %q", testCase.wantErrContains, err.Error())
+			}
+			if testCase.wantServiceDown && !apierrors.IsServiceUnavailable(err) {
+				t.Fatalf("expected ServiceUnavailable, got %v", err)
+			}
+		})
+	}
+}
+
 func TestNewStaticClientProvider(t *testing.T) {
 	t.Parallel()
 

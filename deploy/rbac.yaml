@@ -1,22 +1,15 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: coder-k8s-controller
+  name: coder-k8s
   namespace: coder-system
 ---
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: coder-k8s-apiserver
-  namespace: coder-system
----
-# ClusterRole for the controller to manage CoderControlPlane resources.
-# Permissions match the kubebuilder RBAC markers on CoderControlPlaneReconciler.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: coder-k8s-controller
+  name: coder-k8s
 rules:
+  # Controller: manage CoderControlPlane resources
   - apiGroups: ["coder.com"]
     resources: ["codercontrolplanes"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -26,37 +19,84 @@ rules:
   - apiGroups: ["coder.com"]
     resources: ["codercontrolplanes/finalizers"]
     verbs: ["update"]
+  # Controller: manage WorkspaceProxy resources
+  - apiGroups: ["coder.com"]
+    resources: ["workspaceproxies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["coder.com"]
+    resources: ["workspaceproxies/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["coder.com"]
+    resources: ["workspaceproxies/finalizers"]
+    verbs: ["update"]
+  # Controller: manage CoderProvisioner resources
+  - apiGroups: ["coder.com"]
+    resources: ["coderprovisioners"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["coder.com"]
+    resources: ["coderprovisioners/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["coder.com"]
+    resources: ["coderprovisioners/finalizers"]
+    verbs: ["update"]
+  # Controller: leader election
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Controller + MCP: events
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  # Controller: manage deployments and services for control planes
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Dynamic provider: read operator token secrets
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+  # MCP: read aggregated API resources
+  - apiGroups: ["aggregation.coder.com"]
+    resources: ["coderworkspaces", "codertemplates"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # MCP: read pods, logs, namespaces
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "namespaces"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: coder-k8s-controller
+  name: coder-k8s
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: coder-k8s-controller
+  name: coder-k8s
 subjects:
   - kind: ServiceAccount
-    name: coder-k8s-controller
+    name: coder-k8s
     namespace: coder-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: coder-k8s-apiserver-auth-delegator
+  name: coder-k8s-auth-delegator
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: system:auth-delegator
 subjects:
   - kind: ServiceAccount
-    name: coder-k8s-apiserver
+    name: coder-k8s
     namespace: coder-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: coder-k8s-apiserver-authentication-reader
+  name: coder-k8s-authentication-reader
   namespace: kube-system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -64,43 +104,5 @@ roleRef:
   name: extension-apiserver-authentication-reader
 subjects:
   - kind: ServiceAccount
-    name: coder-k8s-apiserver
-    namespace: coder-system
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: coder-k8s-mcp
-  namespace: coder-system
----
-# ClusterRole for the MCP server to read operator resources.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: coder-k8s-mcp
-rules:
-  - apiGroups: ["coder.com"]
-    resources: ["codercontrolplanes", "codercontrolplanes/status"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["aggregation.coder.com"]
-    resources: ["coderworkspaces", "codertemplates"]
-    verbs: ["get", "list", "watch", "update", "patch"]
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["services", "pods", "pods/log", "events", "namespaces"]
-    verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: coder-k8s-mcp
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: coder-k8s-mcp
-subjects:
-  - kind: ServiceAccount
-    name: coder-k8s-mcp
+    name: coder-k8s
     namespace: coder-system

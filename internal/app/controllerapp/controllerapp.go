@@ -10,12 +10,12 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/app/sharedscheme"
 	"github.com/coder/coder-k8s/internal/coderbootstrap"
 	"github.com/coder/coder-k8s/internal/controller"
 )
@@ -40,27 +40,19 @@ var setupLog = ctrl.Log.WithName("setup")
 
 // NewScheme builds the runtime scheme used by the controller application.
 func NewScheme() *runtime.Scheme {
-	scheme := runtime.NewScheme()
-	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(coderv1alpha1.AddToScheme(scheme))
-	return scheme
+	return sharedscheme.New()
 }
 
-// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-
-// Run starts the controller-runtime manager for the controller application mode.
-func Run(ctx context.Context) error {
-	if ctx == nil {
-		return fmt.Errorf("assertion failed: context must not be nil")
+// NewManager builds a controller-runtime manager for the controller application mode.
+func NewManager(cfg *rest.Config, scheme *runtime.Scheme) (manager.Manager, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("assertion failed: config must not be nil")
 	}
-
-	scheme := NewScheme()
 	if scheme == nil {
-		return fmt.Errorf("assertion failed: scheme is nil after successful construction")
+		return nil, fmt.Errorf("assertion failed: scheme must not be nil")
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                        scheme,
 		HealthProbeBindAddress:        HealthProbeBindAddress,
 		LeaderElection:                true,
@@ -69,10 +61,19 @@ func Run(ctx context.Context) error {
 		LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
-		return fmt.Errorf("unable to start manager: %w", err)
+		return nil, fmt.Errorf("unable to start manager: %w", err)
 	}
 	if mgr == nil {
-		return fmt.Errorf("assertion failed: manager is nil after successful construction")
+		return nil, fmt.Errorf("assertion failed: manager is nil after successful construction")
+	}
+
+	return mgr, nil
+}
+
+// SetupControllers registers all controller reconcilers on the manager.
+func SetupControllers(mgr manager.Manager) error {
+	if mgr == nil {
+		return fmt.Errorf("assertion failed: manager must not be nil")
 	}
 
 	client := mgr.GetClient()
@@ -112,6 +113,15 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("unable to create provisioner controller: %w", err)
 	}
 
+	return nil
+}
+
+// SetupProbes configures health and readiness checks on the manager.
+func SetupProbes(mgr manager.Manager) error {
+	if mgr == nil {
+		return fmt.Errorf("assertion failed: manager must not be nil")
+	}
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return fmt.Errorf("unable to set up health check: %w", err)
 	}
@@ -124,6 +134,35 @@ func Run(ctx context.Context) error {
 		return nil
 	}); err != nil {
 		return fmt.Errorf("unable to set up ready check: %w", err)
+	}
+
+	return nil
+}
+
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+
+// Run starts the controller-runtime manager for the controller application mode.
+func Run(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("assertion failed: context must not be nil")
+	}
+
+	scheme := NewScheme()
+	if scheme == nil {
+		return fmt.Errorf("assertion failed: scheme is nil after successful construction")
+	}
+
+	mgr, err := NewManager(ctrl.GetConfigOrDie(), scheme)
+	if err != nil {
+		return err
+	}
+
+	if err := SetupControllers(mgr); err != nil {
+		return err
+	}
+	if err := SetupProbes(mgr); err != nil {
+		return err
 	}
 
 	setupLog.Info("starting manager")
