@@ -197,9 +197,13 @@ normalize_generated_doc_spacing() {
 	awk '
 		BEGIN {
 			blank_count = 0
+			prev_table_separator = 0
 		}
 		{
 			if ($0 ~ /^[[:space:]]*$/) {
+				if (prev_table_separator) {
+					next
+				}
 				blank_count += 1
 				if (blank_count > 1) {
 					next
@@ -209,6 +213,11 @@ normalize_generated_doc_spacing() {
 			}
 			blank_count = 0
 			print
+			if ($0 ~ /^[[:space:]]*\|[-:|[:space:]]+\|[[:space:]]*$/) {
+				prev_table_separator = 1
+			} else {
+				prev_table_separator = 0
+			}
 		}
 	' "${full_path}" >"${temp_file}"
 
