@@ -25,6 +25,12 @@
             ps."mkdocs-material"
             ps."pymdown-extensions"
           ]);
+          ktx = pkgs.writeShellScriptBin "ktx" ''
+            exec ${pkgs.kubectx}/bin/kubectx "$@"
+          '';
+          kns = pkgs.writeShellScriptBin "kns" ''
+            exec ${pkgs.kubectx}/bin/kubens "$@"
+          '';
         in {
           default = pkgs.mkShell {
             packages = with pkgs; [
@@ -36,6 +42,9 @@
               kubectl
               kind
               k9s
+              kubectx
+              ktx
+              kns
 
               # Cloud tooling
               awscli2
