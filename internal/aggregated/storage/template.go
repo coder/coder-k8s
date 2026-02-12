@@ -1,9 +1,12 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"reflect"
 
+	"github.com/google/uuid"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -105,7 +108,15 @@ func (s *TemplateStorage) Get(ctx context.Context, name string, _ *metav1.GetOpt
 		return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
 	}
 
-	return convert.TemplateToK8s(namespace, template), nil
+	obj := convert.TemplateToK8s(namespace, template)
+
+	files, err := fetchTemplateSourceFiles(ctx, sdk, template.ActiveVersionID)
+	if err != nil {
+		return nil, fmt.Errorf("fetch template source files: %w", err)
+	}
+	obj.Spec.Files = files
+
+	return obj, nil
 }
 
 // List fetches CoderTemplate objects from codersdk.
@@ -216,6 +227,40 @@ func (s *TemplateStorage) Create(
 		return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
 	}
 
+	if templateObj.Spec.Files != nil {
+		zipBytes, err := buildSourceZip(templateObj.Spec.Files)
+		if err != nil {
+			return nil, apierrors.NewBadRequest(fmt.Sprintf("invalid template spec.files: %v", err))
+		}
+
+		uploadResponse, err := sdk.Upload(ctx, codersdk.ContentTypeZip, bytes.NewReader(zipBytes))
+		if err != nil {
+			return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
+		}
+
+		templateVersion, err := sdk.CreateTemplateVersion(ctx, org.ID, codersdk.CreateTemplateVersionRequest{
+			StorageMethod: codersdk.ProvisionerStorageMethodFile,
+			FileID:        uploadResponse.ID,
+			Provisioner:   codersdk.ProvisionerTypeTerraform,
+		})
+		if err != nil {
+			return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
+		}
+
+		createdTemplate, err := sdk.CreateTemplate(ctx, org.ID, codersdk.CreateTemplateRequest{
+			Name:        templateName,
+			VersionID:   templateVersion.ID,
+			DisplayName: templateObj.Spec.DisplayName,
+			Description: templateObj.Spec.Description,
+			Icon:        templateObj.Spec.Icon,
+		})
+		if err != nil {
+			return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
+		}
+
+		return convert.TemplateToK8s(namespace, createdTemplate), nil
+	}
+
 	request, err := convert.TemplateCreateRequestFromK8s(templateObj, templateName)
 	if err != nil {
 		return nil, apierrors.NewBadRequest(err.Error())
@@ -229,7 +274,7 @@ func (s *TemplateStorage) Create(
 	return convert.TemplateToK8s(namespace, createdTemplate), nil
 }
 
-// Update applies a legacy-compatible template update.
+// Update applies a template metadata/source reconcile.
 func (s *TemplateStorage) Update(
 	ctx context.Context,
 	name string,
@@ -317,22 +362,146 @@ func (s *TemplateStorage) Update(
 			return nil, false, err
 		}
 	}
-
-	// Template updates via codersdk are currently limited. The legacy spec.running
-	// field remains for compatibility with in-repo callers and is a no-op in the
-	// Coder backend. Reject updates to all other spec fields to avoid drift between
-	// accepted update payloads and persisted backend state.
-	if updatedTemplate.Spec.Organization != currentTemplate.Spec.Organization ||
-		(updatedTemplate.Spec.VersionID != "" && updatedTemplate.Spec.VersionID != currentTemplate.Spec.VersionID) ||
-		(updatedTemplate.Spec.DisplayName != "" && updatedTemplate.Spec.DisplayName != currentTemplate.Spec.DisplayName) ||
-		(updatedTemplate.Spec.Description != "" && updatedTemplate.Spec.Description != currentTemplate.Spec.Description) ||
-		(updatedTemplate.Spec.Icon != "" && updatedTemplate.Spec.Icon != currentTemplate.Spec.Icon) {
+	if updatedTemplate.Spec.Organization != currentTemplate.Spec.Organization {
 		return nil, false, apierrors.NewBadRequest(
-			"template update only supports changing spec.running; other spec fields are immutable",
+			fmt.Sprintf(
+				"spec.organization %q must match existing organization %q",
+				updatedTemplate.Spec.Organization,
+				currentTemplate.Spec.Organization,
+			),
 		)
 	}
 
-	return currentTemplate, false, nil
+	// spec.versionID is informational (populated from the backend active version).
+	// Reject explicit non-empty mutations to avoid silent drift when the active version remains unchanged.
+	// Allow empty desired values so GitOps clients can omit this informational field on updates.
+	if updatedTemplate.Spec.VersionID != "" && updatedTemplate.Spec.VersionID != currentTemplate.Spec.VersionID {
+		return nil, false, apierrors.NewBadRequest(
+			fmt.Sprintf(
+				"spec.versionID is read-only; to change the active version, update spec.files instead (current: %q, requested: %q)",
+				currentTemplate.Spec.VersionID,
+				updatedTemplate.Spec.VersionID,
+			),
+		)
+	}
+
+	templateID, err := uuid.Parse(currentTemplate.Status.ID)
+	if err != nil {
+		return nil, false, fmt.Errorf("parse current template status.id %q: %w", currentTemplate.Status.ID, err)
+	}
+
+	sdk, err := s.clientForNamespace(ctx, namespace)
+	if err != nil {
+		return nil, false, wrapClientError(err)
+	}
+
+	// Pre-validate spec.files before any mutations to avoid partial updates.
+	var normalizedDesiredFiles map[string]string
+	if updatedTemplate.Spec.Files != nil {
+		var normalizeErr error
+		normalizedDesiredFiles, normalizeErr = normalizeFileKeys(updatedTemplate.Spec.Files)
+		if normalizeErr != nil {
+			return nil, false, apierrors.NewBadRequest(fmt.Sprintf("invalid template spec.files: %v", normalizeErr))
+		}
+		// Validate that files can be built into a zip (path/size/UTF-8 checks).
+		if _, buildErr := buildSourceZip(normalizedDesiredFiles); buildErr != nil {
+			return nil, false, apierrors.NewBadRequest(fmt.Sprintf("invalid template spec.files: %v", buildErr))
+		}
+	}
+
+	metadataChanged := updatedTemplate.Spec.DisplayName != currentTemplate.Spec.DisplayName ||
+		updatedTemplate.Spec.Description != currentTemplate.Spec.Description ||
+		updatedTemplate.Spec.Icon != currentTemplate.Spec.Icon
+	if metadataChanged {
+		_, err := sdk.UpdateTemplateMeta(ctx, templateID, convert.TemplateUpdateMetaRequestFromK8s(updatedTemplate))
+		if err != nil {
+			return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
+		}
+	}
+
+	if updatedTemplate.Spec.Files != nil {
+		if normalizedDesiredFiles == nil {
+			return nil, false, fmt.Errorf("assertion failed: normalized desired template files must not be nil when spec.files is provided")
+		}
+
+		currentActiveVersionID, err := uuid.Parse(currentTemplate.Status.ActiveVersionID)
+		if err != nil {
+			return nil, false, fmt.Errorf(
+				"parse current template status.activeVersionID %q: %w",
+				currentTemplate.Status.ActiveVersionID,
+				err,
+			)
+		}
+
+		currentFiles, err := fetchTemplateSourceFiles(ctx, sdk, currentActiveVersionID)
+		if err != nil {
+			return nil, false, fmt.Errorf("fetch current template source files: %w", err)
+		}
+
+		if !reflect.DeepEqual(normalizedDesiredFiles, currentFiles) {
+			currentRawSourceZip, err := fetchRawTemplateSourceZip(ctx, sdk, currentActiveVersionID)
+			if err != nil {
+				return nil, false, fmt.Errorf("fetch current template source zip: %w", err)
+			}
+
+			zipBytes, err := buildMergedSourceZip(currentRawSourceZip, normalizedDesiredFiles)
+			if err != nil {
+				return nil, false, apierrors.NewBadRequest(fmt.Sprintf("invalid template spec.files: %v", err))
+			}
+
+			uploadResponse, err := sdk.Upload(ctx, codersdk.ContentTypeZip, bytes.NewReader(zipBytes))
+			if err != nil {
+				return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
+			}
+			if uploadResponse.ID == uuid.Nil {
+				return nil, false, fmt.Errorf("assertion failed: uploaded file ID must not be nil")
+			}
+
+			org, err := sdk.OrganizationByName(ctx, currentTemplate.Spec.Organization)
+			if err != nil {
+				return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
+			}
+
+			newVersion, err := sdk.CreateTemplateVersion(ctx, org.ID, codersdk.CreateTemplateVersionRequest{
+				TemplateID:    templateID,
+				StorageMethod: codersdk.ProvisionerStorageMethodFile,
+				FileID:        uploadResponse.ID,
+				Provisioner:   codersdk.ProvisionerTypeTerraform,
+			})
+			if err != nil {
+				return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
+			}
+			if newVersion.ID == uuid.Nil {
+				return nil, false, fmt.Errorf("assertion failed: new template version ID must not be nil")
+			}
+
+			if err := sdk.UpdateActiveTemplateVersion(ctx, templateID, codersdk.UpdateActiveTemplateVersion{ID: newVersion.ID}); err != nil {
+				return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
+			}
+
+			// Post-condition: verify promotion succeeded. The vendored SDK silently
+			// swallows transport errors in UpdateActiveTemplateVersion, so we must
+			// confirm the active version actually changed.
+			verifyTemplate, err := sdk.Template(ctx, templateID)
+			if err != nil {
+				return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
+			}
+			if verifyTemplate.ActiveVersionID != newVersion.ID {
+				return nil, false, fmt.Errorf(
+					"assertion failed: active version promotion did not take effect: expected %q, got %q",
+					newVersion.ID.String(),
+					verifyTemplate.ActiveVersionID.String(),
+				)
+			}
+		}
+	}
+
+	refreshedObj, err := s.Get(ctx, name, nil)
+	if err != nil {
+		return nil, false, err
+	}
+
+	return refreshedObj, false, nil
 }
 
 // Delete deletes a CoderTemplate through codersdk.

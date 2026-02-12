@@ -1,10 +1,14 @@
 package storage
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -26,6 +30,8 @@ import (
 	"github.com/coder/coder-k8s/internal/aggregated/coder"
 	"github.com/coder/coder/v2/codersdk"
 )
+
+const seededTemplateMainTF = `resource "null_resource" "example" {}`
 
 func TestTemplateStorageCRUDWithCoderSDK(t *testing.T) {
 	t.Parallel()
@@ -108,6 +114,635 @@ func TestTemplateStorageCRUDWithCoderSDK(t *testing.T) {
 	_, err = templateStorage.Get(ctx, "acme.ops-template", nil)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("expected NotFound after delete, got %v", err)
+	}
+}
+
+func TestTemplateStorageGetPopulatesSpecFiles(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	obj, err := templateStorage.Get(ctx, "acme.starter-template", nil)
+	if err != nil {
+		t.Fatalf("expected template get to succeed: %v", err)
+	}
+
+	template, ok := obj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from get, got %T", obj)
+	}
+
+	expectedFiles := map[string]string{"main.tf": seededTemplateMainTF}
+	if !reflect.DeepEqual(template.Spec.Files, expectedFiles) {
+		t.Fatalf("expected get to populate spec.files %v, got %v", expectedFiles, template.Spec.Files)
+	}
+}
+
+func TestTemplateStorageListOmitsSpecFiles(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	listObj, err := templateStorage.List(ctx, nil)
+	if err != nil {
+		t.Fatalf("expected template list to succeed: %v", err)
+	}
+
+	list, ok := listObj.(*aggregationv1alpha1.CoderTemplateList)
+	if !ok {
+		t.Fatalf("expected *CoderTemplateList, got %T", listObj)
+	}
+	if len(list.Items) == 0 {
+		t.Fatal("expected at least one template from list")
+	}
+
+	for _, template := range list.Items {
+		if len(template.Spec.Files) != 0 {
+			t.Fatalf("expected list to omit spec.files for %q, got %v", template.Name, template.Spec.Files)
+		}
+	}
+}
+
+func TestTemplateStorageCreateWithFiles(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	createFiles := map[string]string{"main.tf": "resource \"null_resource\" \"created\" {}"}
+	fileCountBefore := state.fileCount()
+	templateVersionCountBefore := state.templateVersionCount()
+
+	createObj := &aggregationv1alpha1.CoderTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme.files-template"},
+		Spec: aggregationv1alpha1.CoderTemplateSpec{
+			Organization: "acme",
+			DisplayName:  "Files Template",
+			Description:  "Template created from spec.files",
+			Icon:         "/icons/files.png",
+			Files:        cloneStringMap(createFiles),
+		},
+	}
+
+	createdObj, err := templateStorage.Create(ctx, createObj, rest.ValidateAllObjectFunc, nil)
+	if err != nil {
+		t.Fatalf("expected template create with files to succeed: %v", err)
+	}
+
+	createdTemplate, ok := createdObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from create, got %T", createdObj)
+	}
+
+	if state.fileCount() != fileCountBefore+1 {
+		t.Fatalf("expected one uploaded file, before=%d after=%d", fileCountBefore, state.fileCount())
+	}
+	if state.templateVersionCount() != templateVersionCountBefore+1 {
+		t.Fatalf("expected one new template version, before=%d after=%d", templateVersionCountBefore, state.templateVersionCount())
+	}
+
+	activeVersionID, ok := state.templateActiveVersionID("acme", "files-template")
+	if !ok {
+		t.Fatal("expected created template active version in mock state")
+	}
+	if activeVersionID == uuid.Nil {
+		t.Fatal("expected created template active version to be non-nil")
+	}
+	if createdTemplate.Status.ActiveVersionID != activeVersionID.String() {
+		t.Fatalf("expected created status.activeVersionID %q, got %q", activeVersionID.String(), createdTemplate.Status.ActiveVersionID)
+	}
+
+	fetchedObj, err := templateStorage.Get(ctx, "acme.files-template", nil)
+	if err != nil {
+		t.Fatalf("expected get for created template to succeed: %v", err)
+	}
+	fetchedTemplate, ok := fetchedObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from get, got %T", fetchedObj)
+	}
+	if !reflect.DeepEqual(fetchedTemplate.Spec.Files, createFiles) {
+		t.Fatalf("expected created template files %v, got %v", createFiles, fetchedTemplate.Spec.Files)
+	}
+}
+
+func TestTemplateStorageUpdateWithChangedFiles(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	initialFiles := map[string]string{"main.tf": "resource \"null_resource\" \"initial\" {}"}
+	createObj := &aggregationv1alpha1.CoderTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme.update-files-template"},
+		Spec: aggregationv1alpha1.CoderTemplateSpec{
+			Organization: "acme",
+			DisplayName:  "Update Files Template",
+			Files:        cloneStringMap(initialFiles),
+		},
+	}
+
+	createdObj, err := templateStorage.Create(ctx, createObj, rest.ValidateAllObjectFunc, nil)
+	if err != nil {
+		t.Fatalf("expected template create with files to succeed: %v", err)
+	}
+	createdTemplate, ok := createdObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from create, got %T", createdObj)
+	}
+
+	fileCountBefore := state.fileCount()
+	templateVersionCountBefore := state.templateVersionCount()
+	activeVersionBefore, ok := state.templateActiveVersionID("acme", "update-files-template")
+	if !ok {
+		t.Fatal("expected active version for created template")
+	}
+
+	updatedFiles := map[string]string{"main.tf": "resource \"null_resource\" \"updated\" {}"}
+	desiredTemplate := createdTemplate.DeepCopy()
+	desiredTemplate.Spec.Files = cloneStringMap(updatedFiles)
+
+	updatedObj, created, err := templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected update with changed files to succeed: %v", err)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+
+	if state.fileCount() != fileCountBefore+1 {
+		t.Fatalf("expected file upload during changed-files update, before=%d after=%d", fileCountBefore, state.fileCount())
+	}
+	if state.templateVersionCount() != templateVersionCountBefore+1 {
+		t.Fatalf("expected template version creation during changed-files update, before=%d after=%d", templateVersionCountBefore, state.templateVersionCount())
+	}
+
+	activeVersionAfter, ok := state.templateActiveVersionID("acme", "update-files-template")
+	if !ok {
+		t.Fatal("expected active version for updated template")
+	}
+	if activeVersionAfter == activeVersionBefore {
+		t.Fatalf("expected active version to change, both were %q", activeVersionAfter)
+	}
+
+	updatedTemplate, ok := updatedObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from update, got %T", updatedObj)
+	}
+	if !reflect.DeepEqual(updatedTemplate.Spec.Files, updatedFiles) {
+		t.Fatalf("expected updated files %v, got %v", updatedFiles, updatedTemplate.Spec.Files)
+	}
+
+	fetchedObj, err := templateStorage.Get(ctx, "acme.update-files-template", nil)
+	if err != nil {
+		t.Fatalf("expected get after update to succeed: %v", err)
+	}
+	fetchedTemplate, ok := fetchedObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from get, got %T", fetchedObj)
+	}
+	if !reflect.DeepEqual(fetchedTemplate.Spec.Files, updatedFiles) {
+		t.Fatalf("expected get to return updated files %v, got %v", updatedFiles, fetchedTemplate.Spec.Files)
+	}
+}
+
+func TestTemplateStorageUpdateVerifiesActiveVersionPromotion(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	initialFiles := map[string]string{"main.tf": "resource \"null_resource\" \"initial\" {}"}
+	createObj := &aggregationv1alpha1.CoderTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme.verify-promotion-template"},
+		Spec: aggregationv1alpha1.CoderTemplateSpec{
+			Organization: "acme",
+			DisplayName:  "Verify Promotion Template",
+			Files:        cloneStringMap(initialFiles),
+		},
+	}
+
+	createdObj, err := templateStorage.Create(ctx, createObj, rest.ValidateAllObjectFunc, nil)
+	if err != nil {
+		t.Fatalf("expected template create with files to succeed: %v", err)
+	}
+	createdTemplate, ok := createdObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from create, got %T", createdObj)
+	}
+
+	activeVersionBefore, ok := state.templateActiveVersionID("acme", "verify-promotion-template")
+	if !ok {
+		t.Fatal("expected active version for created template")
+	}
+	fileCountBefore := state.fileCount()
+	templateVersionCountBefore := state.templateVersionCount()
+	state.setFailActiveVersionPromotion(true)
+
+	updatedFiles := map[string]string{"main.tf": "resource \"null_resource\" \"updated\" {}"}
+	desiredTemplate := createdTemplate.DeepCopy()
+	desiredTemplate.Spec.Files = cloneStringMap(updatedFiles)
+
+	updatedObj, created, err := templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected update to fail when active version promotion is silently ignored")
+	}
+	if updatedObj != nil {
+		t.Fatalf("expected update object to be nil on failure, got %T", updatedObj)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+	if !strings.Contains(err.Error(), "active version promotion did not take effect") {
+		t.Fatalf("expected promotion verification error, got %v", err)
+	}
+
+	if state.fileCount() != fileCountBefore+1 {
+		t.Fatalf("expected file upload before promotion verification failure, before=%d after=%d", fileCountBefore, state.fileCount())
+	}
+	if state.templateVersionCount() != templateVersionCountBefore+1 {
+		t.Fatalf("expected template version creation before promotion verification failure, before=%d after=%d", templateVersionCountBefore, state.templateVersionCount())
+	}
+
+	activeVersionAfter, ok := state.templateActiveVersionID("acme", "verify-promotion-template")
+	if !ok {
+		t.Fatal("expected active version for template after failed update")
+	}
+	if activeVersionAfter != activeVersionBefore {
+		t.Fatalf("expected active version to remain %q after failed promotion, got %q", activeVersionBefore, activeVersionAfter)
+	}
+}
+
+func TestTemplateStorageUpdateWithIdenticalFilesIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	initialFiles := map[string]string{"main.tf": "resource \"null_resource\" \"stable\" {}"}
+	createObj := &aggregationv1alpha1.CoderTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme.noop-files-template"},
+		Spec: aggregationv1alpha1.CoderTemplateSpec{
+			Organization: "acme",
+			Files:        cloneStringMap(initialFiles),
+		},
+	}
+
+	createdObj, err := templateStorage.Create(ctx, createObj, rest.ValidateAllObjectFunc, nil)
+	if err != nil {
+		t.Fatalf("expected template create with files to succeed: %v", err)
+	}
+	createdTemplate, ok := createdObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from create, got %T", createdObj)
+	}
+
+	fileCountBefore := state.fileCount()
+	templateVersionCountBefore := state.templateVersionCount()
+	activeVersionBefore, ok := state.templateActiveVersionID("acme", "noop-files-template")
+	if !ok {
+		t.Fatal("expected active version for created template")
+	}
+
+	desiredTemplate := createdTemplate.DeepCopy()
+	desiredTemplate.Spec.Files = cloneStringMap(initialFiles)
+
+	updatedObj, created, err := templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected update with identical files to succeed: %v", err)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+
+	if state.fileCount() != fileCountBefore {
+		t.Fatalf("expected no new upload for identical files, before=%d after=%d", fileCountBefore, state.fileCount())
+	}
+	if state.templateVersionCount() != templateVersionCountBefore {
+		t.Fatalf("expected no new template version for identical files, before=%d after=%d", templateVersionCountBefore, state.templateVersionCount())
+	}
+
+	activeVersionAfter, ok := state.templateActiveVersionID("acme", "noop-files-template")
+	if !ok {
+		t.Fatal("expected active version for template after no-op update")
+	}
+	if activeVersionAfter != activeVersionBefore {
+		t.Fatalf("expected active version to remain %q on no-op update, got %q", activeVersionBefore, activeVersionAfter)
+	}
+
+	updatedTemplate, ok := updatedObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from update, got %T", updatedObj)
+	}
+	if !reflect.DeepEqual(updatedTemplate.Spec.Files, initialFiles) {
+		t.Fatalf("expected updated files to stay %v, got %v", initialFiles, updatedTemplate.Spec.Files)
+	}
+}
+
+func TestTemplateStorageUpdatePreservesNonUTF8Files(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	currentObj, err := templateStorage.Get(ctx, "acme.starter-template", nil)
+	if err != nil {
+		t.Fatalf("expected template get to succeed: %v", err)
+	}
+	currentTemplate, ok := currentObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from get, got %T", currentObj)
+	}
+	if _, hasBinary := currentTemplate.Spec.Files["binary.dat"]; hasBinary {
+		t.Fatal("expected non-UTF8 binary.dat to be omitted from spec.files")
+	}
+
+	originalSourceZip, ok := state.templateActiveSourceZip("acme", "starter-template")
+	if !ok {
+		t.Fatal("expected active source zip for starter-template before update")
+	}
+	mainModeBefore, ok := zipEntryMode(t, originalSourceZip, "main.tf")
+	if !ok {
+		t.Fatal("expected seeded source zip mode metadata for main.tf")
+	}
+	if mainModeBefore.Perm() != fs.FileMode(0o755) {
+		t.Fatalf("expected seeded main.tf mode 0755, got %v", mainModeBefore)
+	}
+
+	updatedMainTF := "resource \"null_resource\" \"updated_binary_preserve\" {}"
+	fileCountBefore := state.fileCount()
+	templateVersionCountBefore := state.templateVersionCount()
+	activeVersionBefore, ok := state.templateActiveVersionID("acme", "starter-template")
+	if !ok {
+		t.Fatal("expected active version for starter-template")
+	}
+
+	desiredTemplate := currentTemplate.DeepCopy()
+	desiredTemplate.Spec.Files = map[string]string{"main.tf": updatedMainTF}
+
+	updatedObj, created, err := templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected update with changed files to succeed: %v", err)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+
+	if state.fileCount() != fileCountBefore+1 {
+		t.Fatalf("expected file upload during changed-files update, before=%d after=%d", fileCountBefore, state.fileCount())
+	}
+	if state.templateVersionCount() != templateVersionCountBefore+1 {
+		t.Fatalf("expected template version creation during changed-files update, before=%d after=%d", templateVersionCountBefore, state.templateVersionCount())
+	}
+
+	activeVersionAfter, ok := state.templateActiveVersionID("acme", "starter-template")
+	if !ok {
+		t.Fatal("expected active version for starter-template after update")
+	}
+	if activeVersionAfter == activeVersionBefore {
+		t.Fatalf("expected active version to change, both were %q", activeVersionAfter)
+	}
+
+	updatedTemplate, ok := updatedObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from update, got %T", updatedObj)
+	}
+	expectedFiles := map[string]string{"main.tf": updatedMainTF}
+	if !reflect.DeepEqual(updatedTemplate.Spec.Files, expectedFiles) {
+		t.Fatalf("expected updated files %v, got %v", expectedFiles, updatedTemplate.Spec.Files)
+	}
+
+	activeSourceZip, ok := state.templateActiveSourceZip("acme", "starter-template")
+	if !ok {
+		t.Fatal("expected active source zip for starter-template")
+	}
+	zipEntries := unzipEntries(t, activeSourceZip)
+
+	updatedMainBytes, ok := zipEntries["main.tf"]
+	if !ok {
+		t.Fatal("expected merged source zip to include main.tf")
+	}
+	if string(updatedMainBytes) != updatedMainTF {
+		t.Fatalf("expected merged main.tf %q, got %q", updatedMainTF, string(updatedMainBytes))
+	}
+
+	updatedMainMode, ok := zipEntryMode(t, activeSourceZip, "main.tf")
+	if !ok {
+		t.Fatal("expected merged source zip mode metadata for main.tf")
+	}
+	if updatedMainMode.Perm() != fs.FileMode(0o755) {
+		t.Fatalf("expected preserved main.tf mode 0755, got %v", updatedMainMode)
+	}
+
+	expectedBinary := []byte{0x80, 0x81, 0x82}
+	binaryBytes, ok := zipEntries["binary.dat"]
+	if !ok {
+		t.Fatal("expected merged source zip to preserve binary.dat")
+	}
+	if !bytes.Equal(binaryBytes, expectedBinary) {
+		t.Fatalf("expected preserved binary.dat bytes %v, got %v", expectedBinary, binaryBytes)
+	}
+	binaryMode, ok := zipEntryMode(t, activeSourceZip, "binary.dat")
+	if !ok {
+		t.Fatal("expected merged source zip mode metadata for binary.dat")
+	}
+	if binaryMode.Perm() != fs.FileMode(0o755) {
+		t.Fatalf("expected preserved binary.dat mode 0755, got %v", binaryMode)
+	}
+}
+
+func TestTemplateStorageUpdateNormalizesPathsForNoOp(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	currentObj, err := templateStorage.Get(ctx, "acme.starter-template", nil)
+	if err != nil {
+		t.Fatalf("expected template get to succeed: %v", err)
+	}
+	currentTemplate, ok := currentObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from get, got %T", currentObj)
+	}
+
+	mainTF, ok := currentTemplate.Spec.Files["main.tf"]
+	if !ok {
+		t.Fatal("expected starter-template spec.files to contain main.tf")
+	}
+
+	fileCountBefore := state.fileCount()
+	templateVersionCountBefore := state.templateVersionCount()
+	activeVersionBefore, ok := state.templateActiveVersionID("acme", "starter-template")
+	if !ok {
+		t.Fatal("expected active version for starter-template")
+	}
+
+	desiredTemplate := currentTemplate.DeepCopy()
+	desiredTemplate.Spec.Files = map[string]string{"./main.tf": mainTF}
+
+	updatedObj, created, err := templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected update with normalized-identical files to succeed: %v", err)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+
+	if state.fileCount() != fileCountBefore {
+		t.Fatalf("expected no new upload for normalized-identical files, before=%d after=%d", fileCountBefore, state.fileCount())
+	}
+	if state.templateVersionCount() != templateVersionCountBefore {
+		t.Fatalf("expected no new template version for normalized-identical files, before=%d after=%d", templateVersionCountBefore, state.templateVersionCount())
+	}
+
+	activeVersionAfter, ok := state.templateActiveVersionID("acme", "starter-template")
+	if !ok {
+		t.Fatal("expected active version for starter-template after update")
+	}
+	if activeVersionAfter != activeVersionBefore {
+		t.Fatalf("expected active version to remain %q on no-op update, got %q", activeVersionBefore, activeVersionAfter)
+	}
+
+	updatedTemplate, ok := updatedObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from update, got %T", updatedObj)
+	}
+	expectedFiles := map[string]string{"main.tf": mainTF}
+	if !reflect.DeepEqual(updatedTemplate.Spec.Files, expectedFiles) {
+		t.Fatalf("expected files %v, got %v", expectedFiles, updatedTemplate.Spec.Files)
+	}
+}
+
+func TestTemplateStorageUpdateMetadata(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	currentObj, err := templateStorage.Get(ctx, "acme.starter-template", nil)
+	if err != nil {
+		t.Fatalf("expected template get to succeed: %v", err)
+	}
+	currentTemplate, ok := currentObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from get, got %T", currentObj)
+	}
+
+	metaUpdateCountBefore := state.templateMetaUpdateCount()
+	fileCountBefore := state.fileCount()
+	templateVersionCountBefore := state.templateVersionCount()
+
+	desiredTemplate := currentTemplate.DeepCopy()
+	desiredTemplate.Spec.DisplayName = "Renamed Starter Template"
+	desiredTemplate.Spec.Description = "Updated description"
+	desiredTemplate.Spec.Icon = "/icons/renamed.png"
+
+	updatedObj, created, err := templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected metadata update to succeed: %v", err)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+	if state.templateMetaUpdateCount() != metaUpdateCountBefore+1 {
+		t.Fatalf("expected one metadata update call, before=%d after=%d", metaUpdateCountBefore, state.templateMetaUpdateCount())
+	}
+	if state.fileCount() != fileCountBefore {
+		t.Fatalf("expected metadata update to avoid file uploads, before=%d after=%d", fileCountBefore, state.fileCount())
+	}
+	if state.templateVersionCount() != templateVersionCountBefore {
+		t.Fatalf("expected metadata update to avoid template version creation, before=%d after=%d", templateVersionCountBefore, state.templateVersionCount())
+	}
+
+	updatedTemplate, ok := updatedObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from update, got %T", updatedObj)
+	}
+	if updatedTemplate.Spec.DisplayName != desiredTemplate.Spec.DisplayName {
+		t.Fatalf("expected updated displayName %q, got %q", desiredTemplate.Spec.DisplayName, updatedTemplate.Spec.DisplayName)
+	}
+	if updatedTemplate.Spec.Description != desiredTemplate.Spec.Description {
+		t.Fatalf("expected updated description %q, got %q", desiredTemplate.Spec.Description, updatedTemplate.Spec.Description)
+	}
+	if updatedTemplate.Spec.Icon != desiredTemplate.Spec.Icon {
+		t.Fatalf("expected updated icon %q, got %q", desiredTemplate.Spec.Icon, updatedTemplate.Spec.Icon)
 	}
 }
 
@@ -232,7 +867,7 @@ func TestTemplateStorageUpdateReturnsCurrentBackendObjectForLegacyRunningField(t
 	}
 }
 
-func TestTemplateStorageUpdateAllowsEmptyVersionIDWhenTogglingRunning(t *testing.T) {
+func TestTemplateStorageUpdateAllowsUnchangedVersionIDWhenTogglingRunning(t *testing.T) {
 	t.Parallel()
 
 	server, _ := newMockCoderServer(t)
@@ -256,7 +891,60 @@ func TestTemplateStorageUpdateAllowsEmptyVersionIDWhenTogglingRunning(t *testing
 
 	desiredTemplate := currentTemplate.DeepCopy()
 	desiredTemplate.Spec.Running = !currentTemplate.Spec.Running
+
+	updatedObj, created, err := templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected template update to succeed when spec.versionID is unchanged: %v", err)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+
+	updatedTemplate, ok := updatedObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from update, got %T", updatedObj)
+	}
+	if updatedTemplate.Spec.Running != currentTemplate.Spec.Running {
+		t.Fatalf("expected update response running=%t from current backend object, got %t", currentTemplate.Spec.Running, updatedTemplate.Spec.Running)
+	}
+	if updatedTemplate.Spec.VersionID != currentTemplate.Spec.VersionID {
+		t.Fatalf("expected update response spec.versionID %q from current backend object, got %q", currentTemplate.Spec.VersionID, updatedTemplate.Spec.VersionID)
+	}
+}
+
+func TestTemplateStorageUpdateAllowsEmptyVersionIDWhenTogglingRunning(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	currentObj, err := templateStorage.Get(ctx, "acme.starter-template", nil)
+	if err != nil {
+		t.Fatalf("expected template get to succeed: %v", err)
+	}
+
+	currentTemplate, ok := currentObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from get, got %T", currentObj)
+	}
+	if currentTemplate.Spec.VersionID == "" {
+		t.Fatal("expected current template spec.versionID to be populated")
+	}
+
+	desiredTemplate := currentTemplate.DeepCopy()
 	desiredTemplate.Spec.VersionID = ""
+	desiredTemplate.Spec.Running = !currentTemplate.Spec.Running
 
 	updatedObj, created, err := templateStorage.Update(
 		ctx,
@@ -337,18 +1025,18 @@ func TestTemplateStorageUpdateAllowsEmptyOptionalFieldsWhenTogglingRunning(t *te
 	if updatedTemplate.Spec.Running != currentTemplate.Spec.Running {
 		t.Fatalf("expected update response running=%t from current backend object, got %t", currentTemplate.Spec.Running, updatedTemplate.Spec.Running)
 	}
-	if updatedTemplate.Spec.DisplayName != currentTemplate.Spec.DisplayName {
-		t.Fatalf("expected update response spec.displayName %q from current backend object, got %q", currentTemplate.Spec.DisplayName, updatedTemplate.Spec.DisplayName)
+	if updatedTemplate.Spec.DisplayName != desiredTemplate.Spec.DisplayName {
+		t.Fatalf("expected updated spec.displayName %q, got %q", desiredTemplate.Spec.DisplayName, updatedTemplate.Spec.DisplayName)
 	}
-	if updatedTemplate.Spec.Description != currentTemplate.Spec.Description {
-		t.Fatalf("expected update response spec.description %q from current backend object, got %q", currentTemplate.Spec.Description, updatedTemplate.Spec.Description)
+	if updatedTemplate.Spec.Description != desiredTemplate.Spec.Description {
+		t.Fatalf("expected updated spec.description %q, got %q", desiredTemplate.Spec.Description, updatedTemplate.Spec.Description)
 	}
-	if updatedTemplate.Spec.Icon != currentTemplate.Spec.Icon {
-		t.Fatalf("expected update response spec.icon %q from current backend object, got %q", currentTemplate.Spec.Icon, updatedTemplate.Spec.Icon)
+	if updatedTemplate.Spec.Icon != desiredTemplate.Spec.Icon {
+		t.Fatalf("expected updated spec.icon %q, got %q", desiredTemplate.Spec.Icon, updatedTemplate.Spec.Icon)
 	}
 }
 
-func TestTemplateStorageUpdateRejectsDifferentVersionID(t *testing.T) {
+func TestTemplateStorageUpdateRejectsVersionIDChange(t *testing.T) {
 	t.Parallel()
 
 	server, _ := newMockCoderServer(t)
@@ -374,7 +1062,7 @@ func TestTemplateStorageUpdateRejectsDifferentVersionID(t *testing.T) {
 		t.Fatal("expected test fixture to use a different spec.versionID")
 	}
 
-	_, _, err = templateStorage.Update(
+	_, created, err := templateStorage.Update(
 		ctx,
 		desiredTemplate.Name,
 		testUpdatedObjectInfo{obj: desiredTemplate},
@@ -386,12 +1074,15 @@ func TestTemplateStorageUpdateRejectsDifferentVersionID(t *testing.T) {
 	if !apierrors.IsBadRequest(err) {
 		t.Fatalf("expected BadRequest when changing spec.versionID, got %v", err)
 	}
-	if err == nil || !strings.Contains(err.Error(), "spec.running") {
-		t.Fatalf("expected immutable-field error mentioning spec.running, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "spec.versionID is read-only") {
+		t.Fatalf("expected read-only spec.versionID error, got %v", err)
+	}
+	if created {
+		t.Fatal("expected update created=false")
 	}
 }
 
-func TestTemplateStorageUpdateRejectsNonRunningSpecChanges(t *testing.T) {
+func TestTemplateStorageUpdateAllowsMetadataSpecChanges(t *testing.T) {
 	t.Parallel()
 
 	server, _ := newMockCoderServer(t)
@@ -413,7 +1104,7 @@ func TestTemplateStorageUpdateRejectsNonRunningSpecChanges(t *testing.T) {
 	desiredTemplate := currentTemplate.DeepCopy()
 	desiredTemplate.Spec.DisplayName = "Renamed Template"
 
-	_, _, err = templateStorage.Update(
+	updatedObj, created, err := templateStorage.Update(
 		ctx,
 		desiredTemplate.Name,
 		testUpdatedObjectInfo{obj: desiredTemplate},
@@ -422,11 +1113,19 @@ func TestTemplateStorageUpdateRejectsNonRunningSpecChanges(t *testing.T) {
 		false,
 		nil,
 	)
-	if !apierrors.IsBadRequest(err) {
-		t.Fatalf("expected BadRequest when changing immutable template spec fields, got %v", err)
+	if err != nil {
+		t.Fatalf("expected update to allow metadata spec changes: %v", err)
 	}
-	if err == nil || !strings.Contains(err.Error(), "spec.running") {
-		t.Fatalf("expected immutable-field error mentioning spec.running, got %v", err)
+	if created {
+		t.Fatal("expected update created=false")
+	}
+
+	updatedTemplate, ok := updatedObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from update, got %T", updatedObj)
+	}
+	if updatedTemplate.Spec.DisplayName != desiredTemplate.Spec.DisplayName {
+		t.Fatalf("expected updated displayName %q, got %q", desiredTemplate.Spec.DisplayName, updatedTemplate.Spec.DisplayName)
 	}
 }
 
@@ -1415,11 +2114,14 @@ type mockCoderServerState struct {
 	templatesByID        map[uuid.UUID]codersdk.Template
 	templateIDsByOrg     map[string]map[string]uuid.UUID
 	templateVersionsByID map[uuid.UUID]codersdk.TemplateVersion
+	filesByID            map[uuid.UUID][]byte
 	workspacesByID       map[uuid.UUID]codersdk.Workspace
 	workspaceIDsByUser   map[string]map[string]uuid.UUID
 
-	buildTransitions     []codersdk.WorkspaceTransition
-	failBuildTransitions map[codersdk.WorkspaceTransition]int
+	buildTransitions           []codersdk.WorkspaceTransition
+	failBuildTransitions       map[codersdk.WorkspaceTransition]int
+	templateMetaPatchCall      int
+	failActiveVersionPromotion bool
 }
 
 func newMockCoderServer(t *testing.T) (*httptest.Server, *mockCoderServerState) {
@@ -1429,10 +2131,16 @@ func newMockCoderServer(t *testing.T) (*httptest.Server, *mockCoderServerState) 
 	orgID := uuid.New()
 	templateID := uuid.New()
 	activeVersionID := uuid.New()
+	fileID := uuid.New()
 	workspaceID := uuid.New()
 	workspaceBuildID := uuid.New()
 	ttlMillis := int64(3600000)
 	autostartSchedule := "CRON_TZ=UTC 0 9 * * 1-5"
+
+	seededTemplateSourceZip, seedErr := buildSeededTemplateSourceZip()
+	if seedErr != nil {
+		t.Fatalf("build seeded template source zip: %v", seedErr)
+	}
 
 	organization := codersdk.Organization{
 		MinimalOrganization: codersdk.MinimalOrganization{
@@ -1466,6 +2174,9 @@ func newMockCoderServer(t *testing.T) (*httptest.Server, *mockCoderServerState) 
 		UpdatedAt:      now.Add(-2 * time.Hour),
 		Name:           "starter-template-v1",
 		Message:        "initial version",
+		Job: codersdk.ProvisionerJob{
+			FileID: fileID,
+		},
 	}
 
 	workspace := codersdk.Workspace{
@@ -1507,6 +2218,9 @@ func newMockCoderServer(t *testing.T) (*httptest.Server, *mockCoderServerState) 
 		templateVersionsByID: map[uuid.UUID]codersdk.TemplateVersion{
 			templateVersion.ID: templateVersion,
 		},
+		filesByID: map[uuid.UUID][]byte{
+			fileID: seededTemplateSourceZip,
+		},
 		workspacesByID: map[uuid.UUID]codersdk.Workspace{
 			workspace.ID: workspace,
 		},
@@ -1538,17 +2252,35 @@ func (s *mockCoderServerState) handleRequest(t *testing.T, w http.ResponseWriter
 	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templates") && len(segments) == 3:
 		s.handleListTemplates(w)
 		return
+	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templates") && len(segments) == 4:
+		s.handleGetTemplate(w, segments[3])
+		return
 	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "organizations") && len(segments) == 6 && segments[4] == "templates":
 		s.handleGetTemplateByName(w, segments[3], segments[5])
 		return
 	case r.Method == http.MethodPost && hasSegments(segments, "api", "v2", "organizations") && len(segments) == 5 && segments[4] == "templates":
 		s.handleCreateTemplate(w, r, segments[3])
 		return
+	case r.Method == http.MethodPost && hasSegments(segments, "api", "v2", "organizations") && len(segments) == 5 && segments[4] == "templateversions":
+		s.handleCreateTemplateVersion(w, r, segments[3])
+		return
+	case r.Method == http.MethodPatch && hasSegments(segments, "api", "v2", "templates") && len(segments) == 4:
+		s.handleUpdateTemplateMeta(w, r, segments[3])
+		return
+	case r.Method == http.MethodPatch && hasSegments(segments, "api", "v2", "templates") && len(segments) == 5 && segments[4] == "versions":
+		s.handleUpdateActiveTemplateVersion(w, r, segments[3])
+		return
 	case r.Method == http.MethodDelete && hasSegments(segments, "api", "v2", "templates") && len(segments) == 4:
 		s.handleDeleteTemplate(w, segments[3])
 		return
 	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templateversions") && len(segments) == 4:
 		s.handleGetTemplateVersion(w, segments[3])
+		return
+	case r.Method == http.MethodPost && hasSegments(segments, "api", "v2", "files") && len(segments) == 3:
+		s.handleUploadFile(w, r)
+		return
+	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "files") && len(segments) == 4:
+		s.handleGetFile(w, r, segments[3])
 		return
 	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "workspaces") && len(segments) == 3:
 		s.handleListWorkspaces(w)
@@ -1596,6 +2328,25 @@ func (s *mockCoderServerState) handleListTemplates(w http.ResponseWriter) {
 	})
 
 	writeJSON(w, http.StatusOK, templates)
+}
+
+func (s *mockCoderServerState) handleGetTemplate(w http.ResponseWriter, templateIDSegment string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	templateID, err := uuid.Parse(templateIDSegment)
+	if err != nil {
+		writeCoderError(w, http.StatusBadRequest, fmt.Sprintf("invalid template id %q", templateIDSegment))
+		return
+	}
+
+	template, ok := s.templatesByID[templateID]
+	if !ok {
+		writeCoderError(w, http.StatusNotFound, "template not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, template)
 }
 
 func (s *mockCoderServerState) handleGetTemplateByName(w http.ResponseWriter, orgSegment, templateName string) {
@@ -1660,6 +2411,188 @@ func (s *mockCoderServerState) handleCreateTemplate(w http.ResponseWriter, r *ht
 	orgTemplates[template.Name] = template.ID
 
 	writeJSON(w, http.StatusCreated, template)
+}
+
+func (s *mockCoderServerState) handleUploadFile(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	fileData, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeCoderError(w, http.StatusBadRequest, fmt.Sprintf("read upload body: %v", err))
+		return
+	}
+
+	fileID := uuid.New()
+	s.filesByID[fileID] = fileData
+
+	writeJSON(w, http.StatusCreated, codersdk.UploadResponse{ID: fileID})
+}
+
+func (s *mockCoderServerState) handleGetFile(w http.ResponseWriter, r *http.Request, fileIDSegment string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	fileID, err := uuid.Parse(fileIDSegment)
+	if err != nil {
+		writeCoderError(w, http.StatusBadRequest, fmt.Sprintf("invalid file id %q", fileIDSegment))
+		return
+	}
+
+	format := r.URL.Query().Get("format")
+	if format != "" && format != codersdk.FormatZip {
+		writeCoderError(w, http.StatusBadRequest, fmt.Sprintf("unsupported format %q", format))
+		return
+	}
+
+	fileData, ok := s.filesByID[fileID]
+	if !ok {
+		writeCoderError(w, http.StatusNotFound, "file not found")
+		return
+	}
+
+	w.Header().Set("Content-Type", codersdk.ContentTypeZip)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(fileData)
+}
+
+func (s *mockCoderServerState) handleCreateTemplateVersion(w http.ResponseWriter, r *http.Request, orgSegment string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if orgSegment != s.organization.Name && orgSegment != s.organization.ID.String() {
+		writeCoderError(w, http.StatusNotFound, "organization not found")
+		return
+	}
+
+	var request codersdk.CreateTemplateVersionRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeCoderError(w, http.StatusBadRequest, fmt.Sprintf("decode create template version request: %v", err))
+		return
+	}
+	if request.FileID == uuid.Nil {
+		writeCoderError(w, http.StatusBadRequest, "file_id is required")
+		return
+	}
+	if _, ok := s.filesByID[request.FileID]; !ok {
+		writeCoderError(w, http.StatusNotFound, "file not found")
+		return
+	}
+
+	now := time.Now().UTC()
+	templateVersion := codersdk.TemplateVersion{
+		ID:             uuid.New(),
+		OrganizationID: s.organization.ID,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		Name:           fmt.Sprintf("template-version-%d", len(s.templateVersionsByID)+1),
+		Message:        request.Message,
+		Job: codersdk.ProvisionerJob{
+			FileID: request.FileID,
+		},
+	}
+	if request.TemplateID != uuid.Nil {
+		if _, ok := s.templatesByID[request.TemplateID]; !ok {
+			writeCoderError(w, http.StatusNotFound, "template not found")
+			return
+		}
+		templateID := request.TemplateID
+		templateVersion.TemplateID = &templateID
+	}
+
+	s.templateVersionsByID[templateVersion.ID] = templateVersion
+
+	writeJSON(w, http.StatusCreated, templateVersion)
+}
+
+func (s *mockCoderServerState) handleUpdateTemplateMeta(w http.ResponseWriter, r *http.Request, templateIDSegment string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	templateID, err := uuid.Parse(templateIDSegment)
+	if err != nil {
+		writeCoderError(w, http.StatusBadRequest, fmt.Sprintf("invalid template id %q", templateIDSegment))
+		return
+	}
+
+	template, ok := s.templatesByID[templateID]
+	if !ok {
+		writeCoderError(w, http.StatusNotFound, "template not found")
+		return
+	}
+
+	var request codersdk.UpdateTemplateMeta
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeCoderError(w, http.StatusBadRequest, fmt.Sprintf("decode update template metadata request: %v", err))
+		return
+	}
+
+	if request.DisplayName != nil {
+		template.DisplayName = *request.DisplayName
+	}
+	if request.Description != nil {
+		template.Description = *request.Description
+	}
+	if request.Icon != nil {
+		template.Icon = *request.Icon
+	}
+	template.UpdatedAt = time.Now().UTC()
+
+	s.templatesByID[templateID] = template
+	s.templateMetaPatchCall++
+
+	writeJSON(w, http.StatusOK, template)
+}
+
+func (s *mockCoderServerState) handleUpdateActiveTemplateVersion(w http.ResponseWriter, r *http.Request, templateIDSegment string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	templateID, err := uuid.Parse(templateIDSegment)
+	if err != nil {
+		writeCoderError(w, http.StatusBadRequest, fmt.Sprintf("invalid template id %q", templateIDSegment))
+		return
+	}
+
+	template, ok := s.templatesByID[templateID]
+	if !ok {
+		writeCoderError(w, http.StatusNotFound, "template not found")
+		return
+	}
+
+	var request codersdk.UpdateActiveTemplateVersion
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeCoderError(w, http.StatusBadRequest, fmt.Sprintf("decode update active template version request: %v", err))
+		return
+	}
+	if request.ID == uuid.Nil {
+		writeCoderError(w, http.StatusBadRequest, "active version id is required")
+		return
+	}
+
+	templateVersion, ok := s.templateVersionsByID[request.ID]
+	if !ok {
+		writeCoderError(w, http.StatusNotFound, "template version not found")
+		return
+	}
+	if templateVersion.TemplateID != nil && *templateVersion.TemplateID != templateID {
+		writeCoderError(w, http.StatusBadRequest, "template version does not belong to template")
+		return
+	}
+	if templateVersion.TemplateID == nil {
+		templateIDCopy := templateID
+		templateVersion.TemplateID = &templateIDCopy
+		templateVersion.UpdatedAt = time.Now().UTC()
+		s.templateVersionsByID[templateVersion.ID] = templateVersion
+	}
+
+	if !s.failActiveVersionPromotion {
+		template.ActiveVersionID = request.ID
+	}
+	template.UpdatedAt = time.Now().UTC()
+	s.templatesByID[templateID] = template
+
+	writeJSON(w, http.StatusOK, map[string]string{"message": "template active version updated"})
 }
 
 func (s *mockCoderServerState) handleDeleteTemplate(w http.ResponseWriter, templateIDSegment string) {
@@ -1900,6 +2833,85 @@ func (s *mockCoderServerState) hasTemplate(organization, templateName string) bo
 	return ok
 }
 
+func (s *mockCoderServerState) fileCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return len(s.filesByID)
+}
+
+func (s *mockCoderServerState) templateVersionCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return len(s.templateVersionsByID)
+}
+
+func (s *mockCoderServerState) templateActiveVersionID(organization, templateName string) (uuid.UUID, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	organizationTemplates, ok := s.templateIDsByOrg[organization]
+	if !ok {
+		return uuid.Nil, false
+	}
+	templateID, ok := organizationTemplates[templateName]
+	if !ok {
+		return uuid.Nil, false
+	}
+	template, ok := s.templatesByID[templateID]
+	if !ok {
+		return uuid.Nil, false
+	}
+
+	return template.ActiveVersionID, true
+}
+
+func (s *mockCoderServerState) templateActiveSourceZip(organization, templateName string) ([]byte, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	organizationTemplates, ok := s.templateIDsByOrg[organization]
+	if !ok {
+		return nil, false
+	}
+	templateID, ok := organizationTemplates[templateName]
+	if !ok {
+		return nil, false
+	}
+	template, ok := s.templatesByID[templateID]
+	if !ok {
+		return nil, false
+	}
+	version, ok := s.templateVersionsByID[template.ActiveVersionID]
+	if !ok {
+		return nil, false
+	}
+	if version.Job.FileID == uuid.Nil {
+		panic("assertion failed: template version file ID must not be nil")
+	}
+	fileData, ok := s.filesByID[version.Job.FileID]
+	if !ok {
+		return nil, false
+	}
+
+	return append([]byte(nil), fileData...), true
+}
+
+func (s *mockCoderServerState) templateMetaUpdateCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.templateMetaPatchCall
+}
+
+func (s *mockCoderServerState) setFailActiveVersionPromotion(fail bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.failActiveVersionPromotion = fail
+}
+
 func (s *mockCoderServerState) setTemplateVersionTemplateID(templateVersionID, templateID uuid.UUID) {
 	if templateVersionID == uuid.Nil {
 		panic("assertion failed: template version ID must not be nil")
@@ -1984,6 +2996,112 @@ func (s *mockCoderServerState) setBuildTransitionFailure(transition codersdk.Wor
 	s.failBuildTransitions[transition] = statusCode
 }
 
+func buildSeededTemplateSourceZip() ([]byte, error) {
+	var sourceZip bytes.Buffer
+	zipWriter := zip.NewWriter(&sourceZip)
+
+	mainTFHeader := zip.FileHeader{Name: "main.tf", Method: zip.Deflate}
+	mainTFHeader.SetMode(fs.FileMode(0o755))
+	mainTFWriter, err := zipWriter.CreateHeader(&mainTFHeader)
+	if err != nil {
+		return nil, fmt.Errorf("create seeded main.tf zip entry: %w", err)
+	}
+	if _, err := mainTFWriter.Write([]byte(seededTemplateMainTF)); err != nil {
+		return nil, fmt.Errorf("write seeded main.tf zip entry: %w", err)
+	}
+
+	binaryHeader := zip.FileHeader{Name: "binary.dat", Method: zip.Deflate}
+	binaryHeader.SetMode(fs.FileMode(0o755))
+	binaryWriter, err := zipWriter.CreateHeader(&binaryHeader)
+	if err != nil {
+		return nil, fmt.Errorf("create seeded binary.dat zip entry: %w", err)
+	}
+	if _, err := binaryWriter.Write([]byte{0x80, 0x81, 0x82}); err != nil {
+		return nil, fmt.Errorf("write seeded binary.dat zip entry: %w", err)
+	}
+
+	if err := zipWriter.Close(); err != nil {
+		return nil, fmt.Errorf("close seeded source zip writer: %w", err)
+	}
+
+	result := sourceZip.Bytes()
+	if len(result) > maxTemplateSourceZipBytes {
+		return nil, fmt.Errorf("seeded template source zip exceeds max size: %d > %d", len(result), maxTemplateSourceZipBytes)
+	}
+
+	return result, nil
+}
+
+func unzipEntries(t *testing.T, sourceZip []byte) map[string][]byte {
+	t.Helper()
+
+	if sourceZip == nil {
+		t.Fatal("assertion failed: source zip must not be nil")
+	}
+
+	archiveReader, err := zip.NewReader(bytes.NewReader(sourceZip), int64(len(sourceZip)))
+	if err != nil {
+		t.Fatalf("open source zip: %v", err)
+	}
+
+	entries := make(map[string][]byte, len(archiveReader.File))
+	for _, archiveFile := range archiveReader.File {
+		if archiveFile == nil {
+			t.Fatal("assertion failed: source zip entry must not be nil")
+		}
+		if archiveFile.FileInfo().IsDir() {
+			continue
+		}
+		if _, exists := entries[archiveFile.Name]; exists {
+			t.Fatalf("duplicate source zip entry %q", archiveFile.Name)
+		}
+
+		entryReader, err := archiveFile.Open()
+		if err != nil {
+			t.Fatalf("open source zip entry %q: %v", archiveFile.Name, err)
+		}
+		contents, readErr := io.ReadAll(entryReader)
+		closeErr := entryReader.Close()
+		if readErr != nil {
+			t.Fatalf("read source zip entry %q: %v", archiveFile.Name, readErr)
+		}
+		if closeErr != nil {
+			t.Fatalf("close source zip entry %q: %v", archiveFile.Name, closeErr)
+		}
+
+		entries[archiveFile.Name] = contents
+	}
+
+	return entries
+}
+
+func zipEntryMode(t *testing.T, sourceZip []byte, path string) (fs.FileMode, bool) {
+	t.Helper()
+
+	if sourceZip == nil {
+		t.Fatal("assertion failed: source zip must not be nil")
+	}
+	if path == "" {
+		t.Fatal("assertion failed: path must not be empty")
+	}
+
+	archiveReader, err := zip.NewReader(bytes.NewReader(sourceZip), int64(len(sourceZip)))
+	if err != nil {
+		t.Fatalf("open source zip: %v", err)
+	}
+
+	for _, archiveFile := range archiveReader.File {
+		if archiveFile == nil {
+			t.Fatal("assertion failed: source zip entry must not be nil")
+		}
+		if archiveFile.Name == path {
+			return archiveFile.Mode(), true
+		}
+	}
+
+	return 0, false
+}
+
 func newTestClientProvider(t *testing.T, serverURL string) coder.ClientProvider {
 	t.Helper()
 
@@ -2000,6 +3118,19 @@ func newTestClientProvider(t *testing.T, serverURL string) coder.ClientProvider 
 
 func namespacedContext(namespace string) context.Context {
 	return genericapirequest.WithNamespace(context.Background(), namespace)
+}
+
+func cloneStringMap(source map[string]string) map[string]string {
+	if source == nil {
+		return nil
+	}
+
+	cloned := make(map[string]string, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+
+	return cloned
 }
 
 func containsTransition(transitions []codersdk.WorkspaceTransition, transition codersdk.WorkspaceTransition) bool {
