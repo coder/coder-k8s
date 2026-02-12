@@ -71,7 +71,7 @@ rules:
   resources:
   - codercontrolplanes
   - coderprovisioners
-  - workspaceproxies
+  - coderworkspaceproxies
   verbs:
   - create
   - delete
@@ -85,7 +85,7 @@ rules:
   resources:
   - codercontrolplanes/finalizers
   - coderprovisioners/finalizers
-  - workspaceproxies/finalizers
+  - coderworkspaceproxies/finalizers
   verbs:
   - update
 - apiGroups:
@@ -93,7 +93,7 @@ rules:
   resources:
   - codercontrolplanes/status
   - coderprovisioners/status
-  - workspaceproxies/status
+  - coderworkspaceproxies/status
   verbs:
   - get
   - patch

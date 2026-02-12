@@ -40,8 +40,8 @@ func TestControllerSchemeRegistersCoderControlPlaneKinds(t *testing.T) {
 	for _, gvk := range []schema.GroupVersionKind{
 		coderv1alpha1.GroupVersion.WithKind("CoderControlPlane"),
 		coderv1alpha1.GroupVersion.WithKind("CoderControlPlaneList"),
-		coderv1alpha1.GroupVersion.WithKind("WorkspaceProxy"),
-		coderv1alpha1.GroupVersion.WithKind("WorkspaceProxyList"),
+		coderv1alpha1.GroupVersion.WithKind("CoderWorkspaceProxy"),
+		coderv1alpha1.GroupVersion.WithKind("CoderWorkspaceProxyList"),
 		aggregationv1alpha1.SchemeGroupVersion.WithKind("CoderWorkspace"),
 		aggregationv1alpha1.SchemeGroupVersion.WithKind("CoderWorkspaceList"),
 	} {

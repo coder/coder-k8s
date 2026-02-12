@@ -68,31 +68,3 @@ type WorkspaceProxyStatus struct {
 	// Conditions are Kubernetes-standard conditions for this resource.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
-
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-// +kubebuilder:object:root=true
-// +kubebuilder:resource:scope=Namespaced
-// +kubebuilder:subresource:status
-
-// WorkspaceProxy is the schema for Coder workspace proxy resources.
-type WorkspaceProxy struct {
-	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata,omitempty"`
-
-	Spec   WorkspaceProxySpec   `json:"spec,omitempty"`
-	Status WorkspaceProxyStatus `json:"status,omitempty"`
-}
-
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-// +kubebuilder:object:root=true
-
-// WorkspaceProxyList contains a list of WorkspaceProxy objects.
-type WorkspaceProxyList struct {
-	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []WorkspaceProxy `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&WorkspaceProxy{}, &WorkspaceProxyList{})
-}
