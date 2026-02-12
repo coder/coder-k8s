@@ -18,8 +18,8 @@
 | `organizationName` | `string` | OrganizationName is the Coder organization. Defaults to "default". |
 | `bootstrap` | `CoderProvisionerBootstrapSpec` | Bootstrap configures credentials for provisioner key management. |
 | └─ `credentialsSecretRef` | `SecretKeySelector` | CredentialsSecretRef points to a Secret containing a Coder session token with permission to manage provisioner keys. |
-|    ├─ `name` | `string` | Name is the Kubernetes Secret name. |
-|    └─ `key` | `string` | Key is the key inside the Secret data map. |
+| &nbsp;&nbsp;&nbsp;├─ `name` | `string` | Name is the Kubernetes Secret name. |
+| &nbsp;&nbsp;&nbsp;└─ `key` | `string` | Key is the key inside the Secret data map. |
 | `key` | `CoderProvisionerKeySpec` | Key configures provisioner key naming and secret storage. |
 | ├─ `name` | `string` | Name is the provisioner key name in coderd. Defaults to the CR name. |
 | ├─ `secretName` | `string` | SecretName is the Kubernetes Secret to store the key. Defaults to "\{crName\}-provisioner-key". |

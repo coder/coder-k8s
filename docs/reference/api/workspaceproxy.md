@@ -26,8 +26,8 @@
 | `bootstrap` | `ProxyBootstrapSpec` | Bootstrap optionally registers the proxy and mints a proxy token. |
 | ├─ `coderURL` | `string` | CoderURL is the URL for the primary Coder control plane API. |
 | ├─ `credentialsSecretRef` | `SecretKeySelector` | CredentialsSecretRef points to a Secret containing a Coder session token. |
-| │  ├─ `name` | `string` | Name is the Kubernetes Secret name. |
-| │  └─ `key` | `string` | Key is the key inside the Secret data map. |
+| │&nbsp;&nbsp;├─ `name` | `string` | Name is the Kubernetes Secret name. |
+| │&nbsp;&nbsp;└─ `key` | `string` | Key is the key inside the Secret data map. |
 | ├─ `proxyName` | `string` | ProxyName is the name used when registering the proxy in Coder. |
 | ├─ `displayName` | `string` | DisplayName is the human-readable name for the proxy region. |
 | ├─ `icon` | `string` | Icon is the optional icon URL or emoji path for the proxy region. |

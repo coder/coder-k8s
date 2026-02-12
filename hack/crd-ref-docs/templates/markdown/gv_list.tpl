@@ -44,9 +44,9 @@
 {{ $childPrefix := $treePrefix -}}
 {{- if gt $depth 0 -}}
 {{- if $isLast -}}
-{{- $childPrefix = printf "%s   " $treePrefix -}}
+{{- $childPrefix = printf "%s&nbsp;&nbsp;&nbsp;" $treePrefix -}}
 {{- else -}}
-{{- $childPrefix = printf "%s│  " $treePrefix -}}
+{{- $childPrefix = printf "%s│&nbsp;&nbsp;" $treePrefix -}}
 {{- end -}}
 {{- else -}}
 {{- $childPrefix = "" -}}
