@@ -103,6 +103,7 @@ func fetchTemplateSourceFiles(ctx context.Context, sdk *codersdk.Client, version
 	}
 
 	files := make(map[string]string, len(archiveReader.File))
+	seenPaths := make(map[string]struct{}, len(archiveReader.File))
 	totalUncompressedBytes := int64(0)
 
 	for _, archiveFile := range archiveReader.File {
@@ -117,6 +118,10 @@ func fetchTemplateSourceFiles(ctx context.Context, sdk *codersdk.Client, version
 		if err != nil {
 			return nil, fmt.Errorf("validate template source path %q: %w", archiveFile.Name, err)
 		}
+		if _, seen := seenPaths[relativePath]; seen {
+			return nil, fmt.Errorf("duplicate normalized path %q in template source zip", relativePath)
+		}
+		seenPaths[relativePath] = struct{}{}
 		if archiveFile.UncompressedSize64 > uint64(maxTemplateSourceFileBytes) {
 			return nil, fmt.Errorf(
 				"template source file %q exceeds max file size: %d > %d",
@@ -154,9 +159,6 @@ func fetchTemplateSourceFiles(ctx context.Context, sdk *codersdk.Client, version
 
 		if !utf8.Valid(contents) {
 			continue
-		}
-		if _, exists := files[relativePath]; exists {
-			return nil, fmt.Errorf("duplicate normalized path %q in template source zip", relativePath)
 		}
 		files[relativePath] = string(contents)
 	}
