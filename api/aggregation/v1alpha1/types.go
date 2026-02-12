@@ -70,6 +70,15 @@ type CoderTemplateSpec struct {
 	Description string `json:"description,omitempty"`
 	Icon        string `json:"icon,omitempty"`
 
+	// Files is the template source tree for the active template version.
+	//
+	// Keys are slash-delimited relative paths (e.g. "main.tf").
+	// Values are UTF-8 file contents.
+	//
+	// Populated on GET; intentionally omitted from LIST to keep responses small.
+	// On CREATE/UPDATE with files, the server uploads source and creates a new template version.
+	Files map[string]string `json:"files,omitempty"`
+
 	// Running is a legacy flag retained temporarily for in-repo callers that still read template run-state directly.
 	Running bool `json:"running,omitempty"`
 }
