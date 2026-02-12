@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"path"
 	"sort"
 	"strings"
@@ -42,9 +43,31 @@ func fetchRawTemplateSourceZip(ctx context.Context, sdk *codersdk.Client, versio
 		return nil, fmt.Errorf("assertion failed: template version %q job.fileID must not be nil", versionID)
 	}
 
-	sourceZip, _, err := sdk.DownloadWithFormat(ctx, version.Job.FileID, codersdk.FormatZip)
+	resp, err := sdk.Request(
+		ctx,
+		http.MethodGet,
+		fmt.Sprintf("/api/v2/files/%s", version.Job.FileID),
+		nil,
+		codersdk.WithQueryParam("format", codersdk.FormatZip),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("download template source zip for file %q: %w", version.Job.FileID, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		responseErr := codersdk.ReadBodyAsError(resp)
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			return nil, fmt.Errorf("close template source zip response body for file %q: %w", version.Job.FileID, closeErr)
+		}
+		return nil, fmt.Errorf("download template source zip for file %q: %w", version.Job.FileID, responseErr)
+	}
+
+	sourceZip, readErr := io.ReadAll(io.LimitReader(resp.Body, int64(maxTemplateSourceZipBytes)+1))
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("read template source zip for file %q: %w", version.Job.FileID, readErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close template source zip response body for file %q: %w", version.Job.FileID, closeErr)
 	}
 	if len(sourceZip) > maxTemplateSourceZipBytes {
 		return nil, fmt.Errorf("template source zip exceeds max size: %d > %d", len(sourceZip), maxTemplateSourceZipBytes)
