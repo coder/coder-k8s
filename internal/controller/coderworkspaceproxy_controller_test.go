@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/coder/coder/v2/codersdk"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,6 +32,12 @@ type fakeBootstrapClient struct {
 	deleteKeyErr            error
 	deleteKeyCalls          int
 	deleteKeyRequests       []deleteKeyRequest
+
+	// Entitlements support.
+	entitlementsResponse codersdk.Entitlements
+	entitlementsErr      error
+	entitlementsCalls    int
+	entitlementsRequests []entitlementsRequest
 }
 
 type deleteKeyRequest struct {
@@ -38,6 +45,11 @@ type deleteKeyRequest struct {
 	SessionToken     string
 	OrganizationName string
 	KeyName          string
+}
+
+type entitlementsRequest struct {
+	CoderURL     string
+	SessionToken string
 }
 
 func (f *fakeBootstrapClient) EnsureWorkspaceProxy(_ context.Context, _ coderbootstrap.RegisterWorkspaceProxyRequest) (coderbootstrap.RegisterWorkspaceProxyResponse, error) {
@@ -72,6 +84,23 @@ func (f *fakeBootstrapClient) DeleteProvisionerKey(_ context.Context, coderURL, 
 		KeyName:          keyName,
 	})
 	return f.deleteKeyErr
+}
+
+func (f *fakeBootstrapClient) Entitlements(_ context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error) {
+	f.entitlementsCalls++
+	f.entitlementsRequests = append(f.entitlementsRequests, entitlementsRequest{
+		CoderURL:     coderURL,
+		SessionToken: sessionToken,
+	})
+	if f.entitlementsErr != nil {
+		return codersdk.Entitlements{}, f.entitlementsErr
+	}
+	if f.entitlementsResponse.Features == nil {
+		f.entitlementsResponse.Features = map[codersdk.FeatureName]codersdk.Feature{
+			codersdk.FeatureExternalProvisionerDaemons: {Entitlement: codersdk.EntitlementEntitled},
+		}
+	}
+	return f.entitlementsResponse, nil
 }
 
 func workspaceProxyResourceName(name string) string {

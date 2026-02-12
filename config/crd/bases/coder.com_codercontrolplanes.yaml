@@ -345,6 +345,17 @@ spec:
                   - type
                   type: object
                 type: array
+              entitlementsLastChecked:
+                description: EntitlementsLastChecked is when the operator last queried
+                  coderd entitlements.
+                format: date-time
+                type: string
+              externalProvisionerDaemonsEntitlement:
+                description: |-
+                  ExternalProvisionerDaemonsEntitlement is the entitlement value for feature
+                  "external_provisioner_daemons".
+                  Values: entitled, grace_period, not_entitled, unknown.
+                type: string
               licenseLastApplied:
                 description: |-
                   LicenseLastApplied is the timestamp of the most recent successful
@@ -355,6 +366,11 @@ spec:
                 description: |-
                   LicenseLastAppliedHash is the SHA-256 hex hash of the trimmed license JWT
                   that LicenseLastApplied refers to.
+                type: string
+              licenseTier:
+                description: |-
+                  LicenseTier is a best-effort classification of the currently applied license.
+                  Values: none, trial, enterprise, premium, unknown.
                 type: string
               observedGeneration:
                 description: ObservedGeneration tracks the spec generation this status

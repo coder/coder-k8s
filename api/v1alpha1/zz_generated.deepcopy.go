@@ -129,6 +129,10 @@ func (in *CoderControlPlaneStatus) DeepCopyInto(out *CoderControlPlaneStatus) {
 		in, out := &in.LicenseLastApplied, &out.LicenseLastApplied
 		*out = (*in).DeepCopy()
 	}
+	if in.EntitlementsLastChecked != nil {
+		in, out := &in.EntitlementsLastChecked, &out.EntitlementsLastChecked
+		*out = (*in).DeepCopy()
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]metav1.Condition, len(*in))

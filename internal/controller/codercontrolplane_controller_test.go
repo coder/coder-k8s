@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/coder/coder/v2/codersdk"
 	appsv1 "k8s.io/api/apps/v1"
@@ -82,6 +83,30 @@ func (f *fakeLicenseUploader) HasAnyLicense(_ context.Context, _, _ string) (boo
 	}
 
 	return len(f.calls) > 0, nil
+}
+
+type fakeEntitlementsInspector struct {
+	response codersdk.Entitlements
+	err      error
+	calls    int
+	requests []entitlementsInspectCall
+}
+
+type entitlementsInspectCall struct {
+	coderURL     string
+	sessionToken string
+}
+
+func (f *fakeEntitlementsInspector) Entitlements(_ context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error) {
+	f.calls++
+	f.requests = append(f.requests, entitlementsInspectCall{coderURL: coderURL, sessionToken: sessionToken})
+	if f.err != nil {
+		return codersdk.Entitlements{}, f.err
+	}
+	if f.response.Features == nil {
+		f.response.Features = map[codersdk.FeatureName]codersdk.Feature{}
+	}
+	return f.response, nil
 }
 
 func TestReconcile_NotFound(t *testing.T) {
@@ -1770,6 +1795,154 @@ func TestReconcile_OperatorAccess_ResolvesPostgresURLFromSecretRef(t *testing.T)
 	}
 	if reconciled.Status.OperatorTokenSecretRef.Name != "test-operator-custom-token" {
 		t.Fatalf("expected operator token secret ref name %q, got %q", "test-operator-custom-token", reconciled.Status.OperatorTokenSecretRef.Name)
+	}
+}
+
+func TestReconcile_EntitlementsStatusFields(t *testing.T) {
+	ctx := context.Background()
+
+	testCases := []struct {
+		name                       string
+		entitlements               codersdk.Entitlements
+		expectedTier               string
+		expectedProvisionerFeature string
+	}{
+		{
+			name: "none",
+			entitlements: codersdk.Entitlements{
+				Features: map[codersdk.FeatureName]codersdk.Feature{
+					codersdk.FeatureExternalProvisionerDaemons: {Entitlement: codersdk.EntitlementNotEntitled},
+				},
+				HasLicense: false,
+			},
+			expectedTier:               coderv1alpha1.CoderControlPlaneLicenseTierNone,
+			expectedProvisionerFeature: string(codersdk.EntitlementNotEntitled),
+		},
+		{
+			name: "trial",
+			entitlements: codersdk.Entitlements{
+				Features: map[codersdk.FeatureName]codersdk.Feature{
+					codersdk.FeatureExternalProvisionerDaemons: {Entitlement: codersdk.EntitlementGracePeriod},
+				},
+				HasLicense: true,
+				Trial:      true,
+			},
+			expectedTier:               coderv1alpha1.CoderControlPlaneLicenseTierTrial,
+			expectedProvisionerFeature: string(codersdk.EntitlementGracePeriod),
+		},
+		{
+			name: "premium",
+			entitlements: codersdk.Entitlements{
+				Features: map[codersdk.FeatureName]codersdk.Feature{
+					codersdk.FeatureExternalProvisionerDaemons: {Entitlement: codersdk.EntitlementEntitled},
+					codersdk.FeatureCustomRoles:                {Entitlement: codersdk.EntitlementEntitled},
+				},
+				HasLicense: true,
+			},
+			expectedTier:               coderv1alpha1.CoderControlPlaneLicenseTierPremium,
+			expectedProvisionerFeature: string(codersdk.EntitlementEntitled),
+		},
+		{
+			name: "enterprise",
+			entitlements: codersdk.Entitlements{
+				Features: map[codersdk.FeatureName]codersdk.Feature{
+					codersdk.FeatureExternalProvisionerDaemons: {Entitlement: codersdk.EntitlementEntitled},
+					codersdk.FeatureCustomRoles:                {Entitlement: codersdk.EntitlementNotEntitled},
+					codersdk.FeatureMultipleOrganizations:      {Entitlement: codersdk.EntitlementNotEntitled},
+				},
+				HasLicense: true,
+			},
+			expectedTier:               coderv1alpha1.CoderControlPlaneLicenseTierEnterprise,
+			expectedProvisionerFeature: string(codersdk.EntitlementEntitled),
+		},
+	}
+
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			controlPlaneName := "test-entitlements-" + strings.ToLower(testCase.name)
+
+			cp := &coderv1alpha1.CoderControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      controlPlaneName,
+					Namespace: "default",
+				},
+				Spec: coderv1alpha1.CoderControlPlaneSpec{
+					Image: "test-entitlements:latest",
+					ExtraEnv: []corev1.EnvVar{{
+						Name:  "CODER_PG_CONNECTION_URL",
+						Value: "postgres://example.test/coder",
+					}},
+				},
+			}
+			if err := k8sClient.Create(ctx, cp); err != nil {
+				t.Fatalf("failed to create test CoderControlPlane: %v", err)
+			}
+			t.Cleanup(func() {
+				_ = k8sClient.Delete(ctx, cp)
+			})
+
+			provisioner := &fakeOperatorAccessProvisioner{token: "operator-token-entitlements"}
+			inspector := &fakeEntitlementsInspector{response: testCase.entitlements}
+			r := &controller.CoderControlPlaneReconciler{
+				Client:                    k8sClient,
+				Scheme:                    scheme,
+				OperatorAccessProvisioner: provisioner,
+				EntitlementsInspector:     inspector,
+			}
+
+			namespacedName := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}
+			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+				t.Fatalf("reconcile control plane: %v", err)
+			}
+
+			deployment := &appsv1.Deployment{}
+			if err := k8sClient.Get(ctx, namespacedName, deployment); err != nil {
+				t.Fatalf("get deployment: %v", err)
+			}
+			deployment.Status.Replicas = 1
+			deployment.Status.ReadyReplicas = 1
+			if err := k8sClient.Status().Update(ctx, deployment); err != nil {
+				t.Fatalf("update deployment status: %v", err)
+			}
+
+			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+				t.Fatalf("reconcile control plane after deployment ready: %v", err)
+			}
+
+			reconciled := &coderv1alpha1.CoderControlPlane{}
+			if err := k8sClient.Get(ctx, namespacedName, reconciled); err != nil {
+				t.Fatalf("get reconciled control plane: %v", err)
+			}
+			if reconciled.Status.LicenseTier != testCase.expectedTier {
+				t.Fatalf("expected license tier %q, got %q", testCase.expectedTier, reconciled.Status.LicenseTier)
+			}
+			if reconciled.Status.ExternalProvisionerDaemonsEntitlement != testCase.expectedProvisionerFeature {
+				t.Fatalf("expected external provisioner entitlement %q, got %q", testCase.expectedProvisionerFeature, reconciled.Status.ExternalProvisionerDaemonsEntitlement)
+			}
+			if reconciled.Status.EntitlementsLastChecked == nil {
+				t.Fatal("expected entitlementsLastChecked to be set")
+			}
+			firstCheckedAt := reconciled.Status.EntitlementsLastChecked.DeepCopy()
+
+			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+				t.Fatalf("reconcile control plane with unchanged entitlements: %v", err)
+			}
+
+			reconciledAgain := &coderv1alpha1.CoderControlPlane{}
+			if err := k8sClient.Get(ctx, namespacedName, reconciledAgain); err != nil {
+				t.Fatalf("get reconciled control plane after stable reconcile: %v", err)
+			}
+			if reconciledAgain.Status.EntitlementsLastChecked == nil {
+				t.Fatal("expected entitlementsLastChecked to remain set")
+			}
+			if !reconciledAgain.Status.EntitlementsLastChecked.Equal(firstCheckedAt) {
+				t.Fatalf("expected entitlementsLastChecked to remain %s, got %s", firstCheckedAt.UTC().Format(time.RFC3339Nano), reconciledAgain.Status.EntitlementsLastChecked.UTC().Format(time.RFC3339Nano))
+			}
+			if inspector.calls == 0 {
+				t.Fatal("expected entitlements inspector to be called")
+			}
+		})
 	}
 }
 

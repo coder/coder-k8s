@@ -33,6 +33,9 @@
 | `operatorAccessReady` | boolean | OperatorAccessReady reports whether operator API access bootstrap succeeded. |
 | `licenseLastApplied` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#time-v1-meta) | LicenseLastApplied is the timestamp of the most recent successful operator-managed license upload. |
 | `licenseLastAppliedHash` | string | LicenseLastAppliedHash is the SHA-256 hex hash of the trimmed license JWT that LicenseLastApplied refers to. |
+| `licenseTier` | string | LicenseTier is a best-effort classification of the currently applied license. Values: none, trial, enterprise, premium, unknown. |
+| `entitlementsLastChecked` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#time-v1-meta) | EntitlementsLastChecked is when the operator last queried coderd entitlements. |
+| `externalProvisionerDaemonsEntitlement` | string | ExternalProvisionerDaemonsEntitlement is the entitlement value for feature "external_provisioner_daemons". Values: entitled, grace_period, not_entitled, unknown. |
 | `phase` | string | Phase is a high-level readiness indicator. |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#condition-v1-meta) array | Conditions are Kubernetes-standard conditions for this resource. |
 

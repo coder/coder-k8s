@@ -177,6 +177,229 @@ func findCondition(t *testing.T, conditions []metav1.Condition, condType string)
 	return metav1.Condition{}
 }
 
+func createTestProvisioner(
+	ctx context.Context,
+	t *testing.T,
+	namespace string,
+	name string,
+	controlPlaneName string,
+	bootstrapSecretName string,
+) *coderv1alpha1.CoderProvisioner {
+	t.Helper()
+
+	provisioner := &coderv1alpha1.CoderProvisioner{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: coderv1alpha1.CoderProvisionerSpec{
+			ControlPlaneRef: corev1.LocalObjectReference{Name: controlPlaneName},
+			Bootstrap: coderv1alpha1.CoderProvisionerBootstrapSpec{
+				CredentialsSecretRef: coderv1alpha1.SecretKeySelector{
+					Name: bootstrapSecretName,
+					Key:  coderv1alpha1.DefaultTokenSecretKey,
+				},
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, provisioner))
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(context.Background(), provisioner)
+	})
+
+	return provisioner
+}
+
+func TestCoderProvisionerReconciler_EntitlementFastPathNotEntitled(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	namespace := createTestNamespace(ctx, t, "coderprov-ent-fast")
+	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-ent-fast", "https://coder.example.com")
+	now := metav1.Now()
+	controlPlane.Status.EntitlementsLastChecked = &now
+	controlPlane.Status.ExternalProvisionerDaemonsEntitlement = string(codersdk.EntitlementNotEntitled)
+	require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
+	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-ent-fast", coderv1alpha1.DefaultTokenSecretKey, "session-token")
+
+	bootstrapClient := &fakeBootstrapClient{}
+	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
+	provisioner := createTestProvisioner(ctx, t, namespace, "provisioner-ent-fast", controlPlane.Name, bootstrapSecret.Name)
+	namespacedName := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+
+	result, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
+	require.NoError(t, err)
+	require.Greater(t, result.RequeueAfter, time.Duration(0))
+	require.Equal(t, 0, bootstrapClient.entitlementsCalls)
+	require.Equal(t, 0, bootstrapClient.provisionerKeyCalls)
+
+	reconciled := &coderv1alpha1.CoderProvisioner{}
+	require.NoError(t, k8sClient.Get(ctx, namespacedName, reconciled))
+	condition := findCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionExternalProvisionersEntitled)
+	require.Equal(t, metav1.ConditionFalse, condition.Status)
+	require.Equal(t, "NotEntitled", condition.Reason)
+
+	deployment := &appsv1.Deployment{}
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: expectedProvisionerResourceName(provisioner.Name), Namespace: provisioner.Namespace}, deployment)
+	require.Error(t, err)
+	require.True(t, apierrors.IsNotFound(err))
+}
+
+func TestCoderProvisionerReconciler_EntitlementFallbackNotEntitled(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	namespace := createTestNamespace(ctx, t, "coderprov-ent-fallback")
+	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-ent-fallback", "https://coder.example.com")
+	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-ent-fallback", coderv1alpha1.DefaultTokenSecretKey, "session-token")
+
+	bootstrapClient := &fakeBootstrapClient{
+		entitlementsResponse: codersdk.Entitlements{
+			Features: map[codersdk.FeatureName]codersdk.Feature{
+				codersdk.FeatureExternalProvisionerDaemons: {Entitlement: codersdk.EntitlementNotEntitled},
+			},
+		},
+	}
+	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
+	provisioner := createTestProvisioner(ctx, t, namespace, "provisioner-ent-fallback", controlPlane.Name, bootstrapSecret.Name)
+	namespacedName := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+
+	result, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
+	require.NoError(t, err)
+	require.Greater(t, result.RequeueAfter, time.Duration(0))
+	require.Equal(t, 1, bootstrapClient.entitlementsCalls)
+	require.Equal(t, 0, bootstrapClient.provisionerKeyCalls)
+
+	reconciled := &coderv1alpha1.CoderProvisioner{}
+	require.NoError(t, k8sClient.Get(ctx, namespacedName, reconciled))
+	condition := findCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionExternalProvisionersEntitled)
+	require.Equal(t, metav1.ConditionFalse, condition.Status)
+	require.Equal(t, "NotEntitled", condition.Reason)
+}
+
+func TestCoderProvisionerReconciler_EntitlementFastPathNotEntitledStaleRechecks(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	namespace := createTestNamespace(ctx, t, "coderprov-ent-stale")
+	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-ent-stale", "https://coder.example.com")
+	staleCheckedAt := metav1.NewTime(time.Now().Add(-5 * time.Minute))
+	controlPlane.Status.EntitlementsLastChecked = &staleCheckedAt
+	controlPlane.Status.ExternalProvisionerDaemonsEntitlement = string(codersdk.EntitlementNotEntitled)
+	require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
+	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-ent-stale", coderv1alpha1.DefaultTokenSecretKey, "session-token")
+
+	bootstrapClient := &fakeBootstrapClient{
+		entitlementsResponse: codersdk.Entitlements{
+			Features: map[codersdk.FeatureName]codersdk.Feature{
+				codersdk.FeatureExternalProvisionerDaemons: {Entitlement: codersdk.EntitlementEntitled},
+			},
+		},
+		provisionerKeyResponses: []coderbootstrap.EnsureProvisionerKeyResponse{{
+			OrganizationID: uuid.New(),
+			KeyID:          uuid.New(),
+			KeyName:        "provisioner-ent-stale",
+			Key:            "provisioner-key-material",
+		}},
+	}
+	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
+	provisioner := createTestProvisioner(ctx, t, namespace, "provisioner-ent-stale", controlPlane.Name, bootstrapSecret.Name)
+	namespacedName := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+
+	result, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+	require.Equal(t, 1, bootstrapClient.entitlementsCalls)
+	require.Equal(t, 1, bootstrapClient.provisionerKeyCalls)
+
+	reconciled := &coderv1alpha1.CoderProvisioner{}
+	require.NoError(t, k8sClient.Get(ctx, namespacedName, reconciled))
+	condition := findCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionExternalProvisionersEntitled)
+	require.Equal(t, metav1.ConditionTrue, condition.Status)
+	require.Equal(t, "Entitled", condition.Reason)
+}
+
+func TestCoderProvisionerReconciler_EntitlementFastPathEntitledStaleRechecks(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	namespace := createTestNamespace(ctx, t, "coderprov-entitled-stale")
+	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-entitled-stale", "https://coder.example.com")
+	staleCheckedAt := metav1.NewTime(time.Now().Add(-5 * time.Minute))
+	controlPlane.Status.EntitlementsLastChecked = &staleCheckedAt
+	controlPlane.Status.ExternalProvisionerDaemonsEntitlement = string(codersdk.EntitlementEntitled)
+	require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
+	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-entitled-stale", coderv1alpha1.DefaultTokenSecretKey, "session-token")
+
+	bootstrapClient := &fakeBootstrapClient{
+		entitlementsResponse: codersdk.Entitlements{
+			Features: map[codersdk.FeatureName]codersdk.Feature{
+				codersdk.FeatureExternalProvisionerDaemons: {Entitlement: codersdk.EntitlementNotEntitled},
+			},
+		},
+	}
+	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
+	provisioner := createTestProvisioner(ctx, t, namespace, "provisioner-entitled-stale", controlPlane.Name, bootstrapSecret.Name)
+	namespacedName := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+
+	result, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
+	require.NoError(t, err)
+	require.Greater(t, result.RequeueAfter, time.Duration(0))
+	require.Equal(t, 1, bootstrapClient.entitlementsCalls)
+	require.Equal(t, 0, bootstrapClient.provisionerKeyCalls)
+
+	reconciled := &coderv1alpha1.CoderProvisioner{}
+	require.NoError(t, k8sClient.Get(ctx, namespacedName, reconciled))
+	condition := findCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionExternalProvisionersEntitled)
+	require.Equal(t, metav1.ConditionFalse, condition.Status)
+	require.Equal(t, "NotEntitled", condition.Reason)
+}
+
+func TestCoderProvisionerReconciler_EntitlementFallbackForbidden(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	namespace := createTestNamespace(ctx, t, "coderprov-ent-forbidden")
+	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-ent-forbidden", "https://coder.example.com")
+	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-ent-forbidden", coderv1alpha1.DefaultTokenSecretKey, "session-token")
+
+	bootstrapClient := &fakeBootstrapClient{
+		entitlementsErr: codersdk.NewTestError(http.StatusForbidden, http.MethodGet, "/api/v2/entitlements"),
+	}
+	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
+	provisioner := createTestProvisioner(ctx, t, namespace, "provisioner-ent-forbidden", controlPlane.Name, bootstrapSecret.Name)
+	namespacedName := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+
+	result, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
+	require.NoError(t, err)
+	require.Greater(t, result.RequeueAfter, time.Duration(0))
+	require.Equal(t, 1, bootstrapClient.entitlementsCalls)
+	require.Equal(t, 0, bootstrapClient.provisionerKeyCalls)
+
+	reconciled := &coderv1alpha1.CoderProvisioner{}
+	require.NoError(t, k8sClient.Get(ctx, namespacedName, reconciled))
+	condition := findCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionExternalProvisionersEntitled)
+	require.Equal(t, metav1.ConditionFalse, condition.Status)
+	require.Equal(t, "Forbidden", condition.Reason)
+}
+
 func TestCoderProvisionerReconciler_BasicCreate(t *testing.T) {
 	t.Parallel()
 
@@ -320,6 +543,12 @@ func TestCoderProvisionerReconciler_BasicCreate(t *testing.T) {
 	require.NotNil(t, reconciledProvisioner.Status.SecretRef)
 	require.Equal(t, provisioner.Spec.Key.SecretName, reconciledProvisioner.Status.SecretRef.Name)
 	require.Equal(t, provisioner.Spec.Key.SecretKey, reconciledProvisioner.Status.SecretRef.Key)
+	requireCondition(
+		t,
+		reconciledProvisioner.Status.Conditions,
+		coderv1alpha1.CoderProvisionerConditionExternalProvisionersEntitled,
+		metav1.ConditionTrue,
+	)
 }
 
 func TestCoderProvisionerReconciler_ExistingSecret(t *testing.T) {

@@ -95,6 +95,7 @@ type Client interface {
 	EnsureWorkspaceProxy(context.Context, RegisterWorkspaceProxyRequest) (RegisterWorkspaceProxyResponse, error)
 	EnsureProvisionerKey(context.Context, EnsureProvisionerKeyRequest) (EnsureProvisionerKeyResponse, error)
 	DeleteProvisionerKey(ctx context.Context, coderURL, sessionToken, orgName, keyName string) error
+	Entitlements(ctx context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error)
 }
 
 // SDKClient uses codersdk to perform bootstrap operations.
