@@ -393,6 +393,11 @@ func (s *TemplateStorage) Update(
 	}
 
 	if updatedTemplate.Spec.Files != nil {
+		normalizedDesiredFiles, err := normalizeFileKeys(updatedTemplate.Spec.Files)
+		if err != nil {
+			return nil, false, apierrors.NewBadRequest(fmt.Sprintf("invalid template spec.files: %v", err))
+		}
+
 		currentActiveVersionID, err := uuid.Parse(currentTemplate.Status.ActiveVersionID)
 		if err != nil {
 			return nil, false, fmt.Errorf(
@@ -407,8 +412,13 @@ func (s *TemplateStorage) Update(
 			return nil, false, fmt.Errorf("fetch current template source files: %w", err)
 		}
 
-		if !reflect.DeepEqual(updatedTemplate.Spec.Files, currentFiles) {
-			zipBytes, err := buildSourceZip(updatedTemplate.Spec.Files)
+		if !reflect.DeepEqual(normalizedDesiredFiles, currentFiles) {
+			currentRawSourceZip, err := fetchRawTemplateSourceZip(ctx, sdk, currentActiveVersionID)
+			if err != nil {
+				return nil, false, fmt.Errorf("fetch current template source zip: %w", err)
+			}
+
+			zipBytes, err := buildMergedSourceZip(currentRawSourceZip, normalizedDesiredFiles)
 			if err != nil {
 				return nil, false, apierrors.NewBadRequest(fmt.Sprintf("invalid template spec.files: %v", err))
 			}

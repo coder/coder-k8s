@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -398,6 +400,176 @@ func TestTemplateStorageUpdateWithIdenticalFilesIsNoOp(t *testing.T) {
 	}
 	if !reflect.DeepEqual(updatedTemplate.Spec.Files, initialFiles) {
 		t.Fatalf("expected updated files to stay %v, got %v", initialFiles, updatedTemplate.Spec.Files)
+	}
+}
+
+func TestTemplateStorageUpdatePreservesNonUTF8Files(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	currentObj, err := templateStorage.Get(ctx, "acme.starter-template", nil)
+	if err != nil {
+		t.Fatalf("expected template get to succeed: %v", err)
+	}
+	currentTemplate, ok := currentObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from get, got %T", currentObj)
+	}
+	if _, hasBinary := currentTemplate.Spec.Files["binary.dat"]; hasBinary {
+		t.Fatal("expected non-UTF8 binary.dat to be omitted from spec.files")
+	}
+
+	updatedMainTF := "resource \"null_resource\" \"updated_binary_preserve\" {}"
+	fileCountBefore := state.fileCount()
+	templateVersionCountBefore := state.templateVersionCount()
+	activeVersionBefore, ok := state.templateActiveVersionID("acme", "starter-template")
+	if !ok {
+		t.Fatal("expected active version for starter-template")
+	}
+
+	desiredTemplate := currentTemplate.DeepCopy()
+	desiredTemplate.Spec.Files = map[string]string{"main.tf": updatedMainTF}
+
+	updatedObj, created, err := templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected update with changed files to succeed: %v", err)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+
+	if state.fileCount() != fileCountBefore+1 {
+		t.Fatalf("expected file upload during changed-files update, before=%d after=%d", fileCountBefore, state.fileCount())
+	}
+	if state.templateVersionCount() != templateVersionCountBefore+1 {
+		t.Fatalf("expected template version creation during changed-files update, before=%d after=%d", templateVersionCountBefore, state.templateVersionCount())
+	}
+
+	activeVersionAfter, ok := state.templateActiveVersionID("acme", "starter-template")
+	if !ok {
+		t.Fatal("expected active version for starter-template after update")
+	}
+	if activeVersionAfter == activeVersionBefore {
+		t.Fatalf("expected active version to change, both were %q", activeVersionAfter)
+	}
+
+	updatedTemplate, ok := updatedObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from update, got %T", updatedObj)
+	}
+	expectedFiles := map[string]string{"main.tf": updatedMainTF}
+	if !reflect.DeepEqual(updatedTemplate.Spec.Files, expectedFiles) {
+		t.Fatalf("expected updated files %v, got %v", expectedFiles, updatedTemplate.Spec.Files)
+	}
+
+	activeSourceZip, ok := state.templateActiveSourceZip("acme", "starter-template")
+	if !ok {
+		t.Fatal("expected active source zip for starter-template")
+	}
+	zipEntries := unzipEntries(t, activeSourceZip)
+
+	updatedMainBytes, ok := zipEntries["main.tf"]
+	if !ok {
+		t.Fatal("expected merged source zip to include main.tf")
+	}
+	if string(updatedMainBytes) != updatedMainTF {
+		t.Fatalf("expected merged main.tf %q, got %q", updatedMainTF, string(updatedMainBytes))
+	}
+
+	expectedBinary := []byte{0x80, 0x81, 0x82}
+	binaryBytes, ok := zipEntries["binary.dat"]
+	if !ok {
+		t.Fatal("expected merged source zip to preserve binary.dat")
+	}
+	if !bytes.Equal(binaryBytes, expectedBinary) {
+		t.Fatalf("expected preserved binary.dat bytes %v, got %v", expectedBinary, binaryBytes)
+	}
+}
+
+func TestTemplateStorageUpdateNormalizesPathsForNoOp(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	currentObj, err := templateStorage.Get(ctx, "acme.starter-template", nil)
+	if err != nil {
+		t.Fatalf("expected template get to succeed: %v", err)
+	}
+	currentTemplate, ok := currentObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from get, got %T", currentObj)
+	}
+
+	mainTF, ok := currentTemplate.Spec.Files["main.tf"]
+	if !ok {
+		t.Fatal("expected starter-template spec.files to contain main.tf")
+	}
+
+	fileCountBefore := state.fileCount()
+	templateVersionCountBefore := state.templateVersionCount()
+	activeVersionBefore, ok := state.templateActiveVersionID("acme", "starter-template")
+	if !ok {
+		t.Fatal("expected active version for starter-template")
+	}
+
+	desiredTemplate := currentTemplate.DeepCopy()
+	desiredTemplate.Spec.Files = map[string]string{"./main.tf": mainTF}
+
+	updatedObj, created, err := templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected update with normalized-identical files to succeed: %v", err)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+
+	if state.fileCount() != fileCountBefore {
+		t.Fatalf("expected no new upload for normalized-identical files, before=%d after=%d", fileCountBefore, state.fileCount())
+	}
+	if state.templateVersionCount() != templateVersionCountBefore {
+		t.Fatalf("expected no new template version for normalized-identical files, before=%d after=%d", templateVersionCountBefore, state.templateVersionCount())
+	}
+
+	activeVersionAfter, ok := state.templateActiveVersionID("acme", "starter-template")
+	if !ok {
+		t.Fatal("expected active version for starter-template after update")
+	}
+	if activeVersionAfter != activeVersionBefore {
+		t.Fatalf("expected active version to remain %q on no-op update, got %q", activeVersionBefore, activeVersionAfter)
+	}
+
+	updatedTemplate, ok := updatedObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from update, got %T", updatedObj)
+	}
+	expectedFiles := map[string]string{"main.tf": mainTF}
+	if !reflect.DeepEqual(updatedTemplate.Spec.Files, expectedFiles) {
+		t.Fatalf("expected files %v, got %v", expectedFiles, updatedTemplate.Spec.Files)
 	}
 }
 
@@ -1810,7 +1982,7 @@ func newMockCoderServer(t *testing.T) (*httptest.Server, *mockCoderServerState) 
 	ttlMillis := int64(3600000)
 	autostartSchedule := "CRON_TZ=UTC 0 9 * * 1-5"
 
-	seededTemplateSourceZip, seedErr := buildSourceZip(map[string]string{"main.tf": seededTemplateMainTF})
+	seededTemplateSourceZip, seedErr := buildSeededTemplateSourceZip()
 	if seedErr != nil {
 		t.Fatalf("build seeded template source zip: %v", seedErr)
 	}
@@ -2516,6 +2688,37 @@ func (s *mockCoderServerState) templateActiveVersionID(organization, templateNam
 	return template.ActiveVersionID, true
 }
 
+func (s *mockCoderServerState) templateActiveSourceZip(organization, templateName string) ([]byte, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	organizationTemplates, ok := s.templateIDsByOrg[organization]
+	if !ok {
+		return nil, false
+	}
+	templateID, ok := organizationTemplates[templateName]
+	if !ok {
+		return nil, false
+	}
+	template, ok := s.templatesByID[templateID]
+	if !ok {
+		return nil, false
+	}
+	version, ok := s.templateVersionsByID[template.ActiveVersionID]
+	if !ok {
+		return nil, false
+	}
+	if version.Job.FileID == uuid.Nil {
+		panic("assertion failed: template version file ID must not be nil")
+	}
+	fileData, ok := s.filesByID[version.Job.FileID]
+	if !ok {
+		return nil, false
+	}
+
+	return append([]byte(nil), fileData...), true
+}
+
 func (s *mockCoderServerState) templateMetaUpdateCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2605,6 +2808,81 @@ func (s *mockCoderServerState) setBuildTransitionFailure(transition codersdk.Wor
 	}
 
 	s.failBuildTransitions[transition] = statusCode
+}
+
+func buildSeededTemplateSourceZip() ([]byte, error) {
+	var sourceZip bytes.Buffer
+	zipWriter := zip.NewWriter(&sourceZip)
+
+	mainTFWriter, err := zipWriter.Create("main.tf")
+	if err != nil {
+		return nil, fmt.Errorf("create seeded main.tf zip entry: %w", err)
+	}
+	if _, err := mainTFWriter.Write([]byte(seededTemplateMainTF)); err != nil {
+		return nil, fmt.Errorf("write seeded main.tf zip entry: %w", err)
+	}
+
+	binaryWriter, err := zipWriter.Create("binary.dat")
+	if err != nil {
+		return nil, fmt.Errorf("create seeded binary.dat zip entry: %w", err)
+	}
+	if _, err := binaryWriter.Write([]byte{0x80, 0x81, 0x82}); err != nil {
+		return nil, fmt.Errorf("write seeded binary.dat zip entry: %w", err)
+	}
+
+	if err := zipWriter.Close(); err != nil {
+		return nil, fmt.Errorf("close seeded source zip writer: %w", err)
+	}
+
+	result := sourceZip.Bytes()
+	if len(result) > maxTemplateSourceZipBytes {
+		return nil, fmt.Errorf("seeded template source zip exceeds max size: %d > %d", len(result), maxTemplateSourceZipBytes)
+	}
+
+	return result, nil
+}
+
+func unzipEntries(t *testing.T, sourceZip []byte) map[string][]byte {
+	t.Helper()
+
+	if sourceZip == nil {
+		t.Fatal("assertion failed: source zip must not be nil")
+	}
+
+	archiveReader, err := zip.NewReader(bytes.NewReader(sourceZip), int64(len(sourceZip)))
+	if err != nil {
+		t.Fatalf("open source zip: %v", err)
+	}
+
+	entries := make(map[string][]byte, len(archiveReader.File))
+	for _, archiveFile := range archiveReader.File {
+		if archiveFile == nil {
+			t.Fatal("assertion failed: source zip entry must not be nil")
+		}
+		if archiveFile.FileInfo().IsDir() {
+			continue
+		}
+		if _, exists := entries[archiveFile.Name]; exists {
+			t.Fatalf("duplicate source zip entry %q", archiveFile.Name)
+		}
+
+		entryReader, err := archiveFile.Open()
+		if err != nil {
+			t.Fatalf("open source zip entry %q: %v", archiveFile.Name, err)
+		}
+		contents, readErr := io.ReadAll(entryReader)
+		closeErr := entryReader.Close()
+		if readErr != nil {
+			t.Fatalf("read source zip entry %q: %v", archiveFile.Name, readErr)
+		}
+		if closeErr != nil {
+			t.Fatalf("close source zip entry %q: %v", archiveFile.Name, closeErr)
+		}
+
+		entries[archiveFile.Name] = contents
+	}
+
+	return entries
 }
 
 func newTestClientProvider(t *testing.T, serverURL string) coder.ClientProvider {
