@@ -184,6 +184,46 @@ generate_kind_doc() {
 		"$@"
 }
 
+normalize_generated_doc_spacing() {
+	local output_path="$1"
+	local full_path="${SCRIPT_ROOT}/${output_path}"
+	local temp_file
+
+	assert_file "${full_path}"
+
+	temp_file="$(mktemp)"
+	track_temp_file "${temp_file}"
+
+	awk '
+		BEGIN {
+			blank_count = 0
+			prev_table_separator = 0
+		}
+		{
+			if ($0 ~ /^[[:space:]]*$/) {
+				if (prev_table_separator) {
+					next
+				}
+				blank_count += 1
+				if (blank_count > 1) {
+					next
+				}
+				print ""
+				next
+			}
+			blank_count = 0
+			print
+			if ($0 ~ /^[[:space:]]*\|[-:|[:space:]]+\|[[:space:]]*$/) {
+				prev_table_separator = 1
+			} else {
+				prev_table_separator = 0
+			}
+		}
+	' "${full_path}" >"${temp_file}"
+
+	mv "${temp_file}" "${full_path}"
+}
+
 generate_docs_for_source() {
 	local source_path="$1"
 	local source_kind="$2"
@@ -246,6 +286,7 @@ generate_docs_for_source() {
 		esac
 
 		generate_kind_doc "${source_path}" "${output_path}" "${kind}" "${template_values[@]}"
+		normalize_generated_doc_spacing "${output_path}"
 		EXPECTED_GENERATED_DOCS["${output_path}"]=1
 		API_NAV_ENTRIES+=("          - ${kind}: reference/api/$(lower "${kind}").md")
 	done < <(discover_root_kinds "${source_path}")

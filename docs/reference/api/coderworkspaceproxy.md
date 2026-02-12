@@ -13,43 +13,61 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `image` | `string` | Image is the container image used for the workspace proxy pod. |
-| `replicas` | `int32` | Replicas is the desired number of proxy pods. |
-| `service` | `ServiceSpec` | Service controls the service created in front of the workspace proxy. |
-| ├─ `type` | `corev1.ServiceType` | Type controls the Kubernetes service type. |
-| ├─ `port` | `int32` | Port controls the exposed service port. |
-| └─ `annotations` | `map[string]string` | Annotations are applied to the reconciled service object. |
-| `primaryAccessURL` | `string` | PrimaryAccessURL is the coderd URL the proxy should connect to. |
-| `proxySessionTokenSecretRef` | `SecretKeySelector` | ProxySessionTokenSecretRef points to a Secret key containing the proxy token. |
-| ├─ `name` | `string` | Name is the Kubernetes Secret name. |
-| └─ `key` | `string` | Key is the key inside the Secret data map. |
-| `bootstrap` | `ProxyBootstrapSpec` | Bootstrap optionally registers the proxy and mints a proxy token. |
-| ├─ `coderURL` | `string` | CoderURL is the URL for the primary Coder control plane API. |
-| ├─ `credentialsSecretRef` | `SecretKeySelector` | CredentialsSecretRef points to a Secret containing a Coder session token. |
-| │&nbsp;&nbsp;├─ `name` | `string` | Name is the Kubernetes Secret name. |
-| │&nbsp;&nbsp;└─ `key` | `string` | Key is the key inside the Secret data map. |
-| ├─ `proxyName` | `string` | ProxyName is the name used when registering the proxy in Coder. |
-| ├─ `displayName` | `string` | DisplayName is the human-readable name for the proxy region. |
-| ├─ `icon` | `string` | Icon is the optional icon URL or emoji path for the proxy region. |
-| └─ `generatedTokenSecretName` | `string` | GeneratedTokenSecretName stores the generated proxy token. |
-| `derpOnly` | `bool` | DerpOnly configures the workspace proxy to only serve DERP traffic. |
-| `extraArgs` | `[]string` | ExtraArgs are appended to the default workspace proxy arguments. |
-| `extraEnv` | `[]corev1.EnvVar` | ExtraEnv are injected into the workspace proxy container. |
-| `imagePullSecrets` | `[]corev1.LocalObjectReference` | ImagePullSecrets are used by the pod to pull private images. |
-| └─ `name` | `string` | Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: [https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names) |
+| `image` | string | Image is the container image used for the workspace proxy pod. |
+| `replicas` | integer | Replicas is the desired number of proxy pods. |
+| `service` | [ServiceSpec](#servicespec) | Service controls the service created in front of the workspace proxy. |
+| `primaryAccessURL` | string | PrimaryAccessURL is the coderd URL the proxy should connect to. |
+| `proxySessionTokenSecretRef` | [SecretKeySelector](#secretkeyselector) | ProxySessionTokenSecretRef points to a Secret key containing the proxy token. |
+| `bootstrap` | [ProxyBootstrapSpec](#proxybootstrapspec) | Bootstrap optionally registers the proxy and mints a proxy token. |
+| `derpOnly` | boolean | DerpOnly configures the workspace proxy to only serve DERP traffic. |
+| `extraArgs` | string array | ExtraArgs are appended to the default workspace proxy arguments. |
+| `extraEnv` | [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#envvar-v1-core) array | ExtraEnv are injected into the workspace proxy container. |
+| `imagePullSecrets` | [LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#localobjectreference-v1-core) array | ImagePullSecrets are used by the pod to pull private images. |
 
 ## Status
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `observedGeneration` | `int64` | ObservedGeneration tracks the spec generation this status reflects. |
-| `readyReplicas` | `int32` | ReadyReplicas is the number of ready pods observed in the deployment. |
-| `registered` | `bool` | Registered reports whether bootstrap registration completed successfully. |
-| `proxyTokenSecretRef` | `SecretKeySelector` | ProxyTokenSecretRef is the Secret used for the proxy session token. |
-| ├─ `name` | `string` | Name is the Kubernetes Secret name. |
-| └─ `key` | `string` | Key is the key inside the Secret data map. |
-| `phase` | `string` | Phase is a high-level readiness indicator. |
-| `conditions` | `[]metav1.Condition` | Conditions are Kubernetes-standard conditions for this resource. |
+| `observedGeneration` | integer | ObservedGeneration tracks the spec generation this status reflects. |
+| `readyReplicas` | integer | ReadyReplicas is the number of ready pods observed in the deployment. |
+| `registered` | boolean | Registered reports whether bootstrap registration completed successfully. |
+| `proxyTokenSecretRef` | [SecretKeySelector](#secretkeyselector) | ProxyTokenSecretRef is the Secret used for the proxy session token. |
+| `phase` | string | Phase is a high-level readiness indicator. |
+| `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#condition-v1-meta) array | Conditions are Kubernetes-standard conditions for this resource. |
+
+## Referenced types
+
+### ProxyBootstrapSpec
+
+ProxyBootstrapSpec configures optional registration with the Coder API.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `coderURL` | string | CoderURL is the URL for the primary Coder control plane API. |
+| `credentialsSecretRef` | [SecretKeySelector](#secretkeyselector) | CredentialsSecretRef points to a Secret containing a Coder session token. |
+| `proxyName` | string | ProxyName is the name used when registering the proxy in Coder. |
+| `displayName` | string | DisplayName is the human-readable name for the proxy region. |
+| `icon` | string | Icon is the optional icon URL or emoji path for the proxy region. |
+| `generatedTokenSecretName` | string | GeneratedTokenSecretName stores the generated proxy token. |
+
+### SecretKeySelector
+
+SecretKeySelector identifies a key in a Secret.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | string | Name is the Kubernetes Secret name. |
+| `key` | string | Key is the key inside the Secret data map. |
+
+### ServiceSpec
+
+ServiceSpec defines the Service configuration reconciled by the operator.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `type` | [ServiceType](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#servicetype-v1-core) | Type controls the Kubernetes service type. |
+| `port` | integer | Port controls the exposed service port. |
+| `annotations` | object (keys:string, values:string) | Annotations are applied to the reconciled service object. |
 
 ## Source
 
