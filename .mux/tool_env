@@ -29,6 +29,8 @@ mux_use_nix_devshell_path() {
   workspace_cache_tag="$(printf '%s' "${workspace_cache_tag}" | tr -cs 'A-Za-z0-9._-' '_')"
 
   local cache_file="/tmp/mux-nix-path-${workspace_cache_tag}"
+  local cache_state_file="${cache_file}.state"
+  local inherited_retry_interval_seconds=300
 
   local should_refresh=0
   if [[ ! -s "${cache_file}" ]]; then
@@ -37,23 +39,58 @@ mux_use_nix_devshell_path() {
     should_refresh=1
   elif [[ -f "${flake_root}/flake.lock" && "${flake_root}/flake.lock" -nt "${cache_file}" ]]; then
     should_refresh=1
+  elif [[ ! -f "${cache_state_file}" ]]; then
+    should_refresh=1
+  elif [[ "$(<"${cache_state_file}")" != "nix" ]]; then
+    local cache_mtime=0
+    if cache_mtime="$(stat -c %Y "${cache_file}" 2>/dev/null)"; then
+      :
+    elif cache_mtime="$(stat -f %m "${cache_file}" 2>/dev/null)"; then
+      :
+    else
+      cache_mtime=0
+    fi
+
+    local now_epoch
+    now_epoch="$(date +%s)"
+    if (( now_epoch - cache_mtime >= inherited_retry_interval_seconds )); then
+      should_refresh=1
+    fi
   fi
+
+  local refresh_log="${cache_file}.refresh.log"
 
   if [[ "${should_refresh}" -eq 1 ]]; then
     local tmp_cache_file
     tmp_cache_file="$(mktemp "${cache_file}.tmp.XXXXXX")"
 
-    if nix develop "${flake_root}" -c bash -c 'echo "$PATH"' >"${tmp_cache_file}" 2>/dev/null; then
-      if [[ ! -s "${tmp_cache_file}" ]]; then
+    if nix --extra-experimental-features 'nix-command flakes' develop "${flake_root}#default" -c bash -c 'echo "$PATH"' >"${tmp_cache_file}" 2>"${refresh_log}"; then
+      if [[ -s "${tmp_cache_file}" ]]; then
+        mv "${tmp_cache_file}" "${cache_file}"
+        printf '%s' "nix" >"${cache_state_file}"
+      else
         rm -f "${tmp_cache_file}"
-        echo "assertion failed: nix develop returned an empty PATH" >&2
-        return 96
+        echo "warning: nix develop returned an empty PATH; keeping existing PATH" >&2
       fi
-      mv "${tmp_cache_file}" "${cache_file}"
     else
       rm -f "${tmp_cache_file}"
-      echo "assertion failed: failed to refresh nix devshell PATH cache: ${cache_file}" >&2
-      return 96
+      echo "warning: failed to refresh nix devshell PATH cache (${cache_file}); keeping existing PATH" >&2
+      echo "warning: nix develop stderr logged at ${refresh_log}" >&2
+      if [[ -s "${cache_file}" ]]; then
+        if [[ ! -f "${cache_state_file}" ]]; then
+          printf '%s' "inherited" >"${cache_state_file}" 2>/dev/null || true
+        fi
+        if [[ "$(<"${cache_state_file}")" != "nix" ]]; then
+          touch "${cache_file}" 2>/dev/null || true
+        fi
+      fi
+    fi
+  fi
+
+  if [[ ! -s "${cache_file}" && -n "${PATH:-}" ]]; then
+    if printf '%s' "${PATH}" >"${cache_file}" 2>/dev/null; then
+      printf '%s' "inherited" >"${cache_state_file}" 2>/dev/null || true
+      echo "warning: seeded nix PATH cache with inherited PATH (${cache_file})" >&2
     fi
   fi
 
@@ -62,18 +99,15 @@ mux_use_nix_devshell_path() {
     return 0
   fi
 
-  echo "assertion failed: nix devshell PATH cache file missing or empty: ${cache_file}" >&2
-  return 96
+  if [[ -s "${refresh_log}" ]]; then
+    echo "warning: nix devshell PATH cache unavailable; continuing with inherited PATH (details: ${refresh_log})" >&2
+  fi
+
+  return 0
 }
 
-if mux_use_nix_devshell_path; then
-  :
-else
-  status=$?
-  if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
-    return "${status}"
-  fi
-  exit "${status}"
+if ! mux_use_nix_devshell_path; then
+  echo "warning: mux_use_nix_devshell_path failed unexpectedly; continuing with inherited PATH" >&2
 fi
 
 run_and_report() {
