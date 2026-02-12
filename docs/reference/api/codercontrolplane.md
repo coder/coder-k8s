@@ -13,33 +13,56 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `image` | `string` | Image is the container image used for the Coder control plane pod. |
-| `replicas` | `int32` | Replicas is the desired number of control plane pods. |
-| `service` | `ServiceSpec` | Service controls the service created in front of the control plane. |
-| ├─ `type` | `corev1.ServiceType` | Type controls the Kubernetes service type. |
-| ├─ `port` | `int32` | Port controls the exposed service port. |
-| └─ `annotations` | `map[string]string` | Annotations are applied to the reconciled service object. |
-| `extraArgs` | `[]string` | ExtraArgs are appended to the default Coder server arguments. |
-| `extraEnv` | `[]corev1.EnvVar` | ExtraEnv are injected into the Coder control plane container. |
-| `imagePullSecrets` | `[]corev1.LocalObjectReference` | ImagePullSecrets are used by the pod to pull private images. |
-| └─ `name` | `string` | Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: [https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names) |
-| `operatorAccess` | `OperatorAccessSpec` | OperatorAccess configures bootstrap API access to the coderd instance. |
-| ├─ `disabled` | `bool` | Disabled turns off creation and management of the `coder-k8s-operator` user and API token. |
-| └─ `generatedTokenSecretName` | `string` | GeneratedTokenSecretName stores the generated operator API token. |
+
+| `image` | string | Image is the container image used for the Coder control plane pod. |
+| `replicas` | integer | Replicas is the desired number of control plane pods. |
+| `service` | [ServiceSpec](#servicespec) | Service controls the service created in front of the control plane. |
+| `extraArgs` | string array | ExtraArgs are appended to the default Coder server arguments. |
+| `extraEnv` | [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#envvar-v1-core) array | ExtraEnv are injected into the Coder control plane container. |
+| `imagePullSecrets` | [LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#localobjectreference-v1-core) array | ImagePullSecrets are used by the pod to pull private images. |
+| `operatorAccess` | [OperatorAccessSpec](#operatoraccessspec) | OperatorAccess configures bootstrap API access to the coderd instance. |
 
 ## Status
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `observedGeneration` | `int64` | ObservedGeneration tracks the spec generation this status reflects. |
-| `readyReplicas` | `int32` | ReadyReplicas is the number of ready pods observed in the deployment. |
-| `url` | `string` | URL is the in-cluster URL for the control plane service. |
-| `operatorTokenSecretRef` | `SecretKeySelector` | OperatorTokenSecretRef points to the Secret key containing the `coder-k8s-operator` API token. |
-| ├─ `name` | `string` | Name is the Kubernetes Secret name. |
-| └─ `key` | `string` | Key is the key inside the Secret data map. |
-| `operatorAccessReady` | `bool` | OperatorAccessReady reports whether operator API access bootstrap succeeded. |
-| `phase` | `string` | Phase is a high-level readiness indicator. |
-| `conditions` | `[]metav1.Condition` | Conditions are Kubernetes-standard conditions for this resource. |
+
+| `observedGeneration` | integer | ObservedGeneration tracks the spec generation this status reflects. |
+| `readyReplicas` | integer | ReadyReplicas is the number of ready pods observed in the deployment. |
+| `url` | string | URL is the in-cluster URL for the control plane service. |
+| `operatorTokenSecretRef` | [SecretKeySelector](#secretkeyselector) | OperatorTokenSecretRef points to the Secret key containing the `coder-k8s-operator` API token. |
+| `operatorAccessReady` | boolean | OperatorAccessReady reports whether operator API access bootstrap succeeded. |
+| `phase` | string | Phase is a high-level readiness indicator. |
+| `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#condition-v1-meta) array | Conditions are Kubernetes-standard conditions for this resource. |
+
+
+## Referenced types
+### OperatorAccessSpec
+OperatorAccessSpec configures the controller-managed coderd operator user.
+| Field | Type | Description |
+| --- | --- | --- |
+
+| `disabled` | boolean | Disabled turns off creation and management of the `coder-k8s-operator`<br />user and API token. |
+| `generatedTokenSecretName` | string | GeneratedTokenSecretName stores the generated operator API token. |
+
+### SecretKeySelector
+SecretKeySelector identifies a key in a Secret.
+| Field | Type | Description |
+| --- | --- | --- |
+
+| `name` | string | Name is the Kubernetes Secret name. |
+| `key` | string | Key is the key inside the Secret data map. |
+
+### ServiceSpec
+ServiceSpec defines the Service configuration reconciled by the operator.
+| Field | Type | Description |
+| --- | --- | --- |
+
+| `type` | [ServiceType](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#servicetype-v1-core) | Type controls the Kubernetes service type. |
+| `port` | integer | Port controls the exposed service port. |
+| `annotations` | object (keys:string, values:string) | Annotations are applied to the reconciled service object. |
+
+
 
 ## Source
 

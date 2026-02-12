@@ -1,58 +1,87 @@
-{{- define "typeName" -}}
-{{- $fieldType := . -}}
-{{- if not $fieldType -}}
-<unknown>
+{{- define "fieldDoc" -}}
+{{- $doc := . -}}
+{{- if not $doc -}}
+{{- "" -}}
 {{- else -}}
-{{- $typeString := $fieldType.String -}}
-{{- $typeString = trimPrefix "*" $typeString -}}
-{{- $typeString = $typeString | replace "k8s.io/apimachinery/pkg/apis/meta/v1." "metav1." -}}
-{{- $typeString = $typeString | replace "k8s.io/api/core/v1." "corev1." -}}
-{{- $typeString = $typeString | replace "github.com/coder/coder-k8s/api/v1alpha1." "" -}}
-{{- $typeString = $typeString | replace "github.com/coder/coder-k8s/api/aggregation/v1alpha1." "" -}}
-{{- $typeString -}}
+{{- $rendered := markdownRenderFieldDoc $doc -}}
+{{- $rendered = regexReplaceAll "(https?://[^[:space:]<]+)" $rendered "[$1]($1)" -}}
+{{- $rendered -}}
 {{- end -}}
 {{- end -}}
 
-{{- define "renderFields" -}}
-{{- $fields := .fields -}}
-{{- $depth := int .depth -}}
-{{- $maxDepth := int .maxDepth -}}
-{{- $treePrefix := .treePrefix -}}
-{{- $fieldCount := len $fields -}}
-{{- range $index, $field := $fields }}
+{{- define "renderFieldsTableRows" -}}
+{{- $fields := . -}}
+{{- range $field := $fields }}
 {{- if not $field.Type }}{{ fail (printf "field %q is missing type information" $field.Name) }}{{- end }}
-{{- $memberType := $field.Type -}}
-{{- $members := $memberType.Members -}}
-{{- $hasMembers := gt (len $members) 0 -}}
-{{- $memberTypeString := $memberType.String -}}
-{{- $isProjectLocal := contains "github.com/coder/coder-k8s/api/" $memberTypeString -}}
-{{- $isLocalObjectRef := contains "k8s.io/api/core/v1.LocalObjectReference" $memberTypeString -}}
-{{- $shouldExpand := and $hasMembers (lt $depth $maxDepth) (or $isProjectLocal $isLocalObjectRef) -}}
-{{- $isLast := eq (add $index 1) $fieldCount -}}
-{{- $branch := "" -}}
-{{- if gt $depth 0 -}}
-{{- if $isLast -}}
-{{- $branch = "└─ " -}}
-{{- else -}}
-{{- $branch = "├─ " -}}
+| `{{ $field.Name }}` | {{ markdownRenderType $field.Type }} | {{ template "fieldDoc" $field.Doc }} |
 {{- end -}}
 {{- end -}}
-{{- $fieldDoc := markdownRenderFieldDoc $field.Doc -}}
-{{- $fieldDoc = $fieldDoc | replace "<br />" " " -}}
-{{- $fieldDoc = regexReplaceAll "(https?://[^[:space:]<]+)" $fieldDoc "[$1]($1)" -}}
-| {{ $treePrefix }}{{ $branch }}`{{ $field.Name }}` | `{{ template "typeName" $memberType }}` | {{ $fieldDoc }} |
-{{ $childPrefix := $treePrefix -}}
-{{- if gt $depth 0 -}}
-{{- if $isLast -}}
-{{- $childPrefix = printf "%s&nbsp;&nbsp;&nbsp;" $treePrefix -}}
-{{- else -}}
-{{- $childPrefix = printf "%s│&nbsp;&nbsp;" $treePrefix -}}
+
+{{- define "collectReferencedTypes" -}}
+{{- $type := .type -}}
+{{- if not $type -}}
+{{- fail "assertion failed: collectReferencedTypes requires type" -}}
 {{- end -}}
-{{- else -}}
-{{- $childPrefix = "" -}}
+{{- $refs := .refs -}}
+{{- $visited := .visited -}}
+
+{{- $uid := $type.UID -}}
+{{- if eq $uid "" -}}
+{{- $uid = $type.String -}}
 {{- end -}}
-{{ if $shouldExpand }}{{ template "renderFields" (dict "fields" $members "depth" (add $depth 1) "maxDepth" $maxDepth "treePrefix" $childPrefix) }}{{ end }}
+{{- if not (hasKey $visited $uid) -}}
+{{- $_ := set $visited $uid true -}}
+
+{{- $members := $type.Members -}}
+{{- $typePackage := $type.Package -}}
+{{- $isProjectLocal := or (hasPrefix "github.com/coder/coder-k8s/api/v1alpha1" $typePackage) (hasPrefix "github.com/coder/coder-k8s/api/aggregation/v1alpha1" $typePackage) -}}
+{{- if and $isProjectLocal (or (gt (len $members) 0) (gt (len $type.EnumValues) 0)) -}}
+{{- $typeKey := printf "%s.%s" $type.Package $type.Name -}}
+{{- $_ := set $refs $typeKey $type -}}
 {{- end -}}
+
+{{- if $type.UnderlyingType -}}
+{{- template "collectReferencedTypes" (dict "type" $type.UnderlyingType "refs" $refs "visited" $visited) -}}
+{{- end -}}
+{{- if $type.KeyType -}}
+{{- template "collectReferencedTypes" (dict "type" $type.KeyType "refs" $refs "visited" $visited) -}}
+{{- end -}}
+{{- if $type.ValueType -}}
+{{- template "collectReferencedTypes" (dict "type" $type.ValueType "refs" $refs "visited" $visited) -}}
+{{- end -}}
+{{- range $field := $members -}}
+{{- if not $field.Type }}{{ fail (printf "field %q is missing type information" $field.Name) }}{{- end -}}
+{{- template "collectReferencedTypes" (dict "type" $field.Type "refs" $refs "visited" $visited) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "renderTypeDefinition" -}}
+{{- $type := . -}}
+{{- if not $type -}}
+{{- fail "assertion failed: renderTypeDefinition requires type" -}}
+{{- end }}
+### {{ $type.Name }}
+
+{{- $typeDoc := trim $type.Doc -}}
+{{- if ne $typeDoc "" }}
+{{ regexReplaceAll "(https?://[^[:space:]<]+)" $typeDoc "[$1]($1)" }}
+
+{{- end }}
+{{- if gt (len $type.Members) 0 }}
+| Field | Type | Description |
+| --- | --- | --- |
+{{ template "renderFieldsTableRows" $type.Members }}
+
+{{- end }}
+{{- if gt (len $type.EnumValues) 0 }}
+| Value | Description |
+| --- | --- |
+{{- range $value := $type.EnumValues }}
+| `{{ $value.Name }}` | {{ template "fieldDoc" $value.Doc }} |
+{{- end }}
+
+{{- end }}
 {{- end -}}
 
 {{- define "gvList" -}}
@@ -106,7 +135,18 @@
 {{- if eq (len $statusMembers) 0 -}}
 {{ fail (printf "expected kind %q to contain at least one status field" $kind) }}
 {{- end -}}
-{{- $maxFieldDepth := 3 -}}
+
+{{- $referencedTypes := dict -}}
+{{- $visitedTypes := dict -}}
+{{- range $field := $specMembers -}}
+{{- if not $field.Type }}{{ fail (printf "field %q is missing type information" $field.Name) }}{{- end -}}
+{{- template "collectReferencedTypes" (dict "type" $field.Type "refs" $referencedTypes "visited" $visitedTypes) -}}
+{{- end -}}
+{{- range $field := $statusMembers -}}
+{{- if not $field.Type }}{{ fail (printf "field %q is missing type information" $field.Name) }}{{- end -}}
+{{- template "collectReferencedTypes" (dict "type" $field.Type "refs" $referencedTypes "visited" $visitedTypes) -}}
+{{- end -}}
+{{- $referencedTypeKeys := keys $referencedTypes | sortAlpha -}}
 
 <!-- Code generated by hack/update-reference-docs.sh using github.com/elastic/crd-ref-docs. DO NOT EDIT. -->
 
@@ -123,12 +163,23 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-{{ template "renderFields" (dict "fields" $specMembers "depth" 0 "maxDepth" $maxFieldDepth "treePrefix" "") }}
+{{ template "renderFieldsTableRows" $specMembers }}
+
 ## Status
 
 | Field | Type | Description |
 | --- | --- | --- |
-{{ template "renderFields" (dict "fields" $statusMembers "depth" 0 "maxDepth" $maxFieldDepth "treePrefix" "") }}
+{{ template "renderFieldsTableRows" $statusMembers }}
+
+{{ if gt (len $referencedTypeKeys) 0 }}
+## Referenced types
+
+{{- range $typeKey := $referencedTypeKeys }}
+{{- $type := index $referencedTypes $typeKey -}}
+{{ template "renderTypeDefinition" $type }}
+{{ end }}
+{{ end }}
+
 ## Source
 
 - Go type: `{{ $goType }}`
