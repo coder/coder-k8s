@@ -76,6 +76,29 @@ ensure_cluster_node_image_matches() {
 	exit 1
 }
 
+assert_no_aggregation_resource_conflict() {
+	local has_apiservice="false"
+	local has_template_crd="false"
+	local has_workspace_crd="false"
+
+	if kubectl_ctx get apiservice v1alpha1.aggregation.coder.com >/dev/null 2>&1; then
+		has_apiservice="true"
+	fi
+	if kubectl_ctx get crd codertemplates.aggregation.coder.com >/dev/null 2>&1; then
+		has_template_crd="true"
+	fi
+	if kubectl_ctx get crd coderworkspaces.aggregation.coder.com >/dev/null 2>&1; then
+		has_workspace_crd="true"
+	fi
+
+	if [[ "${has_apiservice}" == "true" && ( "${has_template_crd}" == "true" || "${has_workspace_crd}" == "true" ) ]]; then
+		echo "assertion failed: detected aggregation API conflict in ${KUBE_CONTEXT}: APIService v1alpha1.aggregation.coder.com and aggregation.coder.com CRDs are both installed." >&2
+		echo "Delete conflicting CRDs before aggregated API demos:" >&2
+		echo "  kubectl --context ${KUBE_CONTEXT} delete crd codertemplates.aggregation.coder.com coderworkspaces.aggregation.coder.com" >&2
+		exit 1
+	fi
+}
+
 build_binary() {
 	local resolved_goarch="${GOARCH}"
 	if [[ -z "${resolved_goarch}" ]]; then
@@ -115,8 +138,10 @@ cmd_up() {
 	kubectl config use-context "${KUBE_CONTEXT}" >/dev/null
 
 	kubectl_ctx wait --for=condition=Ready node --all --timeout="${NODE_READY_TIMEOUT}"
+	assert_no_aggregation_resource_conflict
 
 	kubectl_ctx apply -f config/e2e/namespace.yaml
+	# config/crd/bases intentionally contains only operator-owned coder.com CRDs.
 	kubectl_ctx apply -f config/crd/bases/
 	kubectl_ctx apply -f config/rbac/
 
