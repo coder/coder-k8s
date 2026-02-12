@@ -72,3 +72,20 @@ func TemplateCreateRequestFromK8s(obj *aggregationv1alpha1.CoderTemplate, templa
 		Icon:        obj.Spec.Icon,
 	}, nil
 }
+
+// TemplateUpdateMetaRequestFromK8s builds a codersdk.UpdateTemplateMeta request.
+func TemplateUpdateMetaRequestFromK8s(obj *aggregationv1alpha1.CoderTemplate) codersdk.UpdateTemplateMeta {
+	if obj == nil {
+		panic("assertion failed: template object must not be nil")
+	}
+
+	displayName := obj.Spec.DisplayName
+	description := obj.Spec.Description
+	icon := obj.Spec.Icon
+
+	return codersdk.UpdateTemplateMeta{
+		DisplayName: &displayName,
+		Description: &description,
+		Icon:        &icon,
+	}
+}
