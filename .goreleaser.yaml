@@ -33,6 +33,17 @@ dockers:
     build_flag_templates:
       - "--pull"
       - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+      - "--label=org.opencontainers.image.source=https://github.com/coder/coder-k8s"
+      - "--label=org.opencontainers.image.url=https://coder.github.io/coder-k8s/"
+      - "--label=org.opencontainers.image.documentation=https://coder.github.io/coder-k8s/"
+      - "--label=org.opencontainers.image.title=coder-k8s"
+      - "--label=org.opencontainers.image.description=Kubernetes operator for Coder"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.vendor=Coder"
+      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+      - "--label=org.opencontainers.image.authors=Coder"
 
 changelog:
   use: github

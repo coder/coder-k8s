@@ -364,6 +364,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute OCI label values
+        id: oci
+        run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Build and push :main
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
         with:
@@ -371,3 +375,15 @@ jobs:
           file: Dockerfile.goreleaser
           push: true
           tags: ghcr.io/coder/coder-k8s:main
+          labels: |
+            org.opencontainers.image.created=${{ steps.oci.outputs.created }}
+            org.opencontainers.image.source=https://github.com/coder/coder-k8s
+            org.opencontainers.image.url=https://coder.github.io/coder-k8s/
+            org.opencontainers.image.documentation=https://coder.github.io/coder-k8s/
+            org.opencontainers.image.title=coder-k8s
+            org.opencontainers.image.description=Kubernetes operator for Coder
+            org.opencontainers.image.version=main
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.vendor=Coder
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.authors=Coder

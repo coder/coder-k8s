@@ -123,3 +123,7 @@ Mux users: there is an optional agent skill (`kind-dev`) under `.mux/skills/` wi
 - `config/rbac/` — Generated RBAC manifests
 - `config/samples/` — Sample custom resources
 - `hack/` — Code generation and maintenance scripts
+
+## License
+
+Apache-2.0. See [LICENSE](./LICENSE).
