@@ -190,15 +190,14 @@ jobs:
           docker build -f Dockerfile.goreleaser -t ghcr.io/coder/coder-k8s:e2e .
           kind load docker-image ghcr.io/coder/coder-k8s:e2e --name e2e
 
-      - name: Apply CRDs and RBAC
+      - name: Apply namespace, CRDs, and RBAC
         run: |
+          kubectl apply -f config/e2e/namespace.yaml
           kubectl apply -f config/crd/bases/
           kubectl apply -f config/rbac/
 
       - name: Deploy controller
-        run: |
-          kubectl apply -f config/e2e/namespace.yaml
-          kubectl apply -f config/e2e/
+        run: kubectl apply -f config/e2e/deployment.yaml
 
       - name: Wait for controller
         run: kubectl wait --for=condition=Available deploy/coder-k8s -n coder-system --timeout=120s

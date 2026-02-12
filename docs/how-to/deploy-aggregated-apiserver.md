@@ -16,10 +16,10 @@ kubectl create namespace coder-system
 
 ## 2. Apply RBAC
 
-The RBAC manifest creates the unified `coder-k8s` ServiceAccount used by all app modes.
+Apply generated RBAC manifests (including the shared `coder-k8s` ServiceAccount and bindings):
 
 ```bash
-kubectl apply -f deploy/rbac.yaml
+kubectl apply -f config/rbac/
 ```
 
 ## 3. Deploy the service and deployment

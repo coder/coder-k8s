@@ -116,12 +116,9 @@ cmd_up() {
 
 	kubectl_ctx wait --for=condition=Ready node --all --timeout="${NODE_READY_TIMEOUT}"
 
+	kubectl_ctx apply -f config/e2e/namespace.yaml
 	kubectl_ctx apply -f config/crd/bases/
 	kubectl_ctx apply -f config/rbac/
-
-	kubectl_ctx apply -f config/e2e/namespace.yaml
-	kubectl_ctx apply -f config/e2e/serviceaccount.yaml
-	kubectl_ctx apply -f config/e2e/clusterrole-binding.yaml
 
 	cmd_ctx
 

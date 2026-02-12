@@ -31,7 +31,7 @@ Follow [Deploy the controller (in-cluster)](../../docs/how-to/deploy-controller.
 ```bash
 kubectl create namespace coder-system
 kubectl apply -f config/crd/bases/
-kubectl apply -f deploy/rbac.yaml
+kubectl apply -f config/rbac/
 kubectl apply -f deploy/deployment.yaml
 kubectl rollout status deployment/coder-k8s -n coder-system
 ```

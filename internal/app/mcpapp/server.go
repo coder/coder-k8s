@@ -20,6 +20,14 @@ const (
 	serverImplementationVersion = "dev"
 )
 
+// +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
+// +kubebuilder:rbac:groups=aggregation.coder.com,resources=coderworkspaces;codertemplates,verbs=get;list;watch;update;patch
+
 // NewServer creates an MCP server with all tools registered.
 func NewServer(k8sClient client.Client, clientset kubernetes.Interface) *mcp.Server {
 	if k8sClient == nil {
