@@ -1,11 +1,11 @@
 apiVersion: coder.com/v1alpha1
-kind: WorkspaceProxy
+kind: CoderWorkspaceProxy
 metadata:
-  name: workspaceproxy-sample
+  name: coderworkspaceproxy-sample
   namespace: default
 spec:
   image: "ghcr.io/coder/coder:latest"
   primaryAccessURL: "https://coder.example.com"
   proxySessionTokenSecretRef:
-    name: workspaceproxy-token
+    name: coderworkspaceproxy-token
     key: token

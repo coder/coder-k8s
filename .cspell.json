@@ -19,6 +19,8 @@
     "codertemplates",
     "coderworkspace",
     "coderworkspaces",
+    "coderworkspaceproxy",
+    "coderworkspaceproxies",
     "coderprovisioner",
     "coderprovisioners",
     "controllerapp",

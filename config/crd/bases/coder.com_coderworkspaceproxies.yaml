@@ -4,20 +4,20 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.0
-  name: workspaceproxies.coder.com
+  name: coderworkspaceproxies.coder.com
 spec:
   group: coder.com
   names:
-    kind: WorkspaceProxy
-    listKind: WorkspaceProxyList
-    plural: workspaceproxies
-    singular: workspaceproxy
+    kind: CoderWorkspaceProxy
+    listKind: CoderWorkspaceProxyList
+    plural: coderworkspaceproxies
+    singular: coderworkspaceproxy
   scope: Namespaced
   versions:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: WorkspaceProxy is the schema for Coder workspace proxy resources.
+        description: CoderWorkspaceProxy is the schema for Coder workspace proxy resources.
         properties:
           apiVersion:
             description: |-

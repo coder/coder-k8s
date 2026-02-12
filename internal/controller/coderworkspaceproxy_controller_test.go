@@ -108,7 +108,7 @@ func workspaceProxyInstanceLabelValue(name string) string {
 	return fmt.Sprintf("%s-%s", name[:available], suffix)
 }
 
-func TestWorkspaceProxyReconcile_UsingDirectTokenSecret(t *testing.T) {
+func TestCoderWorkspaceProxyReconcile_UsingDirectTokenSecret(t *testing.T) {
 	ctx := context.Background()
 	secretName := "proxy-session-token"
 
@@ -126,7 +126,7 @@ func TestWorkspaceProxyReconcile_UsingDirectTokenSecret(t *testing.T) {
 		_ = k8sClient.Delete(ctx, secret)
 	})
 
-	workspaceProxy := &coderv1alpha1.WorkspaceProxy{
+	workspaceProxy := &coderv1alpha1.CoderWorkspaceProxy{
 		ObjectMeta: metav1.ObjectMeta{Name: "proxy-direct", Namespace: "default"},
 		Spec: coderv1alpha1.WorkspaceProxySpec{
 			Image:            "proxy-image:latest",
@@ -144,7 +144,7 @@ func TestWorkspaceProxyReconcile_UsingDirectTokenSecret(t *testing.T) {
 		_ = k8sClient.Delete(ctx, workspaceProxy)
 	})
 
-	reconciler := &controller.WorkspaceProxyReconciler{Client: k8sClient, Scheme: scheme}
+	reconciler := &controller.CoderWorkspaceProxyReconciler{Client: k8sClient, Scheme: scheme}
 	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: workspaceProxy.Name, Namespace: workspaceProxy.Namespace}})
 	if err != nil {
 		t.Fatalf("reconcile workspace proxy: %v", err)
@@ -177,7 +177,7 @@ func TestWorkspaceProxyReconcile_UsingDirectTokenSecret(t *testing.T) {
 	}
 }
 
-func TestWorkspaceProxyReconcile_DoesNotCollideWithControlPlaneChildren(t *testing.T) {
+func TestCoderWorkspaceProxyReconcile_DoesNotCollideWithControlPlaneChildren(t *testing.T) {
 	ctx := context.Background()
 	resourceName := "shared-name"
 
@@ -208,7 +208,7 @@ func TestWorkspaceProxyReconcile_DoesNotCollideWithControlPlaneChildren(t *testi
 		_ = k8sClient.Delete(ctx, controlPlane)
 	})
 
-	workspaceProxy := &coderv1alpha1.WorkspaceProxy{
+	workspaceProxy := &coderv1alpha1.CoderWorkspaceProxy{
 		ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: "default"},
 		Spec: coderv1alpha1.WorkspaceProxySpec{
 			Image:            "proxy-image:latest",
@@ -231,7 +231,7 @@ func TestWorkspaceProxyReconcile_DoesNotCollideWithControlPlaneChildren(t *testi
 		t.Fatalf("reconcile control plane: %v", err)
 	}
 
-	workspaceProxyReconciler := &controller.WorkspaceProxyReconciler{Client: k8sClient, Scheme: scheme}
+	workspaceProxyReconciler := &controller.CoderWorkspaceProxyReconciler{Client: k8sClient, Scheme: scheme}
 	if _, err := workspaceProxyReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: workspaceProxy.Name, Namespace: workspaceProxy.Namespace}}); err != nil {
 		t.Fatalf("reconcile workspace proxy: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestWorkspaceProxyReconcile_DoesNotCollideWithControlPlaneChildren(t *testi
 	}
 }
 
-func TestWorkspaceProxyReconcile_TruncatesLongInstanceLabelValue(t *testing.T) {
+func TestCoderWorkspaceProxyReconcile_TruncatesLongInstanceLabelValue(t *testing.T) {
 	ctx := context.Background()
 	resourceName := strings.Repeat("a", 70)
 	secretName := "proxy-long-name-token"
@@ -270,7 +270,7 @@ func TestWorkspaceProxyReconcile_TruncatesLongInstanceLabelValue(t *testing.T) {
 		_ = k8sClient.Delete(ctx, secret)
 	})
 
-	workspaceProxy := &coderv1alpha1.WorkspaceProxy{
+	workspaceProxy := &coderv1alpha1.CoderWorkspaceProxy{
 		ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: "default"},
 		Spec: coderv1alpha1.WorkspaceProxySpec{
 			Image:            "proxy-image:latest",
@@ -288,7 +288,7 @@ func TestWorkspaceProxyReconcile_TruncatesLongInstanceLabelValue(t *testing.T) {
 		_ = k8sClient.Delete(ctx, workspaceProxy)
 	})
 
-	reconciler := &controller.WorkspaceProxyReconciler{Client: k8sClient, Scheme: scheme}
+	reconciler := &controller.CoderWorkspaceProxyReconciler{Client: k8sClient, Scheme: scheme}
 	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: workspaceProxy.Name, Namespace: workspaceProxy.Namespace}}); err != nil {
 		t.Fatalf("reconcile workspace proxy: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestWorkspaceProxyReconcile_TruncatesLongInstanceLabelValue(t *testing.T) {
 	}
 }
 
-func TestWorkspaceProxyReconcile_WithBootstrap_UsesExistingTokenWithoutCredentials(t *testing.T) {
+func TestCoderWorkspaceProxyReconcile_WithBootstrap_UsesExistingTokenWithoutCredentials(t *testing.T) {
 	ctx := context.Background()
 	tokenSecretName := "proxy-bootstrap-existing-token"
 	proxyTokenSecret := &corev1.Secret{
@@ -338,7 +338,7 @@ func TestWorkspaceProxyReconcile_WithBootstrap_UsesExistingTokenWithoutCredentia
 		_ = k8sClient.Delete(ctx, proxyTokenSecret)
 	})
 
-	workspaceProxy := &coderv1alpha1.WorkspaceProxy{
+	workspaceProxy := &coderv1alpha1.CoderWorkspaceProxy{
 		ObjectMeta: metav1.ObjectMeta{Name: "proxy-bootstrap-existing", Namespace: "default"},
 		Spec: coderv1alpha1.WorkspaceProxySpec{
 			Image: "proxy-image:latest",
@@ -363,7 +363,7 @@ func TestWorkspaceProxyReconcile_WithBootstrap_UsesExistingTokenWithoutCredentia
 	bootstrapClient := &fakeBootstrapClient{
 		response: coderbootstrap.RegisterWorkspaceProxyResponse{ProxyName: workspaceProxy.Name, ProxyToken: "generated-proxy-token"},
 	}
-	reconciler := &controller.WorkspaceProxyReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
+	reconciler := &controller.CoderWorkspaceProxyReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
 
 	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: workspaceProxy.Name, Namespace: workspaceProxy.Namespace}})
 	if err != nil {
@@ -376,7 +376,7 @@ func TestWorkspaceProxyReconcile_WithBootstrap_UsesExistingTokenWithoutCredentia
 		t.Fatalf("expected bootstrap client to be skipped when token already exists, got %d calls", bootstrapClient.calls)
 	}
 
-	reconciled := &coderv1alpha1.WorkspaceProxy{}
+	reconciled := &coderv1alpha1.CoderWorkspaceProxy{}
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: workspaceProxy.Name, Namespace: workspaceProxy.Namespace}, reconciled); err != nil {
 		t.Fatalf("get reconciled workspace proxy: %v", err)
 	}
@@ -388,7 +388,7 @@ func TestWorkspaceProxyReconcile_WithBootstrap_UsesExistingTokenWithoutCredentia
 	}
 }
 
-func TestWorkspaceProxyReconcile_WithBootstrap(t *testing.T) {
+func TestCoderWorkspaceProxyReconcile_WithBootstrap(t *testing.T) {
 	ctx := context.Background()
 	credentialsSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "proxy-bootstrap-credentials", Namespace: "default"},
@@ -404,7 +404,7 @@ func TestWorkspaceProxyReconcile_WithBootstrap(t *testing.T) {
 		_ = k8sClient.Delete(ctx, credentialsSecret)
 	})
 
-	workspaceProxy := &coderv1alpha1.WorkspaceProxy{
+	workspaceProxy := &coderv1alpha1.CoderWorkspaceProxy{
 		ObjectMeta: metav1.ObjectMeta{Name: "proxy-bootstrap", Namespace: "default"},
 		Spec: coderv1alpha1.WorkspaceProxySpec{
 			Image: "proxy-image:latest",
@@ -429,7 +429,7 @@ func TestWorkspaceProxyReconcile_WithBootstrap(t *testing.T) {
 	bootstrapClient := &fakeBootstrapClient{
 		response: coderbootstrap.RegisterWorkspaceProxyResponse{ProxyName: workspaceProxy.Name, ProxyToken: "generated-proxy-token"},
 	}
-	reconciler := &controller.WorkspaceProxyReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
+	reconciler := &controller.CoderWorkspaceProxyReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
 
 	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: workspaceProxy.Name, Namespace: workspaceProxy.Namespace}})
 	if err != nil {

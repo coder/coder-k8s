@@ -29,22 +29,22 @@ const (
 	workspaceProxyNamePrefix  = "wsproxy-"
 )
 
-// WorkspaceProxyReconciler reconciles a WorkspaceProxy object.
-type WorkspaceProxyReconciler struct {
+// CoderWorkspaceProxyReconciler reconciles a CoderWorkspaceProxy object.
+type CoderWorkspaceProxyReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
 	BootstrapClient coderbootstrap.Client
 }
 
-// +kubebuilder:rbac:groups=coder.com,resources=workspaceproxies,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=coder.com,resources=workspaceproxies/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=coder.com,resources=workspaceproxies/finalizers,verbs=update
+// +kubebuilder:rbac:groups=coder.com,resources=coderworkspaceproxies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=coder.com,resources=coderworkspaceproxies/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=coder.com,resources=coderworkspaceproxies/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 
-// Reconcile converges the desired WorkspaceProxy spec into Deployment and Service resources.
-func (r *WorkspaceProxyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+// Reconcile converges the desired CoderWorkspaceProxy spec into Deployment and Service resources.
+func (r *CoderWorkspaceProxyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	if r.Client == nil {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: reconciler client must not be nil")
 	}
@@ -52,12 +52,12 @@ func (r *WorkspaceProxyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, fmt.Errorf("assertion failed: reconciler scheme must not be nil")
 	}
 
-	workspaceProxy := &coderv1alpha1.WorkspaceProxy{}
+	workspaceProxy := &coderv1alpha1.CoderWorkspaceProxy{}
 	if err := r.Get(ctx, req.NamespacedName, workspaceProxy); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
-		return ctrl.Result{}, fmt.Errorf("get workspaceproxy %s: %w", req.NamespacedName, err)
+		return ctrl.Result{}, fmt.Errorf("get coderworkspaceproxy %s: %w", req.NamespacedName, err)
 	}
 
 	if workspaceProxy.Name != req.Name || workspaceProxy.Namespace != req.Namespace {
@@ -92,9 +92,9 @@ func (r *WorkspaceProxyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	return ctrl.Result{}, nil
 }
 
-func (r *WorkspaceProxyReconciler) resolveProxyCredentials(
+func (r *CoderWorkspaceProxyReconciler) resolveProxyCredentials(
 	ctx context.Context,
-	workspaceProxy *coderv1alpha1.WorkspaceProxy,
+	workspaceProxy *coderv1alpha1.CoderWorkspaceProxy,
 ) (string, *coderv1alpha1.SecretKeySelector, bool, error) {
 	if workspaceProxy.Spec.Bootstrap == nil {
 		tokenRef := workspaceProxy.Spec.ProxySessionTokenSecretRef
@@ -162,9 +162,9 @@ func (r *WorkspaceProxyReconciler) resolveProxyCredentials(
 	return primary, &coderv1alpha1.SecretKeySelector{Name: tokenSecretName, Key: proxyTokenKey}, true, nil
 }
 
-func (r *WorkspaceProxyReconciler) reconcileDeployment(
+func (r *CoderWorkspaceProxyReconciler) reconcileDeployment(
 	ctx context.Context,
-	workspaceProxy *coderv1alpha1.WorkspaceProxy,
+	workspaceProxy *coderv1alpha1.CoderWorkspaceProxy,
 	primaryAccessURL string,
 	tokenRef *coderv1alpha1.SecretKeySelector,
 ) (*appsv1.Deployment, error) {
@@ -232,7 +232,7 @@ func (r *WorkspaceProxyReconciler) reconcileDeployment(
 	return deployment, nil
 }
 
-func (r *WorkspaceProxyReconciler) reconcileService(ctx context.Context, workspaceProxy *coderv1alpha1.WorkspaceProxy) (*corev1.Service, error) {
+func (r *CoderWorkspaceProxyReconciler) reconcileService(ctx context.Context, workspaceProxy *coderv1alpha1.CoderWorkspaceProxy) (*corev1.Service, error) {
 	serviceName := workspaceProxyResourceName(workspaceProxy.Name)
 	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: serviceName, Namespace: workspaceProxy.Namespace}}
 
@@ -273,9 +273,9 @@ func (r *WorkspaceProxyReconciler) reconcileService(ctx context.Context, workspa
 	return service, nil
 }
 
-func (r *WorkspaceProxyReconciler) reconcileStatus(
+func (r *CoderWorkspaceProxyReconciler) reconcileStatus(
 	ctx context.Context,
-	workspaceProxy *coderv1alpha1.WorkspaceProxy,
+	workspaceProxy *coderv1alpha1.CoderWorkspaceProxy,
 	deployment *appsv1.Deployment,
 	_ *corev1.Service,
 	tokenRef *coderv1alpha1.SecretKeySelector,
@@ -308,9 +308,9 @@ func (r *WorkspaceProxyReconciler) reconcileStatus(
 	return nil
 }
 
-func (r *WorkspaceProxyReconciler) ensureTokenSecret(
+func (r *CoderWorkspaceProxyReconciler) ensureTokenSecret(
 	ctx context.Context,
-	workspaceProxy *coderv1alpha1.WorkspaceProxy,
+	workspaceProxy *coderv1alpha1.CoderWorkspaceProxy,
 	name string,
 	key string,
 	token string,
@@ -337,7 +337,7 @@ func (r *WorkspaceProxyReconciler) ensureTokenSecret(
 	return nil
 }
 
-func (r *WorkspaceProxyReconciler) readSecretValue(ctx context.Context, namespace, name, key string) (string, error) {
+func (r *CoderWorkspaceProxyReconciler) readSecretValue(ctx context.Context, namespace, name, key string) (string, error) {
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret); err != nil {
 		return "", err
@@ -355,7 +355,7 @@ func (r *WorkspaceProxyReconciler) readSecretValue(ctx context.Context, namespac
 }
 
 // SetupWithManager wires the reconciler into controller-runtime.
-func (r *WorkspaceProxyReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *CoderWorkspaceProxyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if mgr == nil {
 		return fmt.Errorf("assertion failed: manager must not be nil")
 	}
@@ -367,11 +367,11 @@ func (r *WorkspaceProxyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&coderv1alpha1.WorkspaceProxy{}).
+		For(&coderv1alpha1.CoderWorkspaceProxy{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.Secret{}).
-		Named("workspaceproxy").
+		Named("coderworkspaceproxy").
 		Complete(r)
 }
 

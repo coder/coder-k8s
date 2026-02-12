@@ -95,13 +95,13 @@ func SetupControllers(mgr manager.Manager) error {
 		return fmt.Errorf("unable to create controller: %w", err)
 	}
 
-	workspaceProxyReconciler := &controller.WorkspaceProxyReconciler{
+	coderWorkspaceProxyReconciler := &controller.CoderWorkspaceProxyReconciler{
 		Client:          client,
 		Scheme:          managerScheme,
 		BootstrapClient: coderbootstrap.NewSDKClient(),
 	}
-	if err := workspaceProxyReconciler.SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create workspace proxy controller: %w", err)
+	if err := coderWorkspaceProxyReconciler.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create coder workspace proxy controller: %w", err)
 	}
 
 	provisionerReconciler := &controller.CoderProvisionerReconciler{

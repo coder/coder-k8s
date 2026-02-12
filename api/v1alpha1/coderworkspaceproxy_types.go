@@ -71,11 +71,11 @@ type WorkspaceProxyStatus struct {
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
-// +kubebuilder:resource:scope=Namespaced
+// +kubebuilder:resource:path=coderworkspaceproxies,scope=Namespaced
 // +kubebuilder:subresource:status
 
-// WorkspaceProxy is the schema for Coder workspace proxy resources.
-type WorkspaceProxy struct {
+// CoderWorkspaceProxy is the schema for Coder workspace proxy resources.
+type CoderWorkspaceProxy struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
@@ -86,13 +86,13 @@ type WorkspaceProxy struct {
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 
-// WorkspaceProxyList contains a list of WorkspaceProxy objects.
-type WorkspaceProxyList struct {
+// CoderWorkspaceProxyList contains a list of CoderWorkspaceProxy objects.
+type CoderWorkspaceProxyList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []WorkspaceProxy `json:"items"`
+	Items           []CoderWorkspaceProxy `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(&WorkspaceProxy{}, &WorkspaceProxyList{})
+	SchemeBuilder.Register(&CoderWorkspaceProxy{}, &CoderWorkspaceProxyList{})
 }

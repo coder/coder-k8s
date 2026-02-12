@@ -45,7 +45,7 @@ nav:
           # BEGIN GENERATED API NAV
           - CoderControlPlane: reference/api/codercontrolplane.md
           - CoderProvisioner: reference/api/coderprovisioner.md
-          - WorkspaceProxy: reference/api/workspaceproxy.md
+          - CoderWorkspaceProxy: reference/api/coderworkspaceproxy.md
           - CoderTemplate: reference/api/codertemplate.md
           - CoderWorkspace: reference/api/coderworkspace.md
           # END GENERATED API NAV
