@@ -13,35 +13,45 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `spec.controlPlaneRef` | `k8s.io/api/core/v1.LocalObjectReference` | ControlPlaneRef identifies which CoderControlPlane instance to join. |
-| `spec.organizationName` | `string` | OrganizationName is the Coder organization. Defaults to "default". |
-| `spec.bootstrap` | `github.com/coder/coder-k8s/api/v1alpha1.CoderProvisionerBootstrapSpec` | Bootstrap configures credentials for provisioner key management. |
-| `spec.key` | `github.com/coder/coder-k8s/api/v1alpha1.CoderProvisionerKeySpec` | Key configures provisioner key naming and secret storage. |
-| `spec.replicas` | `int32` | Replicas is the desired number of provisioner pods. |
-| `spec.tags` | `map[string]string` | Tags are attached to the provisioner key for job routing. |
-| `spec.image` | `string` | Image is the container image. Defaults to the control plane image. |
-| `spec.extraArgs` | `[]string` | ExtraArgs are appended after "provisionerd start". |
-| `spec.extraEnv` | `[]k8s.io/api/core/v1.EnvVar` | ExtraEnv are injected into the provisioner container. |
-| `spec.resources` | `k8s.io/api/core/v1.ResourceRequirements` | Resources for the provisioner container. |
-| `spec.imagePullSecrets` | `[]k8s.io/api/core/v1.LocalObjectReference` | ImagePullSecrets are used by the pod to pull private images. |
-| `spec.terminationGracePeriodSeconds` | `int64` | TerminationGracePeriodSeconds for the provisioner pods. |
+| `controlPlaneRef` | `corev1.LocalObjectReference` | ControlPlaneRef identifies which CoderControlPlane instance to join. |
+| &nbsp;&nbsp;`name` | `string` | Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: [https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names) |
+| `organizationName` | `string` | OrganizationName is the Coder organization. Defaults to "default". |
+| `bootstrap` | `CoderProvisionerBootstrapSpec` | Bootstrap configures credentials for provisioner key management. |
+| &nbsp;&nbsp;`credentialsSecretRef` | `SecretKeySelector` | CredentialsSecretRef points to a Secret containing a Coder session token with permission to manage provisioner keys. |
+| &nbsp;&nbsp;&nbsp;&nbsp;`name` | `string` | Name is the Kubernetes Secret name. |
+| &nbsp;&nbsp;&nbsp;&nbsp;`key` | `string` | Key is the key inside the Secret data map. |
+| `key` | `CoderProvisionerKeySpec` | Key configures provisioner key naming and secret storage. |
+| &nbsp;&nbsp;`name` | `string` | Name is the provisioner key name in coderd. Defaults to the CR name. |
+| &nbsp;&nbsp;`secretName` | `string` | SecretName is the Kubernetes Secret to store the key. Defaults to "\{crName\}-provisioner-key". |
+| &nbsp;&nbsp;`secretKey` | `string` | SecretKey is the data key in the Secret. Defaults to "key". |
+| `replicas` | `int32` | Replicas is the desired number of provisioner pods. |
+| `tags` | `map[string]string` | Tags are attached to the provisioner key for job routing. |
+| `image` | `string` | Image is the container image. Defaults to the control plane image. |
+| `extraArgs` | `[]string` | ExtraArgs are appended after "provisionerd start". |
+| `extraEnv` | `[]corev1.EnvVar` | ExtraEnv are injected into the provisioner container. |
+| `resources` | `corev1.ResourceRequirements` | Resources for the provisioner container. |
+| `imagePullSecrets` | `[]corev1.LocalObjectReference` | ImagePullSecrets are used by the pod to pull private images. |
+| &nbsp;&nbsp;`name` | `string` | Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: [https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names) |
+| `terminationGracePeriodSeconds` | `int64` | TerminationGracePeriodSeconds for the provisioner pods. |
 
 ## Status
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `status.observedGeneration` | `int64` | ObservedGeneration tracks the spec generation this status reflects. |
-| `status.readyReplicas` | `int32` | ReadyReplicas is the number of ready pods observed in the deployment. |
-| `status.phase` | `string` | Phase is a high-level readiness indicator. |
-| `status.conditions` | `[]metav1.Condition` | Conditions are Kubernetes-standard conditions for this resource. |
-| `status.organizationID` | `string` | OrganizationID is the organization ID last applied to the provisioner key. |
-| `status.organizationName` | `string` | OrganizationName is the organization name last applied to the provisioner key. |
-| `status.provisionerKeyID` | `string` | ProvisionerKeyID is the provisioner key ID last applied in coderd. |
-| `status.provisionerKeyName` | `string` | ProvisionerKeyName is the provisioner key name last applied in coderd. |
-| `status.tagsHash` | `string` | TagsHash is a deterministic hash of spec.tags last applied to the provisioner key. |
-| `status.controlPlaneRefName` | `string` | ControlPlaneRefName is the control plane ref name last applied to the provisioner key. |
-| `status.controlPlaneURL` | `string` | ControlPlaneURL is the control plane URL last applied to the provisioner key. |
-| `status.secretRef` | `github.com/coder/coder-k8s/api/v1alpha1.SecretKeySelector` | SecretRef references the provisioner key secret data currently in use. |
+| `observedGeneration` | `int64` | ObservedGeneration tracks the spec generation this status reflects. |
+| `readyReplicas` | `int32` | ReadyReplicas is the number of ready pods observed in the deployment. |
+| `phase` | `string` | Phase is a high-level readiness indicator. |
+| `conditions` | `[]metav1.Condition` | Conditions are Kubernetes-standard conditions for this resource. |
+| `organizationID` | `string` | OrganizationID is the organization ID last applied to the provisioner key. |
+| `organizationName` | `string` | OrganizationName is the organization name last applied to the provisioner key. |
+| `provisionerKeyID` | `string` | ProvisionerKeyID is the provisioner key ID last applied in coderd. |
+| `provisionerKeyName` | `string` | ProvisionerKeyName is the provisioner key name last applied in coderd. |
+| `tagsHash` | `string` | TagsHash is a deterministic hash of spec.tags last applied to the provisioner key. |
+| `controlPlaneRefName` | `string` | ControlPlaneRefName is the control plane ref name last applied to the provisioner key. |
+| `controlPlaneURL` | `string` | ControlPlaneURL is the control plane URL last applied to the provisioner key. |
+| `secretRef` | `SecretKeySelector` | SecretRef references the provisioner key secret data currently in use. |
+| &nbsp;&nbsp;`name` | `string` | Name is the Kubernetes Secret name. |
+| &nbsp;&nbsp;`key` | `string` | Key is the key inside the Secret data map. |
 
 ## Source
 
