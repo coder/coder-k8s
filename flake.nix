@@ -57,6 +57,8 @@
               govulncheck
 
               docsPython
+
+	      yazi
             ];
           };
         }

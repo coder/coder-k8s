@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
@@ -148,6 +149,123 @@ func TestEnsureProvisionerKey_Exists(t *testing.T) {
 	require.Equal(t, keyID, resp.KeyID)
 	require.Equal(t, keyName, resp.KeyName)
 	require.Empty(t, resp.Key)
+}
+
+func TestEnsureProvisionerKey_FallsBackWhenRateLimitBypassRejected(t *testing.T) {
+	t.Parallel()
+
+	const keyName = "provisioner-key"
+	orgID := uuid.New()
+	keyID := uuid.New()
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	createCalls := 0
+	listCalls := 0
+	bypassRejectedCalls := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(codersdk.BypassRatelimitHeader) == "true" {
+			bypassRejectedCalls++
+			writeJSONResponse(t, w, http.StatusPreconditionRequired, map[string]any{
+				"message": "bypass is not allowed",
+			})
+			return
+		}
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/organizations/default":
+			writeJSONResponse(t, w, http.StatusOK, map[string]any{
+				"id":         orgID.String(),
+				"name":       "default",
+				"created_at": now,
+				"updated_at": now,
+			})
+			return
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/organizations/"+orgID.String()+"/provisionerkeys":
+			listCalls++
+			if createCalls == 0 {
+				writeJSONResponse(t, w, http.StatusOK, []any{})
+				return
+			}
+			writeJSONResponse(t, w, http.StatusOK, []map[string]any{{
+				"id":           keyID.String(),
+				"name":         keyName,
+				"organization": orgID.String(),
+				"created_at":   now,
+				"tags":         map[string]string{"cluster": "dev"},
+			}})
+			return
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/organizations/"+orgID.String()+"/provisionerkeys":
+			createCalls++
+			writeJSONResponse(t, w, http.StatusCreated, map[string]any{
+				"key": "plaintext-provisioner-key",
+			})
+			return
+		default:
+			writeJSONResponse(t, w, http.StatusNotFound, map[string]any{"message": "unexpected route"})
+			return
+		}
+	}))
+	defer server.Close()
+
+	client := coderbootstrap.NewSDKClient()
+	resp, err := client.EnsureProvisionerKey(context.Background(), coderbootstrap.EnsureProvisionerKeyRequest{
+		CoderURL:     server.URL,
+		SessionToken: "session-token",
+		KeyName:      keyName,
+		Tags:         map[string]string{"cluster": "dev"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, createCalls)
+	require.Equal(t, 2, listCalls)
+	require.Equal(t, 2, bypassRejectedCalls)
+	require.Equal(t, orgID, resp.OrganizationID)
+	require.Equal(t, keyID, resp.KeyID)
+	require.Equal(t, keyName, resp.KeyName)
+	require.Equal(t, "plaintext-provisioner-key", resp.Key)
+}
+
+func TestDeleteProvisionerKey_FallsBackWhenRateLimitBypassRejected(t *testing.T) {
+	t.Parallel()
+
+	const keyName = "delete-me"
+	orgID := uuid.New()
+	now := time.Now().UTC().Format(time.RFC3339)
+	deleteCalls := 0
+	bypassRejectedCalls := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(codersdk.BypassRatelimitHeader) == "true" {
+			bypassRejectedCalls++
+			writeJSONResponse(t, w, http.StatusPreconditionRequired, map[string]any{"message": "bypass is not allowed"})
+			return
+		}
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/organizations/default":
+			writeJSONResponse(t, w, http.StatusOK, map[string]any{
+				"id":         orgID.String(),
+				"name":       "default",
+				"created_at": now,
+				"updated_at": now,
+			})
+			return
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v2/organizations/"+orgID.String()+"/provisionerkeys/"+keyName:
+			deleteCalls++
+			w.WriteHeader(http.StatusNoContent)
+			return
+		default:
+			writeJSONResponse(t, w, http.StatusNotFound, map[string]any{"message": "unexpected route"})
+			return
+		}
+	}))
+	defer server.Close()
+
+	client := coderbootstrap.NewSDKClient()
+	err := client.DeleteProvisionerKey(context.Background(), server.URL, "session-token", "", keyName)
+	require.NoError(t, err)
+	require.Equal(t, 1, deleteCalls)
+	require.Equal(t, 1, bypassRejectedCalls)
 }
 
 func TestEnsureProvisionerKey_ValidationErrors(t *testing.T) {

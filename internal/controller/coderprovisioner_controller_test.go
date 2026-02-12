@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
@@ -937,6 +939,62 @@ func TestCoderProvisionerReconciler_ConditionsOnFailure(t *testing.T) {
 		bootstrapCondition := findCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionBootstrapSecretReady)
 		require.Equal(t, "BootstrapSecretUnavailable", bootstrapCondition.Reason)
 	})
+}
+
+func TestCoderProvisionerReconciler_RateLimitBackoff(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	namespace := createTestNamespace(ctx, t, "coderprov-rate-limit")
+	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-rate-limit", "https://coder.example.com")
+	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
+
+	provisioner := &coderv1alpha1.CoderProvisioner{
+		ObjectMeta: metav1.ObjectMeta{Name: "provisioner-rate-limit", Namespace: namespace},
+		Spec: coderv1alpha1.CoderProvisionerSpec{
+			ControlPlaneRef: corev1.LocalObjectReference{Name: controlPlane.Name},
+			Bootstrap: coderv1alpha1.CoderProvisionerBootstrapSpec{
+				CredentialsSecretRef: coderv1alpha1.SecretKeySelector{Name: bootstrapSecret.Name, Key: coderv1alpha1.DefaultTokenSecretKey},
+			},
+			Key: coderv1alpha1.CoderProvisionerKeySpec{Name: "rate-limit-key"},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, provisioner))
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(context.Background(), provisioner)
+	})
+
+	bootstrapClient := &fakeBootstrapClient{
+		provisionerKeyErr: codersdk.NewTestError(
+			http.StatusTooManyRequests,
+			http.MethodPost,
+			"https://coder.example.com/api/v2/organizations/default/provisionerkeys",
+		),
+	}
+	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
+	request := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
+
+	// The first reconcile only adds the cleanup finalizer.
+	reconcileProvisioner(ctx, t, reconciler, request)
+
+	firstResult, firstErr := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: request})
+	require.NoError(t, firstErr)
+	require.GreaterOrEqual(t, firstResult.RequeueAfter, time.Second)
+	require.LessOrEqual(t, firstResult.RequeueAfter, 3*time.Second)
+
+	secondResult, secondErr := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: request})
+	require.NoError(t, secondErr)
+	require.Greater(t, secondResult.RequeueAfter, firstResult.RequeueAfter)
+	require.GreaterOrEqual(t, secondResult.RequeueAfter, 3*time.Second)
+	require.LessOrEqual(t, secondResult.RequeueAfter, 6*time.Second)
+	require.Equal(t, 2, bootstrapClient.provisionerKeyCalls)
+
+	reconciled := &coderv1alpha1.CoderProvisioner{}
+	require.NoError(t, k8sClient.Get(ctx, request, reconciled))
+	requireCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady, metav1.ConditionFalse)
+	rateLimitedCondition := findCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady)
+	require.Equal(t, "RateLimited", rateLimitedCondition.Reason)
+	require.Contains(t, rateLimitedCondition.Message, "retrying in")
 }
 
 func TestCoderProvisionerReconciler_LongNameTruncation(t *testing.T) {

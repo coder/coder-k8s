@@ -3,10 +3,14 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"hash/fnv"
 	"maps"
 	"slices"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	appsv1 "k8s.io/api/apps/v1"
@@ -33,7 +37,14 @@ const (
 	provisionerNamePrefix                           = "provisioner-"
 	provisionerServiceAccountSuffix                 = "-provisioner"
 	provisionerKeyChecksumAnnotation                = "checksum/provisioner-key"
+
+	provisionerRateLimitBackoffBase  = 2 * time.Second
+	provisionerRateLimitBackoffCap   = 2 * time.Minute
+	provisionerRateLimitBackoffFloor = 1 * time.Second
+	provisionerRateLimitJitterRatio  = 0.2
 )
+
+var provisionerRateLimitBackoffAttempts sync.Map // map[string]int
 
 // CoderProvisionerReconciler reconciles a CoderProvisioner object.
 type CoderProvisionerReconciler struct {
@@ -50,7 +61,7 @@ type CoderProvisionerReconciler struct {
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile converges the desired CoderProvisioner spec into Deployment, RBAC, and Secret resources.
-func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	if r.Client == nil {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: reconciler client must not be nil")
 	}
@@ -62,7 +73,42 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	provisioner := &coderv1alpha1.CoderProvisioner{}
-	if err := r.Get(ctx, req.NamespacedName, provisioner); err != nil {
+	defer func() {
+		switch {
+		case err == nil:
+			if result.RequeueAfter == 0 {
+				resetProvisionerRateLimitBackoff(req.NamespacedName)
+			}
+			return
+		case !coderbootstrap.IsRateLimitError(err):
+			resetProvisionerRateLimitBackoff(req.NamespacedName)
+			return
+		}
+
+		backoff := nextProvisionerRateLimitBackoff(req.NamespacedName)
+		message := fmt.Sprintf("Coder API rate limited while reconciling provisioner key; retrying in %s", backoff.Round(time.Second))
+		setCondition(
+			provisioner,
+			coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+			metav1.ConditionFalse,
+			"RateLimited",
+			message,
+		)
+		if statusErr := r.Status().Update(ctx, provisioner); statusErr != nil && !apierrors.IsNotFound(statusErr) {
+			ctrl.LoggerFrom(ctx).Error(statusErr, "failed to update coderprovisioner status after rate limit", "name", req.Name, "namespace", req.Namespace)
+		}
+
+		ctrl.LoggerFrom(ctx).Info(
+			"coder API rate limited during provisioner reconciliation; requeueing with backoff",
+			"name", req.Name,
+			"namespace", req.Namespace,
+			"requeueAfter", backoff,
+		)
+		result = ctrl.Result{RequeueAfter: backoff}
+		err = nil
+	}()
+
+	if err = r.Get(ctx, req.NamespacedName, provisioner); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
@@ -1081,6 +1127,67 @@ func hashProvisionerSecret(secretValue []byte) string {
 	hasher := fnv.New32a()
 	_, _ = hasher.Write(secretValue)
 	return fmt.Sprintf("%08x", hasher.Sum32())
+}
+
+func nextProvisionerRateLimitBackoff(namespacedName types.NamespacedName) time.Duration {
+	if namespacedName.Namespace == "" || namespacedName.Name == "" {
+		return provisionerRateLimitBackoffFloor
+	}
+
+	mapKey := namespacedName.String()
+	attempt := 1
+	if previous, ok := provisionerRateLimitBackoffAttempts.Load(mapKey); ok {
+		previousAttempt, castOK := previous.(int)
+		if !castOK || previousAttempt < 0 {
+			previousAttempt = 0
+		}
+		attempt = previousAttempt + 1
+	}
+	provisionerRateLimitBackoffAttempts.Store(mapKey, attempt)
+
+	backoff := provisionerRateLimitBackoffBase
+	for i := 1; i < attempt; i++ {
+		if backoff >= provisionerRateLimitBackoffCap/2 {
+			backoff = provisionerRateLimitBackoffCap
+			break
+		}
+		backoff *= 2
+	}
+	if backoff > provisionerRateLimitBackoffCap {
+		backoff = provisionerRateLimitBackoffCap
+	}
+
+	jittered := time.Duration(float64(backoff) * provisionerRateLimitJitterMultiplier())
+	if jittered < provisionerRateLimitBackoffFloor {
+		jittered = provisionerRateLimitBackoffFloor
+	}
+	if jittered > provisionerRateLimitBackoffCap {
+		jittered = provisionerRateLimitBackoffCap
+	}
+
+	return jittered
+}
+
+func resetProvisionerRateLimitBackoff(namespacedName types.NamespacedName) {
+	if namespacedName.Namespace == "" || namespacedName.Name == "" {
+		return
+	}
+	provisionerRateLimitBackoffAttempts.Delete(namespacedName.String())
+}
+
+func provisionerRateLimitJitterMultiplier() float64 {
+	if provisionerRateLimitJitterRatio <= 0 {
+		return 1
+	}
+
+	var randomBytes [8]byte
+	if _, err := rand.Read(randomBytes[:]); err != nil {
+		return 1
+	}
+
+	randomFraction := float64(binary.BigEndian.Uint64(randomBytes[:])) / float64(^uint64(0))
+	jitter := (randomFraction*2 - 1) * provisionerRateLimitJitterRatio
+	return 1 + jitter
 }
 
 func setCondition(
