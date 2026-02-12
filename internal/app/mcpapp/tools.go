@@ -50,12 +50,24 @@ type getControlPlaneStatusInput struct {
 	Name      string `json:"name"`
 }
 
+// NOTE: We cannot return metav1.Condition directly because metav1.Time embeds
+// time.Time, which causes jsonschema-go schema inference to fail for MCP tool
+// schemas.
+type controlPlaneConditionSummary struct {
+	Type               string `json:"type"`
+	Status             string `json:"status"`
+	Reason             string `json:"reason,omitempty"`
+	Message            string `json:"message,omitempty"`
+	ObservedGeneration int64  `json:"observedGeneration,omitempty"`
+	LastTransitionTime string `json:"lastTransitionTime,omitempty"`
+}
+
 type getControlPlaneStatusOutput struct {
-	ObservedGeneration int64              `json:"observedGeneration"`
-	ReadyReplicas      int32              `json:"readyReplicas"`
-	URL                string             `json:"url"`
-	Phase              string             `json:"phase"`
-	Conditions         []metav1.Condition `json:"conditions"`
+	ObservedGeneration int64                          `json:"observedGeneration"`
+	ReadyReplicas      int32                          `json:"readyReplicas"`
+	URL                string                         `json:"url"`
+	Phase              string                         `json:"phase"`
+	Conditions         []controlPlaneConditionSummary `json:"conditions"`
 }
 
 type listControlPlanePodsInput struct {
@@ -293,7 +305,7 @@ func registerTools(server *mcp.Server, k8sClient client.Client, clientset kubern
 			ReadyReplicas:      controlPlane.Status.ReadyReplicas,
 			URL:                controlPlane.Status.URL,
 			Phase:              controlPlane.Status.Phase,
-			Conditions:         controlPlane.Status.Conditions,
+			Conditions:         summarizeMetav1Conditions(controlPlane.Status.Conditions),
 		}, nil
 	})
 
@@ -871,6 +883,29 @@ func desiredReplicas(replicas *int32) int32 {
 		return 0
 	}
 	return *replicas
+}
+
+func summarizeMetav1Conditions(in []metav1.Condition) []controlPlaneConditionSummary {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make([]controlPlaneConditionSummary, 0, len(in))
+	for _, cond := range in {
+		summary := controlPlaneConditionSummary{
+			Type:               cond.Type,
+			Status:             string(cond.Status),
+			Reason:             cond.Reason,
+			Message:            cond.Message,
+			ObservedGeneration: cond.ObservedGeneration,
+		}
+		if !cond.LastTransitionTime.IsZero() {
+			summary.LastTransitionTime = cond.LastTransitionTime.Time.UTC().Format(time.RFC3339Nano)
+		}
+		out = append(out, summary)
+	}
+
+	return out
 }
 
 func sanitizeControlPlanePodListLimit(limit int64) int64 {
