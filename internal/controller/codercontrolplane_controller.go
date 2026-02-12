@@ -1087,6 +1087,12 @@ func (r *CoderControlPlaneReconciler) reconcileStatus(
 			return fmt.Errorf("assertion failed: fetched object %s/%s does not match expected %s/%s",
 				latest.Namespace, latest.Name, namespacedName.Namespace, namespacedName.Name)
 		}
+		if nextStatus.ObservedGeneration > 0 && latest.Generation != nextStatus.ObservedGeneration {
+			// A newer reconcile has observed a newer generation. Avoid overwriting
+			// status with stale data from an older reconcile attempt.
+			coderControlPlane.Status = latest.Status
+			return nil
+		}
 		if equality.Semantic.DeepEqual(latest.Status, nextStatus) {
 			coderControlPlane.Status = latest.Status
 			return nil
