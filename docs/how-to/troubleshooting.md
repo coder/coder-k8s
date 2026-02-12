@@ -40,6 +40,30 @@ kubectl apply -f config/crd/bases/
   kubectl get clusterrolebinding coder-k8s-controller
   ```
 
+## Aggregated `codertemplates` / `coderworkspaces` reads are empty or inconsistent
+
+If `kubectl get codertemplates.aggregation.coder.com` or `kubectl get coderworkspaces.aggregation.coder.com` returns empty data unexpectedly, check for CRD/APIService conflicts.
+
+When both of these exist at once:
+
+- `APIService` `v1alpha1.aggregation.coder.com`
+- CRDs `codertemplates.aggregation.coder.com` and/or `coderworkspaces.aggregation.coder.com`
+
+Kubernetes may not route reads the way you expect for demos.
+
+```bash
+kubectl get apiservice v1alpha1.aggregation.coder.com
+kubectl get crd codertemplates.aggregation.coder.com coderworkspaces.aggregation.coder.com
+```
+
+For APIService-based demos, remove the conflicting aggregation CRDs:
+
+```bash
+kubectl delete crd codertemplates.aggregation.coder.com coderworkspaces.aggregation.coder.com
+kubectl apply -f deploy/apiserver-apiservice.yaml
+kubectl wait --for=condition=Available apiservice/v1alpha1.aggregation.coder.com --timeout=120s
+```
+
 ## Aggregated APIService shows `False` / `Unavailable`
 
 - Ensure the deployment and service exist:

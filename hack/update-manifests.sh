@@ -14,9 +14,15 @@ if [[ ! -d "${SCRIPT_ROOT}/internal/controller" ]]; then
 fi
 
 cd "${SCRIPT_ROOT}"
+
+# Generate CRDs for operator-owned coder.com APIs only.
 GOFLAGS=-mod=vendor go run ./vendor/sigs.k8s.io/controller-tools/cmd/controller-gen \
 	crd:crdVersions=v1 \
+	paths=./api/v1alpha1 \
+	output:crd:artifacts:config=config/crd/bases
+
+# Generate RBAC across the repo.
+GOFLAGS=-mod=vendor go run ./vendor/sigs.k8s.io/controller-tools/cmd/controller-gen \
 	rbac:roleName=manager-role \
 	paths=./... \
-	output:crd:artifacts:config=config/crd/bases \
 	output:rbac:artifacts:config=config/rbac
