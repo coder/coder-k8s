@@ -326,6 +326,84 @@ func TestTemplateStorageUpdateWithChangedFiles(t *testing.T) {
 	}
 }
 
+func TestTemplateStorageUpdateVerifiesActiveVersionPromotion(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	initialFiles := map[string]string{"main.tf": "resource \"null_resource\" \"initial\" {}"}
+	createObj := &aggregationv1alpha1.CoderTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme.verify-promotion-template"},
+		Spec: aggregationv1alpha1.CoderTemplateSpec{
+			Organization: "acme",
+			DisplayName:  "Verify Promotion Template",
+			Files:        cloneStringMap(initialFiles),
+		},
+	}
+
+	createdObj, err := templateStorage.Create(ctx, createObj, rest.ValidateAllObjectFunc, nil)
+	if err != nil {
+		t.Fatalf("expected template create with files to succeed: %v", err)
+	}
+	createdTemplate, ok := createdObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from create, got %T", createdObj)
+	}
+
+	activeVersionBefore, ok := state.templateActiveVersionID("acme", "verify-promotion-template")
+	if !ok {
+		t.Fatal("expected active version for created template")
+	}
+	fileCountBefore := state.fileCount()
+	templateVersionCountBefore := state.templateVersionCount()
+	state.setFailActiveVersionPromotion(true)
+
+	updatedFiles := map[string]string{"main.tf": "resource \"null_resource\" \"updated\" {}"}
+	desiredTemplate := createdTemplate.DeepCopy()
+	desiredTemplate.Spec.Files = cloneStringMap(updatedFiles)
+
+	updatedObj, created, err := templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected update to fail when active version promotion is silently ignored")
+	}
+	if updatedObj != nil {
+		t.Fatalf("expected update object to be nil on failure, got %T", updatedObj)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+	if !strings.Contains(err.Error(), "active version promotion did not take effect") {
+		t.Fatalf("expected promotion verification error, got %v", err)
+	}
+
+	if state.fileCount() != fileCountBefore+1 {
+		t.Fatalf("expected file upload before promotion verification failure, before=%d after=%d", fileCountBefore, state.fileCount())
+	}
+	if state.templateVersionCount() != templateVersionCountBefore+1 {
+		t.Fatalf("expected template version creation before promotion verification failure, before=%d after=%d", templateVersionCountBefore, state.templateVersionCount())
+	}
+
+	activeVersionAfter, ok := state.templateActiveVersionID("acme", "verify-promotion-template")
+	if !ok {
+		t.Fatal("expected active version for template after failed update")
+	}
+	if activeVersionAfter != activeVersionBefore {
+		t.Fatalf("expected active version to remain %q after failed promotion, got %q", activeVersionBefore, activeVersionAfter)
+	}
+}
+
 func TestTemplateStorageUpdateWithIdenticalFilesIsNoOp(t *testing.T) {
 	t.Parallel()
 
@@ -1964,9 +2042,10 @@ type mockCoderServerState struct {
 	workspacesByID       map[uuid.UUID]codersdk.Workspace
 	workspaceIDsByUser   map[string]map[string]uuid.UUID
 
-	buildTransitions      []codersdk.WorkspaceTransition
-	failBuildTransitions  map[codersdk.WorkspaceTransition]int
-	templateMetaPatchCall int
+	buildTransitions           []codersdk.WorkspaceTransition
+	failBuildTransitions       map[codersdk.WorkspaceTransition]int
+	templateMetaPatchCall      int
+	failActiveVersionPromotion bool
 }
 
 func newMockCoderServer(t *testing.T) (*httptest.Server, *mockCoderServerState) {
@@ -2097,6 +2176,9 @@ func (s *mockCoderServerState) handleRequest(t *testing.T, w http.ResponseWriter
 	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templates") && len(segments) == 3:
 		s.handleListTemplates(w)
 		return
+	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templates") && len(segments) == 4:
+		s.handleGetTemplate(w, segments[3])
+		return
 	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "organizations") && len(segments) == 6 && segments[4] == "templates":
 		s.handleGetTemplateByName(w, segments[3], segments[5])
 		return
@@ -2170,6 +2252,25 @@ func (s *mockCoderServerState) handleListTemplates(w http.ResponseWriter) {
 	})
 
 	writeJSON(w, http.StatusOK, templates)
+}
+
+func (s *mockCoderServerState) handleGetTemplate(w http.ResponseWriter, templateIDSegment string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	templateID, err := uuid.Parse(templateIDSegment)
+	if err != nil {
+		writeCoderError(w, http.StatusBadRequest, fmt.Sprintf("invalid template id %q", templateIDSegment))
+		return
+	}
+
+	template, ok := s.templatesByID[templateID]
+	if !ok {
+		writeCoderError(w, http.StatusNotFound, "template not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, template)
 }
 
 func (s *mockCoderServerState) handleGetTemplateByName(w http.ResponseWriter, orgSegment, templateName string) {
@@ -2409,7 +2510,9 @@ func (s *mockCoderServerState) handleUpdateActiveTemplateVersion(w http.Response
 		s.templateVersionsByID[templateVersion.ID] = templateVersion
 	}
 
-	template.ActiveVersionID = request.ID
+	if !s.failActiveVersionPromotion {
+		template.ActiveVersionID = request.ID
+	}
 	template.UpdatedAt = time.Now().UTC()
 	s.templatesByID[templateID] = template
 
@@ -2724,6 +2827,13 @@ func (s *mockCoderServerState) templateMetaUpdateCount() int {
 	defer s.mu.Unlock()
 
 	return s.templateMetaPatchCall
+}
+
+func (s *mockCoderServerState) setFailActiveVersionPromotion(fail bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.failActiveVersionPromotion = fail
 }
 
 func (s *mockCoderServerState) setTemplateVersionTemplateID(templateVersionID, templateID uuid.UUID) {

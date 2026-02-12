@@ -452,6 +452,21 @@ func (s *TemplateStorage) Update(
 			if err := sdk.UpdateActiveTemplateVersion(ctx, templateID, codersdk.UpdateActiveTemplateVersion{ID: newVersion.ID}); err != nil {
 				return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
 			}
+
+			// Post-condition: verify promotion succeeded. The vendored SDK silently
+			// swallows transport errors in UpdateActiveTemplateVersion, so we must
+			// confirm the active version actually changed.
+			verifyTemplate, err := sdk.Template(ctx, templateID)
+			if err != nil {
+				return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
+			}
+			if verifyTemplate.ActiveVersionID != newVersion.ID {
+				return nil, false, fmt.Errorf(
+					"assertion failed: active version promotion did not take effect: expected %q, got %q",
+					newVersion.ID.String(),
+					verifyTemplate.ActiveVersionID.String(),
+				)
+			}
 		}
 	}
 
