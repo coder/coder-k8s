@@ -226,6 +226,21 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
+              licenseSecretRef:
+                description: |-
+                  LicenseSecretRef references a Secret key containing a Coder Enterprise
+                  license JWT. When set, the controller uploads the license after the
+                  control plane is ready and re-uploads when the Secret value changes.
+                properties:
+                  key:
+                    description: Key is the key inside the Secret data map.
+                    type: string
+                  name:
+                    description: Name is the Kubernetes Secret name.
+                    type: string
+                required:
+                - name
+                type: object
               operatorAccess:
                 default: {}
                 description: OperatorAccess configures bootstrap API access to the
@@ -330,6 +345,17 @@ spec:
                   - type
                   type: object
                 type: array
+              licenseLastApplied:
+                description: |-
+                  LicenseLastApplied is the timestamp of the most recent successful
+                  operator-managed license upload.
+                format: date-time
+                type: string
+              licenseLastAppliedHash:
+                description: |-
+                  LicenseLastAppliedHash is the SHA-256 hex hash of the trimmed license JWT
+                  that LicenseLastApplied refers to.
+                type: string
               observedGeneration:
                 description: ObservedGeneration tracks the spec generation this status
                   reflects.

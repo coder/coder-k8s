@@ -88,8 +88,10 @@ func SetupControllers(mgr manager.Manager) error {
 
 	reconciler := &controller.CoderControlPlaneReconciler{
 		Client:                    client,
+		APIReader:                 mgr.GetAPIReader(),
 		Scheme:                    managerScheme,
 		OperatorAccessProvisioner: coderbootstrap.NewPostgresOperatorAccessProvisioner(),
+		LicenseUploader:           controller.NewSDKLicenseUploader(),
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create controller: %w", err)
