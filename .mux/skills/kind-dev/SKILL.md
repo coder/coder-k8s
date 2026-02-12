@@ -22,6 +22,19 @@ export CLUSTER_NAME="coder-k8s-${MUX_WORKSPACE_NAME:-dev}"
 kubectl --context kind-${CLUSTER_NAME} get nodes
 ```
 
+`./hack/kind-dev.sh up` defaults to `KIND_NODE_IMAGE=kindest/node:v1.34.0`. Override it when needed:
+
+```bash
+KIND_NODE_IMAGE=kindest/node:v1.32.0 ./hack/kind-dev.sh up
+```
+
+If the cluster already exists and you change `KIND_NODE_IMAGE`, recreate it first:
+
+```bash
+./hack/kind-dev.sh down
+KIND_NODE_IMAGE=kindest/node:v1.32.0 ./hack/kind-dev.sh up
+```
+
 ## Start controller (out-of-cluster)
 
 ```bash
