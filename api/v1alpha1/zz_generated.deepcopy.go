@@ -99,6 +99,11 @@ func (in *CoderControlPlaneSpec) DeepCopyInto(out *CoderControlPlaneSpec) {
 		copy(*out, *in)
 	}
 	out.OperatorAccess = in.OperatorAccess
+	if in.LicenseSecretRef != nil {
+		in, out := &in.LicenseSecretRef, &out.LicenseSecretRef
+		*out = new(SecretKeySelector)
+		**out = **in
+	}
 	return
 }
 
@@ -119,6 +124,10 @@ func (in *CoderControlPlaneStatus) DeepCopyInto(out *CoderControlPlaneStatus) {
 		in, out := &in.OperatorTokenSecretRef, &out.OperatorTokenSecretRef
 		*out = new(SecretKeySelector)
 		**out = **in
+	}
+	if in.LicenseLastApplied != nil {
+		in, out := &in.LicenseLastApplied, &out.LicenseLastApplied
+		*out = (*in).DeepCopy()
 	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions

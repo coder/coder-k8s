@@ -3,10 +3,12 @@ package controller_test
 import (
 	"context"
 	"errors"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/coder/coder/v2/codersdk"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -39,6 +41,26 @@ func (f *fakeOperatorAccessProvisioner) RevokeOperatorToken(_ context.Context, r
 	f.revokeCalls++
 	f.revokeRequests = append(f.revokeRequests, req)
 	return f.revokeErr
+}
+
+type licenseUploadCall struct {
+	coderURL     string
+	sessionToken string
+	licenseJWT   string
+}
+
+type fakeLicenseUploader struct {
+	err   error
+	calls []licenseUploadCall
+}
+
+func (f *fakeLicenseUploader) AddLicense(_ context.Context, coderURL, sessionToken, licenseJWT string) error {
+	f.calls = append(f.calls, licenseUploadCall{
+		coderURL:     coderURL,
+		sessionToken: sessionToken,
+		licenseJWT:   licenseJWT,
+	})
+	return f.err
 }
 
 func TestReconcile_NotFound(t *testing.T) {
@@ -345,6 +367,410 @@ func TestReconcile_PhaseTransitionToReady(t *testing.T) {
 	}
 	if reconciledAfterReady.Status.ReadyReplicas != 1 {
 		t.Fatalf("expected ready replicas 1 after deployment ready, got %d", reconciledAfterReady.Status.ReadyReplicas)
+	}
+}
+
+func TestReconcile_LicenseSecretRefNil_DoesNotUpload(t *testing.T) {
+	ctx := context.Background()
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-license-no-ref",
+			Namespace: "default",
+		},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			ExtraEnv: []corev1.EnvVar{{
+				Name:  "CODER_PG_CONNECTION_URL",
+				Value: "postgres://example/coder",
+			}},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("failed to create test CoderControlPlane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	provisioner := &fakeOperatorAccessProvisioner{token: "operator-token-no-license-ref"}
+	uploader := &fakeLicenseUploader{}
+	r := &controller.CoderControlPlaneReconciler{
+		Client:                    k8sClient,
+		Scheme:                    scheme,
+		OperatorAccessProvisioner: provisioner,
+		LicenseUploader:           uploader,
+	}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("first reconcile control plane: %v", err)
+	}
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+		t.Fatalf("get reconciled deployment: %v", err)
+	}
+	deployment.Status.ReadyReplicas = 1
+	deployment.Status.Replicas = 1
+	if err := k8sClient.Status().Update(ctx, deployment); err != nil {
+		t.Fatalf("update deployment status: %v", err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("second reconcile control plane: %v", err)
+	}
+
+	if len(uploader.calls) != 0 {
+		t.Fatalf("expected no license upload calls when licenseSecretRef is not configured, got %d", len(uploader.calls))
+	}
+
+	reconciled := &coderv1alpha1.CoderControlPlane{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, reconciled); err != nil {
+		t.Fatalf("get reconciled control plane: %v", err)
+	}
+	licenseCondition := findCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderControlPlaneConditionLicenseApplied)
+	if licenseCondition.Status != metav1.ConditionUnknown {
+		t.Fatalf("expected license condition status %q, got %q", metav1.ConditionUnknown, licenseCondition.Status)
+	}
+	if licenseCondition.Reason != "Pending" {
+		t.Fatalf("expected license condition reason %q, got %q", "Pending", licenseCondition.Reason)
+	}
+}
+
+func TestReconcile_LicensePendingUntilControlPlaneReady(t *testing.T) {
+	ctx := context.Background()
+
+	licenseSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-pending-secret", Namespace: "default"},
+		Data: map[string][]byte{
+			coderv1alpha1.DefaultLicenseSecretKey: []byte("license-pending"),
+		},
+	}
+	if err := k8sClient.Create(ctx, licenseSecret); err != nil {
+		t.Fatalf("create license secret: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, licenseSecret)
+	})
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-pending", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			ExtraEnv: []corev1.EnvVar{{
+				Name:  "CODER_PG_CONNECTION_URL",
+				Value: "postgres://example/pending",
+			}},
+			LicenseSecretRef: &coderv1alpha1.SecretKeySelector{Name: licenseSecret.Name},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create test CoderControlPlane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	provisioner := &fakeOperatorAccessProvisioner{token: "operator-token-pending"}
+	uploader := &fakeLicenseUploader{}
+	r := &controller.CoderControlPlaneReconciler{
+		Client:                    k8sClient,
+		Scheme:                    scheme,
+		OperatorAccessProvisioner: provisioner,
+		LicenseUploader:           uploader,
+	}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("reconcile control plane: %v", err)
+	}
+	if len(uploader.calls) != 0 {
+		t.Fatalf("expected no license upload calls before deployment readiness, got %d", len(uploader.calls))
+	}
+
+	reconciled := &coderv1alpha1.CoderControlPlane{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, reconciled); err != nil {
+		t.Fatalf("get reconciled control plane: %v", err)
+	}
+	licenseCondition := findCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderControlPlaneConditionLicenseApplied)
+	if licenseCondition.Status != metav1.ConditionFalse {
+		t.Fatalf("expected license condition status %q, got %q", metav1.ConditionFalse, licenseCondition.Status)
+	}
+	if licenseCondition.Reason != "Pending" {
+		t.Fatalf("expected license condition reason %q, got %q", "Pending", licenseCondition.Reason)
+	}
+}
+
+func TestReconcile_LicenseAppliesOnceAndTracksHash(t *testing.T) {
+	ctx := context.Background()
+
+	licenseSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-apply-secret", Namespace: "default"},
+		Data: map[string][]byte{
+			coderv1alpha1.DefaultLicenseSecretKey: []byte("  license-jwt-initial  \n"),
+		},
+	}
+	if err := k8sClient.Create(ctx, licenseSecret); err != nil {
+		t.Fatalf("create license secret: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, licenseSecret)
+	})
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-apply", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			ExtraEnv: []corev1.EnvVar{{
+				Name:  "CODER_PG_CONNECTION_URL",
+				Value: "postgres://example/license-apply",
+			}},
+			LicenseSecretRef: &coderv1alpha1.SecretKeySelector{Name: licenseSecret.Name},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create test CoderControlPlane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	provisioner := &fakeOperatorAccessProvisioner{token: "operator-token-license-apply"}
+	uploader := &fakeLicenseUploader{}
+	r := &controller.CoderControlPlaneReconciler{
+		Client:                    k8sClient,
+		Scheme:                    scheme,
+		OperatorAccessProvisioner: provisioner,
+		LicenseUploader:           uploader,
+	}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("first reconcile control plane: %v", err)
+	}
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+		t.Fatalf("get reconciled deployment: %v", err)
+	}
+	deployment.Status.ReadyReplicas = 1
+	deployment.Status.Replicas = 1
+	if err := k8sClient.Status().Update(ctx, deployment); err != nil {
+		t.Fatalf("update deployment status: %v", err)
+	}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("second reconcile control plane: %v", err)
+	}
+	if len(uploader.calls) != 1 {
+		t.Fatalf("expected one license upload call, got %d", len(uploader.calls))
+	}
+	if uploader.calls[0].sessionToken != "operator-token-license-apply" {
+		t.Fatalf("expected license upload session token %q, got %q", "operator-token-license-apply", uploader.calls[0].sessionToken)
+	}
+	if uploader.calls[0].licenseJWT != "license-jwt-initial" {
+		t.Fatalf("expected trimmed license JWT %q, got %q", "license-jwt-initial", uploader.calls[0].licenseJWT)
+	}
+
+	reconciled := &coderv1alpha1.CoderControlPlane{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, reconciled); err != nil {
+		t.Fatalf("get reconciled control plane: %v", err)
+	}
+	if reconciled.Status.LicenseLastApplied == nil {
+		t.Fatalf("expected licenseLastApplied to be set after successful upload")
+	}
+	if reconciled.Status.LicenseLastAppliedHash == "" {
+		t.Fatalf("expected licenseLastAppliedHash to be set after successful upload")
+	}
+	licenseCondition := findCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderControlPlaneConditionLicenseApplied)
+	if licenseCondition.Status != metav1.ConditionTrue {
+		t.Fatalf("expected license condition status %q, got %q", metav1.ConditionTrue, licenseCondition.Status)
+	}
+	if licenseCondition.Reason != "Applied" {
+		t.Fatalf("expected license condition reason %q, got %q", "Applied", licenseCondition.Reason)
+	}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("third reconcile control plane: %v", err)
+	}
+	if len(uploader.calls) != 1 {
+		t.Fatalf("expected license upload call count to remain 1 for idempotent reconcile, got %d", len(uploader.calls))
+	}
+}
+
+func TestReconcile_LicenseRotationUploadsNewSecretValue(t *testing.T) {
+	ctx := context.Background()
+
+	licenseSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-rotation-secret", Namespace: "default"},
+		Data: map[string][]byte{
+			coderv1alpha1.DefaultLicenseSecretKey: []byte("license-jwt-v1"),
+		},
+	}
+	if err := k8sClient.Create(ctx, licenseSecret); err != nil {
+		t.Fatalf("create license secret: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, licenseSecret)
+	})
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-rotation", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			ExtraEnv: []corev1.EnvVar{{
+				Name:  "CODER_PG_CONNECTION_URL",
+				Value: "postgres://example/license-rotation",
+			}},
+			LicenseSecretRef: &coderv1alpha1.SecretKeySelector{Name: licenseSecret.Name},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create test CoderControlPlane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	provisioner := &fakeOperatorAccessProvisioner{token: "operator-token-license-rotation"}
+	uploader := &fakeLicenseUploader{}
+	r := &controller.CoderControlPlaneReconciler{
+		Client:                    k8sClient,
+		Scheme:                    scheme,
+		OperatorAccessProvisioner: provisioner,
+		LicenseUploader:           uploader,
+	}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("first reconcile control plane: %v", err)
+	}
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+		t.Fatalf("get reconciled deployment: %v", err)
+	}
+	deployment.Status.ReadyReplicas = 1
+	deployment.Status.Replicas = 1
+	if err := k8sClient.Status().Update(ctx, deployment); err != nil {
+		t.Fatalf("update deployment status: %v", err)
+	}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("second reconcile control plane: %v", err)
+	}
+	if len(uploader.calls) != 1 {
+		t.Fatalf("expected first license upload call, got %d", len(uploader.calls))
+	}
+
+	reconciled := &coderv1alpha1.CoderControlPlane{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, reconciled); err != nil {
+		t.Fatalf("get reconciled control plane: %v", err)
+	}
+	initialHash := reconciled.Status.LicenseLastAppliedHash
+	if initialHash == "" {
+		t.Fatalf("expected initial license hash to be set")
+	}
+
+	secretToRotate := &corev1.Secret{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: licenseSecret.Name, Namespace: licenseSecret.Namespace}, secretToRotate); err != nil {
+		t.Fatalf("get license secret for update: %v", err)
+	}
+	secretToRotate.Data[coderv1alpha1.DefaultLicenseSecretKey] = []byte("license-jwt-v2")
+	if err := k8sClient.Update(ctx, secretToRotate); err != nil {
+		t.Fatalf("update license secret: %v", err)
+	}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("third reconcile control plane: %v", err)
+	}
+	if len(uploader.calls) != 2 {
+		t.Fatalf("expected rotated license to trigger second upload call, got %d", len(uploader.calls))
+	}
+	if uploader.calls[1].licenseJWT != "license-jwt-v2" {
+		t.Fatalf("expected rotated license JWT %q, got %q", "license-jwt-v2", uploader.calls[1].licenseJWT)
+	}
+
+	reconciledAfterRotation := &coderv1alpha1.CoderControlPlane{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, reconciledAfterRotation); err != nil {
+		t.Fatalf("get reconciled control plane after rotation: %v", err)
+	}
+	if reconciledAfterRotation.Status.LicenseLastAppliedHash == initialHash {
+		t.Fatalf("expected license hash to change after rotation")
+	}
+}
+
+func TestReconcile_LicenseNotSupportedSetsConditionWithoutRequeue(t *testing.T) {
+	ctx := context.Background()
+
+	licenseSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-not-supported-secret", Namespace: "default"},
+		Data: map[string][]byte{
+			coderv1alpha1.DefaultLicenseSecretKey: []byte("license-oss"),
+		},
+	}
+	if err := k8sClient.Create(ctx, licenseSecret); err != nil {
+		t.Fatalf("create license secret: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, licenseSecret)
+	})
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-not-supported", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			ExtraEnv: []corev1.EnvVar{{
+				Name:  "CODER_PG_CONNECTION_URL",
+				Value: "postgres://example/license-not-supported",
+			}},
+			LicenseSecretRef: &coderv1alpha1.SecretKeySelector{Name: licenseSecret.Name},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create test CoderControlPlane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	provisioner := &fakeOperatorAccessProvisioner{token: "operator-token-license-not-supported"}
+	uploader := &fakeLicenseUploader{err: codersdk.NewTestError(http.StatusNotFound, http.MethodPost, "/api/v2/licenses")}
+	r := &controller.CoderControlPlaneReconciler{
+		Client:                    k8sClient,
+		Scheme:                    scheme,
+		OperatorAccessProvisioner: provisioner,
+		LicenseUploader:           uploader,
+	}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("first reconcile control plane: %v", err)
+	}
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+		t.Fatalf("get reconciled deployment: %v", err)
+	}
+	deployment.Status.ReadyReplicas = 1
+	deployment.Status.Replicas = 1
+	if err := k8sClient.Status().Update(ctx, deployment); err != nil {
+		t.Fatalf("update deployment status: %v", err)
+	}
+
+	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}})
+	if err != nil {
+		t.Fatalf("second reconcile control plane: %v", err)
+	}
+	if result.RequeueAfter > 0 {
+		t.Fatalf("expected no requeue for not-supported license API, got %+v", result)
+	}
+	if len(uploader.calls) != 1 {
+		t.Fatalf("expected one attempted license upload call, got %d", len(uploader.calls))
+	}
+
+	reconciled := &coderv1alpha1.CoderControlPlane{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, reconciled); err != nil {
+		t.Fatalf("get reconciled control plane: %v", err)
+	}
+	if reconciled.Status.LicenseLastApplied != nil {
+		t.Fatalf("expected licenseLastApplied to remain nil when API is not supported")
+	}
+	if reconciled.Status.LicenseLastAppliedHash != "" {
+		t.Fatalf("expected licenseLastAppliedHash to remain empty when API is not supported")
+	}
+	licenseCondition := findCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderControlPlaneConditionLicenseApplied)
+	if licenseCondition.Status != metav1.ConditionFalse {
+		t.Fatalf("expected license condition status %q, got %q", metav1.ConditionFalse, licenseCondition.Status)
+	}
+	if licenseCondition.Reason != "NotSupported" {
+		t.Fatalf("expected license condition reason %q, got %q", "NotSupported", licenseCondition.Reason)
 	}
 }
 

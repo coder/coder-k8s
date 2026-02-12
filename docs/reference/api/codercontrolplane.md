@@ -20,6 +20,7 @@
 | `extraEnv` | [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#envvar-v1-core) array | ExtraEnv are injected into the Coder control plane container. |
 | `imagePullSecrets` | [LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#localobjectreference-v1-core) array | ImagePullSecrets are used by the pod to pull private images. |
 | `operatorAccess` | [OperatorAccessSpec](#operatoraccessspec) | OperatorAccess configures bootstrap API access to the coderd instance. |
+| `licenseSecretRef` | [SecretKeySelector](#secretkeyselector) | LicenseSecretRef references a Secret key containing a Coder Enterprise license JWT. When set, the controller uploads the license after the control plane is ready and re-uploads when the Secret value changes. |
 
 ## Status
 
@@ -30,6 +31,8 @@
 | `url` | string | URL is the in-cluster URL for the control plane service. |
 | `operatorTokenSecretRef` | [SecretKeySelector](#secretkeyselector) | OperatorTokenSecretRef points to the Secret key containing the `coder-k8s-operator` API token. |
 | `operatorAccessReady` | boolean | OperatorAccessReady reports whether operator API access bootstrap succeeded. |
+| `licenseLastApplied` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#time-v1-meta) | LicenseLastApplied is the timestamp of the most recent successful operator-managed license upload. |
+| `licenseLastAppliedHash` | string | LicenseLastAppliedHash is the SHA-256 hex hash of the trimmed license JWT that LicenseLastApplied refers to. |
 | `phase` | string | Phase is a high-level readiness indicator. |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#condition-v1-meta) array | Conditions are Kubernetes-standard conditions for this resource. |
 

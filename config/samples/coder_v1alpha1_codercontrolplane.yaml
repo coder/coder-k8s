@@ -5,3 +5,6 @@ metadata:
   namespace: default
 spec:
   image: "ghcr.io/coder/coder-k8s:main"
+  licenseSecretRef:
+    name: coder-license
+    key: license

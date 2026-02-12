@@ -90,6 +90,7 @@ func SetupControllers(mgr manager.Manager) error {
 		Client:                    client,
 		Scheme:                    managerScheme,
 		OperatorAccessProvisioner: coderbootstrap.NewPostgresOperatorAccessProvisioner(),
+		LicenseUploader:           controller.NewSDKLicenseUploader(),
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create controller: %w", err)

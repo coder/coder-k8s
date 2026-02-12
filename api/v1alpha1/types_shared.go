@@ -5,6 +5,8 @@ import corev1 "k8s.io/api/core/v1"
 const (
 	// DefaultTokenSecretKey is the default key used for proxy session tokens.
 	DefaultTokenSecretKey = "token"
+	// DefaultLicenseSecretKey is the default key used for Coder license JWTs.
+	DefaultLicenseSecretKey = "license"
 )
 
 // ServiceSpec defines the Service configuration reconciled by the operator.

@@ -3,17 +3,23 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash/fnv"
 	"maps"
+	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
+	"github.com/coder/coder/v2/codersdk"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -21,6 +27,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/coderbootstrap"
@@ -41,6 +49,18 @@ const (
 
 	operatorAccessRetryInterval = 30 * time.Second
 	operatorTokenSecretSuffix   = "-operator-token"
+
+	// #nosec G101 -- this is a field index key, not a credential.
+	licenseSecretNameFieldIndex = ".spec.licenseSecretRef.name"
+
+	licenseConditionReasonApplied       = "Applied"
+	licenseConditionReasonPending       = "Pending"
+	licenseConditionReasonSecretMissing = "SecretMissing"
+	licenseConditionReasonForbidden     = "Forbidden"
+	licenseConditionReasonNotSupported  = "NotSupported"
+	licenseConditionReasonError         = "Error"
+
+	licenseUploadRequestTimeout = 30 * time.Second
 )
 
 var (
@@ -48,12 +68,62 @@ var (
 	errSecretValueEmpty   = errors.New("secret value empty")
 )
 
+// LicenseUploader uploads Coder Enterprise license JWTs to a coderd instance.
+type LicenseUploader interface {
+	AddLicense(ctx context.Context, coderURL, sessionToken, licenseJWT string) error
+}
+
+// NewSDKLicenseUploader returns a LicenseUploader backed by codersdk.
+func NewSDKLicenseUploader() LicenseUploader {
+	return &sdkLicenseUploader{}
+}
+
+type sdkLicenseUploader struct{}
+
+func (u *sdkLicenseUploader) AddLicense(ctx context.Context, coderURL, sessionToken, licenseJWT string) error {
+	if strings.TrimSpace(coderURL) == "" {
+		return fmt.Errorf("assertion failed: coder URL must not be empty")
+	}
+	if sessionToken == "" {
+		return fmt.Errorf("assertion failed: session token must not be empty")
+	}
+	if licenseJWT == "" {
+		return fmt.Errorf("assertion failed: license JWT must not be empty")
+	}
+
+	parsedURL, err := url.Parse(coderURL)
+	if err != nil {
+		return fmt.Errorf("parse coder URL: %w", err)
+	}
+
+	sdkClient := codersdk.New(parsedURL)
+	sdkClient.SetSessionToken(sessionToken)
+	if sdkClient.HTTPClient == nil {
+		sdkClient.HTTPClient = &http.Client{}
+	}
+	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return fmt.Errorf("assertion failed: http.DefaultTransport is not *http.Transport")
+	}
+	// Use a dedicated transport to avoid sharing http.DefaultTransport's
+	// connection pool across parallel test servers.
+	sdkClient.HTTPClient.Transport = defaultTransport.Clone()
+	sdkClient.HTTPClient.Timeout = licenseUploadRequestTimeout
+
+	if _, err := sdkClient.AddLicense(ctx, codersdk.AddLicenseRequest{License: licenseJWT}); err != nil {
+		return fmt.Errorf("upload coder license: %w", err)
+	}
+
+	return nil
+}
+
 // CoderControlPlaneReconciler reconciles a CoderControlPlane object.
 type CoderControlPlaneReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
 	OperatorAccessProvisioner coderbootstrap.OperatorAccessProvisioner
+	LicenseUploader           LicenseUploader
 }
 
 // +kubebuilder:rbac:groups=coder.com,resources=codercontrolplanes,verbs=get;list;watch;create;update;patch;delete
@@ -101,11 +171,16 @@ func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 
+	licenseResult, err := r.reconcileLicense(ctx, coderControlPlane, &nextStatus)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if err := r.reconcileStatus(ctx, coderControlPlane, nextStatus); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	return operatorResult, nil
+	return mergeResults(operatorResult, licenseResult), nil
 }
 
 func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) (*appsv1.Deployment, error) {
@@ -326,6 +401,238 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 		Key:  coderv1alpha1.DefaultTokenSecretKey,
 	}
 	nextStatus.OperatorAccessReady = true
+
+	return ctrl.Result{}, nil
+}
+
+func (r *CoderControlPlaneReconciler) reconcileLicense(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+	nextStatus *coderv1alpha1.CoderControlPlaneStatus,
+) (ctrl.Result, error) {
+	if coderControlPlane == nil {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+	if nextStatus == nil {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: next status must not be nil")
+	}
+
+	if coderControlPlane.Spec.LicenseSecretRef == nil {
+		if err := setControlPlaneCondition(
+			nextStatus,
+			coderControlPlane.Generation,
+			coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
+			metav1.ConditionUnknown,
+			licenseConditionReasonPending,
+			"License Secret reference is not configured.",
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
+	if r.LicenseUploader == nil {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: license uploader must not be nil when licenseSecretRef is configured")
+	}
+
+	if nextStatus.Phase != coderv1alpha1.CoderControlPlanePhaseReady {
+		if err := setControlPlaneCondition(
+			nextStatus,
+			coderControlPlane.Generation,
+			coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
+			metav1.ConditionFalse,
+			licenseConditionReasonPending,
+			"Waiting for control plane readiness before applying license.",
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
+	if !nextStatus.OperatorAccessReady || nextStatus.OperatorTokenSecretRef == nil {
+		if err := setControlPlaneCondition(
+			nextStatus,
+			coderControlPlane.Generation,
+			coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
+			metav1.ConditionFalse,
+			licenseConditionReasonPending,
+			"Waiting for operator access credentials before applying license.",
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
+	if strings.TrimSpace(nextStatus.URL) == "" {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: control plane URL must not be empty when licenseSecretRef is configured")
+	}
+
+	operatorTokenSecretName := strings.TrimSpace(nextStatus.OperatorTokenSecretRef.Name)
+	if operatorTokenSecretName == "" {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: operator token secret name must not be empty when operator access is ready")
+	}
+	operatorTokenSecretKey := strings.TrimSpace(nextStatus.OperatorTokenSecretRef.Key)
+	if operatorTokenSecretKey == "" {
+		operatorTokenSecretKey = coderv1alpha1.DefaultTokenSecretKey
+	}
+
+	operatorToken, err := r.readSecretValue(ctx, coderControlPlane.Namespace, operatorTokenSecretName, operatorTokenSecretKey)
+	switch {
+	case err == nil:
+	case apierrors.IsNotFound(err), errors.Is(err, errSecretValueMissing), errors.Is(err, errSecretValueEmpty):
+		if err := setControlPlaneCondition(
+			nextStatus,
+			coderControlPlane.Generation,
+			coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
+			metav1.ConditionFalse,
+			licenseConditionReasonSecretMissing,
+			"Operator token Secret is missing or incomplete; retrying license upload.",
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+	default:
+		if err := setControlPlaneCondition(
+			nextStatus,
+			coderControlPlane.Generation,
+			coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
+			metav1.ConditionFalse,
+			licenseConditionReasonError,
+			"Failed to read operator token Secret; retrying license upload.",
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+	}
+
+	licenseSecretName := strings.TrimSpace(coderControlPlane.Spec.LicenseSecretRef.Name)
+	if licenseSecretName == "" {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: license secret name must not be empty when licenseSecretRef is configured")
+	}
+	licenseSecretKey := strings.TrimSpace(coderControlPlane.Spec.LicenseSecretRef.Key)
+	if licenseSecretKey == "" {
+		licenseSecretKey = coderv1alpha1.DefaultLicenseSecretKey
+	}
+
+	licenseJWT, err := r.readSecretValue(ctx, coderControlPlane.Namespace, licenseSecretName, licenseSecretKey)
+	switch {
+	case err == nil:
+	case apierrors.IsNotFound(err), errors.Is(err, errSecretValueMissing), errors.Is(err, errSecretValueEmpty):
+		if err := setControlPlaneCondition(
+			nextStatus,
+			coderControlPlane.Generation,
+			coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
+			metav1.ConditionFalse,
+			licenseConditionReasonSecretMissing,
+			"License Secret is missing or incomplete; retrying upload.",
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+	default:
+		if err := setControlPlaneCondition(
+			nextStatus,
+			coderControlPlane.Generation,
+			coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
+			metav1.ConditionFalse,
+			licenseConditionReasonError,
+			"Failed to read license Secret; retrying upload.",
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+	}
+
+	licenseJWT = strings.TrimSpace(licenseJWT)
+	if licenseJWT == "" {
+		if err := setControlPlaneCondition(
+			nextStatus,
+			coderControlPlane.Generation,
+			coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
+			metav1.ConditionFalse,
+			licenseConditionReasonSecretMissing,
+			"License Secret value is empty after trimming whitespace.",
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+	}
+
+	licenseHash, err := hashLicenseJWT(licenseJWT)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if nextStatus.LicenseLastApplied != nil && nextStatus.LicenseLastAppliedHash == licenseHash {
+		if err := setControlPlaneCondition(
+			nextStatus,
+			coderControlPlane.Generation,
+			coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
+			metav1.ConditionTrue,
+			licenseConditionReasonApplied,
+			"Configured license is already applied.",
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
+	if err := r.LicenseUploader.AddLicense(ctx, nextStatus.URL, operatorToken, licenseJWT); err != nil {
+		var sdkErr *codersdk.Error
+		if errors.As(err, &sdkErr) {
+			switch sdkErr.StatusCode() {
+			case http.StatusNotFound:
+				if err := setControlPlaneCondition(
+					nextStatus,
+					coderControlPlane.Generation,
+					coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
+					metav1.ConditionFalse,
+					licenseConditionReasonNotSupported,
+					"Control plane does not expose the Enterprise licenses API.",
+				); err != nil {
+					return ctrl.Result{}, err
+				}
+				return ctrl.Result{}, nil
+			case http.StatusUnauthorized, http.StatusForbidden:
+				if err := setControlPlaneCondition(
+					nextStatus,
+					coderControlPlane.Generation,
+					coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
+					metav1.ConditionFalse,
+					licenseConditionReasonForbidden,
+					"Operator token is not authorized to upload the configured license.",
+				); err != nil {
+					return ctrl.Result{}, err
+				}
+				return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+			}
+		}
+		if err := setControlPlaneCondition(
+			nextStatus,
+			coderControlPlane.Generation,
+			coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
+			metav1.ConditionFalse,
+			licenseConditionReasonError,
+			"Failed to upload configured license; retrying.",
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+	}
+
+	now := metav1.Now()
+	nextStatus.LicenseLastApplied = &now
+	nextStatus.LicenseLastAppliedHash = licenseHash
+	if err := setControlPlaneCondition(
+		nextStatus,
+		coderControlPlane.Generation,
+		coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
+		metav1.ConditionTrue,
+		licenseConditionReasonApplied,
+		"Configured license uploaded successfully.",
+	); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	return ctrl.Result{}, nil
 }
@@ -574,6 +881,105 @@ func (r *CoderControlPlaneReconciler) readSecretValue(ctx context.Context, names
 	return string(value), nil
 }
 
+func setControlPlaneCondition(
+	nextStatus *coderv1alpha1.CoderControlPlaneStatus,
+	generation int64,
+	conditionType string,
+	status metav1.ConditionStatus,
+	reason string,
+	message string,
+) error {
+	if nextStatus == nil {
+		return fmt.Errorf("assertion failed: next status must not be nil")
+	}
+	if strings.TrimSpace(conditionType) == "" {
+		return fmt.Errorf("assertion failed: condition type must not be empty")
+	}
+	if strings.TrimSpace(reason) == "" {
+		return fmt.Errorf("assertion failed: condition reason must not be empty")
+	}
+
+	meta.SetStatusCondition(&nextStatus.Conditions, metav1.Condition{
+		Type:               conditionType,
+		Status:             status,
+		ObservedGeneration: generation,
+		Reason:             reason,
+		Message:            message,
+	})
+
+	return nil
+}
+
+func hashLicenseJWT(licenseJWT string) (string, error) {
+	if licenseJWT == "" {
+		return "", fmt.Errorf("assertion failed: license JWT must not be empty")
+	}
+
+	sum := sha256.Sum256([]byte(licenseJWT))
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func mergeResults(results ...ctrl.Result) ctrl.Result {
+	merged := ctrl.Result{}
+	for _, result := range results {
+		if result.RequeueAfter > 0 && (merged.RequeueAfter == 0 || result.RequeueAfter < merged.RequeueAfter) {
+			merged.RequeueAfter = result.RequeueAfter
+		}
+	}
+
+	return merged
+}
+
+func indexByLicenseSecretName(obj client.Object) []string {
+	coderControlPlane, ok := obj.(*coderv1alpha1.CoderControlPlane)
+	if !ok || coderControlPlane.Spec.LicenseSecretRef == nil {
+		return nil
+	}
+
+	licenseSecretName := strings.TrimSpace(coderControlPlane.Spec.LicenseSecretRef.Name)
+	if licenseSecretName == "" {
+		return nil
+	}
+
+	return []string{licenseSecretName}
+}
+
+func (r *CoderControlPlaneReconciler) reconcileRequestsForLicenseSecret(
+	ctx context.Context,
+	obj client.Object,
+) []reconcile.Request {
+	secret, ok := obj.(*corev1.Secret)
+	if !ok {
+		return nil
+	}
+	if strings.TrimSpace(secret.Name) == "" || strings.TrimSpace(secret.Namespace) == "" {
+		return nil
+	}
+
+	var coderControlPlanes coderv1alpha1.CoderControlPlaneList
+	if err := r.List(
+		ctx,
+		&coderControlPlanes,
+		client.InNamespace(secret.Namespace),
+		client.MatchingFields{licenseSecretNameFieldIndex: secret.Name},
+	); err != nil {
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(coderControlPlanes.Items))
+	for _, coderControlPlane := range coderControlPlanes.Items {
+		if strings.TrimSpace(coderControlPlane.Name) == "" || strings.TrimSpace(coderControlPlane.Namespace) == "" {
+			continue
+		}
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
+			Name:      coderControlPlane.Name,
+			Namespace: coderControlPlane.Namespace,
+		}})
+	}
+
+	return requests
+}
+
 func (r *CoderControlPlaneReconciler) reconcileStatus(
 	ctx context.Context,
 	coderControlPlane *coderv1alpha1.CoderControlPlane,
@@ -603,11 +1009,24 @@ func (r *CoderControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("assertion failed: reconciler scheme must not be nil")
 	}
 
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&coderv1alpha1.CoderControlPlane{},
+		licenseSecretNameFieldIndex,
+		indexByLicenseSecretName,
+	); err != nil {
+		return fmt.Errorf("index coder control planes by license secret name: %w", err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&coderv1alpha1.CoderControlPlane{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.Secret{}).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.reconcileRequestsForLicenseSecret),
+		).
 		Named("codercontrolplane").
 		Complete(r)
 }

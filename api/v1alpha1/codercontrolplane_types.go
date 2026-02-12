@@ -10,6 +10,8 @@ const (
 	CoderControlPlanePhasePending = "Pending"
 	// CoderControlPlanePhaseReady indicates at least one control plane pod is ready.
 	CoderControlPlanePhaseReady = "Ready"
+	// CoderControlPlaneConditionLicenseApplied indicates whether the operator uploaded the configured license.
+	CoderControlPlaneConditionLicenseApplied = "LicenseApplied"
 )
 
 // CoderControlPlaneSpec defines the desired state of a CoderControlPlane.
@@ -32,6 +34,11 @@ type CoderControlPlaneSpec struct {
 	// OperatorAccess configures bootstrap API access to the coderd instance.
 	// +kubebuilder:default={}
 	OperatorAccess OperatorAccessSpec `json:"operatorAccess,omitempty"`
+	// LicenseSecretRef references a Secret key containing a Coder Enterprise
+	// license JWT. When set, the controller uploads the license after the
+	// control plane is ready and re-uploads when the Secret value changes.
+	// +optional
+	LicenseSecretRef *SecretKeySelector `json:"licenseSecretRef,omitempty"`
 }
 
 // OperatorAccessSpec configures the controller-managed coderd operator user.
@@ -56,6 +63,14 @@ type CoderControlPlaneStatus struct {
 	OperatorTokenSecretRef *SecretKeySelector `json:"operatorTokenSecretRef,omitempty"`
 	// OperatorAccessReady reports whether operator API access bootstrap succeeded.
 	OperatorAccessReady bool `json:"operatorAccessReady,omitempty"`
+	// LicenseLastApplied is the timestamp of the most recent successful
+	// operator-managed license upload.
+	// +optional
+	LicenseLastApplied *metav1.Time `json:"licenseLastApplied,omitempty"`
+	// LicenseLastAppliedHash is the SHA-256 hex hash of the trimmed license JWT
+	// that LicenseLastApplied refers to.
+	// +optional
+	LicenseLastAppliedHash string `json:"licenseLastAppliedHash,omitempty"`
 	// Phase is a high-level readiness indicator.
 	Phase string `json:"phase,omitempty"`
 	// Conditions are Kubernetes-standard conditions for this resource.
