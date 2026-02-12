@@ -27,9 +27,8 @@ build: $(VENDOR_STAMP)
 	GOFLAGS=$(GOFLAGS) go build ./...
 
 lint: $(VENDOR_STAMP)
-	@command -v golangci-lint >/dev/null || (echo "golangci-lint not found; use nix develop" && exit 1)
-	GOFLAGS=$(GOFLAGS) golangci-lint run ./...
-	GOFLAGS=$(GOFLAGS) golangci-lint fmt --diff
+	GOFLAGS=$(GOFLAGS) go tool golangci-lint run ./...
+	GOFLAGS=$(GOFLAGS) go tool golangci-lint fmt --diff
 
 vuln: $(VENDOR_STAMP)
 	@command -v govulncheck >/dev/null || (echo "govulncheck not found; use nix develop" && exit 1)
