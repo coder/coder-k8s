@@ -191,6 +191,7 @@ func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 
+	originalStatus := *coderControlPlane.Status.DeepCopy()
 	nextStatus := r.desiredStatus(coderControlPlane, deployment, service)
 
 	operatorResult, err := r.reconcileOperatorAccess(ctx, coderControlPlane, &nextStatus)
@@ -203,7 +204,7 @@ func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 
-	if err := r.reconcileStatus(ctx, coderControlPlane, nextStatus); err != nil {
+	if err := r.reconcileStatus(ctx, coderControlPlane, originalStatus, nextStatus); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -1052,16 +1053,72 @@ func (r *CoderControlPlaneReconciler) reconcileRequestsForLicenseSecret(
 	return requests
 }
 
+func mergeControlPlaneStatusDelta(
+	baseStatus coderv1alpha1.CoderControlPlaneStatus,
+	nextStatus coderv1alpha1.CoderControlPlaneStatus,
+	latestStatus coderv1alpha1.CoderControlPlaneStatus,
+) coderv1alpha1.CoderControlPlaneStatus {
+	mergedStatus := latestStatus
+
+	if baseStatus.ObservedGeneration != nextStatus.ObservedGeneration {
+		mergedStatus.ObservedGeneration = nextStatus.ObservedGeneration
+	}
+	if baseStatus.ReadyReplicas != nextStatus.ReadyReplicas {
+		mergedStatus.ReadyReplicas = nextStatus.ReadyReplicas
+	}
+	if baseStatus.URL != nextStatus.URL {
+		mergedStatus.URL = nextStatus.URL
+	}
+	if !equality.Semantic.DeepEqual(baseStatus.OperatorTokenSecretRef, nextStatus.OperatorTokenSecretRef) {
+		mergedStatus.OperatorTokenSecretRef = cloneSecretKeySelector(nextStatus.OperatorTokenSecretRef)
+	}
+	if baseStatus.OperatorAccessReady != nextStatus.OperatorAccessReady {
+		mergedStatus.OperatorAccessReady = nextStatus.OperatorAccessReady
+	}
+	if !equality.Semantic.DeepEqual(baseStatus.LicenseLastApplied, nextStatus.LicenseLastApplied) {
+		mergedStatus.LicenseLastApplied = cloneMetav1Time(nextStatus.LicenseLastApplied)
+	}
+	if baseStatus.LicenseLastAppliedHash != nextStatus.LicenseLastAppliedHash {
+		mergedStatus.LicenseLastAppliedHash = nextStatus.LicenseLastAppliedHash
+	}
+	if baseStatus.Phase != nextStatus.Phase {
+		mergedStatus.Phase = nextStatus.Phase
+	}
+	if !equality.Semantic.DeepEqual(baseStatus.Conditions, nextStatus.Conditions) {
+		mergedStatus.Conditions = append([]metav1.Condition(nil), nextStatus.Conditions...)
+	}
+
+	return mergedStatus
+}
+
+func cloneSecretKeySelector(selector *coderv1alpha1.SecretKeySelector) *coderv1alpha1.SecretKeySelector {
+	if selector == nil {
+		return nil
+	}
+
+	copied := *selector
+	return &copied
+}
+
+func cloneMetav1Time(timestamp *metav1.Time) *metav1.Time {
+	if timestamp == nil {
+		return nil
+	}
+
+	return timestamp.DeepCopy()
+}
+
 func (r *CoderControlPlaneReconciler) reconcileStatus(
 	ctx context.Context,
 	coderControlPlane *coderv1alpha1.CoderControlPlane,
+	baseStatus coderv1alpha1.CoderControlPlaneStatus,
 	nextStatus coderv1alpha1.CoderControlPlaneStatus,
 ) error {
 	if coderControlPlane == nil {
 		return fmt.Errorf("assertion failed: coder control plane must not be nil")
 	}
 
-	if equality.Semantic.DeepEqual(coderControlPlane.Status, nextStatus) {
+	if equality.Semantic.DeepEqual(baseStatus, nextStatus) {
 		return nil
 	}
 
@@ -1093,17 +1150,19 @@ func (r *CoderControlPlaneReconciler) reconcileStatus(
 			coderControlPlane.Status = latest.Status
 			return nil
 		}
-		if equality.Semantic.DeepEqual(latest.Status, nextStatus) {
+
+		mergedStatus := mergeControlPlaneStatusDelta(baseStatus, nextStatus, latest.Status)
+		if equality.Semantic.DeepEqual(latest.Status, mergedStatus) {
 			coderControlPlane.Status = latest.Status
 			return nil
 		}
 
-		latest.Status = nextStatus
+		latest.Status = mergedStatus
 		if err := r.Status().Update(ctx, latest); err != nil {
 			return err
 		}
 
-		coderControlPlane.Status = nextStatus
+		coderControlPlane.Status = mergedStatus
 		return nil
 	}); err != nil {
 		return fmt.Errorf("update control plane status: %w", err)
