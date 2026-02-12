@@ -1,5 +1,10 @@
 # coder-k8s
 
+> [!WARNING]
+> **Highly Experimental / Alpha Software**
+> This repository is a **hackathon contribution** and remains a **highly experimental, alpha-stage** project.
+> **Do not use this in production or expose it to end users.**
+>
 ## Project description
 
 `coder-k8s` is a Go-based Kubernetes control-plane project with two app modes:
