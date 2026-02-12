@@ -56,6 +56,8 @@ make kind-dev-up
 > KIND_NODE_IMAGE=kindest/node:v1.32.0 make kind-dev-up
 > ```
 
+> If the cluster already exists and you change `KIND_NODE_IMAGE`, run `make kind-dev-down` first so the new image can be applied.
+>
 If you need to switch your kubectl context later:
 
 ```bash

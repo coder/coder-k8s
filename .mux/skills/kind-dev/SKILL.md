@@ -28,6 +28,13 @@ kubectl --context kind-${CLUSTER_NAME} get nodes
 KIND_NODE_IMAGE=kindest/node:v1.32.0 ./hack/kind-dev.sh up
 ```
 
+If the cluster already exists and you change `KIND_NODE_IMAGE`, recreate it first:
+
+```bash
+./hack/kind-dev.sh down
+KIND_NODE_IMAGE=kindest/node:v1.32.0 ./hack/kind-dev.sh up
+```
+
 ## Start controller (out-of-cluster)
 
 ```bash

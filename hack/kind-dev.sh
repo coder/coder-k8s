@@ -39,6 +39,43 @@ ensure_cluster() {
 	fi
 }
 
+ensure_cluster_node_image_matches() {
+	local control_plane_container expected_image actual_image expected_image_id actual_image_id
+
+	require_cmd docker
+
+	expected_image="${KIND_NODE_IMAGE}"
+	if [[ -z "${expected_image}" ]]; then
+		echo "assertion failed: KIND_NODE_IMAGE must not be empty" >&2
+		exit 1
+	fi
+
+	control_plane_container="${CLUSTER_NAME}-control-plane"
+	if ! docker inspect "${control_plane_container}" >/dev/null 2>&1; then
+		echo "assertion failed: expected kind control-plane container ${control_plane_container} for existing cluster ${CLUSTER_NAME}" >&2
+		exit 1
+	fi
+
+	actual_image="$(docker inspect --format '{{.Config.Image}}' "${control_plane_container}")"
+	if [[ -z "${actual_image}" ]]; then
+		echo "assertion failed: kind control-plane container ${control_plane_container} has an empty image value" >&2
+		exit 1
+	fi
+
+	if [[ "${actual_image}" == "${expected_image}" ]]; then
+		return
+	fi
+
+	expected_image_id="$(docker image inspect --format '{{.ID}}' "${expected_image}" 2>/dev/null || true)"
+	actual_image_id="$(docker image inspect --format '{{.ID}}' "${actual_image}" 2>/dev/null || true)"
+	if [[ -n "${expected_image_id}" && -n "${actual_image_id}" && "${expected_image_id}" == "${actual_image_id}" ]]; then
+		return
+	fi
+
+	echo "assertion failed: existing cluster ${CLUSTER_NAME} uses node image ${actual_image}, but KIND_NODE_IMAGE=${expected_image}. Recreate the cluster to apply a different node image (run: ./hack/kind-dev.sh down && KIND_NODE_IMAGE=${expected_image} ./hack/kind-dev.sh up)" >&2
+	exit 1
+}
+
 build_binary() {
 	local resolved_goarch="${GOARCH}"
 	if [[ -z "${resolved_goarch}" ]]; then
@@ -66,11 +103,13 @@ cmd_up() {
 		exit 1
 	fi
 
-	if ! kind get clusters | grep -qx "${CLUSTER_NAME}"; then
+	if kind get clusters | grep -qx "${CLUSTER_NAME}"; then
+		ensure_cluster_node_image_matches
+		echo "Using existing KIND cluster ${CLUSTER_NAME} with node image: ${KIND_NODE_IMAGE}"
+	else
 		kind create cluster --name "${CLUSTER_NAME}" --image "${KIND_NODE_IMAGE}"
+		echo "Created KIND cluster ${CLUSTER_NAME} with node image: ${KIND_NODE_IMAGE}"
 	fi
-
-	echo "Using KIND node image: ${KIND_NODE_IMAGE}"
 
 	kind export kubeconfig --name "${CLUSTER_NAME}" >/dev/null
 	kubectl config use-context "${KUBE_CONTEXT}" >/dev/null
