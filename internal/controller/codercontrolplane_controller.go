@@ -61,7 +61,8 @@ const (
 	licenseConditionReasonNotSupported  = "NotSupported"
 	licenseConditionReasonError         = "Error"
 
-	licenseUploadRequestTimeout = 30 * time.Second
+	licenseUploadRequestTimeout       = 30 * time.Second
+	entitlementsStatusRefreshInterval = 2 * time.Minute
 )
 
 var (
@@ -73,6 +74,35 @@ var (
 type LicenseUploader interface {
 	AddLicense(ctx context.Context, coderURL, sessionToken, licenseJWT string) error
 	HasAnyLicense(ctx context.Context, coderURL, sessionToken string) (bool, error)
+}
+
+// EntitlementsInspector inspects coderd entitlements.
+type EntitlementsInspector interface {
+	Entitlements(ctx context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error)
+}
+
+// NewSDKEntitlementsInspector returns an EntitlementsInspector backed by codersdk.
+func NewSDKEntitlementsInspector() EntitlementsInspector {
+	return &sdkEntitlementsInspector{}
+}
+
+type sdkEntitlementsInspector struct{}
+
+func (i *sdkEntitlementsInspector) Entitlements(ctx context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error) {
+	sdkClient, err := newSDKLicenseClient(coderURL, sessionToken)
+	if err != nil {
+		return codersdk.Entitlements{}, err
+	}
+
+	entitlements, err := sdkClient.Entitlements(ctx)
+	if err != nil {
+		return codersdk.Entitlements{}, fmt.Errorf("query coder entitlements: %w", err)
+	}
+	if entitlements.Features == nil {
+		return codersdk.Entitlements{}, fmt.Errorf("assertion failed: entitlements features must not be nil")
+	}
+
+	return entitlements, nil
 }
 
 // NewSDKLicenseUploader returns a LicenseUploader backed by codersdk.
@@ -151,6 +181,7 @@ type CoderControlPlaneReconciler struct {
 
 	OperatorAccessProvisioner coderbootstrap.OperatorAccessProvisioner
 	LicenseUploader           LicenseUploader
+	EntitlementsInspector     EntitlementsInspector
 }
 
 // +kubebuilder:rbac:groups=coder.com,resources=codercontrolplanes,verbs=get;list;watch;create;update;patch;delete
@@ -204,11 +235,16 @@ func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 
+	entitlementsResult, err := r.reconcileEntitlements(ctx, coderControlPlane, &nextStatus)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if err := r.reconcileStatus(ctx, coderControlPlane, originalStatus, nextStatus); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	return mergeResults(operatorResult, licenseResult), nil
+	return mergeResults(operatorResult, licenseResult, entitlementsResult), nil
 }
 
 func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) (*appsv1.Deployment, error) {
@@ -727,6 +763,143 @@ func (r *CoderControlPlaneReconciler) reconcileLicense(
 	return ctrl.Result{}, nil
 }
 
+func (r *CoderControlPlaneReconciler) reconcileEntitlements(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+	nextStatus *coderv1alpha1.CoderControlPlaneStatus,
+) (ctrl.Result, error) {
+	if coderControlPlane == nil {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+	if nextStatus == nil {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: next status must not be nil")
+	}
+
+	if strings.TrimSpace(nextStatus.LicenseTier) == "" {
+		nextStatus.LicenseTier = coderv1alpha1.CoderControlPlaneLicenseTierUnknown
+	}
+	if strings.TrimSpace(nextStatus.ExternalProvisionerDaemonsEntitlement) == "" {
+		nextStatus.ExternalProvisionerDaemonsEntitlement = coderv1alpha1.CoderControlPlaneEntitlementUnknown
+	}
+
+	if nextStatus.Phase != coderv1alpha1.CoderControlPlanePhaseReady ||
+		!nextStatus.OperatorAccessReady ||
+		nextStatus.OperatorTokenSecretRef == nil {
+		return ctrl.Result{}, nil
+	}
+	if strings.TrimSpace(nextStatus.URL) == "" {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: control plane URL must not be empty when querying entitlements")
+	}
+	if r.EntitlementsInspector == nil {
+		return ctrl.Result{}, nil
+	}
+
+	operatorTokenSecretName := strings.TrimSpace(nextStatus.OperatorTokenSecretRef.Name)
+	if operatorTokenSecretName == "" {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: operator token secret name must not be empty when querying entitlements")
+	}
+	operatorTokenSecretKey := strings.TrimSpace(nextStatus.OperatorTokenSecretRef.Key)
+	if operatorTokenSecretKey == "" {
+		operatorTokenSecretKey = coderv1alpha1.DefaultTokenSecretKey
+	}
+
+	operatorToken, err := r.readSecretValue(ctx, coderControlPlane.Namespace, operatorTokenSecretName, operatorTokenSecretKey)
+	switch {
+	case err == nil:
+	case apierrors.IsNotFound(err), errors.Is(err, errSecretValueMissing), errors.Is(err, errSecretValueEmpty):
+		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+	default:
+		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+	}
+
+	entitlements, err := r.EntitlementsInspector.Entitlements(ctx, nextStatus.URL, operatorToken)
+	if err != nil {
+		var sdkErr *codersdk.Error
+		if errors.As(err, &sdkErr) {
+			switch sdkErr.StatusCode() {
+			case http.StatusNotFound, http.StatusUnauthorized, http.StatusForbidden:
+				return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+			}
+		}
+		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+	}
+	if entitlements.Features == nil {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: entitlements features must not be nil")
+	}
+
+	previousTier := nextStatus.LicenseTier
+	previousExternalProvisionerEntitlement := nextStatus.ExternalProvisionerDaemonsEntitlement
+
+	nextStatus.LicenseTier = licenseTierFromEntitlements(entitlements)
+	nextStatus.ExternalProvisionerDaemonsEntitlement = externalProvisionerDaemonsEntitlement(entitlements)
+
+	shouldRefreshEntitlementsTimestamp := nextStatus.EntitlementsLastChecked == nil
+	if !shouldRefreshEntitlementsTimestamp {
+		elapsedSinceLastCheck := time.Since(nextStatus.EntitlementsLastChecked.Time)
+		shouldRefreshEntitlementsTimestamp = elapsedSinceLastCheck < 0 || elapsedSinceLastCheck >= entitlementsStatusRefreshInterval
+	}
+	if previousTier != nextStatus.LicenseTier ||
+		previousExternalProvisionerEntitlement != nextStatus.ExternalProvisionerDaemonsEntitlement {
+		shouldRefreshEntitlementsTimestamp = true
+	}
+	if shouldRefreshEntitlementsTimestamp {
+		now := metav1.Now()
+		nextStatus.EntitlementsLastChecked = &now
+	}
+
+	requeueAfter := entitlementsStatusRefreshInterval
+	if nextStatus.EntitlementsLastChecked != nil {
+		elapsedSinceLastCheck := time.Since(nextStatus.EntitlementsLastChecked.Time)
+		if elapsedSinceLastCheck >= 0 && elapsedSinceLastCheck < entitlementsStatusRefreshInterval {
+			requeueAfter = entitlementsStatusRefreshInterval - elapsedSinceLastCheck
+		}
+	}
+
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+func externalProvisionerDaemonsEntitlement(entitlements codersdk.Entitlements) string {
+	feature, ok := entitlements.Features[codersdk.FeatureExternalProvisionerDaemons]
+	if !ok {
+		return coderv1alpha1.CoderControlPlaneEntitlementUnknown
+	}
+
+	return normalizedEntitlementValue(feature.Entitlement)
+}
+
+func normalizedEntitlementValue(entitlement codersdk.Entitlement) string {
+	switch entitlement {
+	case codersdk.EntitlementEntitled, codersdk.EntitlementGracePeriod, codersdk.EntitlementNotEntitled:
+		return string(entitlement)
+	default:
+		return coderv1alpha1.CoderControlPlaneEntitlementUnknown
+	}
+}
+
+func licenseTierFromEntitlements(entitlements codersdk.Entitlements) string {
+	if !entitlements.HasLicense {
+		return coderv1alpha1.CoderControlPlaneLicenseTierNone
+	}
+	if entitlements.Trial {
+		return coderv1alpha1.CoderControlPlaneLicenseTierTrial
+	}
+
+	for _, featureName := range []codersdk.FeatureName{
+		codersdk.FeatureCustomRoles,
+		codersdk.FeatureMultipleOrganizations,
+	} {
+		feature, ok := entitlements.Features[featureName]
+		if !ok {
+			continue
+		}
+		if feature.Entitlement.Entitled() {
+			return coderv1alpha1.CoderControlPlaneLicenseTierPremium
+		}
+	}
+
+	return coderv1alpha1.CoderControlPlaneLicenseTierEnterprise
+}
+
 func (r *CoderControlPlaneReconciler) cleanupDisabledOperatorAccess(
 	ctx context.Context,
 	coderControlPlane *coderv1alpha1.CoderControlPlane,
@@ -1121,6 +1294,15 @@ func mergeControlPlaneStatusDelta(
 	}
 	if baseStatus.LicenseLastAppliedHash != nextStatus.LicenseLastAppliedHash {
 		mergedStatus.LicenseLastAppliedHash = nextStatus.LicenseLastAppliedHash
+	}
+	if baseStatus.LicenseTier != nextStatus.LicenseTier {
+		mergedStatus.LicenseTier = nextStatus.LicenseTier
+	}
+	if !equality.Semantic.DeepEqual(baseStatus.EntitlementsLastChecked, nextStatus.EntitlementsLastChecked) {
+		mergedStatus.EntitlementsLastChecked = cloneMetav1Time(nextStatus.EntitlementsLastChecked)
+	}
+	if baseStatus.ExternalProvisionerDaemonsEntitlement != nextStatus.ExternalProvisionerDaemonsEntitlement {
+		mergedStatus.ExternalProvisionerDaemonsEntitlement = nextStatus.ExternalProvisionerDaemonsEntitlement
 	}
 	if baseStatus.Phase != nextStatus.Phase {
 		mergedStatus.Phase = nextStatus.Phase

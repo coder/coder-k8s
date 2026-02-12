@@ -138,6 +138,33 @@ func (c *SDKClient) DeleteProvisionerKey(ctx context.Context, coderURL, sessionT
 	return xerrors.Errorf("delete provisioner key %q: %w", keyName, err)
 }
 
+// Entitlements returns deployment entitlements for the given coderd instance.
+func (c *SDKClient) Entitlements(ctx context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error) {
+	if coderURL == "" {
+		return codersdk.Entitlements{}, xerrors.New("coder URL is required")
+	}
+	if sessionToken == "" {
+		return codersdk.Entitlements{}, xerrors.New("session token is required")
+	}
+
+	client, err := newAuthenticatedClient(coderURL, sessionToken)
+	if err != nil {
+		return codersdk.Entitlements{}, err
+	}
+
+	entitlements, err := withOptionalRateLimitBypass(ctx, func(requestCtx context.Context) (codersdk.Entitlements, error) {
+		return client.Entitlements(requestCtx)
+	})
+	if err != nil {
+		return codersdk.Entitlements{}, xerrors.Errorf("get entitlements: %w", err)
+	}
+	if entitlements.Features == nil {
+		return codersdk.Entitlements{}, xerrors.New("assertion failed: entitlements.features is nil")
+	}
+
+	return entitlements, nil
+}
+
 func validateProvisionerKeyInputs(coderURL, sessionToken, keyName string) error {
 	if coderURL == "" {
 		return xerrors.New("coder URL is required")

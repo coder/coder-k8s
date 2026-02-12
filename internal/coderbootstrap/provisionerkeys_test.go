@@ -315,6 +315,55 @@ func TestEnsureProvisionerKey_ValidationErrors(t *testing.T) {
 	}
 }
 
+func TestEntitlements_Success(t *testing.T) {
+	t.Parallel()
+
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodGet, r.Method)
+		require.Equal(t, "/api/v2/entitlements", r.URL.Path)
+		requestCount++
+		writeJSONResponse(t, w, http.StatusOK, map[string]any{
+			"features": map[string]any{
+				string(codersdk.FeatureExternalProvisionerDaemons): map[string]any{
+					"entitlement": string(codersdk.EntitlementEntitled),
+					"enabled":     true,
+				},
+			},
+			"warnings":          []string{},
+			"errors":            []string{},
+			"has_license":       true,
+			"trial":             false,
+			"require_telemetry": false,
+			"refreshed_at":      time.Now().UTC().Format(time.RFC3339),
+		})
+	}))
+	defer server.Close()
+
+	client := coderbootstrap.NewSDKClient()
+	entitlements, err := client.Entitlements(context.Background(), server.URL, "session-token")
+	require.NoError(t, err)
+	require.Equal(t, 1, requestCount)
+
+	feature, ok := entitlements.Features[codersdk.FeatureExternalProvisionerDaemons]
+	require.True(t, ok)
+	require.Equal(t, codersdk.EntitlementEntitled, feature.Entitlement)
+}
+
+func TestEntitlements_ValidationErrors(t *testing.T) {
+	t.Parallel()
+
+	client := coderbootstrap.NewSDKClient()
+
+	_, err := client.Entitlements(context.Background(), "", "session-token")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "coder URL is required")
+
+	_, err = client.Entitlements(context.Background(), "https://coder.example.com", "")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "session token is required")
+}
+
 func TestDeleteProvisionerKey_Success(t *testing.T) {
 	t.Parallel()
 

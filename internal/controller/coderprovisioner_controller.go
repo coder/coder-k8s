@@ -5,13 +5,17 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"maps"
+	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -25,6 +29,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/coderbootstrap"
@@ -42,6 +48,11 @@ const (
 	provisionerRateLimitBackoffCap   = 2 * time.Minute
 	provisionerRateLimitBackoffFloor = 1 * time.Second
 	provisionerRateLimitJitterRatio  = 0.2
+
+	externalProvisionerEntitlementRetryInterval = 2 * time.Minute
+
+	// #nosec G101 -- this is a field index key, not a credential.
+	provisionerControlPlaneRefNameFieldIndex = ".spec.controlPlaneRef.name"
 )
 
 var provisionerRateLimitBackoffAttempts sync.Map // map[string]int
@@ -178,6 +189,26 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		"BootstrapSecretAvailable",
 		"Bootstrap credentials secret is available",
 	)
+
+	entitlementResult, entitlementErr := r.reconcileExternalProvisionerEntitlement(ctx, provisioner, controlPlane, sessionToken)
+	if entitlementErr != nil {
+		if statusSnapshot == nil {
+			return ctrl.Result{}, fmt.Errorf("assertion failed: status snapshot must not be nil")
+		}
+		if !equality.Semantic.DeepEqual(*statusSnapshot, provisioner.Status) {
+			_ = r.Status().Update(ctx, provisioner)
+		}
+		return ctrl.Result{}, entitlementErr
+	}
+	if entitlementResult.RequeueAfter > 0 {
+		if statusSnapshot == nil {
+			return ctrl.Result{}, fmt.Errorf("assertion failed: status snapshot must not be nil")
+		}
+		if !equality.Semantic.DeepEqual(*statusSnapshot, provisioner.Status) {
+			_ = r.Status().Update(ctx, provisioner)
+		}
+		return entitlementResult, nil
+	}
 
 	desiredTagsHash := hashProvisionerTags(provisioner.Spec.Tags)
 	desiredControlPlaneRefName := provisioner.Spec.ControlPlaneRef.Name
@@ -689,6 +720,106 @@ func (r *CoderProvisionerReconciler) readBootstrapSessionToken(ctx context.Conte
 	return token, nil
 }
 
+func (r *CoderProvisionerReconciler) reconcileExternalProvisionerEntitlement(
+	ctx context.Context,
+	provisioner *coderv1alpha1.CoderProvisioner,
+	controlPlane *coderv1alpha1.CoderControlPlane,
+	sessionToken string,
+) (ctrl.Result, error) {
+	if provisioner == nil {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: coder provisioner must not be nil")
+	}
+	if controlPlane == nil {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+	if strings.TrimSpace(controlPlane.Status.URL) == "" {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: coder control plane URL must not be empty")
+	}
+	if sessionToken == "" {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: bootstrap session token must not be empty")
+	}
+
+	if controlPlane.Status.EntitlementsLastChecked != nil {
+		recheckAfter := durationUntilNextEntitlementsCheck(controlPlane.Status.EntitlementsLastChecked, externalProvisionerEntitlementRetryInterval)
+
+		switch strings.TrimSpace(controlPlane.Status.ExternalProvisionerDaemonsEntitlement) {
+		case string(codersdk.EntitlementEntitled), string(codersdk.EntitlementGracePeriod):
+			if recheckAfter > 0 {
+				setCondition(
+					provisioner,
+					coderv1alpha1.CoderProvisionerConditionExternalProvisionersEntitled,
+					metav1.ConditionTrue,
+					"Entitled",
+					"Coder deployment is entitled to external provisioner daemons",
+				)
+				return ctrl.Result{}, nil
+			}
+		case string(codersdk.EntitlementNotEntitled):
+			if recheckAfter > 0 {
+				setCondition(
+					provisioner,
+					coderv1alpha1.CoderProvisionerConditionExternalProvisionersEntitled,
+					metav1.ConditionFalse,
+					"NotEntitled",
+					"Coder deployment is not entitled to external provisioner daemons; install a Premium/Enterprise license to enable external provisioners.",
+				)
+				return ctrl.Result{RequeueAfter: recheckAfter}, nil
+			}
+		}
+	}
+
+	entitlements, err := r.BootstrapClient.Entitlements(ctx, controlPlane.Status.URL, sessionToken)
+	if err != nil {
+		reason := "EntitlementsQueryFailed"
+		message := "Failed to query Coder entitlements; retrying."
+
+		var apiErr *codersdk.Error
+		if errors.As(err, &apiErr) {
+			switch apiErr.StatusCode() {
+			case http.StatusNotFound:
+				reason = "NotSupported"
+				message = "Coder deployment does not expose /api/v2/entitlements; cannot verify license."
+			case http.StatusUnauthorized, http.StatusForbidden:
+				reason = "Forbidden"
+				message = "Bootstrap token is not authorized to read entitlements; retrying."
+			}
+		}
+
+		setCondition(
+			provisioner,
+			coderv1alpha1.CoderProvisionerConditionExternalProvisionersEntitled,
+			metav1.ConditionFalse,
+			reason,
+			message,
+		)
+		return ctrl.Result{RequeueAfter: externalProvisionerEntitlementRetryInterval}, nil
+	}
+	if entitlements.Features == nil {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: entitlements features must not be nil")
+	}
+
+	feature, ok := entitlements.Features[codersdk.FeatureExternalProvisionerDaemons]
+	if !ok || !feature.Entitlement.Entitled() {
+		setCondition(
+			provisioner,
+			coderv1alpha1.CoderProvisionerConditionExternalProvisionersEntitled,
+			metav1.ConditionFalse,
+			"NotEntitled",
+			"Coder deployment is not entitled to external provisioner daemons; install a Premium/Enterprise license to enable external provisioners.",
+		)
+		return ctrl.Result{RequeueAfter: externalProvisionerEntitlementRetryInterval}, nil
+	}
+
+	setCondition(
+		provisioner,
+		coderv1alpha1.CoderProvisionerConditionExternalProvisionersEntitled,
+		metav1.ConditionTrue,
+		"Entitled",
+		"Coder deployment is entitled to external provisioner daemons",
+	)
+	return ctrl.Result{}, nil
+}
+
 func (r *CoderProvisionerReconciler) ensureProvisionerKeySecret(
 	ctx context.Context,
 	provisioner *coderv1alpha1.CoderProvisioner,
@@ -975,6 +1106,56 @@ func (r *CoderProvisionerReconciler) readSecretValue(ctx context.Context, namesp
 	return string(value), nil
 }
 
+func indexProvisionerByControlPlaneRefName(obj client.Object) []string {
+	provisioner, ok := obj.(*coderv1alpha1.CoderProvisioner)
+	if !ok {
+		return nil
+	}
+
+	controlPlaneName := strings.TrimSpace(provisioner.Spec.ControlPlaneRef.Name)
+	if controlPlaneName == "" {
+		return nil
+	}
+
+	return []string{controlPlaneName}
+}
+
+func (r *CoderProvisionerReconciler) reconcileRequestsForControlPlane(
+	ctx context.Context,
+	obj client.Object,
+) []reconcile.Request {
+	controlPlane, ok := obj.(*coderv1alpha1.CoderControlPlane)
+	if !ok {
+		return nil
+	}
+	if strings.TrimSpace(controlPlane.Name) == "" || strings.TrimSpace(controlPlane.Namespace) == "" {
+		return nil
+	}
+
+	var provisioners coderv1alpha1.CoderProvisionerList
+	if err := r.List(
+		ctx,
+		&provisioners,
+		client.InNamespace(controlPlane.Namespace),
+		client.MatchingFields{provisionerControlPlaneRefNameFieldIndex: controlPlane.Name},
+	); err != nil {
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(provisioners.Items))
+	for _, provisioner := range provisioners.Items {
+		if strings.TrimSpace(provisioner.Name) == "" || strings.TrimSpace(provisioner.Namespace) == "" {
+			continue
+		}
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
+			Name:      provisioner.Name,
+			Namespace: provisioner.Namespace,
+		}})
+	}
+
+	return requests
+}
+
 // SetupWithManager wires the reconciler into controller-runtime.
 func (r *CoderProvisionerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if mgr == nil {
@@ -990,6 +1171,15 @@ func (r *CoderProvisionerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("assertion failed: reconciler bootstrap client must not be nil")
 	}
 
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&coderv1alpha1.CoderProvisioner{},
+		provisionerControlPlaneRefNameFieldIndex,
+		indexProvisionerByControlPlaneRefName,
+	); err != nil {
+		return fmt.Errorf("index coder provisioners by control plane ref name: %w", err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&coderv1alpha1.CoderProvisioner{}).
 		Owns(&appsv1.Deployment{}).
@@ -997,6 +1187,10 @@ func (r *CoderProvisionerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
+		Watches(
+			&coderv1alpha1.CoderControlPlane{},
+			handler.EnqueueRequestsFromMapFunc(r.reconcileRequestsForControlPlane),
+		).
 		Named("coderprovisioner").
 		Complete(r)
 }
@@ -1190,6 +1384,25 @@ func provisionerRateLimitJitterMultiplier() float64 {
 	randomFraction := float64(binary.BigEndian.Uint64(randomBytes[:])) / float64(^uint64(0))
 	jitter := (randomFraction*2 - 1) * provisionerRateLimitJitterRatio
 	return 1 + jitter
+}
+
+func durationUntilNextEntitlementsCheck(lastChecked *metav1.Time, interval time.Duration) time.Duration {
+	if lastChecked == nil {
+		return 0
+	}
+	if interval <= 0 {
+		return 0
+	}
+
+	elapsed := time.Since(lastChecked.Time)
+	if elapsed < 0 {
+		return interval
+	}
+	if elapsed >= interval {
+		return 0
+	}
+
+	return interval - elapsed
 }
 
 func setCondition(

@@ -12,6 +12,20 @@ const (
 	CoderControlPlanePhaseReady = "Ready"
 	// CoderControlPlaneConditionLicenseApplied indicates whether the operator uploaded the configured license.
 	CoderControlPlaneConditionLicenseApplied = "LicenseApplied"
+
+	// CoderControlPlaneLicenseTierNone indicates no license is currently installed.
+	CoderControlPlaneLicenseTierNone = "none"
+	// CoderControlPlaneLicenseTierTrial indicates a trial license is currently installed.
+	CoderControlPlaneLicenseTierTrial = "trial"
+	// CoderControlPlaneLicenseTierEnterprise indicates an enterprise license is currently installed.
+	CoderControlPlaneLicenseTierEnterprise = "enterprise"
+	// CoderControlPlaneLicenseTierPremium indicates a premium license is currently installed.
+	CoderControlPlaneLicenseTierPremium = "premium"
+	// CoderControlPlaneLicenseTierUnknown indicates the controller could not determine the current license tier.
+	CoderControlPlaneLicenseTierUnknown = "unknown"
+
+	// CoderControlPlaneEntitlementUnknown indicates the controller could not determine a feature entitlement.
+	CoderControlPlaneEntitlementUnknown = "unknown"
 )
 
 // CoderControlPlaneSpec defines the desired state of a CoderControlPlane.
@@ -71,6 +85,18 @@ type CoderControlPlaneStatus struct {
 	// that LicenseLastApplied refers to.
 	// +optional
 	LicenseLastAppliedHash string `json:"licenseLastAppliedHash,omitempty"`
+	// LicenseTier is a best-effort classification of the currently applied license.
+	// Values: none, trial, enterprise, premium, unknown.
+	// +optional
+	LicenseTier string `json:"licenseTier,omitempty"`
+	// EntitlementsLastChecked is when the operator last queried coderd entitlements.
+	// +optional
+	EntitlementsLastChecked *metav1.Time `json:"entitlementsLastChecked,omitempty"`
+	// ExternalProvisionerDaemonsEntitlement is the entitlement value for feature
+	// "external_provisioner_daemons".
+	// Values: entitled, grace_period, not_entitled, unknown.
+	// +optional
+	ExternalProvisionerDaemonsEntitlement string `json:"externalProvisionerDaemonsEntitlement,omitempty"`
 	// Phase is a high-level readiness indicator.
 	Phase string `json:"phase,omitempty"`
 	// Conditions are Kubernetes-standard conditions for this resource.

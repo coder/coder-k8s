@@ -19,6 +19,9 @@ const (
 	CoderProvisionerConditionProvisionerKeyReady = "ProvisionerKeyReady"
 	// CoderProvisionerConditionProvisionerKeySecretReady indicates whether the provisioner key secret is populated.
 	CoderProvisionerConditionProvisionerKeySecretReady = "ProvisionerKeySecretReady"
+	// CoderProvisionerConditionExternalProvisionersEntitled indicates whether the
+	// referenced Coder deployment is entitled to run external provisioner daemons.
+	CoderProvisionerConditionExternalProvisionersEntitled = "ExternalProvisionersEntitled"
 	// CoderProvisionerConditionDeploymentReady indicates whether the provisioner deployment has ready replicas.
 	CoderProvisionerConditionDeploymentReady = "DeploymentReady"
 
