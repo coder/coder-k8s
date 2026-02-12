@@ -227,7 +227,7 @@ func (s *TemplateStorage) Create(
 		return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
 	}
 
-	if len(templateObj.Spec.Files) > 0 {
+	if templateObj.Spec.Files != nil {
 		zipBytes, err := buildSourceZip(templateObj.Spec.Files)
 		if err != nil {
 			return nil, apierrors.NewBadRequest(fmt.Sprintf("invalid template spec.files: %v", err))

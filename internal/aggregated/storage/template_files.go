@@ -469,6 +469,10 @@ func validateTemplateSourcePath(templatePath string) (string, error) {
 		return "", fmt.Errorf("path must not be empty")
 	}
 
+	if strings.ContainsRune(templatePath, '\\') {
+		return "", fmt.Errorf("path must not contain backslashes")
+	}
+
 	cleanedPath := path.Clean(templatePath)
 	if cleanedPath == "." || cleanedPath == "/" {
 		return "", fmt.Errorf("path must not resolve to root")
