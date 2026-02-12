@@ -67,9 +67,11 @@ func (c *SDKClient) EnsureProvisionerKey(ctx context.Context, req EnsureProvisio
 		}, nil
 	}
 
-	created, err := client.CreateProvisionerKey(ctx, organization.ID, codersdk.CreateProvisionerKeyRequest{
-		Name: req.KeyName,
-		Tags: req.Tags,
+	created, err := withOptionalRateLimitBypass(ctx, func(requestCtx context.Context) (codersdk.CreateProvisionerKeyResponse, error) {
+		return client.CreateProvisionerKey(requestCtx, organization.ID, codersdk.CreateProvisionerKeyRequest{
+			Name: req.KeyName,
+			Tags: req.Tags,
+		})
 	})
 	if err != nil {
 		return EnsureProvisionerKeyResponse{}, xerrors.Errorf("create provisioner key %q: %w", req.KeyName, err)
@@ -78,7 +80,9 @@ func (c *SDKClient) EnsureProvisionerKey(ctx context.Context, req EnsureProvisio
 		return EnsureProvisionerKeyResponse{}, xerrors.Errorf("assertion failed: created provisioner key %q returned an empty key", req.KeyName)
 	}
 
-	createdMetadata, err := findOrganizationProvisionerKey(ctx, client, organization.ID, req.KeyName)
+	createdMetadata, err := withOptionalRateLimitBypass(ctx, func(requestCtx context.Context) (*codersdk.ProvisionerKey, error) {
+		return findOrganizationProvisionerKey(requestCtx, client, organization.ID, req.KeyName)
+	})
 	if err != nil {
 		return EnsureProvisionerKeyResponse{}, xerrors.Errorf("query created provisioner key %q: %w", req.KeyName, err)
 	}
@@ -119,7 +123,9 @@ func (c *SDKClient) DeleteProvisionerKey(ctx context.Context, coderURL, sessionT
 		return err
 	}
 
-	err = client.DeleteProvisionerKey(ctx, organization.ID, keyName)
+	_, err = withOptionalRateLimitBypass(ctx, func(requestCtx context.Context) (struct{}, error) {
+		return struct{}{}, client.DeleteProvisionerKey(requestCtx, organization.ID, keyName)
+	})
 	if err == nil {
 		return nil
 	}
@@ -166,7 +172,7 @@ func newAuthenticatedClient(coderURL, sessionToken string) (*codersdk.Client, er
 	}
 	// Use a dedicated transport to avoid sharing http.DefaultTransport's
 	// connection pool across parallel test servers.
-	client.HTTPClient.Transport = defaultTransport.Clone()
+	client.HTTPClient.Transport = bypassRateLimitRoundTripper{base: defaultTransport.Clone()}
 	client.HTTPClient.Timeout = coderSDKRequestTimeout
 
 	return client, nil

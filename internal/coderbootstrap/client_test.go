@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
@@ -198,6 +199,72 @@ func TestEnsureWorkspaceProxyUpdatesExistingProxy(t *testing.T) {
 	require.True(t, patched)
 	require.Equal(t, proxyName, result.ProxyName)
 	require.Equal(t, "token-updated", result.ProxyToken)
+}
+
+func TestEnsureWorkspaceProxyCreateFallsBackWhenRateLimitBypassRejected(t *testing.T) {
+	t.Parallel()
+
+	const proxyName = "proxy-fallback"
+	now := time.Now().UTC().Format(time.RFC3339)
+	proxyID := uuid.NewString()
+	createCalls := 0
+	bypassRejectedCalls := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/workspaceproxies/"+proxyName:
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"message": "not found"})
+			return
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/workspaceproxies":
+			createCalls++
+			if r.Header.Get(codersdk.BypassRatelimitHeader) == "true" {
+				bypassRejectedCalls++
+				w.WriteHeader(http.StatusPreconditionRequired)
+				_ = json.NewEncoder(w).Encode(map[string]string{"message": "bypass is not allowed"})
+				return
+			}
+
+			response := proxyResponse{}
+			response.Proxy.ID = proxyID
+			response.Proxy.Name = proxyName
+			response.Proxy.DisplayName = "Proxy Fallback"
+			response.Proxy.IconURL = "/emojis/1f5fa.png"
+			response.Proxy.Healthy = true
+			response.Proxy.PathAppURL = "https://proxy-fallback.example.com"
+			response.Proxy.WildcardHostname = "*.proxy-fallback.example.com"
+			response.Proxy.Status.Status = "unregistered"
+			response.Proxy.Status.CheckedAt = now
+			response.Proxy.CreatedAt = now
+			response.Proxy.UpdatedAt = now
+			response.Proxy.Version = "2.0.0"
+			response.ProxyToken = "token-created"
+
+			w.WriteHeader(http.StatusCreated)
+			err := json.NewEncoder(w).Encode(response)
+			require.NoError(t, err)
+			return
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"message": "unexpected route"})
+			return
+		}
+	}))
+	defer server.Close()
+
+	client := coderbootstrap.NewSDKClient()
+	result, err := client.EnsureWorkspaceProxy(context.Background(), coderbootstrap.RegisterWorkspaceProxyRequest{
+		CoderURL:     server.URL,
+		SessionToken: "session-token",
+		ProxyName:    proxyName,
+		DisplayName:  "Proxy Fallback",
+		Icon:         "/emojis/1f5fa.png",
+	})
+	require.NoError(t, err)
+	require.Equal(t, proxyName, result.ProxyName)
+	require.Equal(t, "token-created", result.ProxyToken)
+	require.Equal(t, 2, createCalls)
+	require.Equal(t, 1, bypassRejectedCalls)
 }
 
 func TestEnsureWorkspaceProxyValidatesInputs(t *testing.T) {

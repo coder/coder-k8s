@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"net/url"
 	"time"
 
 	"golang.org/x/xerrors"
@@ -16,6 +15,65 @@ import (
 const (
 	coderSDKRequestTimeout = 30 * time.Second
 )
+
+type bypassRateLimitContextKey struct{}
+
+func withRateLimitBypass(ctx context.Context) context.Context {
+	if ctx == nil {
+		return nil
+	}
+	return context.WithValue(ctx, bypassRateLimitContextKey{}, true)
+}
+
+func shouldBypassRateLimit(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	enabled, _ := ctx.Value(bypassRateLimitContextKey{}).(bool)
+	return enabled
+}
+
+func isRateLimitBypassRejected(err error) bool {
+	var apiErr *codersdk.Error
+	return errors.As(err, &apiErr) && apiErr.StatusCode() == http.StatusPreconditionRequired
+}
+
+// IsRateLimitError reports whether err (or any wrapped cause) is a codersdk
+// API error with HTTP 429 Too Many Requests.
+func IsRateLimitError(err error) bool {
+	var apiErr *codersdk.Error
+	return errors.As(err, &apiErr) && apiErr.StatusCode() == http.StatusTooManyRequests
+}
+
+func withOptionalRateLimitBypass[T any](ctx context.Context, operation func(context.Context) (T, error)) (T, error) {
+	result, err := operation(withRateLimitBypass(ctx))
+	if err == nil {
+		return result, nil
+	}
+	if !isRateLimitBypassRejected(err) {
+		return result, err
+	}
+	return operation(ctx)
+}
+
+type bypassRateLimitRoundTripper struct {
+	base http.RoundTripper
+}
+
+func (rt bypassRateLimitRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req == nil {
+		return nil, xerrors.New("assertion failed: request must not be nil")
+	}
+	if !shouldBypassRateLimit(req.Context()) {
+		return rt.base.RoundTrip(req)
+	}
+
+	cloned := req.Clone(req.Context())
+	cloned.Header = req.Header.Clone()
+	cloned.Header.Set(codersdk.BypassRatelimitHeader, "true")
+
+	return rt.base.RoundTrip(cloned)
+}
 
 // RegisterWorkspaceProxyRequest describes how to register a workspace proxy in Coder.
 type RegisterWorkspaceProxyRequest struct {
@@ -60,24 +118,10 @@ func (c *SDKClient) EnsureWorkspaceProxy(ctx context.Context, req RegisterWorksp
 		return RegisterWorkspaceProxyResponse{}, xerrors.New("proxy name is required")
 	}
 
-	coderURL, err := url.Parse(req.CoderURL)
+	client, err := newAuthenticatedClient(req.CoderURL, req.SessionToken)
 	if err != nil {
-		return RegisterWorkspaceProxyResponse{}, xerrors.Errorf("parse coder URL: %w", err)
+		return RegisterWorkspaceProxyResponse{}, err
 	}
-
-	client := codersdk.New(coderURL)
-	client.SetSessionToken(req.SessionToken)
-	if client.HTTPClient == nil {
-		client.HTTPClient = &http.Client{}
-	}
-	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		return RegisterWorkspaceProxyResponse{}, xerrors.New("assertion failed: http.DefaultTransport is not *http.Transport")
-	}
-	// Use a dedicated transport to avoid sharing http.DefaultTransport's
-	// connection pool across parallel test servers.
-	client.HTTPClient.Transport = defaultTransport.Clone()
-	client.HTTPClient.Timeout = coderSDKRequestTimeout
 
 	existing, err := client.WorkspaceProxyByName(ctx, req.ProxyName)
 	if err != nil {
@@ -86,10 +130,12 @@ func (c *SDKClient) EnsureWorkspaceProxy(ctx context.Context, req RegisterWorksp
 			return RegisterWorkspaceProxyResponse{}, xerrors.Errorf("query workspace proxy %q: %w", req.ProxyName, err)
 		}
 
-		created, createErr := client.CreateWorkspaceProxy(ctx, codersdk.CreateWorkspaceProxyRequest{
-			Name:        req.ProxyName,
-			DisplayName: req.DisplayName,
-			Icon:        req.Icon,
+		created, createErr := withOptionalRateLimitBypass(ctx, func(requestCtx context.Context) (codersdk.UpdateWorkspaceProxyResponse, error) {
+			return client.CreateWorkspaceProxy(requestCtx, codersdk.CreateWorkspaceProxyRequest{
+				Name:        req.ProxyName,
+				DisplayName: req.DisplayName,
+				Icon:        req.Icon,
+			})
 		})
 		if createErr != nil {
 			return RegisterWorkspaceProxyResponse{}, xerrors.Errorf("create workspace proxy %q: %w", req.ProxyName, createErr)
@@ -109,12 +155,14 @@ func (c *SDKClient) EnsureWorkspaceProxy(ctx context.Context, req RegisterWorksp
 		icon = existing.IconURL
 	}
 
-	updated, err := client.PatchWorkspaceProxy(ctx, codersdk.PatchWorkspaceProxy{
-		ID:              existing.ID,
-		Name:            existing.Name,
-		DisplayName:     displayName,
-		Icon:            icon,
-		RegenerateToken: true,
+	updated, err := withOptionalRateLimitBypass(ctx, func(requestCtx context.Context) (codersdk.UpdateWorkspaceProxyResponse, error) {
+		return client.PatchWorkspaceProxy(requestCtx, codersdk.PatchWorkspaceProxy{
+			ID:              existing.ID,
+			Name:            existing.Name,
+			DisplayName:     displayName,
+			Icon:            icon,
+			RegenerateToken: true,
+		})
 	})
 	if err != nil {
 		return RegisterWorkspaceProxyResponse{}, xerrors.Errorf("update workspace proxy %q: %w", req.ProxyName, err)
