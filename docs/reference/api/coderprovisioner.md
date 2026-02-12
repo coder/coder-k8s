@@ -14,16 +14,16 @@
 | Field | Type | Description |
 | --- | --- | --- |
 | `controlPlaneRef` | `corev1.LocalObjectReference` | ControlPlaneRef identifies which CoderControlPlane instance to join. |
-| &nbsp;&nbsp;`name` | `string` | Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: [https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names) |
+| └─ `name` | `string` | Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: [https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names) |
 | `organizationName` | `string` | OrganizationName is the Coder organization. Defaults to "default". |
 | `bootstrap` | `CoderProvisionerBootstrapSpec` | Bootstrap configures credentials for provisioner key management. |
-| &nbsp;&nbsp;`credentialsSecretRef` | `SecretKeySelector` | CredentialsSecretRef points to a Secret containing a Coder session token with permission to manage provisioner keys. |
-| &nbsp;&nbsp;&nbsp;&nbsp;`name` | `string` | Name is the Kubernetes Secret name. |
-| &nbsp;&nbsp;&nbsp;&nbsp;`key` | `string` | Key is the key inside the Secret data map. |
+| └─ `credentialsSecretRef` | `SecretKeySelector` | CredentialsSecretRef points to a Secret containing a Coder session token with permission to manage provisioner keys. |
+| &nbsp;&nbsp;&nbsp;├─ `name` | `string` | Name is the Kubernetes Secret name. |
+| &nbsp;&nbsp;&nbsp;└─ `key` | `string` | Key is the key inside the Secret data map. |
 | `key` | `CoderProvisionerKeySpec` | Key configures provisioner key naming and secret storage. |
-| &nbsp;&nbsp;`name` | `string` | Name is the provisioner key name in coderd. Defaults to the CR name. |
-| &nbsp;&nbsp;`secretName` | `string` | SecretName is the Kubernetes Secret to store the key. Defaults to "\{crName\}-provisioner-key". |
-| &nbsp;&nbsp;`secretKey` | `string` | SecretKey is the data key in the Secret. Defaults to "key". |
+| ├─ `name` | `string` | Name is the provisioner key name in coderd. Defaults to the CR name. |
+| ├─ `secretName` | `string` | SecretName is the Kubernetes Secret to store the key. Defaults to "\{crName\}-provisioner-key". |
+| └─ `secretKey` | `string` | SecretKey is the data key in the Secret. Defaults to "key". |
 | `replicas` | `int32` | Replicas is the desired number of provisioner pods. |
 | `tags` | `map[string]string` | Tags are attached to the provisioner key for job routing. |
 | `image` | `string` | Image is the container image. Defaults to the control plane image. |
@@ -31,7 +31,7 @@
 | `extraEnv` | `[]corev1.EnvVar` | ExtraEnv are injected into the provisioner container. |
 | `resources` | `corev1.ResourceRequirements` | Resources for the provisioner container. |
 | `imagePullSecrets` | `[]corev1.LocalObjectReference` | ImagePullSecrets are used by the pod to pull private images. |
-| &nbsp;&nbsp;`name` | `string` | Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: [https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names) |
+| └─ `name` | `string` | Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: [https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names) |
 | `terminationGracePeriodSeconds` | `int64` | TerminationGracePeriodSeconds for the provisioner pods. |
 
 ## Status
@@ -50,8 +50,8 @@
 | `controlPlaneRefName` | `string` | ControlPlaneRefName is the control plane ref name last applied to the provisioner key. |
 | `controlPlaneURL` | `string` | ControlPlaneURL is the control plane URL last applied to the provisioner key. |
 | `secretRef` | `SecretKeySelector` | SecretRef references the provisioner key secret data currently in use. |
-| &nbsp;&nbsp;`name` | `string` | Name is the Kubernetes Secret name. |
-| &nbsp;&nbsp;`key` | `string` | Key is the key inside the Secret data map. |
+| ├─ `name` | `string` | Name is the Kubernetes Secret name. |
+| └─ `key` | `string` | Key is the key inside the Secret data map. |
 
 ## Source
 

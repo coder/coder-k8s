@@ -16,16 +16,16 @@
 | `image` | `string` | Image is the container image used for the Coder control plane pod. |
 | `replicas` | `int32` | Replicas is the desired number of control plane pods. |
 | `service` | `ServiceSpec` | Service controls the service created in front of the control plane. |
-| &nbsp;&nbsp;`type` | `corev1.ServiceType` | Type controls the Kubernetes service type. |
-| &nbsp;&nbsp;`port` | `int32` | Port controls the exposed service port. |
-| &nbsp;&nbsp;`annotations` | `map[string]string` | Annotations are applied to the reconciled service object. |
+| ├─ `type` | `corev1.ServiceType` | Type controls the Kubernetes service type. |
+| ├─ `port` | `int32` | Port controls the exposed service port. |
+| └─ `annotations` | `map[string]string` | Annotations are applied to the reconciled service object. |
 | `extraArgs` | `[]string` | ExtraArgs are appended to the default Coder server arguments. |
 | `extraEnv` | `[]corev1.EnvVar` | ExtraEnv are injected into the Coder control plane container. |
 | `imagePullSecrets` | `[]corev1.LocalObjectReference` | ImagePullSecrets are used by the pod to pull private images. |
-| &nbsp;&nbsp;`name` | `string` | Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: [https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names) |
+| └─ `name` | `string` | Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: [https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names) |
 | `operatorAccess` | `OperatorAccessSpec` | OperatorAccess configures bootstrap API access to the coderd instance. |
-| &nbsp;&nbsp;`disabled` | `bool` | Disabled turns off creation and management of the `coder-k8s-operator` user and API token. |
-| &nbsp;&nbsp;`generatedTokenSecretName` | `string` | GeneratedTokenSecretName stores the generated operator API token. |
+| ├─ `disabled` | `bool` | Disabled turns off creation and management of the `coder-k8s-operator` user and API token. |
+| └─ `generatedTokenSecretName` | `string` | GeneratedTokenSecretName stores the generated operator API token. |
 
 ## Status
 
@@ -35,8 +35,8 @@
 | `readyReplicas` | `int32` | ReadyReplicas is the number of ready pods observed in the deployment. |
 | `url` | `string` | URL is the in-cluster URL for the control plane service. |
 | `operatorTokenSecretRef` | `SecretKeySelector` | OperatorTokenSecretRef points to the Secret key containing the `coder-k8s-operator` API token. |
-| &nbsp;&nbsp;`name` | `string` | Name is the Kubernetes Secret name. |
-| &nbsp;&nbsp;`key` | `string` | Key is the key inside the Secret data map. |
+| ├─ `name` | `string` | Name is the Kubernetes Secret name. |
+| └─ `key` | `string` | Key is the key inside the Secret data map. |
 | `operatorAccessReady` | `bool` | OperatorAccessReady reports whether operator API access bootstrap succeeded. |
 | `phase` | `string` | Phase is a high-level readiness indicator. |
 | `conditions` | `[]metav1.Condition` | Conditions are Kubernetes-standard conditions for this resource. |
