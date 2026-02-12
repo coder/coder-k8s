@@ -46,10 +46,14 @@ Bootstrap a KIND cluster and install CRDs/RBAC (**this also switches your curren
 make kind-dev-up
 ```
 
-> Tip: to run multiple clusters in parallel, override the name:
+> Tip: override defaults when needed:
+>
+> - Use `CLUSTER_NAME` to run multiple clusters in parallel.
+> - Use `KIND_NODE_IMAGE` to pin the node image (default: `kindest/node:v1.34.0`).
 >
 > ```bash
 > CLUSTER_NAME=my-cluster make kind-dev-up
+> KIND_NODE_IMAGE=kindest/node:v1.32.0 make kind-dev-up
 > ```
 
 If you need to switch your kubectl context later:

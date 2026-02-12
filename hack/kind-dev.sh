@@ -13,6 +13,7 @@ CLUSTER_NAME="${CLUSTER_NAME:-${DEFAULT_CLUSTER_NAME}}"
 KUBE_CONTEXT="kind-${CLUSTER_NAME}"
 NAMESPACE="${NAMESPACE:-coder-system}"
 DEPLOYMENT="${DEPLOYMENT:-coder-k8s}"
+KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.34.0}"
 IMAGE="${IMAGE:-ghcr.io/coder/coder-k8s:e2e}"
 GOARCH="${GOARCH:-}"
 NODE_READY_TIMEOUT="${NODE_READY_TIMEOUT:-300s}"
@@ -60,9 +61,16 @@ cmd_up() {
 	require_cmd kind
 	require_cmd kubectl
 
-	if ! kind get clusters | grep -qx "${CLUSTER_NAME}"; then
-		kind create cluster --name "${CLUSTER_NAME}"
+	if [[ -z "${KIND_NODE_IMAGE}" ]]; then
+		echo "assertion failed: KIND_NODE_IMAGE must not be empty" >&2
+		exit 1
 	fi
+
+	if ! kind get clusters | grep -qx "${CLUSTER_NAME}"; then
+		kind create cluster --name "${CLUSTER_NAME}" --image "${KIND_NODE_IMAGE}"
+	fi
+
+	echo "Using KIND node image: ${KIND_NODE_IMAGE}"
 
 	kind export kubeconfig --name "${CLUSTER_NAME}" >/dev/null
 	kubectl config use-context "${KUBE_CONTEXT}" >/dev/null
