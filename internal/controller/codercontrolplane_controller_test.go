@@ -50,8 +50,11 @@ type licenseUploadCall struct {
 }
 
 type fakeLicenseUploader struct {
-	err   error
-	calls []licenseUploadCall
+	err               error
+	hasAnyLicenseErr  error
+	hasAnyLicense     *bool
+	hasAnyLicenseCall int
+	calls             []licenseUploadCall
 }
 
 func (f *fakeLicenseUploader) AddLicense(_ context.Context, coderURL, sessionToken, licenseJWT string) error {
@@ -61,6 +64,18 @@ func (f *fakeLicenseUploader) AddLicense(_ context.Context, coderURL, sessionTok
 		licenseJWT:   licenseJWT,
 	})
 	return f.err
+}
+
+func (f *fakeLicenseUploader) HasAnyLicense(_ context.Context, _, _ string) (bool, error) {
+	f.hasAnyLicenseCall++
+	if f.hasAnyLicenseErr != nil {
+		return false, f.hasAnyLicenseErr
+	}
+	if f.hasAnyLicense != nil {
+		return *f.hasAnyLicense, nil
+	}
+
+	return len(f.calls) > 0, nil
 }
 
 func TestReconcile_NotFound(t *testing.T) {
@@ -587,6 +602,81 @@ func TestReconcile_LicenseAppliesOnceAndTracksHash(t *testing.T) {
 	}
 	if len(uploader.calls) != 1 {
 		t.Fatalf("expected license upload call count to remain 1 for idempotent reconcile, got %d", len(uploader.calls))
+	}
+}
+
+func TestReconcile_LicenseReuploadsWhenBackendHasNoLicenses(t *testing.T) {
+	ctx := context.Background()
+
+	licenseSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-backend-reset-secret", Namespace: "default"},
+		Data: map[string][]byte{
+			coderv1alpha1.DefaultLicenseSecretKey: []byte("license-jwt-backend-reset"),
+		},
+	}
+	if err := k8sClient.Create(ctx, licenseSecret); err != nil {
+		t.Fatalf("create license secret: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, licenseSecret)
+	})
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-backend-reset", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			ExtraEnv: []corev1.EnvVar{{
+				Name:  "CODER_PG_CONNECTION_URL",
+				Value: "postgres://example/license-backend-reset",
+			}},
+			LicenseSecretRef: &coderv1alpha1.SecretKeySelector{Name: licenseSecret.Name},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create test CoderControlPlane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	provisioner := &fakeOperatorAccessProvisioner{token: "operator-token-backend-reset"}
+	uploader := &fakeLicenseUploader{}
+	r := &controller.CoderControlPlaneReconciler{
+		Client:                    k8sClient,
+		Scheme:                    scheme,
+		OperatorAccessProvisioner: provisioner,
+		LicenseUploader:           uploader,
+	}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("first reconcile control plane: %v", err)
+	}
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+		t.Fatalf("get reconciled deployment: %v", err)
+	}
+	deployment.Status.ReadyReplicas = 1
+	deployment.Status.Replicas = 1
+	if err := k8sClient.Status().Update(ctx, deployment); err != nil {
+		t.Fatalf("update deployment status: %v", err)
+	}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("second reconcile control plane: %v", err)
+	}
+	if len(uploader.calls) != 1 {
+		t.Fatalf("expected initial upload call count 1, got %d", len(uploader.calls))
+	}
+
+	backendHasNoLicenses := false
+	uploader.hasAnyLicense = &backendHasNoLicenses
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("third reconcile control plane: %v", err)
+	}
+	if uploader.hasAnyLicenseCall == 0 {
+		t.Fatalf("expected reconcile to query existing licenses when hash matches")
+	}
+	if len(uploader.calls) != 2 {
+		t.Fatalf("expected license to be re-uploaded when backend has no licenses, got %d upload calls", len(uploader.calls))
 	}
 }
 

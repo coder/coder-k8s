@@ -69,9 +69,10 @@ var (
 	errSecretValueEmpty   = errors.New("secret value empty")
 )
 
-// LicenseUploader uploads Coder Enterprise license JWTs to a coderd instance.
+// LicenseUploader uploads and inspects Coder Enterprise licenses in a coderd instance.
 type LicenseUploader interface {
 	AddLicense(ctx context.Context, coderURL, sessionToken, licenseJWT string) error
+	HasAnyLicense(ctx context.Context, coderURL, sessionToken string) (bool, error)
 }
 
 // NewSDKLicenseUploader returns a LicenseUploader backed by codersdk.
@@ -82,19 +83,47 @@ func NewSDKLicenseUploader() LicenseUploader {
 type sdkLicenseUploader struct{}
 
 func (u *sdkLicenseUploader) AddLicense(ctx context.Context, coderURL, sessionToken, licenseJWT string) error {
-	if strings.TrimSpace(coderURL) == "" {
-		return fmt.Errorf("assertion failed: coder URL must not be empty")
-	}
-	if sessionToken == "" {
-		return fmt.Errorf("assertion failed: session token must not be empty")
-	}
 	if licenseJWT == "" {
 		return fmt.Errorf("assertion failed: license JWT must not be empty")
 	}
 
+	sdkClient, err := newSDKLicenseClient(coderURL, sessionToken)
+	if err != nil {
+		return err
+	}
+
+	if _, err := sdkClient.AddLicense(ctx, codersdk.AddLicenseRequest{License: licenseJWT}); err != nil {
+		return fmt.Errorf("upload coder license: %w", err)
+	}
+
+	return nil
+}
+
+func (u *sdkLicenseUploader) HasAnyLicense(ctx context.Context, coderURL, sessionToken string) (bool, error) {
+	sdkClient, err := newSDKLicenseClient(coderURL, sessionToken)
+	if err != nil {
+		return false, err
+	}
+
+	licenses, err := sdkClient.Licenses(ctx)
+	if err != nil {
+		return false, fmt.Errorf("list coder licenses: %w", err)
+	}
+
+	return len(licenses) > 0, nil
+}
+
+func newSDKLicenseClient(coderURL, sessionToken string) (*codersdk.Client, error) {
+	if strings.TrimSpace(coderURL) == "" {
+		return nil, fmt.Errorf("assertion failed: coder URL must not be empty")
+	}
+	if sessionToken == "" {
+		return nil, fmt.Errorf("assertion failed: session token must not be empty")
+	}
+
 	parsedURL, err := url.Parse(coderURL)
 	if err != nil {
-		return fmt.Errorf("parse coder URL: %w", err)
+		return nil, fmt.Errorf("parse coder URL: %w", err)
 	}
 
 	sdkClient := codersdk.New(parsedURL)
@@ -104,24 +133,21 @@ func (u *sdkLicenseUploader) AddLicense(ctx context.Context, coderURL, sessionTo
 	}
 	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
-		return fmt.Errorf("assertion failed: http.DefaultTransport is not *http.Transport")
+		return nil, fmt.Errorf("assertion failed: http.DefaultTransport is not *http.Transport")
 	}
 	// Use a dedicated transport to avoid sharing http.DefaultTransport's
 	// connection pool across parallel test servers.
 	sdkClient.HTTPClient.Transport = defaultTransport.Clone()
 	sdkClient.HTTPClient.Timeout = licenseUploadRequestTimeout
 
-	if _, err := sdkClient.AddLicense(ctx, codersdk.AddLicenseRequest{License: licenseJWT}); err != nil {
-		return fmt.Errorf("upload coder license: %w", err)
-	}
-
-	return nil
+	return sdkClient, nil
 }
 
 // CoderControlPlaneReconciler reconciles a CoderControlPlane object.
 type CoderControlPlaneReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
 
 	OperatorAccessProvisioner coderbootstrap.OperatorAccessProvisioner
 	LicenseUploader           LicenseUploader
@@ -565,17 +591,62 @@ func (r *CoderControlPlaneReconciler) reconcileLicense(
 	}
 
 	if nextStatus.LicenseLastApplied != nil && nextStatus.LicenseLastAppliedHash == licenseHash {
-		if err := setControlPlaneCondition(
-			nextStatus,
-			coderControlPlane.Generation,
-			coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
-			metav1.ConditionTrue,
-			licenseConditionReasonApplied,
-			"Configured license is already applied.",
-		); err != nil {
-			return ctrl.Result{}, err
+		hasAnyLicense, hasLicenseErr := r.LicenseUploader.HasAnyLicense(ctx, nextStatus.URL, operatorToken)
+		if hasLicenseErr != nil {
+			var sdkErr *codersdk.Error
+			if errors.As(hasLicenseErr, &sdkErr) {
+				switch sdkErr.StatusCode() {
+				case http.StatusNotFound:
+					if err := setControlPlaneCondition(
+						nextStatus,
+						coderControlPlane.Generation,
+						coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
+						metav1.ConditionFalse,
+						licenseConditionReasonNotSupported,
+						"Control plane does not expose the Enterprise licenses API.",
+					); err != nil {
+						return ctrl.Result{}, err
+					}
+					return ctrl.Result{}, nil
+				case http.StatusUnauthorized, http.StatusForbidden:
+					if err := setControlPlaneCondition(
+						nextStatus,
+						coderControlPlane.Generation,
+						coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
+						metav1.ConditionFalse,
+						licenseConditionReasonForbidden,
+						"Operator token is not authorized to query configured licenses.",
+					); err != nil {
+						return ctrl.Result{}, err
+					}
+					return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+				}
+			}
+			if err := setControlPlaneCondition(
+				nextStatus,
+				coderControlPlane.Generation,
+				coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
+				metav1.ConditionFalse,
+				licenseConditionReasonError,
+				"Failed to query existing licenses; retrying.",
+			); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
 		}
-		return ctrl.Result{}, nil
+		if hasAnyLicense {
+			if err := setControlPlaneCondition(
+				nextStatus,
+				coderControlPlane.Generation,
+				coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
+				metav1.ConditionTrue,
+				licenseConditionReasonApplied,
+				"Configured license is already applied.",
+			); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
+		}
 	}
 
 	if err := r.LicenseUploader.AddLicense(ctx, nextStatus.URL, operatorToken, licenseJWT); err != nil {
@@ -999,9 +1070,17 @@ func (r *CoderControlPlaneReconciler) reconcileStatus(
 		return fmt.Errorf("assertion failed: coder control plane namespaced name must not be empty")
 	}
 
+	statusReader := r.APIReader
+	if statusReader == nil {
+		statusReader = r.Client
+	}
+	if statusReader == nil {
+		return fmt.Errorf("assertion failed: status reader must not be nil")
+	}
+
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &coderv1alpha1.CoderControlPlane{}
-		if err := r.Get(ctx, namespacedName, latest); err != nil {
+		if err := statusReader.Get(ctx, namespacedName, latest); err != nil {
 			return err
 		}
 		if latest.Name != namespacedName.Name || latest.Namespace != namespacedName.Namespace {
