@@ -651,6 +651,23 @@ func (r *CoderControlPlaneReconciler) reconcileLicense(
 	}
 
 	if err := r.LicenseUploader.AddLicense(ctx, nextStatus.URL, operatorToken, licenseJWT); err != nil {
+		if isDuplicateLicenseUploadError(err) {
+			now := metav1.Now()
+			nextStatus.LicenseLastApplied = &now
+			nextStatus.LicenseLastAppliedHash = licenseHash
+			if err := setControlPlaneCondition(
+				nextStatus,
+				coderControlPlane.Generation,
+				coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
+				metav1.ConditionTrue,
+				licenseConditionReasonApplied,
+				"Configured license already exists in coderd.",
+			); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
+		}
+
 		var sdkErr *codersdk.Error
 		if errors.As(err, &sdkErr) {
 			switch sdkErr.StatusCode() {
@@ -1051,6 +1068,30 @@ func (r *CoderControlPlaneReconciler) reconcileRequestsForLicenseSecret(
 	}
 
 	return requests
+}
+
+func isDuplicateLicenseUploadError(err error) bool {
+	var sdkErr *codersdk.Error
+	if !errors.As(err, &sdkErr) {
+		return false
+	}
+
+	message := strings.ToLower(strings.TrimSpace(sdkErr.Message + " " + sdkErr.Detail))
+	if message == "" {
+		return false
+	}
+
+	if strings.Contains(message, "licenses_jwt_key") {
+		return true
+	}
+	if strings.Contains(message, "duplicate key") {
+		return true
+	}
+	if strings.Contains(message, "already exists") {
+		return true
+	}
+
+	return false
 }
 
 func mergeControlPlaneStatusDelta(
