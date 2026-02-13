@@ -38,6 +38,26 @@ func validateFieldSelector(sel fields.Selector) error {
 	return nil
 }
 
+// validateUnsupportedWatchListOptions rejects watch-list options that this storage
+// does not implement yet.
+func validateUnsupportedWatchListOptions(opts *metainternalversion.ListOptions) error {
+	if opts == nil {
+		return nil
+	}
+
+	if opts.SendInitialEvents != nil {
+		return fmt.Errorf("sendInitialEvents is not supported for this watch endpoint")
+	}
+	if opts.ResourceVersionMatch != "" {
+		return fmt.Errorf(
+			"resourceVersionMatch %q is not supported for this watch endpoint",
+			opts.ResourceVersionMatch,
+		)
+	}
+
+	return nil
+}
+
 // filterForListOptions builds a watch.FilterFunc that applies namespace, label, and field selector filtering.
 // Returns nil if no filtering is needed.
 func filterForListOptions(requestNamespace string, opts *metainternalversion.ListOptions) (watch.FilterFunc, error) {

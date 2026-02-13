@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -288,6 +289,87 @@ func TestWatchStopsOnContextCancel(t *testing.T) {
 	assertWatchClosed(t, watcher, watchEventTimeout)
 }
 
+func TestWorkspaceWatchRejectsUnsupportedWatchListOptions(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newMockCoderServer(t)
+	defer server.Close()
+
+	workspaceStorage := NewWorkspaceStorage(newTestClientProvider(t, server.URL))
+	defer workspaceStorage.Destroy()
+
+	ctx := namespacedContext("control-plane")
+
+	t.Run("sendInitialEvents", func(t *testing.T) {
+		sendInitialEvents := true
+		watcher, err := workspaceStorage.Watch(ctx, &metainternalversion.ListOptions{SendInitialEvents: &sendInitialEvents})
+		assertBadRequestWatchOptionsError(t, watcher, err, "sendInitialEvents")
+	})
+
+	t.Run("resourceVersionMatch", func(t *testing.T) {
+		watcher, err := workspaceStorage.Watch(ctx, &metainternalversion.ListOptions{
+			ResourceVersionMatch: metav1.ResourceVersionMatchNotOlderThan,
+		})
+		assertBadRequestWatchOptionsError(t, watcher, err, "resourceVersionMatch")
+	})
+}
+
+func TestTemplateWatchRejectsUnsupportedWatchListOptions(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	defer templateStorage.Destroy()
+
+	ctx := namespacedContext("control-plane")
+
+	t.Run("sendInitialEvents", func(t *testing.T) {
+		sendInitialEvents := true
+		watcher, err := templateStorage.Watch(ctx, &metainternalversion.ListOptions{SendInitialEvents: &sendInitialEvents})
+		assertBadRequestWatchOptionsError(t, watcher, err, "sendInitialEvents")
+	})
+
+	t.Run("resourceVersionMatch", func(t *testing.T) {
+		watcher, err := templateStorage.Watch(ctx, &metainternalversion.ListOptions{
+			ResourceVersionMatch: metav1.ResourceVersionMatchNotOlderThan,
+		})
+		assertBadRequestWatchOptionsError(t, watcher, err, "resourceVersionMatch")
+	})
+}
+
+func TestValidateUnsupportedWatchListOptions(t *testing.T) {
+	t.Parallel()
+
+	if err := validateUnsupportedWatchListOptions(nil); err != nil {
+		t.Fatalf("expected nil list options to be accepted, got %v", err)
+	}
+
+	if err := validateUnsupportedWatchListOptions(&metainternalversion.ListOptions{}); err != nil {
+		t.Fatalf("expected empty list options to be accepted, got %v", err)
+	}
+
+	sendInitialEvents := true
+	err := validateUnsupportedWatchListOptions(&metainternalversion.ListOptions{SendInitialEvents: &sendInitialEvents})
+	if err == nil {
+		t.Fatal("expected sendInitialEvents to be rejected")
+	}
+	if !strings.Contains(err.Error(), "sendInitialEvents") {
+		t.Fatalf("expected sendInitialEvents error, got %v", err)
+	}
+
+	err = validateUnsupportedWatchListOptions(&metainternalversion.ListOptions{
+		ResourceVersionMatch: metav1.ResourceVersionMatchNotOlderThan,
+	})
+	if err == nil {
+		t.Fatal("expected resourceVersionMatch to be rejected")
+	}
+	if !strings.Contains(err.Error(), "resourceVersionMatch") {
+		t.Fatalf("expected resourceVersionMatch error, got %v", err)
+	}
+}
+
 func TestValidateFieldSelector(t *testing.T) {
 	t.Parallel()
 
@@ -456,6 +538,27 @@ func assertWatchClosed(t *testing.T, watcher watch.Interface, timeout time.Durat
 		}
 	case <-time.After(timeout):
 		t.Fatal("timed out waiting for watcher channel to close")
+	}
+}
+
+func assertBadRequestWatchOptionsError(t *testing.T, watcher watch.Interface, err error, wantErrSubstring string) {
+	t.Helper()
+
+	if err == nil {
+		if watcher != nil {
+			watcher.Stop()
+		}
+		t.Fatalf("expected watch options error containing %q", wantErrSubstring)
+	}
+	if watcher != nil {
+		watcher.Stop()
+		t.Fatalf("expected watcher to be nil when watch options are rejected, got %T", watcher)
+	}
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected bad request error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), wantErrSubstring) {
+		t.Fatalf("expected error containing %q, got %v", wantErrSubstring, err)
 	}
 }
 

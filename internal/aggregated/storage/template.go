@@ -222,6 +222,10 @@ func (s *TemplateStorage) Watch(ctx context.Context, opts *metainternalversion.L
 		return nil, err
 	}
 
+	if err := validateUnsupportedWatchListOptions(opts); err != nil {
+		return nil, apierrors.NewBadRequest(fmt.Sprintf("invalid watch options: %v", err))
+	}
+
 	filter, err := filterForListOptions(requestNamespace, opts)
 	if err != nil {
 		return nil, apierrors.NewBadRequest(fmt.Sprintf("invalid watch options: %v", err))
