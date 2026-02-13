@@ -1393,7 +1393,12 @@ func controlPlaneSDKURL(coderControlPlane *coderv1alpha1.CoderControlPlane) stri
 		servicePort = defaultControlPlanePort
 	}
 
-	return fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", coderControlPlane.Name, coderControlPlane.Namespace, servicePort)
+	scheme := "http"
+	if controlPlaneTLSEnabled(coderControlPlane) && servicePort == 443 {
+		scheme = "https"
+	}
+
+	return fmt.Sprintf("%s://%s.%s.svc.cluster.local:%d", scheme, coderControlPlane.Name, coderControlPlane.Namespace, servicePort)
 }
 
 func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
