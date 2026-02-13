@@ -128,6 +128,39 @@ func TestInstallAPIGroupRegistersDiscovery(t *testing.T) {
 	}
 }
 
+func TestNewRecommendedConfigSetsExtendedRequestTimeout(t *testing.T) {
+	t.Helper()
+
+	scheme := NewScheme()
+	if scheme == nil {
+		t.Fatal("expected non-nil scheme")
+	}
+	codecs := serializer.NewCodecFactory(scheme)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("create test listener: %v", err)
+	}
+	defer func() {
+		_ = listener.Close()
+	}()
+
+	secureServingOptions := genericoptions.NewSecureServingOptions()
+	secureServingOptions.Listener = listener
+	secureServingOptions.BindPort = 0
+	secureServingOptions.ServerCert.CertDirectory = ""
+	secureServingOptions.ServerCert.PairName = ""
+
+	recommendedConfig, err := NewRecommendedConfig(scheme, codecs, secureServingOptions)
+	if err != nil {
+		t.Fatalf("build recommended config: %v", err)
+	}
+
+	if got, want := recommendedConfig.RequestTimeout, defaultRequestTimeout; got != want {
+		t.Fatalf("expected request timeout %s, got %s", want, got)
+	}
+}
+
 func TestBuildClientProviderDefersMissingCoderConfigAsServiceUnavailable(t *testing.T) {
 	t.Parallel()
 

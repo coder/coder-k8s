@@ -32,6 +32,8 @@ const (
 	defaultTemplateVersionBuildBackoffAfter    = 2 * time.Minute
 	defaultTemplateVersionBuildInitialPoll     = 2 * time.Second
 	defaultTemplateVersionBuildMaxPollInterval = 10 * time.Second
+	// MaxTemplateVersionBuildWaitTimeout keeps template build waits within aggregated API request deadlines.
+	MaxTemplateVersionBuildWaitTimeout = 30 * time.Minute
 )
 
 type templateVersionBuildWaitConfig struct {
@@ -50,6 +52,8 @@ var (
 	_ rest.GracefulDeleter      = (*TemplateStorage)(nil)
 	_ rest.Scoper               = (*TemplateStorage)(nil)
 	_ rest.SingularNameProvider = (*TemplateStorage)(nil)
+
+	errTemplateVersionBuildWaitTimeoutExceeded = errors.New("template version build wait timeout exceeded")
 )
 
 // TemplateStorage provides codersdk-backed CoderTemplate objects.
@@ -687,7 +691,14 @@ func mapTemplateVersionBuildWaitError(waitErr error, templateName string) error 
 
 	var timeoutErr *templateVersionBuildWaitTimeoutError
 	if errors.As(waitErr, &timeoutErr) {
-		return apierrors.NewBadRequest(timeoutErr.Error())
+		switch {
+		case errors.Is(timeoutErr.cause, errTemplateVersionBuildWaitTimeoutExceeded):
+			return apierrors.NewBadRequest(timeoutErr.Error())
+		case errors.Is(timeoutErr.cause, context.DeadlineExceeded), errors.Is(timeoutErr.cause, context.Canceled):
+			return apierrors.NewTimeoutError(timeoutErr.Error(), 0)
+		default:
+			return apierrors.NewInternalError(timeoutErr)
+		}
 	}
 
 	return coder.MapCoderError(waitErr, aggregationv1alpha1.Resource("codertemplates"), templateName)
@@ -709,7 +720,15 @@ func waitForTemplateVersionBuild(ctx context.Context, sdk *codersdk.Client, vers
 		return waitConfigErr
 	}
 
-	waitCtx, cancel := context.WithTimeout(ctx, waitConfig.waitTimeout)
+	effectiveWaitTimeout := waitConfig.waitTimeout
+	if requestDeadline, hasRequestDeadline := ctx.Deadline(); hasRequestDeadline {
+		remaining := time.Until(requestDeadline)
+		if remaining > 0 && remaining < effectiveWaitTimeout {
+			effectiveWaitTimeout = remaining
+		}
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, effectiveWaitTimeout)
 	defer cancel()
 
 	pollInterval := waitConfig.initialPoll
@@ -721,12 +740,17 @@ func waitForTemplateVersionBuild(ctx context.Context, sdk *codersdk.Client, vers
 		version, err := sdk.TemplateVersion(waitCtx, versionID)
 		if err != nil {
 			if waitCtx.Err() != nil {
+				timeoutCause, timeoutCauseErr := templateVersionBuildWaitTimeoutCause(ctx, waitCtx)
+				if timeoutCauseErr != nil {
+					return timeoutCauseErr
+				}
+
 				return &templateVersionBuildWaitTimeoutError{
 					versionID:   versionID,
-					waitTimeout: waitConfig.waitTimeout,
+					waitTimeout: effectiveWaitTimeout,
 					lastStatus:  lastStatus,
 					lastError:   lastError,
-					cause:       waitCtx.Err(),
+					cause:       timeoutCause,
 				}
 			}
 			return fmt.Errorf("fetch template version %q: %w", versionID.String(), err)
@@ -771,19 +795,45 @@ func waitForTemplateVersionBuild(ctx context.Context, sdk *codersdk.Client, vers
 
 		select {
 		case <-waitCtx.Done():
-			if waitCtx.Err() == nil {
-				return fmt.Errorf("assertion failed: wait context finished without an error")
+			timeoutCause, timeoutCauseErr := templateVersionBuildWaitTimeoutCause(ctx, waitCtx)
+			if timeoutCauseErr != nil {
+				return timeoutCauseErr
 			}
+
 			return &templateVersionBuildWaitTimeoutError{
 				versionID:   versionID,
-				waitTimeout: waitConfig.waitTimeout,
+				waitTimeout: effectiveWaitTimeout,
 				lastStatus:  lastStatus,
 				lastError:   lastError,
-				cause:       waitCtx.Err(),
+				cause:       timeoutCause,
 			}
 		case <-time.After(pollInterval):
 		}
 	}
+}
+
+func templateVersionBuildWaitTimeoutCause(requestCtx, waitCtx context.Context) (error, error) {
+	if requestCtx == nil {
+		return nil, fmt.Errorf("assertion failed: request context must not be nil")
+	}
+	if waitCtx == nil {
+		return nil, fmt.Errorf("assertion failed: wait context must not be nil")
+	}
+
+	waitErr := waitCtx.Err()
+	if waitErr == nil {
+		return nil, fmt.Errorf("assertion failed: wait context finished without an error")
+	}
+
+	if requestErr := requestCtx.Err(); requestErr != nil {
+		return requestErr, nil
+	}
+
+	if errors.Is(waitErr, context.DeadlineExceeded) {
+		return errTemplateVersionBuildWaitTimeoutExceeded, nil
+	}
+
+	return waitErr, nil
 }
 
 func loadTemplateVersionBuildWaitConfigFromEnv() (templateVersionBuildWaitConfig, error) {
@@ -796,6 +846,16 @@ func loadTemplateVersionBuildWaitConfigFromEnv() (templateVersionBuildWaitConfig
 			"assertion failed: %s must be > 0, got %s",
 			templateVersionBuildWaitTimeoutEnv,
 			waitTimeout,
+		)
+	}
+
+	if waitTimeout > MaxTemplateVersionBuildWaitTimeout {
+		return templateVersionBuildWaitConfig{}, fmt.Errorf(
+			"assertion failed: %s (%s) must be <= %s (%s)",
+			templateVersionBuildWaitTimeoutEnv,
+			waitTimeout,
+			"aggregated API request timeout",
+			MaxTemplateVersionBuildWaitTimeout,
 		)
 	}
 

@@ -509,6 +509,110 @@ func TestTemplateStorageUpdateReturnsBadRequestWhenTemplateVersionBuildWaitTimes
 	}
 }
 
+func TestTemplateStorageUpdateReturnsTimeoutWhenRequestContextTimesOut(t *testing.T) {
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	baseCtx := namespacedContext("control-plane")
+
+	createObj := &aggregationv1alpha1.CoderTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme.request-timeout-template"},
+		Spec: aggregationv1alpha1.CoderTemplateSpec{
+			Organization: "acme",
+			Files:        map[string]string{"main.tf": "resource \"null_resource\" \"initial\" {}"},
+		},
+	}
+	createdObj, err := templateStorage.Create(baseCtx, createObj, rest.ValidateAllObjectFunc, nil)
+	if err != nil {
+		t.Fatalf("expected template create to succeed: %v", err)
+	}
+	createdTemplate := createdObj.(*aggregationv1alpha1.CoderTemplate)
+
+	t.Setenv(templateVersionBuildWaitTimeoutEnv, "5s")
+	t.Setenv(templateVersionBuildBackoffAfterEnv, "0s")
+	t.Setenv(templateVersionBuildInitialPollIntervalEnv, "10ms")
+	t.Setenv(templateVersionBuildMaxPollIntervalEnv, "20ms")
+
+	state.setNextCreatedTemplateVersionStatus(codersdk.ProvisionerJobPending)
+
+	updateCtx, cancel := context.WithTimeout(baseCtx, 120*time.Millisecond)
+	defer cancel()
+
+	desiredTemplate := createdTemplate.DeepCopy()
+	desiredTemplate.Spec.Files = map[string]string{"main.tf": "resource \"null_resource\" \"updated\" {}"}
+
+	updatedObj, created, updateErr := templateStorage.Update(
+		updateCtx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if updateErr == nil {
+		t.Fatal("expected update to fail when request context times out")
+	}
+	if updatedObj != nil {
+		t.Fatalf("expected nil updated object on request timeout, got %T", updatedObj)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+	if apierrors.IsBadRequest(updateErr) {
+		t.Fatalf("expected non-BadRequest error for request context timeout, got %v", updateErr)
+	}
+	if !apierrors.IsTimeout(updateErr) {
+		t.Fatalf("expected timeout error for request context timeout, got %v", updateErr)
+	}
+	assertTopLevelStatusError(t, updateErr)
+}
+
+func TestMapTemplateVersionBuildWaitErrorMapsRequestContextFailuresToTimeout(t *testing.T) {
+	tests := []struct {
+		name  string
+		cause error
+	}{
+		{
+			name:  "deadline exceeded",
+			cause: context.DeadlineExceeded,
+		},
+		{
+			name:  "canceled",
+			cause: context.Canceled,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mappedErr := mapTemplateVersionBuildWaitError(
+				&templateVersionBuildWaitTimeoutError{
+					versionID:   uuid.New(),
+					waitTimeout: time.Minute,
+					lastStatus:  codersdk.ProvisionerJobRunning,
+					cause:       tt.cause,
+				},
+				"acme.template",
+			)
+
+			if mappedErr == nil {
+				t.Fatal("expected mapped timeout error")
+			}
+			if apierrors.IsBadRequest(mappedErr) {
+				t.Fatalf("expected timeout error, got BadRequest: %v", mappedErr)
+			}
+			if !apierrors.IsTimeout(mappedErr) {
+				t.Fatalf("expected timeout error, got %v", mappedErr)
+			}
+			assertTopLevelStatusError(t, mappedErr)
+		})
+	}
+}
+
 func TestLoadTemplateVersionBuildWaitConfigFromEnvDefaults(t *testing.T) {
 	t.Setenv(templateVersionBuildWaitTimeoutEnv, "")
 	t.Setenv(templateVersionBuildBackoffAfterEnv, "")
@@ -534,12 +638,23 @@ func TestLoadTemplateVersionBuildWaitConfigFromEnvDefaults(t *testing.T) {
 }
 
 func TestLoadTemplateVersionBuildWaitConfigFromEnvInvalid(t *testing.T) {
-	t.Setenv(templateVersionBuildWaitTimeoutEnv, "1m")
+	t.Setenv(templateVersionBuildWaitTimeoutEnv, "31m")
 	t.Setenv(templateVersionBuildBackoffAfterEnv, "2m")
 	t.Setenv(templateVersionBuildInitialPollIntervalEnv, "500ms")
 	t.Setenv(templateVersionBuildMaxPollIntervalEnv, "10s")
 
 	_, err := loadTemplateVersionBuildWaitConfigFromEnv()
+	if err == nil {
+		t.Fatal("expected max wait timeout validation to fail")
+	}
+	if !strings.Contains(err.Error(), templateVersionBuildWaitTimeoutEnv) {
+		t.Fatalf("expected error to mention %s, got %v", templateVersionBuildWaitTimeoutEnv, err)
+	}
+
+	t.Setenv(templateVersionBuildWaitTimeoutEnv, "1m")
+	t.Setenv(templateVersionBuildBackoffAfterEnv, "2m")
+
+	_, err = loadTemplateVersionBuildWaitConfigFromEnv()
 	if err == nil {
 		t.Fatal("expected invalid wait config to fail")
 	}

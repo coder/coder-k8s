@@ -103,6 +103,10 @@ The wait behavior is configurable via environment variables on the
 - `CODER_K8S_TEMPLATE_BUILD_INITIAL_POLL_INTERVAL` (default: `2s`)
 - `CODER_K8S_TEMPLATE_BUILD_MAX_POLL_INTERVAL` (default: `10s`)
 
+- Aggregated API request timeout defaults to `30m`; keep it at or above the build wait timeout.
+
+- `CODER_K8S_TEMPLATE_BUILD_WAIT_TIMEOUT` values above `30m` are rejected, because they cannot exceed the API request timeout.
+
 Behavior:
 
 - Polls at the initial interval for the first 2 minutes.
