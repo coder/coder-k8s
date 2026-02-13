@@ -155,29 +155,40 @@ jobs:
         run: go build ./...
 
   e2e-kind:
-    name: E2E Smoke (Kind)
+    name: E2E (Kind + CNPG + Templates)
     needs: [changes, test]
     if: needs.changes.outputs.go == 'true' && (github.event_name != 'push' || github.actor != 'github-merge-queue[bot]')
     runs-on: depot-ubuntu-24.04-8
     timeout-minutes: 45
     steps:
+      # ---- PR fast-path: skip heavy E2E on pull requests ----
+      - name: Skip full E2E on pull requests
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "::notice::Skipping full E2E on ${GITHUB_EVENT_NAME}; runs in merge queue and on push to main."
+
+      # ---- Full CNPG + Templates E2E (merge queue + push) ----
       - name: Checkout
+        if: github.event_name != 'pull_request'
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
 
       - name: Setup Go
+        if: github.event_name != 'pull_request'
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Create Kind cluster
+        if: github.event_name != 'pull_request'
         uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
         with:
           cluster_name: e2e
 
       - name: Build binary
+        if: github.event_name != 'pull_request'
         env:
           GOFLAGS: -mod=vendor
           CGO_ENABLED: "0"
@@ -186,33 +197,96 @@ jobs:
         run: go build -o coder-k8s ./
 
       - name: Build and load image
+        if: github.event_name != 'pull_request'
         run: |
           docker build -f Dockerfile.goreleaser -t ghcr.io/coder/coder-k8s:e2e .
           kind load docker-image ghcr.io/coder/coder-k8s:e2e --name e2e
 
       - name: Apply namespace, CRDs, and RBAC
+        if: github.event_name != 'pull_request'
         run: |
           kubectl apply -f config/e2e/namespace.yaml
           kubectl apply -f config/crd/bases/
           kubectl apply -f config/rbac/
 
-      - name: Deploy controller
+      - name: Enable aggregated API server
+        if: github.event_name != 'pull_request'
+        run: |
+          kubectl apply -f deploy/apiserver-service.yaml
+          kubectl apply -f deploy/apiserver-apiservice.yaml
+
+      - name: Deploy coder-k8s (controller + aggregated API server)
+        if: github.event_name != 'pull_request'
         run: kubectl apply -f config/e2e/deployment.yaml
 
-      - name: Wait for controller
-        run: kubectl wait --for=condition=Available deploy/coder-k8s -n coder-system --timeout=120s
-
-      - name: Apply sample CR
-        run: kubectl apply -f config/samples/coder_v1alpha1_codercontrolplane.yaml
-
-      - name: Verify CR exists
+      - name: Wait for operator and APIService
+        if: github.event_name != 'pull_request'
         run: |
-          kubectl get codercontrolplanes -A
-          COUNT=$(kubectl get codercontrolplanes -A -o json | jq '.items | length')
-          if [ "$COUNT" -lt 1 ]; then
-            echo "assertion failed: expected at least 1 CoderControlPlane resource" >&2
-            exit 1
-          fi
+          kubectl wait --for=condition=Available deploy/coder-k8s -n coder-system --timeout=120s
+          kubectl wait --for=condition=Available apiservice/v1alpha1.aggregation.coder.com --timeout=180s
+
+      - name: Install CloudNativePG operator
+        if: github.event_name != 'pull_request'
+        run: |
+          kubectl apply --server-side -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/v1.25.0/releases/cnpg-1.25.0.yaml
+          kubectl wait --for=condition=Available deploy/cnpg-controller-manager -n cnpg-system --timeout=180s
+
+      - name: Provision PostgreSQL and CoderControlPlane
+        if: github.event_name != 'pull_request'
+        run: kubectl apply -f examples/cloudnativepg/
+
+      - name: Wait for PostgreSQL
+        if: github.event_name != 'pull_request'
+        run: kubectl -n coder wait --for=condition=Ready cluster/coder-db --timeout=600s
+
+      - name: Wait for Coder deployment
+        if: github.event_name != 'pull_request'
+        run: kubectl -n coder rollout status deployment/coder --timeout=600s
+
+      - name: Wait for CoderControlPlane readiness
+        if: github.event_name != 'pull_request'
+        run: |
+          kubectl -n coder wait --for=jsonpath='{.status.phase}'=Ready codercontrolplane/coder --timeout=600s
+          kubectl -n coder wait --for=jsonpath='{.status.operatorAccessReady}'=true codercontrolplane/coder --timeout=600s
+
+      - name: Verify operator token secret
+        if: github.event_name != 'pull_request'
+        run: |
+          TOKEN_SECRET=$(kubectl -n coder get codercontrolplane coder -o jsonpath='{.status.operatorTokenSecretRef.name}')
+          test -n "$TOKEN_SECRET"
+          kubectl -n coder get secret "$TOKEN_SECRET"
+
+      - name: Create CoderTemplate via kubectl
+        if: github.event_name != 'pull_request'
+        run: kubectl apply -f config/e2e/codertemplate.yaml
+
+      - name: Verify CoderTemplate exists
+        if: github.event_name != 'pull_request'
+        run: |
+          kubectl -n coder get codertemplates
+          kubectl -n coder get codertemplate default.e2e-template -o yaml
+
+      # ---- Failure diagnostics ----
+      - name: Dump cluster state on failure
+        if: failure() && github.event_name != 'pull_request'
+        run: |
+          echo "=== Pods (all namespaces) ==="
+          kubectl get pods -A || true
+          echo ""
+          echo "=== APIService ==="
+          kubectl describe apiservice v1alpha1.aggregation.coder.com || true
+          echo ""
+          echo "=== coder-k8s logs ==="
+          kubectl -n coder-system logs deploy/coder-k8s --tail=200 || true
+          echo ""
+          echo "=== CoderControlPlane ==="
+          kubectl -n coder describe codercontrolplane coder || true
+          echo ""
+          echo "=== Coder deployment logs ==="
+          kubectl -n coder logs deploy/coder --tail=200 || true
+          echo ""
+          echo "=== CNPG controller logs ==="
+          kubectl -n cnpg-system logs deploy/cnpg-controller-manager --tail=200 || true
 
   terraform:
     name: Terraform (fmt/validate/tflint/trivy)
