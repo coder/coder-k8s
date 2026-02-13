@@ -4,38 +4,33 @@
     **Highly experimental / alpha software**
     This project is an active prototype. Do not use it in production.
 
-`coder-k8s` is a Kubernetes control-plane project for running and managing Coder through Kubernetes APIs.
+`coder-k8s` is a Kubernetes control-plane stack for running and managing Coder through Kubernetes APIs.
 
-## What is in this repository?
+## What you can deploy
 
 `coder-k8s` ships one binary with four app modes:
 
-- **`all` (default)**: controller + aggregated API server + MCP server in one process.
-- **`controller`**: reconciles `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy` (`coder.com/v1alpha1`).
+- **`all` (default)**: operator + workspace/template API server + MCP server in one process.
+- **`controller`**: reconciles `CoderControlPlane`, `CoderProvisioner`, and `CoderWorkspaceProxy` (`coder.com/v1alpha1`).
 - **`aggregated-apiserver`**: serves `CoderWorkspace` + `CoderTemplate` (`aggregation.coder.com/v1alpha1`).
-- **`mcp-http`**: serves MCP tooling over HTTP.
+- **`mcp-http`**: serves operational MCP tooling over HTTP.
 
-## Documentation map (Diátaxis)
+## Quick start path
 
-- **Tutorials**: guided learning path
-  - [Getting started](tutorials/getting-started.md)
-- **How-to guides**: task-focused operations
-  - [Deploy controller](how-to/deploy-controller.md)
-  - [Deploy aggregated API server](how-to/deploy-aggregated-apiserver.md)
-  - [Run MCP server](how-to/mcp-server.md)
-  - [Troubleshooting](how-to/troubleshooting.md)
-- **Reference**: generated API reference
-  - [API reference](reference/api/codercontrolplane.md)
-- **Explanation**: conceptual internals
-  - [Architecture](explanation/architecture.md)
+If you want to deploy quickly and validate the end-to-end flow:
 
-## Quick commands
+1. Follow [Deploy a Coder Control Plane](tutorials/getting-started.md).
+2. Verify the managed Coder Deployment and Service.
+3. If you need external provisioners, continue with [Deploy an External Provisioner](tutorials/deploy-coderprovisioner.md).
 
-```bash
-make manifests
-make test
-make build
-make docs-serve
-```
+## Learn more
 
-New here? Start with the [Getting started tutorial](tutorials/getting-started.md).
+- [Deploy an External Provisioner](tutorials/deploy-coderprovisioner.md)
+- [Deploy controller](how-to/deploy-controller.md)
+- [Deploy aggregated API server](how-to/deploy-aggregated-apiserver.md)
+- [Run MCP server](how-to/mcp-server.md)
+- [Troubleshooting](how-to/troubleshooting.md)
+- [API reference](reference/api/codercontrolplane.md)
+- [Architecture](explanation/architecture.md)
+
+Start with [Deploy a Coder Control Plane](tutorials/getting-started.md).

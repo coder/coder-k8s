@@ -2,7 +2,7 @@ apiVersion: coder.com/v1alpha1
 kind: CoderWorkspaceProxy
 metadata:
   name: coderworkspaceproxy-sample
-  namespace: default
+  namespace: coder
 spec:
   image: "ghcr.io/coder/coder:latest"
   primaryAccessURL: "https://coder.example.com"
