@@ -3,7 +3,8 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-  outputs = { self, nixpkgs }:
+  outputs =
+    { self, nixpkgs }:
     let
       supportedSystems = [
         "x86_64-linux"
@@ -12,13 +13,14 @@
         "aarch64-darwin"
       ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
-    in {
-      devShells = forAllSystems (system:
+    in
+    {
+      devShells = forAllSystems (
+        system:
         let
           pkgs = import nixpkgs {
             inherit system;
-            config.allowUnfreePredicate = pkg:
-              builtins.elem (nixpkgs.lib.getName pkg) [ "terraform" ];
+            config.allowUnfreePredicate = pkg: builtins.elem (nixpkgs.lib.getName pkg) [ "terraform" ];
           };
           docsPython = pkgs.python3.withPackages (ps: [
             ps.mkdocs
@@ -31,12 +33,14 @@
           kns = pkgs.writeShellScriptBin "kns" ''
             exec ${pkgs.kubectx}/bin/kubens "$@"
           '';
-        in {
+        in
+        {
           default = pkgs.mkShell {
             packages = with pkgs; [
               go
               gnumake
               git
+              lazygit
 
               # Kubernetes dev/demo tools
               kubectl
@@ -57,11 +61,22 @@
               govulncheck
 
               docsPython
-
-	      yazi
+              yazi
             ];
+
+            shellHook = ''
+              alias lg='lazygit'
+            '';
           };
         }
+      );
+
+      formatter = forAllSystems (
+        system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        pkgs.nixfmt
       );
     };
 }
