@@ -67,6 +67,7 @@ const (
 	licenseConditionReasonNotSupported  = "NotSupported"
 	licenseConditionReasonError         = "Error"
 
+	workspaceRBACDriftRequeueInterval = 2 * time.Minute
 	gatewayExposureRequeueInterval    = 2 * time.Minute
 	licenseUploadRequestTimeout       = 30 * time.Second
 	entitlementsStatusRefreshInterval = 2 * time.Minute
@@ -275,6 +276,9 @@ func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	result := mergeResults(operatorResult, licenseResult, entitlementsResult)
+	if requiresWorkspaceRBACDriftRequeue(coderControlPlane) {
+		result = mergeResults(result, ctrl.Result{RequeueAfter: workspaceRBACDriftRequeueInterval})
+	}
 	if gatewayExposureNeedsRequeue {
 		result = mergeResults(result, ctrl.Result{RequeueAfter: gatewayExposureRequeueInterval})
 	}
@@ -294,6 +298,22 @@ func controlPlaneTLSEnabled(cp *coderv1alpha1.CoderControlPlane) bool {
 		return false
 	}
 	return len(cp.Spec.TLS.SecretNames) > 0
+}
+
+func requiresWorkspaceRBACDriftRequeue(cp *coderv1alpha1.CoderControlPlane) bool {
+	if cp == nil || !cp.Spec.RBAC.WorkspacePerms {
+		return false
+	}
+
+	for _, namespace := range cp.Spec.RBAC.WorkspaceNamespaces {
+		namespace = strings.TrimSpace(namespace)
+		if namespace == "" || namespace == cp.Namespace {
+			continue
+		}
+		return true
+	}
+
+	return false
 }
 
 func workspaceRBACLabels(cp *coderv1alpha1.CoderControlPlane) map[string]string {

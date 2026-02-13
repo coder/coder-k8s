@@ -2310,8 +2310,12 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 
 		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
 		namespacedName := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}
-		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+		result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
+		if err != nil {
 			t.Fatalf("reconcile control plane before delete: %v", err)
+		}
+		if result.RequeueAfter <= 0 {
+			t.Fatalf("expected cross-namespace workspace RBAC to request periodic drift requeue, got %+v", result)
 		}
 
 		roleName := serviceAccountName + "-workspace-perms"
@@ -2333,7 +2337,7 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 		}
 
 		role = &rbacv1.Role{}
-		err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: workspaceNamespace}, role)
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: workspaceNamespace}, role)
 		if !apierrors.IsNotFound(err) {
 			t.Fatalf("expected cross-namespace role %s/%s to be removed after control plane deletion, got: %v", workspaceNamespace, roleName, err)
 		}
