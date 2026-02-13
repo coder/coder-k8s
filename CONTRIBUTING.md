@@ -21,7 +21,8 @@ kubectl apply -f config/crd/bases/
 # Run controller locally against your kubeconfig context
 GOFLAGS=-mod=vendor go run . --app=controller
 
-# In another terminal, apply a sample control plane
+# In another terminal, create the sample namespace and apply a sample control plane
+kubectl create namespace coder
 kubectl apply -f config/samples/coder_v1alpha1_codercontrolplane.yaml
 
 # Verify resource creation
