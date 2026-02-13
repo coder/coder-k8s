@@ -327,6 +327,354 @@ func TestTemplateStorageUpdateWithChangedFiles(t *testing.T) {
 	}
 }
 
+func TestTemplateStorageUpdateWaitsForTemplateVersionBuildBeforePromotion(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	createObj := &aggregationv1alpha1.CoderTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme.wait-for-build-template"},
+		Spec: aggregationv1alpha1.CoderTemplateSpec{
+			Organization: "acme",
+			DisplayName:  "Wait For Build Template",
+			Files:        map[string]string{"main.tf": "resource \"null_resource\" \"initial\" {}"},
+		},
+	}
+
+	createdObj, err := templateStorage.Create(ctx, createObj, rest.ValidateAllObjectFunc, nil)
+	if err != nil {
+		t.Fatalf("expected template create with files to succeed: %v", err)
+	}
+	createdTemplate, ok := createdObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from create, got %T", createdObj)
+	}
+
+	activeVersionBefore, ok := state.templateActiveVersionID("acme", "wait-for-build-template")
+	if !ok {
+		t.Fatal("expected active version for created template")
+	}
+
+	state.setNextCreatedTemplateVersionPendingForPolls(2)
+
+	desiredTemplate := createdTemplate.DeepCopy()
+	desiredTemplate.Spec.Files = map[string]string{"main.tf": "resource \"null_resource\" \"updated\" {}"}
+
+	updatedObj, created, err := templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected update with changed files to succeed after build wait: %v", err)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+
+	activeVersionAfter, ok := state.templateActiveVersionID("acme", "wait-for-build-template")
+	if !ok {
+		t.Fatal("expected active version for updated template")
+	}
+	if activeVersionAfter == activeVersionBefore {
+		t.Fatalf("expected active version to change after build wait, both were %q", activeVersionAfter)
+	}
+
+	updatedTemplate, ok := updatedObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from update, got %T", updatedObj)
+	}
+	expectedFiles := map[string]string{"main.tf": "resource \"null_resource\" \"updated\" {}"}
+	if !reflect.DeepEqual(updatedTemplate.Spec.Files, expectedFiles) {
+		t.Fatalf("expected updated files %v, got %v", expectedFiles, updatedTemplate.Spec.Files)
+	}
+}
+
+func TestTemplateStorageUpdateReturnsBadRequestWhenTemplateVersionBuildFails(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	createObj := &aggregationv1alpha1.CoderTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme.failed-build-template"},
+		Spec: aggregationv1alpha1.CoderTemplateSpec{
+			Organization: "acme",
+			Files:        map[string]string{"main.tf": "resource \"null_resource\" \"initial\" {}"},
+		},
+	}
+	createdObj, err := templateStorage.Create(ctx, createObj, rest.ValidateAllObjectFunc, nil)
+	if err != nil {
+		t.Fatalf("expected template create to succeed: %v", err)
+	}
+	createdTemplate := createdObj.(*aggregationv1alpha1.CoderTemplate)
+
+	state.setNextCreatedTemplateVersionStatus(codersdk.ProvisionerJobFailed)
+
+	desiredTemplate := createdTemplate.DeepCopy()
+	desiredTemplate.Spec.Files = map[string]string{"main.tf": "resource \"null_resource\" \"updated\" {}"}
+
+	updatedObj, created, updateErr := templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if updateErr == nil {
+		t.Fatal("expected update to fail when template version build fails")
+	}
+	if updatedObj != nil {
+		t.Fatalf("expected nil updated object on failure, got %T", updatedObj)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+	if !apierrors.IsBadRequest(updateErr) {
+		t.Fatalf("expected BadRequest for failed build, got %v", updateErr)
+	}
+	assertTopLevelStatusError(t, updateErr)
+	if !strings.Contains(updateErr.Error(), "build ended with status") {
+		t.Fatalf("expected failed-build error message, got %v", updateErr)
+	}
+}
+
+func TestTemplateStorageUpdateReturnsBadRequestWhenTemplateVersionBuildWaitTimesOut(t *testing.T) {
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	createObj := &aggregationv1alpha1.CoderTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme.timeout-build-template"},
+		Spec: aggregationv1alpha1.CoderTemplateSpec{
+			Organization: "acme",
+			Files:        map[string]string{"main.tf": "resource \"null_resource\" \"initial\" {}"},
+		},
+	}
+	createdObj, err := templateStorage.Create(ctx, createObj, rest.ValidateAllObjectFunc, nil)
+	if err != nil {
+		t.Fatalf("expected template create to succeed: %v", err)
+	}
+	createdTemplate := createdObj.(*aggregationv1alpha1.CoderTemplate)
+
+	t.Setenv(templateVersionBuildWaitTimeoutEnv, "120ms")
+	t.Setenv(templateVersionBuildBackoffAfterEnv, "0s")
+	t.Setenv(templateVersionBuildInitialPollIntervalEnv, "10ms")
+	t.Setenv(templateVersionBuildMaxPollIntervalEnv, "20ms")
+
+	state.setNextCreatedTemplateVersionStatus(codersdk.ProvisionerJobPending)
+
+	desiredTemplate := createdTemplate.DeepCopy()
+	desiredTemplate.Spec.Files = map[string]string{"main.tf": "resource \"null_resource\" \"updated\" {}"}
+
+	updatedObj, created, updateErr := templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if updateErr == nil {
+		t.Fatal("expected update to fail when template version build wait times out")
+	}
+	if updatedObj != nil {
+		t.Fatalf("expected nil updated object on timeout, got %T", updatedObj)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+	if !apierrors.IsBadRequest(updateErr) {
+		t.Fatalf("expected BadRequest for build wait timeout, got %v", updateErr)
+	}
+	assertTopLevelStatusError(t, updateErr)
+	if !strings.Contains(updateErr.Error(), "did not succeed within") {
+		t.Fatalf("expected timeout error message, got %v", updateErr)
+	}
+}
+
+func TestTemplateStorageUpdateReturnsTimeoutWhenRequestContextTimesOut(t *testing.T) {
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	baseCtx := namespacedContext("control-plane")
+
+	createObj := &aggregationv1alpha1.CoderTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme.request-timeout-template"},
+		Spec: aggregationv1alpha1.CoderTemplateSpec{
+			Organization: "acme",
+			Files:        map[string]string{"main.tf": "resource \"null_resource\" \"initial\" {}"},
+		},
+	}
+	createdObj, err := templateStorage.Create(baseCtx, createObj, rest.ValidateAllObjectFunc, nil)
+	if err != nil {
+		t.Fatalf("expected template create to succeed: %v", err)
+	}
+	createdTemplate := createdObj.(*aggregationv1alpha1.CoderTemplate)
+
+	t.Setenv(templateVersionBuildWaitTimeoutEnv, "5s")
+	t.Setenv(templateVersionBuildBackoffAfterEnv, "0s")
+	t.Setenv(templateVersionBuildInitialPollIntervalEnv, "10ms")
+	t.Setenv(templateVersionBuildMaxPollIntervalEnv, "20ms")
+
+	state.setNextCreatedTemplateVersionStatus(codersdk.ProvisionerJobPending)
+
+	updateCtx, cancel := context.WithTimeout(baseCtx, 120*time.Millisecond)
+	defer cancel()
+
+	desiredTemplate := createdTemplate.DeepCopy()
+	desiredTemplate.Spec.Files = map[string]string{"main.tf": "resource \"null_resource\" \"updated\" {}"}
+
+	updatedObj, created, updateErr := templateStorage.Update(
+		updateCtx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if updateErr == nil {
+		t.Fatal("expected update to fail when request context times out")
+	}
+	if updatedObj != nil {
+		t.Fatalf("expected nil updated object on request timeout, got %T", updatedObj)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+	if apierrors.IsBadRequest(updateErr) {
+		t.Fatalf("expected non-BadRequest error for request context timeout, got %v", updateErr)
+	}
+	if !apierrors.IsTimeout(updateErr) {
+		t.Fatalf("expected timeout error for request context timeout, got %v", updateErr)
+	}
+	assertTopLevelStatusError(t, updateErr)
+}
+
+func TestMapTemplateVersionBuildWaitErrorMapsRequestContextFailuresToTimeout(t *testing.T) {
+	tests := []struct {
+		name  string
+		cause error
+	}{
+		{
+			name:  "deadline exceeded",
+			cause: context.DeadlineExceeded,
+		},
+		{
+			name:  "canceled",
+			cause: context.Canceled,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mappedErr := mapTemplateVersionBuildWaitError(
+				&templateVersionBuildWaitTimeoutError{
+					versionID:   uuid.New(),
+					waitTimeout: time.Minute,
+					lastStatus:  codersdk.ProvisionerJobRunning,
+					cause:       tt.cause,
+				},
+				"acme.template",
+			)
+
+			if mappedErr == nil {
+				t.Fatal("expected mapped timeout error")
+			}
+			if apierrors.IsBadRequest(mappedErr) {
+				t.Fatalf("expected timeout error, got BadRequest: %v", mappedErr)
+			}
+			if !apierrors.IsTimeout(mappedErr) {
+				t.Fatalf("expected timeout error, got %v", mappedErr)
+			}
+			assertTopLevelStatusError(t, mappedErr)
+		})
+	}
+}
+
+func TestLoadTemplateVersionBuildWaitConfigFromEnvDefaults(t *testing.T) {
+	t.Setenv(templateVersionBuildWaitTimeoutEnv, "")
+	t.Setenv(templateVersionBuildBackoffAfterEnv, "")
+	t.Setenv(templateVersionBuildInitialPollIntervalEnv, "")
+	t.Setenv(templateVersionBuildMaxPollIntervalEnv, "")
+
+	cfg, err := loadTemplateVersionBuildWaitConfigFromEnv()
+	if err != nil {
+		t.Fatalf("expected default wait config load to succeed: %v", err)
+	}
+	if cfg.waitTimeout != defaultTemplateVersionBuildWaitTimeout {
+		t.Fatalf("expected default wait timeout %s, got %s", defaultTemplateVersionBuildWaitTimeout, cfg.waitTimeout)
+	}
+	if cfg.backoffAfter != defaultTemplateVersionBuildBackoffAfter {
+		t.Fatalf("expected default backoff-after %s, got %s", defaultTemplateVersionBuildBackoffAfter, cfg.backoffAfter)
+	}
+	if cfg.initialPoll != defaultTemplateVersionBuildInitialPoll {
+		t.Fatalf("expected default initial poll %s, got %s", defaultTemplateVersionBuildInitialPoll, cfg.initialPoll)
+	}
+	if cfg.maxPollInterval != defaultTemplateVersionBuildMaxPollInterval {
+		t.Fatalf("expected default max poll interval %s, got %s", defaultTemplateVersionBuildMaxPollInterval, cfg.maxPollInterval)
+	}
+}
+
+func TestLoadTemplateVersionBuildWaitConfigFromEnvInvalid(t *testing.T) {
+	t.Setenv(templateVersionBuildWaitTimeoutEnv, "31m")
+	t.Setenv(templateVersionBuildBackoffAfterEnv, "2m")
+	t.Setenv(templateVersionBuildInitialPollIntervalEnv, "500ms")
+	t.Setenv(templateVersionBuildMaxPollIntervalEnv, "10s")
+
+	_, err := loadTemplateVersionBuildWaitConfigFromEnv()
+	if err == nil {
+		t.Fatal("expected max wait timeout validation to fail")
+	}
+	if !strings.Contains(err.Error(), templateVersionBuildWaitTimeoutEnv) {
+		t.Fatalf("expected error to mention %s, got %v", templateVersionBuildWaitTimeoutEnv, err)
+	}
+
+	t.Setenv(templateVersionBuildWaitTimeoutEnv, "1m")
+	t.Setenv(templateVersionBuildBackoffAfterEnv, "2m")
+
+	_, err = loadTemplateVersionBuildWaitConfigFromEnv()
+	if err == nil {
+		t.Fatal("expected invalid wait config to fail")
+	}
+	if !strings.Contains(err.Error(), templateVersionBuildBackoffAfterEnv) {
+		t.Fatalf("expected error to mention %s, got %v", templateVersionBuildBackoffAfterEnv, err)
+	}
+
+	t.Setenv(templateVersionBuildBackoffAfterEnv, "2s")
+	t.Setenv(templateVersionBuildInitialPollIntervalEnv, "5s")
+	t.Setenv(templateVersionBuildMaxPollIntervalEnv, "1s")
+
+	_, err = loadTemplateVersionBuildWaitConfigFromEnv()
+	if err == nil {
+		t.Fatal("expected max-poll-interval validation to fail")
+	}
+	if !strings.Contains(err.Error(), templateVersionBuildMaxPollIntervalEnv) {
+		t.Fatalf("expected error to mention %s, got %v", templateVersionBuildMaxPollIntervalEnv, err)
+	}
+}
+
 func TestTemplateStorageUpdateVerifiesActiveVersionPromotion(t *testing.T) {
 	t.Parallel()
 
@@ -2118,10 +2466,13 @@ type mockCoderServerState struct {
 	workspacesByID       map[uuid.UUID]codersdk.Workspace
 	workspaceIDsByUser   map[string]map[string]uuid.UUID
 
-	buildTransitions           []codersdk.WorkspaceTransition
-	failBuildTransitions       map[codersdk.WorkspaceTransition]int
-	templateMetaPatchCall      int
-	failActiveVersionPromotion bool
+	buildTransitions                  []codersdk.WorkspaceTransition
+	failBuildTransitions              map[codersdk.WorkspaceTransition]int
+	templateMetaPatchCall             int
+	failActiveVersionPromotion        bool
+	templateVersionPollsBeforeSuccess map[uuid.UUID]int
+	nextTemplateVersionInitialStatus  codersdk.ProvisionerJobStatus
+	nextTemplateVersionPendingPolls   int
 }
 
 func newMockCoderServer(t *testing.T) (*httptest.Server, *mockCoderServerState) {
@@ -2176,6 +2527,7 @@ func newMockCoderServer(t *testing.T) (*httptest.Server, *mockCoderServerState) 
 		Message:        "initial version",
 		Job: codersdk.ProvisionerJob{
 			FileID: fileID,
+			Status: codersdk.ProvisionerJobSucceeded,
 		},
 	}
 
@@ -2229,8 +2581,10 @@ func newMockCoderServer(t *testing.T) (*httptest.Server, *mockCoderServerState) 
 				workspace.Name: workspace.ID,
 			},
 		},
-		buildTransitions:     []codersdk.WorkspaceTransition{},
-		failBuildTransitions: map[codersdk.WorkspaceTransition]int{},
+		buildTransitions:                  []codersdk.WorkspaceTransition{},
+		failBuildTransitions:              map[codersdk.WorkspaceTransition]int{},
+		templateVersionPollsBeforeSuccess: map[uuid.UUID]int{},
+		nextTemplateVersionInitialStatus:  codersdk.ProvisionerJobSucceeded,
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2480,6 +2834,10 @@ func (s *mockCoderServerState) handleCreateTemplateVersion(w http.ResponseWriter
 	}
 
 	now := time.Now().UTC()
+	initialStatus := s.nextTemplateVersionInitialStatus
+	if initialStatus == "" {
+		initialStatus = codersdk.ProvisionerJobSucceeded
+	}
 	templateVersion := codersdk.TemplateVersion{
 		ID:             uuid.New(),
 		OrganizationID: s.organization.ID,
@@ -2489,6 +2847,7 @@ func (s *mockCoderServerState) handleCreateTemplateVersion(w http.ResponseWriter
 		Message:        request.Message,
 		Job: codersdk.ProvisionerJob{
 			FileID: request.FileID,
+			Status: initialStatus,
 		},
 	}
 	if request.TemplateID != uuid.Nil {
@@ -2499,6 +2858,17 @@ func (s *mockCoderServerState) handleCreateTemplateVersion(w http.ResponseWriter
 		templateID := request.TemplateID
 		templateVersion.TemplateID = &templateID
 	}
+
+	if s.nextTemplateVersionPendingPolls > 0 {
+		if initialStatus != codersdk.ProvisionerJobPending && initialStatus != codersdk.ProvisionerJobRunning {
+			panic(fmt.Sprintf("assertion failed: pending poll simulation requires pending/running status, got %q", initialStatus))
+		}
+		s.templateVersionPollsBeforeSuccess[templateVersion.ID] = s.nextTemplateVersionPendingPolls
+	}
+
+	// Reset one-shot template version behavior knobs after creation.
+	s.nextTemplateVersionInitialStatus = codersdk.ProvisionerJobSucceeded
+	s.nextTemplateVersionPendingPolls = 0
 
 	s.templateVersionsByID[templateVersion.ID] = templateVersion
 
@@ -2586,6 +2956,15 @@ func (s *mockCoderServerState) handleUpdateActiveTemplateVersion(w http.Response
 		s.templateVersionsByID[templateVersion.ID] = templateVersion
 	}
 
+	if templateVersion.Job.Status != codersdk.ProvisionerJobSucceeded {
+		writeCoderError(
+			w,
+			http.StatusForbidden,
+			"Only versions that have been built successfully can be promoted.\n	Error: Attempted to promote a version with a running build",
+		)
+		return
+	}
+
 	if !s.failActiveVersionPromotion {
 		template.ActiveVersionID = request.ID
 	}
@@ -2632,6 +3011,23 @@ func (s *mockCoderServerState) handleGetTemplateVersion(w http.ResponseWriter, t
 	if !ok {
 		writeCoderError(w, http.StatusNotFound, "template version not found")
 		return
+	}
+
+	if pollsRemaining, hasPendingPolls := s.templateVersionPollsBeforeSuccess[templateVersionID]; hasPendingPolls {
+		if pollsRemaining <= 0 {
+			panic(fmt.Sprintf("assertion failed: template version %q pending poll count must be > 0", templateVersionID.String()))
+		}
+		pollsRemaining--
+		if pollsRemaining == 0 {
+			completedAt := time.Now().UTC()
+			templateVersion.Job.Status = codersdk.ProvisionerJobSucceeded
+			templateVersion.Job.CompletedAt = &completedAt
+			templateVersion.UpdatedAt = completedAt
+			delete(s.templateVersionPollsBeforeSuccess, templateVersionID)
+		} else {
+			s.templateVersionPollsBeforeSuccess[templateVersionID] = pollsRemaining
+		}
+		s.templateVersionsByID[templateVersionID] = templateVersion
 	}
 
 	writeJSON(w, http.StatusOK, templateVersion)
@@ -2910,6 +3306,30 @@ func (s *mockCoderServerState) setFailActiveVersionPromotion(fail bool) {
 	defer s.mu.Unlock()
 
 	s.failActiveVersionPromotion = fail
+}
+
+func (s *mockCoderServerState) setNextCreatedTemplateVersionStatus(status codersdk.ProvisionerJobStatus) {
+	if status == "" {
+		panic("assertion failed: template version status must not be empty")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.nextTemplateVersionInitialStatus = status
+	s.nextTemplateVersionPendingPolls = 0
+}
+
+func (s *mockCoderServerState) setNextCreatedTemplateVersionPendingForPolls(polls int) {
+	if polls <= 0 {
+		panic(fmt.Sprintf("assertion failed: pending poll count must be > 0, got %d", polls))
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.nextTemplateVersionInitialStatus = codersdk.ProvisionerJobPending
+	s.nextTemplateVersionPendingPolls = polls
 }
 
 func (s *mockCoderServerState) setTemplateVersionTemplateID(templateVersionID, templateID uuid.UUID) {

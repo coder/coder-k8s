@@ -75,6 +75,8 @@ make docs-serve
 
 - [`examples/cloudnativepg/`](examples/cloudnativepg/) — Deploy a `CoderControlPlane` with a CloudNativePG-managed PostgreSQL backend.
 
+- [`examples/aggregated/`](examples/aggregated/) - Reusable `CoderTemplate` manifests for aggregated API testing.
+
 ## KIND development cluster (k9s demos)
 
 Bootstrap a KIND cluster and install CRDs/RBAC (**this switches current kubectl context**):

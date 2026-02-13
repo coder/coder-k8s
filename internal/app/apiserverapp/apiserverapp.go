@@ -38,6 +38,8 @@ const (
 	// DefaultSecureServingPort is the secure serving port used by aggregated-apiserver mode.
 	DefaultSecureServingPort = 6443
 	serverName               = "coder-k8s-aggregated-apiserver"
+	// defaultRequestTimeout keeps API request lifetimes aligned with template build wait limits.
+	defaultRequestTimeout = storage.MaxTemplateVersionBuildWaitTimeout
 )
 
 // Options configures aggregated-apiserver bootstrap behavior.
@@ -192,6 +194,7 @@ func NewRecommendedConfig(
 	recommendedConfig.RuleResolver = authz
 	recommendedConfig.EffectiveVersion = apiservercompatibility.DefaultBuildEffectiveVersion()
 	recommendedConfig.SkipOpenAPIInstallation = true
+	recommendedConfig.RequestTimeout = defaultRequestTimeout
 
 	definitionNamer := apiserveropenapi.NewDefinitionNamer(scheme)
 	recommendedConfig.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(getOpenAPIDefinitions, definitionNamer)
