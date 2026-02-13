@@ -1383,6 +1383,19 @@ func (r *CoderControlPlaneReconciler) desiredStatus(
 	return nextStatus
 }
 
+func controlPlaneSDKURL(coderControlPlane *coderv1alpha1.CoderControlPlane) string {
+	if coderControlPlane == nil {
+		return ""
+	}
+
+	servicePort := coderControlPlane.Spec.Service.Port
+	if servicePort == 0 {
+		servicePort = defaultControlPlanePort
+	}
+
+	return fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", coderControlPlane.Name, coderControlPlane.Namespace, servicePort)
+}
+
 func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 	ctx context.Context,
 	coderControlPlane *coderv1alpha1.CoderControlPlane,
@@ -1543,8 +1556,9 @@ func (r *CoderControlPlaneReconciler) reconcileLicense(
 		return ctrl.Result{}, nil
 	}
 
-	if strings.TrimSpace(nextStatus.URL) == "" {
-		return ctrl.Result{}, fmt.Errorf("assertion failed: control plane URL must not be empty when licenseSecretRef is configured")
+	controlPlaneURL := controlPlaneSDKURL(coderControlPlane)
+	if strings.TrimSpace(controlPlaneURL) == "" {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: control plane SDK URL must not be empty when licenseSecretRef is configured")
 	}
 
 	operatorTokenSecretName := strings.TrimSpace(nextStatus.OperatorTokenSecretRef.Name)
@@ -1644,7 +1658,7 @@ func (r *CoderControlPlaneReconciler) reconcileLicense(
 	}
 
 	if nextStatus.LicenseLastApplied != nil && nextStatus.LicenseLastAppliedHash == licenseHash {
-		hasAnyLicense, hasLicenseErr := r.LicenseUploader.HasAnyLicense(ctx, nextStatus.URL, operatorToken)
+		hasAnyLicense, hasLicenseErr := r.LicenseUploader.HasAnyLicense(ctx, controlPlaneURL, operatorToken)
 		if hasLicenseErr != nil {
 			var sdkErr *codersdk.Error
 			if errors.As(hasLicenseErr, &sdkErr) {
@@ -1702,7 +1716,7 @@ func (r *CoderControlPlaneReconciler) reconcileLicense(
 		}
 	}
 
-	if err := r.LicenseUploader.AddLicense(ctx, nextStatus.URL, operatorToken, licenseJWT); err != nil {
+	if err := r.LicenseUploader.AddLicense(ctx, controlPlaneURL, operatorToken, licenseJWT); err != nil {
 		if isDuplicateLicenseUploadError(err) {
 			now := metav1.Now()
 			nextStatus.LicenseLastApplied = &now
@@ -1803,8 +1817,9 @@ func (r *CoderControlPlaneReconciler) reconcileEntitlements(
 		nextStatus.OperatorTokenSecretRef == nil {
 		return ctrl.Result{}, nil
 	}
-	if strings.TrimSpace(nextStatus.URL) == "" {
-		return ctrl.Result{}, fmt.Errorf("assertion failed: control plane URL must not be empty when querying entitlements")
+	controlPlaneURL := controlPlaneSDKURL(coderControlPlane)
+	if strings.TrimSpace(controlPlaneURL) == "" {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: control plane SDK URL must not be empty when querying entitlements")
 	}
 	if r.EntitlementsInspector == nil {
 		return ctrl.Result{}, nil
@@ -1828,7 +1843,7 @@ func (r *CoderControlPlaneReconciler) reconcileEntitlements(
 		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
 	}
 
-	entitlements, err := r.EntitlementsInspector.Entitlements(ctx, nextStatus.URL, operatorToken)
+	entitlements, err := r.EntitlementsInspector.Entitlements(ctx, controlPlaneURL, operatorToken)
 	if err != nil {
 		var sdkErr *codersdk.Error
 		if errors.As(err, &sdkErr) {
