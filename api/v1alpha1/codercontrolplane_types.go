@@ -53,6 +53,62 @@ type CoderControlPlaneSpec struct {
 	// control plane is ready and re-uploads when the Secret value changes.
 	// +optional
 	LicenseSecretRef *SecretKeySelector `json:"licenseSecretRef,omitempty"`
+
+	// ServiceAccount configures the ServiceAccount for the control plane pod.
+	// +kubebuilder:default={}
+	ServiceAccount ServiceAccountSpec `json:"serviceAccount,omitempty"`
+	// RBAC configures namespace-scoped RBAC for workspace provisioning.
+	// +kubebuilder:default={}
+	RBAC RBACSpec `json:"rbac,omitempty"`
+
+	// Resources sets resource requests/limits for the control plane container.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+	// SecurityContext sets the container security context.
+	// +optional
+	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
+	// PodSecurityContext sets the pod-level security context.
+	// +optional
+	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
+
+	// TLS configures Coder built-in TLS.
+	// +kubebuilder:default={}
+	TLS TLSSpec `json:"tls,omitempty"`
+
+	// ReadinessProbe configures the readiness probe for the control plane container.
+	// +kubebuilder:default={enabled:true}
+	ReadinessProbe ProbeSpec `json:"readinessProbe,omitempty"`
+	// LivenessProbe configures the liveness probe for the control plane container.
+	// +kubebuilder:default={enabled:false}
+	LivenessProbe ProbeSpec `json:"livenessProbe,omitempty"`
+
+	// EnvUseClusterAccessURL injects a default CODER_ACCESS_URL when not explicitly set.
+	// +kubebuilder:default=true
+	EnvUseClusterAccessURL *bool `json:"envUseClusterAccessURL,omitempty"`
+
+	// Expose configures external exposure via Ingress or Gateway API.
+	// +optional
+	Expose *ExposeSpec `json:"expose,omitempty"`
+
+	// EnvFrom injects environment variables from ConfigMaps/Secrets.
+	EnvFrom []corev1.EnvFromSource `json:"envFrom,omitempty"`
+	// Volumes are additional volumes to add to the pod.
+	Volumes []corev1.Volume `json:"volumes,omitempty"`
+	// VolumeMounts are additional volume mounts for the control plane container.
+	VolumeMounts []corev1.VolumeMount `json:"volumeMounts,omitempty"`
+	// Certs configures additional CA certificate mounts.
+	// +kubebuilder:default={}
+	Certs CertsSpec `json:"certs,omitempty"`
+
+	// NodeSelector constrains pod scheduling to nodes matching labels.
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	// Tolerations are applied to the control plane pod.
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+	// Affinity configures pod affinity/anti-affinity rules.
+	// +optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+	// TopologySpreadConstraints control pod topology spread.
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
 }
 
 // OperatorAccessSpec configures the controller-managed coderd operator user.
