@@ -17,6 +17,7 @@ import (
 	"github.com/coder/coder/v2/codersdk"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -31,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/coderbootstrap"
@@ -194,6 +196,8 @@ type CoderControlPlaneReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile converges the desired CoderControlPlane spec into Deployment and Service resources.
 func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -230,6 +234,9 @@ func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	service, err := r.reconcileService(ctx, coderControlPlane)
 	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcileExposure(ctx, coderControlPlane); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -691,6 +698,339 @@ func (r *CoderControlPlaneReconciler) reconcileService(ctx context.Context, code
 	// Avoid an immediate cached read-after-write here; cache propagation lag can
 	// transiently return NotFound for just-created objects and produce noisy reconcile errors.
 	return service, nil
+}
+
+func (r *CoderControlPlaneReconciler) reconcileExposure(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+
+	exposeSpec := coderControlPlane.Spec.Expose
+	if exposeSpec == nil || (exposeSpec.Ingress == nil && exposeSpec.Gateway == nil) {
+		if err := r.cleanupOwnedIngress(ctx, coderControlPlane); err != nil {
+			return fmt.Errorf("cleanup managed ingress: %w", err)
+		}
+		if err := r.cleanupOwnedHTTPRoute(ctx, coderControlPlane); err != nil {
+			return fmt.Errorf("cleanup managed httproute: %w", err)
+		}
+		return nil
+	}
+
+	if exposeSpec.Ingress != nil && exposeSpec.Gateway != nil {
+		return fmt.Errorf("assertion failed: only one of ingress or gateway exposure may be configured")
+	}
+
+	if exposeSpec.Ingress != nil {
+		if err := r.reconcileIngress(ctx, coderControlPlane); err != nil {
+			return err
+		}
+		if err := r.cleanupOwnedHTTPRoute(ctx, coderControlPlane); err != nil {
+			return fmt.Errorf("cleanup managed httproute: %w", err)
+		}
+		return nil
+	}
+
+	if err := r.reconcileHTTPRoute(ctx, coderControlPlane); err != nil {
+		return err
+	}
+	if err := r.cleanupOwnedIngress(ctx, coderControlPlane); err != nil {
+		return fmt.Errorf("cleanup managed ingress: %w", err)
+	}
+
+	return nil
+}
+
+func (r *CoderControlPlaneReconciler) reconcileIngress(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+	if coderControlPlane.Spec.Expose == nil || coderControlPlane.Spec.Expose.Ingress == nil {
+		return fmt.Errorf("assertion failed: ingress exposure spec must not be nil")
+	}
+
+	ingressExpose := coderControlPlane.Spec.Expose.Ingress
+	primaryHost := strings.TrimSpace(ingressExpose.Host)
+	if primaryHost == "" {
+		return fmt.Errorf("assertion failed: ingress host must not be empty")
+	}
+
+	wildcardHost := strings.TrimSpace(ingressExpose.WildcardHost)
+	servicePort := coderControlPlane.Spec.Service.Port
+	if servicePort == 0 {
+		servicePort = defaultControlPlanePort
+	}
+
+	ingress := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: coderControlPlane.Name, Namespace: coderControlPlane.Namespace}}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, ingress, func() error {
+		labels := controlPlaneLabels(coderControlPlane.Name)
+		ingress.Labels = maps.Clone(labels)
+		ingress.Annotations = maps.Clone(ingressExpose.Annotations)
+
+		pathTypePrefix := networkingv1.PathTypePrefix
+		rules := []networkingv1.IngressRule{
+			{
+				Host: primaryHost,
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{
+							{
+								Path:     "/",
+								PathType: &pathTypePrefix,
+								Backend: networkingv1.IngressBackend{
+									Service: &networkingv1.IngressServiceBackend{
+										Name: coderControlPlane.Name,
+										Port: networkingv1.ServiceBackendPort{Number: servicePort},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		if wildcardHost != "" {
+			rules = append(rules, networkingv1.IngressRule{
+				Host: wildcardHost,
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{
+							{
+								Path:     "/",
+								PathType: &pathTypePrefix,
+								Backend: networkingv1.IngressBackend{
+									Service: &networkingv1.IngressServiceBackend{
+										Name: coderControlPlane.Name,
+										Port: networkingv1.ServiceBackendPort{Number: servicePort},
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+		}
+
+		var tls []networkingv1.IngressTLS
+		if ingressExpose.TLS != nil {
+			secretName := strings.TrimSpace(ingressExpose.TLS.SecretName)
+			if secretName != "" {
+				tls = append(tls, networkingv1.IngressTLS{
+					SecretName: secretName,
+					Hosts:      []string{primaryHost},
+				})
+			}
+
+			wildcardSecretName := strings.TrimSpace(ingressExpose.TLS.WildcardSecretName)
+			if wildcardSecretName != "" {
+				if wildcardHost == "" {
+					return fmt.Errorf("assertion failed: ingress wildcard host must not be empty when wildcard TLS secret is set")
+				}
+				tls = append(tls, networkingv1.IngressTLS{
+					SecretName: wildcardSecretName,
+					Hosts:      []string{wildcardHost},
+				})
+			}
+		}
+
+		ingress.Spec = networkingv1.IngressSpec{
+			IngressClassName: ingressExpose.ClassName,
+			Rules:            rules,
+			TLS:              tls,
+		}
+
+		if err := controllerutil.SetControllerReference(coderControlPlane, ingress, r.Scheme); err != nil {
+			return fmt.Errorf("set controller reference: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("reconcile control plane ingress: %w", err)
+	}
+
+	return nil
+}
+
+func (r *CoderControlPlaneReconciler) reconcileHTTPRoute(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+	if coderControlPlane.Spec.Expose == nil || coderControlPlane.Spec.Expose.Gateway == nil {
+		return fmt.Errorf("assertion failed: gateway exposure spec must not be nil")
+	}
+
+	gatewayExpose := coderControlPlane.Spec.Expose.Gateway
+	primaryHost := strings.TrimSpace(gatewayExpose.Host)
+	if primaryHost == "" {
+		return fmt.Errorf("assertion failed: gateway host must not be empty")
+	}
+
+	httpRoute := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: coderControlPlane.Name, Namespace: coderControlPlane.Namespace}}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, httpRoute, func() error {
+		labels := controlPlaneLabels(coderControlPlane.Name)
+		httpRoute.Labels = maps.Clone(labels)
+
+		parentRefs := make([]gatewayv1.ParentReference, 0, len(gatewayExpose.ParentRefs))
+		for i := range gatewayExpose.ParentRefs {
+			parentRefSpec := gatewayExpose.ParentRefs[i]
+			parentRefName := strings.TrimSpace(parentRefSpec.Name)
+			if parentRefName == "" {
+				return fmt.Errorf("assertion failed: gateway parentRef[%d] name must not be empty", i)
+			}
+
+			parentRef := gatewayv1.ParentReference{Name: gatewayv1.ObjectName(parentRefName)}
+			if parentRefSpec.Namespace != nil {
+				namespace := strings.TrimSpace(*parentRefSpec.Namespace)
+				if namespace == "" {
+					return fmt.Errorf("assertion failed: gateway parentRef[%d] namespace must not be empty when set", i)
+				}
+				namespaceRef := gatewayv1.Namespace(namespace)
+				parentRef.Namespace = &namespaceRef
+			}
+			if parentRefSpec.SectionName != nil {
+				sectionName := strings.TrimSpace(*parentRefSpec.SectionName)
+				if sectionName == "" {
+					return fmt.Errorf("assertion failed: gateway parentRef[%d] sectionName must not be empty when set", i)
+				}
+				sectionNameRef := gatewayv1.SectionName(sectionName)
+				parentRef.SectionName = &sectionNameRef
+			}
+
+			parentRefs = append(parentRefs, parentRef)
+		}
+
+		hostnames := []gatewayv1.Hostname{gatewayv1.Hostname(primaryHost)}
+		wildcardHost := strings.TrimSpace(gatewayExpose.WildcardHost)
+		if wildcardHost != "" {
+			hostnames = append(hostnames, gatewayv1.Hostname(wildcardHost))
+		}
+
+		servicePort := coderControlPlane.Spec.Service.Port
+		if servicePort == 0 {
+			servicePort = defaultControlPlanePort
+		}
+		backendPort := gatewayv1.PortNumber(servicePort)
+		serviceKind := gatewayv1.Kind("Service")
+		serviceGroup := gatewayv1.Group("")
+		pathTypePrefix := gatewayv1.PathMatchPathPrefix
+		pathPrefix := "/"
+
+		httpRoute.Spec = gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: parentRefs},
+			Hostnames:       hostnames,
+			Rules: []gatewayv1.HTTPRouteRule{
+				{
+					Matches: []gatewayv1.HTTPRouteMatch{
+						{
+							Path: &gatewayv1.HTTPPathMatch{
+								Type:  &pathTypePrefix,
+								Value: &pathPrefix,
+							},
+						},
+					},
+					BackendRefs: []gatewayv1.HTTPBackendRef{
+						{
+							BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Group: &serviceGroup,
+									Kind:  &serviceKind,
+									Name:  gatewayv1.ObjectName(coderControlPlane.Name),
+									Port:  &backendPort,
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		if err := controllerutil.SetControllerReference(coderControlPlane, httpRoute, r.Scheme); err != nil {
+			return fmt.Errorf("set controller reference: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		if meta.IsNoMatchError(err) {
+			ctrl.LoggerFrom(ctx).WithName("controller").WithName("codercontrolplane").Info(
+				"Gateway API CRDs not available, skipping HTTPRoute reconciliation",
+			)
+			return nil
+		}
+		return fmt.Errorf("reconcile control plane httproute: %w", err)
+	}
+
+	return nil
+}
+
+func (r *CoderControlPlaneReconciler) cleanupOwnedIngress(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+
+	ingress := &networkingv1.Ingress{}
+	namespacedName := types.NamespacedName{Name: coderControlPlane.Name, Namespace: coderControlPlane.Namespace}
+	err := r.Get(ctx, namespacedName, ingress)
+	switch {
+	case err == nil:
+	case apierrors.IsNotFound(err):
+		return nil
+	default:
+		return fmt.Errorf("get control plane ingress %s: %w", namespacedName, err)
+	}
+
+	if !isOwnedByCoderControlPlane(ingress, coderControlPlane) {
+		return nil
+	}
+
+	if err := r.Delete(ctx, ingress); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete control plane ingress %s: %w", namespacedName, err)
+	}
+
+	return nil
+}
+
+func (r *CoderControlPlaneReconciler) cleanupOwnedHTTPRoute(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+
+	httpRoute := &gatewayv1.HTTPRoute{}
+	namespacedName := types.NamespacedName{Name: coderControlPlane.Name, Namespace: coderControlPlane.Namespace}
+	err := r.Get(ctx, namespacedName, httpRoute)
+	switch {
+	case err == nil:
+	case apierrors.IsNotFound(err), meta.IsNoMatchError(err):
+		return nil
+	default:
+		return fmt.Errorf("get control plane httproute %s: %w", namespacedName, err)
+	}
+
+	if !isOwnedByCoderControlPlane(httpRoute, coderControlPlane) {
+		return nil
+	}
+
+	if err := r.Delete(ctx, httpRoute); err != nil && !apierrors.IsNotFound(err) && !meta.IsNoMatchError(err) {
+		return fmt.Errorf("delete control plane httproute %s: %w", namespacedName, err)
+	}
+
+	return nil
+}
+
+func isOwnedByCoderControlPlane(object metav1.Object, coderControlPlane *coderv1alpha1.CoderControlPlane) bool {
+	if object == nil || coderControlPlane == nil {
+		return false
+	}
+
+	ownerReference := metav1.GetControllerOf(object)
+	if ownerReference == nil {
+		return false
+	}
+
+	return ownerReference.APIVersion == coderv1alpha1.GroupVersion.String() &&
+		ownerReference.Kind == "CoderControlPlane" &&
+		ownerReference.Name == coderControlPlane.Name &&
+		ownerReference.UID == coderControlPlane.UID
 }
 
 func (r *CoderControlPlaneReconciler) desiredStatus(
@@ -1318,19 +1658,7 @@ func (r *CoderControlPlaneReconciler) cleanupDisabledOperatorAccess(
 }
 
 func isManagedOperatorTokenSecret(secret *corev1.Secret, coderControlPlane *coderv1alpha1.CoderControlPlane) bool {
-	if secret == nil || coderControlPlane == nil {
-		return false
-	}
-
-	ownerReference := metav1.GetControllerOf(secret)
-	if ownerReference == nil {
-		return false
-	}
-
-	return ownerReference.APIVersion == coderv1alpha1.GroupVersion.String() &&
-		ownerReference.Kind == "CoderControlPlane" &&
-		ownerReference.Name == coderControlPlane.Name &&
-		ownerReference.UID == coderControlPlane.UID
+	return isOwnedByCoderControlPlane(secret, coderControlPlane)
 }
 
 func (r *CoderControlPlaneReconciler) resolvePostgresURLFromExtraEnv(
@@ -1775,6 +2103,7 @@ func (r *CoderControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&coderv1alpha1.CoderControlPlane{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
+		Owns(&networkingv1.Ingress{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
