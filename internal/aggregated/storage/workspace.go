@@ -397,7 +397,7 @@ func (s *WorkspaceStorage) Update(
 	ctx context.Context,
 	name string,
 	objInfo rest.UpdatedObjectInfo,
-	_ rest.ValidateObjectFunc,
+	createValidation rest.ValidateObjectFunc,
 	updateValidation rest.ValidateObjectUpdateFunc,
 	forceAllowCreate bool,
 	_ *metav1.UpdateOptions,
@@ -417,12 +417,6 @@ func (s *WorkspaceStorage) Update(
 	if s.broadcaster == nil {
 		return nil, false, fmt.Errorf("assertion failed: workspace broadcaster must not be nil")
 	}
-	if forceAllowCreate {
-		return nil, false, apierrors.NewMethodNotSupported(
-			aggregationv1alpha1.Resource("coderworkspaces"),
-			"create on update",
-		)
-	}
 
 	namespace, badNamespaceErr := requiredNamespaceFromRequestContext(ctx)
 	if badNamespaceErr != nil {
@@ -441,7 +435,55 @@ func (s *WorkspaceStorage) Update(
 
 	currentWorkspace, err := sdk.WorkspaceByOwnerAndName(ctx, userName, workspaceName, codersdk.WorkspaceOptions{})
 	if err != nil {
-		return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), name)
+		mappedErr := coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), name)
+		if !forceAllowCreate || !apierrors.IsNotFound(mappedErr) {
+			return nil, false, mappedErr
+		}
+
+		// FIXME: This branch intentionally enables best-effort SSA create-on-update
+		// semantics for coderworkspaces.
+		//
+		// The aggregated API is a stateless proxy to Coder and currently does not
+		// persist Kubernetes metadata.managedFields (or other Kubernetes-only metadata),
+		// so SSA field ownership/conflict semantics are not durable.
+		//
+		// Future options to remove this hack:
+		//  1. Preferred: add first-class metadata support on templates/workspaces in
+		//     Coder + codersdk and round-trip Kubernetes-managed metadata there.
+		//  2. Persist Kubernetes-only metadata in a shadow Kubernetes resource
+		//     (ConfigMap/CRD) managed by this aggregated API server.
+		//  3. Keep this fallback and continue documenting SSA limitations.
+		createObj, objInfoErr := objInfo.UpdatedObject(ctx, s.New())
+		if objInfoErr != nil {
+			return nil, false, objInfoErr
+		}
+		if createObj == nil {
+			return nil, false, fmt.Errorf("assertion failed: create-on-update workspace object must not be nil")
+		}
+
+		createWorkspace, ok := createObj.(*aggregationv1alpha1.CoderWorkspace)
+		if !ok {
+			return nil, false, fmt.Errorf("assertion failed: expected *CoderWorkspace, got %T", createObj)
+		}
+		createWorkspace = createWorkspace.DeepCopy()
+		if createWorkspace == nil {
+			return nil, false, fmt.Errorf("assertion failed: create-on-update workspace deep copy must not be nil")
+		}
+		if createWorkspace.Name == "" {
+			createWorkspace.Name = name
+		}
+		if createWorkspace.Name != name {
+			return nil, false, apierrors.NewBadRequest(
+				fmt.Sprintf("updated object metadata.name %q must match request name %q", createWorkspace.Name, name),
+			)
+		}
+
+		createdObj, createErr := s.Create(ctx, createWorkspace, createValidation, nil)
+		if createErr != nil {
+			return nil, false, createErr
+		}
+
+		return createdObj, true, nil
 	}
 	if currentWorkspace.OrganizationName != orgName {
 		return nil, false, apierrors.NewNotFound(aggregationv1alpha1.Resource("coderworkspaces"), name)

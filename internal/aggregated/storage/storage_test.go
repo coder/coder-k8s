@@ -1477,6 +1477,58 @@ func TestTemplateStorageUpdateAllowsMetadataSpecChanges(t *testing.T) {
 	}
 }
 
+func TestTemplateStorageUpdateForceAllowCreateCreatesWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	desiredTemplate := &aggregationv1alpha1.CoderTemplate{
+		Spec: aggregationv1alpha1.CoderTemplateSpec{
+			Organization: "acme",
+			DisplayName:  "SSA-created template",
+			Description:  "Created via forceAllowCreate update hack",
+			Icon:         "/icons/ssa-template.png",
+			Files: map[string]string{
+				"main.tf": "resource \"null_resource\" \"ssa_create\" {}",
+			},
+		},
+	}
+
+	updatedObj, created, err := templateStorage.Update(
+		ctx,
+		"acme.ssa-template",
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		rest.ValidateAllObjectFunc,
+		rest.ValidateAllObjectUpdateFunc,
+		true,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected create-on-update to succeed for missing template: %v", err)
+	}
+	if !created {
+		t.Fatal("expected update created=true when forceAllowCreate creates a template")
+	}
+
+	createdTemplate, ok := updatedObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		t.Fatalf("expected *CoderTemplate from update, got %T", updatedObj)
+	}
+	if createdTemplate.Name != "acme.ssa-template" {
+		t.Fatalf("expected created template name acme.ssa-template, got %q", createdTemplate.Name)
+	}
+	if createdTemplate.Spec.Organization != "acme" {
+		t.Fatalf("expected created template organization acme, got %q", createdTemplate.Spec.Organization)
+	}
+	if !state.hasTemplate("acme", "ssa-template") {
+		t.Fatal("expected create-on-update template to be persisted in mock server state")
+	}
+}
+
 func TestTemplateStorageUpdateRejectsMissingResourceVersion(t *testing.T) {
 	t.Parallel()
 
@@ -1843,6 +1895,54 @@ func TestWorkspaceStorageCreateAllowsMatchingTemplateVersionID(t *testing.T) {
 	}
 	if transitions := state.buildTransitionsSnapshot(); len(transitions) != 0 {
 		t.Fatalf("expected no workspace build transitions when spec.running=true, got %v", transitions)
+	}
+}
+
+func TestWorkspaceStorageUpdateForceAllowCreateCreatesWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	workspaceStorage := NewWorkspaceStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	desiredWorkspace := &aggregationv1alpha1.CoderWorkspace{
+		Spec: aggregationv1alpha1.CoderWorkspaceSpec{
+			Organization: "acme",
+			TemplateName: "starter-template",
+			Running:      false,
+		},
+	}
+
+	updatedObj, created, err := workspaceStorage.Update(
+		ctx,
+		"acme.alice.ssa-workspace",
+		testUpdatedObjectInfo{obj: desiredWorkspace},
+		rest.ValidateAllObjectFunc,
+		rest.ValidateAllObjectUpdateFunc,
+		true,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected create-on-update to succeed for missing workspace: %v", err)
+	}
+	if !created {
+		t.Fatal("expected update created=true when forceAllowCreate creates a workspace")
+	}
+
+	createdWorkspace, ok := updatedObj.(*aggregationv1alpha1.CoderWorkspace)
+	if !ok {
+		t.Fatalf("expected *CoderWorkspace from update, got %T", updatedObj)
+	}
+	if createdWorkspace.Name != "acme.alice.ssa-workspace" {
+		t.Fatalf("expected created workspace name acme.alice.ssa-workspace, got %q", createdWorkspace.Name)
+	}
+	if !state.hasWorkspace("alice", "ssa-workspace") {
+		t.Fatal("expected create-on-update workspace to be persisted in mock server state")
+	}
+	if !containsTransition(state.buildTransitionsSnapshot(), codersdk.WorkspaceTransitionStop) {
+		t.Fatal("expected create-on-update workspace with spec.running=false to queue stop transition")
 	}
 }
 

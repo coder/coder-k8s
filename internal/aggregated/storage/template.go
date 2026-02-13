@@ -415,7 +415,7 @@ func (s *TemplateStorage) Update(
 	ctx context.Context,
 	name string,
 	objInfo rest.UpdatedObjectInfo,
-	_ rest.ValidateObjectFunc,
+	createValidation rest.ValidateObjectFunc,
 	updateValidation rest.ValidateObjectUpdateFunc,
 	forceAllowCreate bool,
 	_ *metav1.UpdateOptions,
@@ -435,16 +435,57 @@ func (s *TemplateStorage) Update(
 	if s.broadcaster == nil {
 		return nil, false, fmt.Errorf("assertion failed: template broadcaster must not be nil")
 	}
-	if forceAllowCreate {
-		return nil, false, apierrors.NewMethodNotSupported(
-			aggregationv1alpha1.Resource("codertemplates"),
-			"create on update",
-		)
-	}
 
 	currentObj, err := s.Get(ctx, name, nil)
 	if err != nil {
-		return nil, false, err
+		if !forceAllowCreate || !apierrors.IsNotFound(err) {
+			return nil, false, err
+		}
+
+		// FIXME: This branch intentionally enables best-effort SSA create-on-update
+		// semantics for codertemplates.
+		//
+		// The aggregated API is a stateless proxy to Coder and currently does not
+		// persist Kubernetes metadata.managedFields (or other Kubernetes-only metadata),
+		// so SSA field ownership/conflict semantics are not durable.
+		//
+		// Future options to remove this hack:
+		//  1. Preferred: add first-class metadata support on templates/workspaces in
+		//     Coder + codersdk and round-trip Kubernetes-managed metadata there.
+		//  2. Persist Kubernetes-only metadata in a shadow Kubernetes resource
+		//     (ConfigMap/CRD) managed by this aggregated API server.
+		//  3. Keep this fallback and continue documenting SSA limitations.
+		createObj, objInfoErr := objInfo.UpdatedObject(ctx, s.New())
+		if objInfoErr != nil {
+			return nil, false, objInfoErr
+		}
+		if createObj == nil {
+			return nil, false, fmt.Errorf("assertion failed: create-on-update template object must not be nil")
+		}
+
+		createTemplate, ok := createObj.(*aggregationv1alpha1.CoderTemplate)
+		if !ok {
+			return nil, false, fmt.Errorf("assertion failed: expected *CoderTemplate, got %T", createObj)
+		}
+		createTemplate = createTemplate.DeepCopy()
+		if createTemplate == nil {
+			return nil, false, fmt.Errorf("assertion failed: create-on-update template deep copy must not be nil")
+		}
+		if createTemplate.Name == "" {
+			createTemplate.Name = name
+		}
+		if createTemplate.Name != name {
+			return nil, false, apierrors.NewBadRequest(
+				fmt.Sprintf("updated object metadata.name %q must match request name %q", createTemplate.Name, name),
+			)
+		}
+
+		createdObj, createErr := s.Create(ctx, createTemplate, createValidation, nil)
+		if createErr != nil {
+			return nil, false, createErr
+		}
+
+		return createdObj, true, nil
 	}
 
 	currentObjForUpdate := currentObj.DeepCopyObject()
