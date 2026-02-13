@@ -35,6 +35,7 @@ nav:
   - Home: index.md
   - Tutorials:
       - Getting started: tutorials/getting-started.md
+      - Deploy operator stack with Argo CD: tutorials/deploy-with-argocd.md
   - How-to guides:
       - Deploy controller: how-to/deploy-controller.md
       - Deploy aggregated API server: how-to/deploy-aggregated-apiserver.md
