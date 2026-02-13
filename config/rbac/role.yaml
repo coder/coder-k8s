@@ -18,7 +18,6 @@ rules:
   - ""
   resources:
   - namespaces
-  - pods
   verbs:
   - get
   - list
@@ -26,12 +25,8 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - pods/log
-  verbs:
-  - get
-- apiGroups:
-  - ""
-  resources:
+  - persistentvolumeclaims
+  - pods
   - secrets
   - serviceaccounts
   - services
@@ -43,6 +38,12 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/log
+  verbs:
+  - get
 - apiGroups:
   - aggregation.coder.com
   resources:

@@ -87,7 +87,7 @@ spec:
                 type: object
                 x-kubernetes-map-type: atomic
               extraArgs:
-                description: ExtraArgs are appended after "provisionerd start".
+                description: ExtraArgs are appended after "provisioner start".
                 items:
                   type: string
                 type: array

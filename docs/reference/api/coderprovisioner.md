@@ -20,7 +20,7 @@
 | `replicas` | integer | Replicas is the desired number of provisioner pods. |
 | `tags` | object (keys:string, values:string) | Tags are attached to the provisioner key for job routing. |
 | `image` | string | Image is the container image. Defaults to the control plane image. |
-| `extraArgs` | string array | ExtraArgs are appended after "provisionerd start". |
+| `extraArgs` | string array | ExtraArgs are appended after "provisioner start". |
 | `extraEnv` | [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#envvar-v1-core) array | ExtraEnv are injected into the provisioner container. |
 | `resources` | [ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#resourcerequirements-v1-core) | Resources for the provisioner container. |
 | `imagePullSecrets` | [LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#localobjectreference-v1-core) array | ImagePullSecrets are used by the pod to pull private images. |

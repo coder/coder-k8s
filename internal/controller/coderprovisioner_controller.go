@@ -68,6 +68,7 @@ type CoderProvisionerReconciler struct {
 // +kubebuilder:rbac:groups=coder.com,resources=coderprovisioners/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=coder.com,resources=coderprovisioners/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods;persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
 
@@ -441,7 +442,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			"ProvisionerKeyReady",
 			"Provisioner key is available in coderd",
 		)
-	} else if status.OrganizationName == "" || status.TagsHash == "" || status.ControlPlaneRefName == "" {
+	} else if status.OrganizationName == "" || status.TagsHash == "" || status.ControlPlaneRefName == "" || status.ControlPlaneURL == "" {
 		// Secret is usable and no drift detected, but status metadata is empty
 		// (e.g. upgrade from older version). Call EnsureProvisionerKey to populate
 		// IDs and key name. If coderd reports an existing key (no plaintext key
@@ -550,6 +551,30 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		"Provisioner key secret is available",
 	)
 
+	// Persist key-related status metadata immediately so retries after later
+	// reconciliation failures (for example RBAC/deployment errors) do not
+	// repeatedly re-run metadata backfill/rotation against coderd.
+	keyStatusSnapshot := provisioner.Status.DeepCopy()
+	if keyStatusSnapshot == nil {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: key status snapshot must not be nil")
+	}
+	provisioner.Status.OrganizationID = organizationID
+	provisioner.Status.OrganizationName = appliedOrgName
+	provisioner.Status.ProvisionerKeyID = provisionerKeyID
+	provisioner.Status.ProvisionerKeyName = provisionerKeyName
+	provisioner.Status.TagsHash = appliedTagsHash
+	provisioner.Status.ControlPlaneRefName = appliedControlPlaneRefName
+	provisioner.Status.ControlPlaneURL = appliedControlPlaneURL
+	provisioner.Status.SecretRef = &coderv1alpha1.SecretKeySelector{Name: keySecretName, Key: keySecretKey}
+	if !equality.Semantic.DeepEqual(*keyStatusSnapshot, provisioner.Status) {
+		if err := r.Status().Update(ctx, provisioner); err != nil {
+			return ctrl.Result{}, fmt.Errorf("update coderprovisioner key status: %w", err)
+		}
+		statusSnapshot = provisioner.Status.DeepCopy()
+		if statusSnapshot == nil {
+			return ctrl.Result{}, fmt.Errorf("assertion failed: status snapshot must not be nil after key status update")
+		}
+	}
 	serviceAccountName := provisionerServiceAccountName(provisioner.Name)
 	if _, err := r.reconcileServiceAccount(ctx, provisioner, serviceAccountName); err != nil {
 		return ctrl.Result{}, err
@@ -573,7 +598,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	secretRef := &coderv1alpha1.SecretKeySelector{Name: keySecretName, Key: keySecretKey}
-	deployment, err := r.reconcileDeployment(ctx, provisioner, image, controlPlane.Status.URL, organizationName, secretRef, serviceAccountName, secretChecksum)
+	deployment, err := r.reconcileDeployment(ctx, provisioner, image, controlPlane.Status.URL, secretRef, serviceAccountName, secretChecksum)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -946,7 +971,6 @@ func (r *CoderProvisionerReconciler) reconcileDeployment(
 	provisioner *coderv1alpha1.CoderProvisioner,
 	image string,
 	coderURL string,
-	organizationName string,
 	secretRef *coderv1alpha1.SecretKeySelector,
 	serviceAccountName string,
 	secretChecksum string,
@@ -971,7 +995,7 @@ func (r *CoderProvisionerReconciler) reconcileDeployment(
 			terminationGracePeriodSeconds = *provisioner.Spec.TerminationGracePeriodSeconds
 		}
 
-		args := []string{"provisionerd", "start"}
+		args := []string{"provisioner", "start"}
 		args = append(args, provisioner.Spec.ExtraArgs...)
 
 		env := []corev1.EnvVar{
@@ -983,9 +1007,6 @@ func (r *CoderProvisionerReconciler) reconcileDeployment(
 					Key:                  secretRef.Key,
 				}},
 			},
-		}
-		if organizationName != "" && organizationName != defaultProvisionerOrganizationName {
-			env = append(env, corev1.EnvVar{Name: "CODER_ORGANIZATION", Value: organizationName})
 		}
 		env = append(env, provisioner.Spec.ExtraEnv...)
 
@@ -1005,6 +1026,7 @@ func (r *CoderProvisionerReconciler) reconcileDeployment(
 				Containers: []corev1.Container{{
 					Name:      "provisioner",
 					Image:     image,
+					Command:   []string{"coder"},
 					Args:      args,
 					Env:       env,
 					Resources: provisioner.Spec.Resources,
