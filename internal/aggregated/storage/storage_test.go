@@ -1115,6 +1115,88 @@ func TestTemplateStorageListAllowsAllNamespacesRequest(t *testing.T) {
 	}
 }
 
+func TestTemplateStorageListAggregatesAcrossNamespaces(t *testing.T) {
+	t.Parallel()
+
+	serverA, _ := newMockCoderServer(t)
+	defer serverA.Close()
+	serverB, _ := newMockCoderServer(t)
+	defer serverB.Close()
+
+	provider := &multiNamespaceTestProvider{
+		clients: map[string]*codersdk.Client{
+			"ns-a": newTestSDKClient(t, serverA.URL),
+			"ns-b": newTestSDKClient(t, serverB.URL),
+		},
+		namespaces: []string{"ns-a", "ns-b"},
+	}
+
+	templateStorage := NewTemplateStorage(provider)
+
+	listObj, err := templateStorage.List(namespacedContext(""), nil)
+	if err != nil {
+		t.Fatalf("expected all-namespaces list to aggregate successfully, got %v", err)
+	}
+
+	list, ok := listObj.(*aggregationv1alpha1.CoderTemplateList)
+	if !ok {
+		t.Fatalf("expected *CoderTemplateList, got %T", listObj)
+	}
+	if len(list.Items) != 2 {
+		t.Fatalf("expected two templates in aggregated list, got %d", len(list.Items))
+	}
+	if list.Items[0].Namespace != "ns-a" || list.Items[1].Namespace != "ns-b" {
+		t.Fatalf(
+			"expected namespaces [ns-a ns-b], got [%s %s]",
+			list.Items[0].Namespace,
+			list.Items[1].Namespace,
+		)
+	}
+	if !sort.SliceIsSorted(list.Items, func(i, j int) bool {
+		if list.Items[i].Namespace != list.Items[j].Namespace {
+			return list.Items[i].Namespace < list.Items[j].Namespace
+		}
+		return list.Items[i].Name < list.Items[j].Name
+	}) {
+		t.Fatal("expected template list items to be sorted by namespace then name")
+	}
+}
+
+func TestTemplateStorageListNamespacedRequestBypassesFanOut(t *testing.T) {
+	t.Parallel()
+
+	serverA, _ := newMockCoderServer(t)
+	defer serverA.Close()
+	serverB, _ := newMockCoderServer(t)
+	defer serverB.Close()
+
+	provider := &multiNamespaceTestProvider{
+		clients: map[string]*codersdk.Client{
+			"ns-a": newTestSDKClient(t, serverA.URL),
+			"ns-b": newTestSDKClient(t, serverB.URL),
+		},
+		namespaces: []string{"ns-a", "ns-b"},
+	}
+
+	templateStorage := NewTemplateStorage(provider)
+
+	listObj, err := templateStorage.List(namespacedContext("ns-a"), nil)
+	if err != nil {
+		t.Fatalf("expected namespaced list to succeed, got %v", err)
+	}
+
+	list, ok := listObj.(*aggregationv1alpha1.CoderTemplateList)
+	if !ok {
+		t.Fatalf("expected *CoderTemplateList, got %T", listObj)
+	}
+	if len(list.Items) != 1 {
+		t.Fatalf("expected one template from namespaced list, got %d", len(list.Items))
+	}
+	if list.Items[0].Namespace != "ns-a" {
+		t.Fatalf("expected namespaced list item to use ns-a, got %q", list.Items[0].Namespace)
+	}
+}
+
 func TestTemplateStorageListPreservesProviderStatusErrors(t *testing.T) {
 	t.Parallel()
 
@@ -2497,6 +2579,53 @@ func TestWorkspaceStorageListAllowsAllNamespacesRequest(t *testing.T) {
 	}
 }
 
+func TestWorkspaceStorageListAggregatesAcrossNamespaces(t *testing.T) {
+	t.Parallel()
+
+	serverA, _ := newMockCoderServer(t)
+	defer serverA.Close()
+	serverB, _ := newMockCoderServer(t)
+	defer serverB.Close()
+
+	provider := &multiNamespaceTestProvider{
+		clients: map[string]*codersdk.Client{
+			"ns-a": newTestSDKClient(t, serverA.URL),
+			"ns-b": newTestSDKClient(t, serverB.URL),
+		},
+		namespaces: []string{"ns-a", "ns-b"},
+	}
+
+	workspaceStorage := NewWorkspaceStorage(provider)
+
+	listObj, err := workspaceStorage.List(namespacedContext(""), nil)
+	if err != nil {
+		t.Fatalf("expected all-namespaces list to aggregate successfully, got %v", err)
+	}
+
+	list, ok := listObj.(*aggregationv1alpha1.CoderWorkspaceList)
+	if !ok {
+		t.Fatalf("expected *CoderWorkspaceList, got %T", listObj)
+	}
+	if len(list.Items) != 2 {
+		t.Fatalf("expected two workspaces in aggregated list, got %d", len(list.Items))
+	}
+	if list.Items[0].Namespace != "ns-a" || list.Items[1].Namespace != "ns-b" {
+		t.Fatalf(
+			"expected namespaces [ns-a ns-b], got [%s %s]",
+			list.Items[0].Namespace,
+			list.Items[1].Namespace,
+		)
+	}
+	if !sort.SliceIsSorted(list.Items, func(i, j int) bool {
+		if list.Items[i].Namespace != list.Items[j].Namespace {
+			return list.Items[i].Namespace < list.Items[j].Namespace
+		}
+		return list.Items[i].Name < list.Items[j].Name
+	}) {
+		t.Fatal("expected workspace list items to be sorted by namespace then name")
+	}
+}
+
 func TestWorkspaceStorageListPreservesProviderStatusErrors(t *testing.T) {
 	t.Parallel()
 
@@ -2532,6 +2661,37 @@ func assertTopLevelStatusError(t *testing.T, err error) {
 	if reflect.TypeOf(err) != reflect.TypeOf(&apierrors.StatusError{}) {
 		t.Fatalf("expected top-level error type *apierrors.StatusError, got %T", err)
 	}
+}
+
+type multiNamespaceTestProvider struct {
+	clients    map[string]*codersdk.Client
+	namespaces []string
+}
+
+var (
+	_ coder.ClientProvider  = (*multiNamespaceTestProvider)(nil)
+	_ coder.NamespaceLister = (*multiNamespaceTestProvider)(nil)
+)
+
+func (p *multiNamespaceTestProvider) ClientForNamespace(_ context.Context, namespace string) (*codersdk.Client, error) {
+	if p == nil {
+		return nil, fmt.Errorf("assertion failed: multi namespace provider must not be nil")
+	}
+
+	client, ok := p.clients[namespace]
+	if !ok {
+		return nil, apierrors.NewNotFound(aggregationv1alpha1.Resource("namespace"), namespace)
+	}
+
+	return client, nil
+}
+
+func (p *multiNamespaceTestProvider) EligibleNamespaces(_ context.Context) ([]string, error) {
+	if p == nil {
+		return nil, fmt.Errorf("assertion failed: multi namespace provider must not be nil")
+	}
+
+	return p.namespaces, nil
 }
 
 type testUpdatedObjectInfo struct {
@@ -3622,7 +3782,7 @@ func zipEntryMode(t *testing.T, sourceZip []byte, path string) (fs.FileMode, boo
 	return 0, false
 }
 
-func newTestClientProvider(t *testing.T, serverURL string) coder.ClientProvider {
+func newTestSDKClient(t *testing.T, serverURL string) *codersdk.Client {
 	t.Helper()
 
 	parsedURL, err := url.Parse(serverURL)
@@ -3633,7 +3793,13 @@ func newTestClientProvider(t *testing.T, serverURL string) coder.ClientProvider 
 	client := codersdk.New(parsedURL)
 	client.SetSessionToken("test-session-token")
 
-	return &coder.StaticClientProvider{Client: client, Namespace: "control-plane"}
+	return client
+}
+
+func newTestClientProvider(t *testing.T, serverURL string) coder.ClientProvider {
+	t.Helper()
+
+	return &coder.StaticClientProvider{Client: newTestSDKClient(t, serverURL), Namespace: "control-plane"}
 }
 
 func namespacedContext(namespace string) context.Context {

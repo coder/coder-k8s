@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -150,6 +151,48 @@ func (s *WorkspaceStorage) List(ctx context.Context, _ *metainternalversion.List
 	namespace, badNamespaceErr := namespaceFromRequestContext(ctx)
 	if badNamespaceErr != nil {
 		return nil, badNamespaceErr
+	}
+
+	if namespace == "" {
+		if lister, ok := s.provider.(coder.NamespaceLister); ok {
+			namespaces, err := lister.EligibleNamespaces(ctx)
+			if err != nil {
+				return nil, err
+			}
+
+			list := &aggregationv1alpha1.CoderWorkspaceList{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "CoderWorkspaceList",
+					APIVersion: aggregationv1alpha1.SchemeGroupVersion.String(),
+				},
+				Items: make([]aggregationv1alpha1.CoderWorkspace, 0),
+			}
+
+			for _, eligibleNamespace := range namespaces {
+				sdk, err := s.clientForNamespace(ctx, eligibleNamespace)
+				if err != nil {
+					return nil, wrapClientError(err)
+				}
+
+				workspacesResponse, err := sdk.Workspaces(ctx, codersdk.WorkspaceFilter{})
+				if err != nil {
+					return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), "<list>")
+				}
+
+				for _, workspace := range workspacesResponse.Workspaces {
+					list.Items = append(list.Items, *convert.WorkspaceToK8s(eligibleNamespace, workspace))
+				}
+			}
+
+			sort.Slice(list.Items, func(i, j int) bool {
+				if list.Items[i].Namespace != list.Items[j].Namespace {
+					return list.Items[i].Namespace < list.Items[j].Namespace
+				}
+				return list.Items[i].Name < list.Items[j].Name
+			})
+
+			return list, nil
+		}
 	}
 
 	responseNamespace, responseNamespaceErr := namespaceForListConversion(ctx, namespace, s.provider)
