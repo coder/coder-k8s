@@ -17,11 +17,14 @@ import (
 	"github.com/coder/coder/v2/codersdk"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/util/retry"
@@ -30,15 +33,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/coderbootstrap"
 )
 
 const (
-	defaultCoderImage       = "ghcr.io/coder/coder:latest"
-	defaultControlPlanePort = int32(80)
-	controlPlaneTargetPort  = int32(3000)
+	defaultCoderImage         = "ghcr.io/coder/coder:latest"
+	defaultControlPlanePort   = int32(80)
+	controlPlaneTargetPort    = int32(8080)
+	controlPlaneTLSTargetPort = int32(8443)
 
 	postgresConnectionURLEnvVar = "CODER_PG_CONNECTION_URL"
 
@@ -51,8 +56,15 @@ const (
 	operatorAccessRetryInterval = 30 * time.Second
 	operatorTokenSecretSuffix   = "-operator-token"
 
-	// #nosec G101 -- this is a field index key, not a credential.
-	licenseSecretNameFieldIndex = ".spec.licenseSecretRef.name"
+	workspaceRBACFinalizer          = "coder.com/workspace-rbac-cleanup"
+	workspaceRBACOwnerUIDAnnotation = "coder.com/workspace-rbac-owner-uid"
+	workspaceRoleNameSuffix         = "-workspace-perms"
+	kubernetesObjectNameMaxLength   = 253
+
+	// #nosec G101 -- these are field index keys, not credentials.
+	licenseSecretNameFieldIndex    = ".spec.licenseSecretRef.name"
+	envFromConfigMapNameFieldIndex = ".spec.envFrom.configMapRef.name"
+	envFromSecretNameFieldIndex    = ".spec.envFrom.secretRef.name" // #nosec G101 -- this is a field index key, not a credential.
 
 	licenseConditionReasonApplied       = "Applied"
 	licenseConditionReasonPending       = "Pending"
@@ -61,6 +73,8 @@ const (
 	licenseConditionReasonNotSupported  = "NotSupported"
 	licenseConditionReasonError         = "Error"
 
+	workspaceRBACDriftRequeueInterval = 2 * time.Minute
+	gatewayExposureRequeueInterval    = 2 * time.Minute
 	licenseUploadRequestTimeout       = 30 * time.Second
 	entitlementsStatusRefreshInterval = 2 * time.Minute
 )
@@ -188,8 +202,15 @@ type CoderControlPlaneReconciler struct {
 // +kubebuilder:rbac:groups=coder.com,resources=codercontrolplanes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=coder.com,resources=codercontrolplanes/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods;persistentvolumeclaims,verbs=deletecollection
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=deletecollection
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile converges the desired CoderControlPlane spec into Deployment and Service resources.
 func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -213,11 +234,30 @@ func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			coderControlPlane.Namespace, coderControlPlane.Name, req.Namespace, req.Name)
 	}
 
+	if !coderControlPlane.DeletionTimestamp.IsZero() {
+		return r.finalizeWorkspaceRBAC(ctx, coderControlPlane)
+	}
+
+	if err := r.ensureWorkspaceRBACFinalizer(ctx, req.NamespacedName, coderControlPlane); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err := r.reconcileServiceAccount(ctx, coderControlPlane); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcileWorkspaceRBAC(ctx, coderControlPlane); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	deployment, err := r.reconcileDeployment(ctx, coderControlPlane)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	service, err := r.reconcileService(ctx, coderControlPlane)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	gatewayExposureNeedsRequeue, err := r.reconcileExposure(ctx, coderControlPlane)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -244,11 +284,619 @@ func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 
-	return mergeResults(operatorResult, licenseResult, entitlementsResult), nil
+	result := mergeResults(operatorResult, licenseResult, entitlementsResult)
+	if requiresWorkspaceRBACDriftRequeue(coderControlPlane) {
+		result = mergeResults(result, ctrl.Result{RequeueAfter: workspaceRBACDriftRequeueInterval})
+	}
+	if gatewayExposureNeedsRequeue {
+		result = mergeResults(result, ctrl.Result{RequeueAfter: gatewayExposureRequeueInterval})
+	}
+
+	return result, nil
+}
+
+func resolveServiceAccountName(cp *coderv1alpha1.CoderControlPlane) string {
+	if cp.Spec.ServiceAccount.Name != "" {
+		return cp.Spec.ServiceAccount.Name
+	}
+	return cp.Name
+}
+
+func workspaceRBACScopeHash(coderControlPlane *coderv1alpha1.CoderControlPlane) (string, error) {
+	if coderControlPlane == nil {
+		return "", fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+	if strings.TrimSpace(coderControlPlane.Namespace) == "" {
+		return "", fmt.Errorf("assertion failed: coder control plane namespace must not be empty")
+	}
+	if strings.TrimSpace(coderControlPlane.Name) == "" {
+		return "", fmt.Errorf("assertion failed: coder control plane name must not be empty")
+	}
+
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(coderControlPlane.Namespace))
+	_, _ = hasher.Write([]byte{0})
+	_, _ = hasher.Write([]byte(coderControlPlane.Name))
+
+	return fmt.Sprintf("%08x", hasher.Sum32()), nil
+}
+
+func scopedWorkspaceRBACName(baseName, scopeHash, suffix string) (string, error) {
+	normalizedBaseName := strings.TrimSpace(baseName)
+	if normalizedBaseName == "" {
+		return "", fmt.Errorf("assertion failed: workspace RBAC base name must not be empty")
+	}
+	if strings.TrimSpace(scopeHash) == "" {
+		return "", fmt.Errorf("assertion failed: workspace RBAC scope hash must not be empty")
+	}
+
+	candidate := fmt.Sprintf("%s-%s%s", normalizedBaseName, scopeHash, suffix)
+	if len(candidate) <= kubernetesObjectNameMaxLength {
+		return candidate, nil
+	}
+
+	available := kubernetesObjectNameMaxLength - len(scopeHash) - len(suffix) - 1
+	if available < 1 {
+		return "", fmt.Errorf("assertion failed: workspace RBAC name prefix capacity must be positive")
+	}
+
+	truncatedPrefix := normalizedBaseName
+	if len(truncatedPrefix) > available {
+		truncatedPrefix = truncatedPrefix[:available]
+	}
+	truncatedPrefix = strings.Trim(truncatedPrefix, "-.")
+	if truncatedPrefix == "" {
+		truncatedPrefix = "workspace"
+	}
+
+	result := fmt.Sprintf("%s-%s%s", truncatedPrefix, scopeHash, suffix)
+	if len(result) > kubernetesObjectNameMaxLength {
+		return "", fmt.Errorf("assertion failed: workspace RBAC name %q exceeds %d characters", result, kubernetesObjectNameMaxLength)
+	}
+
+	return result, nil
+}
+
+func workspaceRoleName(coderControlPlane *coderv1alpha1.CoderControlPlane, serviceAccountName string) (string, error) {
+	scopeHash, err := workspaceRBACScopeHash(coderControlPlane)
+	if err != nil {
+		return "", err
+	}
+
+	return scopedWorkspaceRBACName(serviceAccountName, scopeHash, workspaceRoleNameSuffix)
+}
+
+func workspaceRoleBindingName(coderControlPlane *coderv1alpha1.CoderControlPlane, serviceAccountName string) (string, error) {
+	scopeHash, err := workspaceRBACScopeHash(coderControlPlane)
+	if err != nil {
+		return "", err
+	}
+
+	return scopedWorkspaceRBACName(serviceAccountName, scopeHash, "")
+}
+
+func boolOrDefault(explicit *bool, defaultValue bool) bool {
+	if explicit == nil {
+		return defaultValue
+	}
+
+	return *explicit
+}
+
+func workspacePermsEnabled(explicit *bool) bool {
+	return boolOrDefault(explicit, true)
+}
+
+func workspaceDeploymentsEnabled(explicit *bool) bool {
+	return boolOrDefault(explicit, true)
+}
+
+func controlPlaneTLSEnabled(cp *coderv1alpha1.CoderControlPlane) bool {
+	if cp == nil {
+		return false
+	}
+	return len(cp.Spec.TLS.SecretNames) > 0
+}
+
+func httpRouteBackendServicePort(coderControlPlane *coderv1alpha1.CoderControlPlane) (int32, error) {
+	if coderControlPlane == nil {
+		return 0, fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+
+	servicePort := coderControlPlane.Spec.Service.Port
+	if servicePort == 0 {
+		servicePort = defaultControlPlanePort
+	}
+
+	if controlPlaneTLSEnabled(coderControlPlane) && servicePort == 443 {
+		return defaultControlPlanePort, nil
+	}
+
+	return servicePort, nil
+}
+
+func requiresWorkspaceRBACDriftRequeue(cp *coderv1alpha1.CoderControlPlane) bool {
+	if cp == nil || !workspacePermsEnabled(cp.Spec.RBAC.WorkspacePerms) {
+		return false
+	}
+
+	for _, namespace := range cp.Spec.RBAC.WorkspaceNamespaces {
+		namespace = strings.TrimSpace(namespace)
+		if namespace == "" || namespace == cp.Namespace {
+			continue
+		}
+		return true
+	}
+
+	return false
+}
+
+func workspaceRBACLabels(cp *coderv1alpha1.CoderControlPlane) map[string]string {
+	labels := maps.Clone(controlPlaneLabels(cp.Name))
+	labels["coder.com/control-plane"] = cp.Name
+	labels["coder.com/control-plane-namespace"] = cp.Namespace
+	return labels
+}
+
+func workspaceRBACAnnotations(ownerUID string) map[string]string {
+	return map[string]string{workspaceRBACOwnerUIDAnnotation: ownerUID}
+}
+
+func hasWorkspaceRBACIdentityLabels(object metav1.Object, coderControlPlane *coderv1alpha1.CoderControlPlane) bool {
+	if object == nil || coderControlPlane == nil {
+		return false
+	}
+
+	labels := object.GetLabels()
+	if labels == nil {
+		return false
+	}
+
+	return labels["coder.com/control-plane"] == coderControlPlane.Name &&
+		labels["coder.com/control-plane-namespace"] == coderControlPlane.Namespace
+}
+
+func hasWorkspaceRBACOwnerUID(object metav1.Object, coderControlPlane *coderv1alpha1.CoderControlPlane) bool {
+	if object == nil || coderControlPlane == nil {
+		return false
+	}
+
+	ownerUID := strings.TrimSpace(string(coderControlPlane.UID))
+	if ownerUID == "" {
+		return false
+	}
+
+	annotations := object.GetAnnotations()
+	if annotations == nil {
+		return false
+	}
+
+	return strings.TrimSpace(annotations[workspaceRBACOwnerUIDAnnotation]) == ownerUID
+}
+
+func isManagedWorkspaceRole(
+	role *rbacv1.Role,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+	expectedRoleName string,
+) bool {
+	if role == nil || coderControlPlane == nil {
+		return false
+	}
+	if isOwnedByCoderControlPlane(role, coderControlPlane) {
+		return true
+	}
+	if !hasWorkspaceRBACIdentityLabels(role, coderControlPlane) {
+		return false
+	}
+	if hasWorkspaceRBACOwnerUID(role, coderControlPlane) {
+		return true
+	}
+
+	return role.Namespace != coderControlPlane.Namespace && role.Name == expectedRoleName
+}
+
+func isManagedWorkspaceRoleBinding(
+	roleBinding *rbacv1.RoleBinding,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+	expectedRoleName string,
+	expectedRoleBindingName string,
+	expectedServiceAccountName string,
+) bool {
+	if roleBinding == nil || coderControlPlane == nil {
+		return false
+	}
+	if isOwnedByCoderControlPlane(roleBinding, coderControlPlane) {
+		return true
+	}
+	if !hasWorkspaceRBACIdentityLabels(roleBinding, coderControlPlane) {
+		return false
+	}
+	if hasWorkspaceRBACOwnerUID(roleBinding, coderControlPlane) {
+		return true
+	}
+	if roleBinding.Namespace == coderControlPlane.Namespace {
+		return false
+	}
+	if roleBinding.Name != expectedRoleBindingName {
+		return false
+	}
+	if roleBinding.RoleRef.APIGroup != rbacv1.GroupName || roleBinding.RoleRef.Kind != "Role" || roleBinding.RoleRef.Name != expectedRoleName {
+		return false
+	}
+	if len(roleBinding.Subjects) != 1 {
+		return false
+	}
+
+	subject := roleBinding.Subjects[0]
+	return subject.Kind == rbacv1.ServiceAccountKind &&
+		subject.Name == expectedServiceAccountName &&
+		subject.Namespace == coderControlPlane.Namespace
+}
+
+func (r *CoderControlPlaneReconciler) ensureWorkspaceRBACFinalizer(
+	ctx context.Context,
+	namespacedName types.NamespacedName,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+	if coderControlPlane.Name != namespacedName.Name || coderControlPlane.Namespace != namespacedName.Namespace {
+		return fmt.Errorf("assertion failed: finalizer target %s/%s does not match request %s", coderControlPlane.Namespace, coderControlPlane.Name, namespacedName)
+	}
+	if controllerutil.ContainsFinalizer(coderControlPlane, workspaceRBACFinalizer) {
+		return nil
+	}
+
+	original := coderControlPlane.DeepCopy()
+	controllerutil.AddFinalizer(coderControlPlane, workspaceRBACFinalizer)
+	if err := r.Patch(ctx, coderControlPlane, client.MergeFrom(original)); err != nil {
+		return fmt.Errorf("add workspace RBAC finalizer: %w", err)
+	}
+	if err := r.Get(ctx, namespacedName, coderControlPlane); err != nil {
+		return fmt.Errorf("reload codercontrolplane %s after finalizer update: %w", namespacedName, err)
+	}
+
+	return nil
+}
+
+func (r *CoderControlPlaneReconciler) finalizeWorkspaceRBAC(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+) (ctrl.Result, error) {
+	if coderControlPlane == nil {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+	if !controllerutil.ContainsFinalizer(coderControlPlane, workspaceRBACFinalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	if err := r.cleanupManagedWorkspaceRBAC(ctx, coderControlPlane, nil, nil); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	original := coderControlPlane.DeepCopy()
+	controllerutil.RemoveFinalizer(coderControlPlane, workspaceRBACFinalizer)
+	if err := r.Patch(ctx, coderControlPlane, client.MergeFrom(original)); err != nil {
+		return ctrl.Result{}, fmt.Errorf("remove workspace RBAC finalizer: %w", err)
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func (r *CoderControlPlaneReconciler) reconcileServiceAccount(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+	if coderControlPlane.Spec.ServiceAccount.DisableCreate {
+		return r.detachManagedServiceAccounts(ctx, coderControlPlane)
+	}
+
+	serviceAccountName := resolveServiceAccountName(coderControlPlane)
+	if strings.TrimSpace(serviceAccountName) == "" {
+		return fmt.Errorf("assertion failed: service account name must not be empty")
+	}
+
+	serviceAccount := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: serviceAccountName, Namespace: coderControlPlane.Namespace}}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, serviceAccount, func() error {
+		labels := maps.Clone(controlPlaneLabels(coderControlPlane.Name))
+		maps.Copy(labels, coderControlPlane.Spec.ServiceAccount.Labels)
+		serviceAccount.Labels = labels
+		serviceAccount.Annotations = maps.Clone(coderControlPlane.Spec.ServiceAccount.Annotations)
+
+		if err := controllerutil.SetControllerReference(coderControlPlane, serviceAccount, r.Scheme); err != nil {
+			return fmt.Errorf("set controller reference: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("reconcile control plane serviceaccount: %w", err)
+	}
+
+	return nil
+}
+
+func (r *CoderControlPlaneReconciler) detachManagedServiceAccounts(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+
+	serviceAccounts := &corev1.ServiceAccountList{}
+	if err := r.List(
+		ctx,
+		serviceAccounts,
+		client.InNamespace(coderControlPlane.Namespace),
+	); err != nil {
+		return fmt.Errorf("list service accounts for detachment: %w", err)
+	}
+
+	for i := range serviceAccounts.Items {
+		serviceAccount := &serviceAccounts.Items[i]
+		if !isOwnedByCoderControlPlane(serviceAccount, coderControlPlane) {
+			continue
+		}
+
+		original := serviceAccount.DeepCopy()
+		if err := controllerutil.RemoveControllerReference(coderControlPlane, serviceAccount, r.Scheme); err != nil {
+			return fmt.Errorf("remove controller reference from service account %s/%s: %w", serviceAccount.Namespace, serviceAccount.Name, err)
+		}
+		if equality.Semantic.DeepEqual(original.OwnerReferences, serviceAccount.OwnerReferences) {
+			continue
+		}
+
+		if err := r.Patch(ctx, serviceAccount, client.MergeFrom(original)); err != nil {
+			return fmt.Errorf("patch detached service account %s/%s: %w", serviceAccount.Namespace, serviceAccount.Name, err)
+		}
+	}
+
+	return nil
+}
+
+func (r *CoderControlPlaneReconciler) reconcileWorkspaceRBAC(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+
+	serviceAccountName := resolveServiceAccountName(coderControlPlane)
+	if strings.TrimSpace(serviceAccountName) == "" {
+		return fmt.Errorf("assertion failed: service account name must not be empty")
+	}
+	ownerUID := strings.TrimSpace(string(coderControlPlane.UID))
+	if ownerUID == "" {
+		return fmt.Errorf("assertion failed: coder control plane UID must not be empty")
+	}
+	roleName, err := workspaceRoleName(coderControlPlane, serviceAccountName)
+	if err != nil {
+		return err
+	}
+	roleBindingName, err := workspaceRoleBindingName(coderControlPlane, serviceAccountName)
+	if err != nil {
+		return err
+	}
+
+	if !workspacePermsEnabled(coderControlPlane.Spec.RBAC.WorkspacePerms) {
+		return r.cleanupManagedWorkspaceRBAC(ctx, coderControlPlane, nil, nil)
+	}
+
+	rules := []rbacv1.PolicyRule{
+		{
+			APIGroups: []string{""},
+			Resources: []string{"pods"},
+			Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"},
+		},
+		{
+			APIGroups: []string{""},
+			Resources: []string{"persistentvolumeclaims"},
+			Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"},
+		},
+	}
+	if workspaceDeploymentsEnabled(coderControlPlane.Spec.RBAC.EnableDeployments) {
+		rules = append(rules, rbacv1.PolicyRule{
+			APIGroups: []string{"apps"},
+			Resources: []string{"deployments"},
+			Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"},
+		})
+	}
+	rules = append(rules, coderControlPlane.Spec.RBAC.ExtraRules...)
+
+	targetNamespaces := append([]string{coderControlPlane.Namespace}, coderControlPlane.Spec.RBAC.WorkspaceNamespaces...)
+	seenNamespaces := make(map[string]struct{}, len(targetNamespaces))
+	keepRoles := make(map[string]struct{}, len(targetNamespaces))
+	keepRoleBindings := make(map[string]struct{}, len(targetNamespaces))
+	for _, namespace := range targetNamespaces {
+		namespace = strings.TrimSpace(namespace)
+		if namespace == "" {
+			return fmt.Errorf("assertion failed: workspace namespace must not be empty")
+		}
+		if _, seen := seenNamespaces[namespace]; seen {
+			continue
+		}
+		seenNamespaces[namespace] = struct{}{}
+
+		labels := workspaceRBACLabels(coderControlPlane)
+		annotations := workspaceRBACAnnotations(ownerUID)
+
+		role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: roleName, Namespace: namespace}}
+		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, role, func() error {
+			role.Labels = maps.Clone(labels)
+			role.Annotations = maps.Clone(annotations)
+			role.Rules = append([]rbacv1.PolicyRule(nil), rules...)
+
+			if namespace == coderControlPlane.Namespace {
+				if err := controllerutil.SetControllerReference(coderControlPlane, role, r.Scheme); err != nil {
+					return fmt.Errorf("set controller reference: %w", err)
+				}
+			} else {
+				role.OwnerReferences = nil
+			}
+
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("reconcile workspace role %s/%s: %w", namespace, roleName, err)
+		}
+
+		roleBinding := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: roleBindingName, Namespace: namespace}}
+		_, err = controllerutil.CreateOrUpdate(ctx, r.Client, roleBinding, func() error {
+			roleBinding.Labels = maps.Clone(labels)
+			roleBinding.Annotations = maps.Clone(annotations)
+			roleBinding.RoleRef = rbacv1.RoleRef{
+				APIGroup: rbacv1.GroupName,
+				Kind:     "Role",
+				Name:     roleName,
+			}
+			roleBinding.Subjects = []rbacv1.Subject{{
+				Kind:      rbacv1.ServiceAccountKind,
+				Name:      serviceAccountName,
+				Namespace: coderControlPlane.Namespace,
+			}}
+
+			if namespace == coderControlPlane.Namespace {
+				if err := controllerutil.SetControllerReference(coderControlPlane, roleBinding, r.Scheme); err != nil {
+					return fmt.Errorf("set controller reference: %w", err)
+				}
+			} else {
+				roleBinding.OwnerReferences = nil
+			}
+
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("reconcile workspace role binding %s/%s: %w", namespace, roleBindingName, err)
+		}
+
+		keepRoles[namespacedResourceKey(namespace, roleName)] = struct{}{}
+		keepRoleBindings[namespacedResourceKey(namespace, roleBindingName)] = struct{}{}
+	}
+
+	return r.cleanupManagedWorkspaceRBAC(ctx, coderControlPlane, keepRoles, keepRoleBindings)
+}
+
+func namespacedResourceKey(namespace, name string) string {
+	return fmt.Sprintf("%s/%s", namespace, name)
+}
+
+func (r *CoderControlPlaneReconciler) cleanupManagedWorkspaceRBAC(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+	keepRoles map[string]struct{},
+	keepRoleBindings map[string]struct{},
+) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+
+	serviceAccountName := strings.TrimSpace(resolveServiceAccountName(coderControlPlane))
+	if serviceAccountName == "" {
+		serviceAccountName = coderControlPlane.Name
+	}
+	expectedRoleName, err := workspaceRoleName(coderControlPlane, serviceAccountName)
+	if err != nil {
+		return err
+	}
+	expectedRoleBindingName, err := workspaceRoleBindingName(coderControlPlane, serviceAccountName)
+	if err != nil {
+		return err
+	}
+
+	labels := workspaceRBACLabels(coderControlPlane)
+
+	roles := &rbacv1.RoleList{}
+	if err := r.List(ctx, roles, client.MatchingLabels(labels)); err != nil {
+		return fmt.Errorf("list managed workspace roles: %w", err)
+	}
+	for i := range roles.Items {
+		role := &roles.Items[i]
+		if keepRoles != nil {
+			if _, ok := keepRoles[namespacedResourceKey(role.Namespace, role.Name)]; ok {
+				continue
+			}
+		}
+		if !isManagedWorkspaceRole(role, coderControlPlane, expectedRoleName) {
+			continue
+		}
+		if err := r.Delete(ctx, role); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete managed workspace role %s/%s: %w", role.Namespace, role.Name, err)
+		}
+	}
+
+	roleBindings := &rbacv1.RoleBindingList{}
+	if err := r.List(ctx, roleBindings, client.MatchingLabels(labels)); err != nil {
+		return fmt.Errorf("list managed workspace role bindings: %w", err)
+	}
+	for i := range roleBindings.Items {
+		roleBinding := &roleBindings.Items[i]
+		if keepRoleBindings != nil {
+			if _, ok := keepRoleBindings[namespacedResourceKey(roleBinding.Namespace, roleBinding.Name)]; ok {
+				continue
+			}
+		}
+		if !isManagedWorkspaceRoleBinding(roleBinding, coderControlPlane, expectedRoleName, expectedRoleBindingName, serviceAccountName) {
+			continue
+		}
+		if err := r.Delete(ctx, roleBinding); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete managed workspace role binding %s/%s: %w", roleBinding.Namespace, roleBinding.Name, err)
+		}
+	}
+
+	return nil
+}
+
+func probeEnabled(explicit *bool, defaultEnabled bool) bool {
+	return boolOrDefault(explicit, defaultEnabled)
+}
+
+func buildProbe(spec coderv1alpha1.ProbeSpec, path, portName string) *corev1.Probe {
+	probe := &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path:   path,
+				Port:   intstr.FromString(portName),
+				Scheme: corev1.URISchemeHTTP,
+			},
+		},
+		InitialDelaySeconds: spec.InitialDelaySeconds,
+		PeriodSeconds:       10,
+		TimeoutSeconds:      1,
+		SuccessThreshold:    1,
+		FailureThreshold:    3,
+	}
+	if spec.PeriodSeconds != nil {
+		probe.PeriodSeconds = *spec.PeriodSeconds
+	}
+	if spec.TimeoutSeconds != nil {
+		probe.TimeoutSeconds = *spec.TimeoutSeconds
+	}
+	if spec.SuccessThreshold != nil {
+		probe.SuccessThreshold = *spec.SuccessThreshold
+	}
+	if spec.FailureThreshold != nil {
+		probe.FailureThreshold = *spec.FailureThreshold
+	}
+
+	return probe
 }
 
 func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) (*appsv1.Deployment, error) {
+	if coderControlPlane == nil {
+		return nil, fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+
 	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: coderControlPlane.Name, Namespace: coderControlPlane.Namespace}}
+
+	injectClusterAccessURL := coderControlPlane.Spec.EnvUseClusterAccessURL == nil || *coderControlPlane.Spec.EnvUseClusterAccessURL
+	accessURLConfiguredViaEnvFrom := false
+	if injectClusterAccessURL {
+		var err error
+		accessURLConfiguredViaEnvFrom, err = r.envFromDefinesEnvVar(ctx, coderControlPlane.Namespace, coderControlPlane.Spec.EnvFrom, "CODER_ACCESS_URL")
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deployment, func() error {
 		labels := controlPlaneLabels(coderControlPlane.Name)
@@ -268,27 +916,226 @@ func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, c
 			image = defaultCoderImage
 		}
 
-		args := []string{"--http-address=0.0.0.0:3000"}
+		serviceAccountName := resolveServiceAccountName(coderControlPlane)
+		if strings.TrimSpace(serviceAccountName) == "" {
+			return fmt.Errorf("assertion failed: service account name must not be empty")
+		}
+
+		args := []string{"--http-address=0.0.0.0:8080"}
 		args = append(args, coderControlPlane.Spec.ExtraArgs...)
+
+		env := []corev1.EnvVar{
+			{
+				Name: "KUBE_POD_IP",
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"},
+				},
+			},
+			{
+				Name:  "CODER_DERP_SERVER_RELAY_URL",
+				Value: "http://$(KUBE_POD_IP):8080",
+			},
+		}
+
+		tlsEnabled := controlPlaneTLSEnabled(coderControlPlane)
+		if injectClusterAccessURL {
+			configuredAccessURL, err := findEnvVar(coderControlPlane.Spec.ExtraEnv, "CODER_ACCESS_URL")
+			if err != nil {
+				return err
+			}
+			if configuredAccessURL == nil && !accessURLConfiguredViaEnvFrom {
+				scheme := "http"
+				accessURLPort := coderControlPlane.Spec.Service.Port
+				if accessURLPort == 0 {
+					accessURLPort = defaultControlPlanePort
+				}
+				if tlsEnabled {
+					scheme = "https"
+					accessURLPort = 443
+				}
+
+				accessURL := fmt.Sprintf("%s://%s.%s.svc.cluster.local", scheme, coderControlPlane.Name, coderControlPlane.Namespace)
+				if (scheme == "http" && accessURLPort != 80) || (scheme == "https" && accessURLPort != 443) {
+					accessURL = fmt.Sprintf("%s:%d", accessURL, accessURLPort)
+				}
+				env = append(env, corev1.EnvVar{
+					Name:  "CODER_ACCESS_URL",
+					Value: accessURL,
+				})
+			}
+		}
+
+		ports := []corev1.ContainerPort{{
+			Name:          "http",
+			ContainerPort: controlPlaneTargetPort,
+			Protocol:      corev1.ProtocolTCP,
+		}}
+
+		volumes := make([]corev1.Volume, 0, len(coderControlPlane.Spec.TLS.SecretNames)+len(coderControlPlane.Spec.Certs.Secrets)+len(coderControlPlane.Spec.Volumes))
+		volumeMounts := make([]corev1.VolumeMount, 0, len(coderControlPlane.Spec.TLS.SecretNames)+len(coderControlPlane.Spec.Certs.Secrets)+len(coderControlPlane.Spec.VolumeMounts))
+		if tlsEnabled {
+			tlsCertFiles := make([]string, 0, len(coderControlPlane.Spec.TLS.SecretNames))
+			tlsKeyFiles := make([]string, 0, len(coderControlPlane.Spec.TLS.SecretNames))
+
+			tlsSecretSeen := make(map[string]struct{}, len(coderControlPlane.Spec.TLS.SecretNames))
+
+			for _, secretName := range coderControlPlane.Spec.TLS.SecretNames {
+				secretName = strings.TrimSpace(secretName)
+				if secretName == "" {
+					return fmt.Errorf("assertion failed: tls secret name must not be empty")
+				}
+				if _, seen := tlsSecretSeen[secretName]; seen {
+					continue
+				}
+				tlsSecretSeen[secretName] = struct{}{}
+
+				volumeName := volumeNameForSecret("tls", secretName)
+				mountPath := fmt.Sprintf("/etc/ssl/certs/coder/%s", secretName)
+				volumes = append(volumes, corev1.Volume{
+					Name: volumeName,
+					VolumeSource: corev1.VolumeSource{
+						Secret: &corev1.SecretVolumeSource{SecretName: secretName},
+					},
+				})
+				volumeMounts = append(volumeMounts, corev1.VolumeMount{
+					Name:      volumeName,
+					MountPath: mountPath,
+					ReadOnly:  true,
+				})
+
+				tlsCertFiles = append(tlsCertFiles, fmt.Sprintf("%s/tls.crt", mountPath))
+				tlsKeyFiles = append(tlsKeyFiles, fmt.Sprintf("%s/tls.key", mountPath))
+			}
+
+			env = append(env,
+				corev1.EnvVar{Name: "CODER_TLS_ENABLE", Value: "true"},
+				corev1.EnvVar{Name: "CODER_TLS_ADDRESS", Value: "0.0.0.0:8443"},
+				corev1.EnvVar{Name: "CODER_TLS_CERT_FILE", Value: strings.Join(tlsCertFiles, ",")},
+				corev1.EnvVar{Name: "CODER_TLS_KEY_FILE", Value: strings.Join(tlsKeyFiles, ",")},
+			)
+
+			ports = append(ports, corev1.ContainerPort{
+				Name:          "https",
+				ContainerPort: controlPlaneTLSTargetPort,
+				Protocol:      corev1.ProtocolTCP,
+			})
+		}
+
+		certSecretNameCounts := make(map[string]int, len(coderControlPlane.Spec.Certs.Secrets))
+		for i := range coderControlPlane.Spec.Certs.Secrets {
+			secretName := strings.TrimSpace(coderControlPlane.Spec.Certs.Secrets[i].Name)
+			if secretName == "" {
+				continue
+			}
+			certSecretNameCounts[secretName]++
+		}
+
+		certVolumeNameBySecret := make(map[string]string, len(certSecretNameCounts))
+		certMountFileCount := make(map[string]int, len(coderControlPlane.Spec.Certs.Secrets))
+		certSelectorSeen := make(map[string]struct{}, len(coderControlPlane.Spec.Certs.Secrets))
+		for i := range coderControlPlane.Spec.Certs.Secrets {
+			secret := coderControlPlane.Spec.Certs.Secrets[i]
+			secret.Name = strings.TrimSpace(secret.Name)
+			secret.Key = strings.TrimSpace(secret.Key)
+			if secret.Name == "" {
+				return fmt.Errorf("assertion failed: cert secret name must not be empty")
+			}
+			if secret.Key == "" {
+				return fmt.Errorf("assertion failed: cert secret key must not be empty")
+			}
+
+			selectorKey := fmt.Sprintf("%s\x00%s", secret.Name, secret.Key)
+			if _, seen := certSelectorSeen[selectorKey]; seen {
+				continue
+			}
+			certSelectorSeen[selectorKey] = struct{}{}
+
+			volumeName, volumeExists := certVolumeNameBySecret[secret.Name]
+			if !volumeExists {
+				volumeName = volumeNameForSecret("ca-cert", secret.Name)
+				certVolumeNameBySecret[secret.Name] = volumeName
+				volumes = append(volumes, corev1.Volume{
+					Name: volumeName,
+					VolumeSource: corev1.VolumeSource{
+						Secret: &corev1.SecretVolumeSource{SecretName: secret.Name},
+					},
+				})
+			}
+
+			mountFileBase := secret.Name
+			if certSecretNameCounts[secret.Name] > 1 {
+				mountFileBase = fmt.Sprintf("%s-%s", secret.Name, secret.Key)
+			}
+			mountFileName := mountFileBase
+			if !strings.HasSuffix(mountFileName, ".crt") {
+				mountFileName += ".crt"
+			}
+
+			mountFileCount := certMountFileCount[mountFileName]
+			certMountFileCount[mountFileName] = mountFileCount + 1
+			if mountFileCount > 0 {
+				mountFileName = strings.TrimSuffix(mountFileName, ".crt")
+				mountFileName = fmt.Sprintf("%s-%d.crt", mountFileName, mountFileCount+1)
+			}
+
+			volumeMounts = append(volumeMounts, corev1.VolumeMount{
+				Name:      volumeName,
+				MountPath: fmt.Sprintf("/etc/ssl/certs/%s", mountFileName),
+				SubPath:   secret.Key,
+				ReadOnly:  true,
+			})
+		}
+
+		env = append(env, coderControlPlane.Spec.ExtraEnv...)
+		volumes = append(volumes, coderControlPlane.Spec.Volumes...)
+		volumeMounts = append(volumeMounts, coderControlPlane.Spec.VolumeMounts...)
+
+		container := corev1.Container{
+			Name:         "coder",
+			Image:        image,
+			Args:         args,
+			Env:          env,
+			EnvFrom:      coderControlPlane.Spec.EnvFrom,
+			Ports:        ports,
+			VolumeMounts: volumeMounts,
+		}
+		if coderControlPlane.Spec.SecurityContext != nil {
+			container.SecurityContext = coderControlPlane.Spec.SecurityContext
+		}
+		if coderControlPlane.Spec.Resources != nil {
+			container.Resources = *coderControlPlane.Spec.Resources
+		}
+		if probeEnabled(coderControlPlane.Spec.ReadinessProbe.Enabled, true) {
+			container.ReadinessProbe = buildProbe(coderControlPlane.Spec.ReadinessProbe, "/healthz", "http")
+		}
+		if probeEnabled(coderControlPlane.Spec.LivenessProbe.Enabled, false) {
+			container.LivenessProbe = buildProbe(coderControlPlane.Spec.LivenessProbe, "/healthz", "http")
+		}
+
+		podSpec := corev1.PodSpec{
+			ServiceAccountName: serviceAccountName,
+			ImagePullSecrets:   coderControlPlane.Spec.ImagePullSecrets,
+			Containers:         []corev1.Container{container},
+			Volumes:            volumes,
+			NodeSelector:       maps.Clone(coderControlPlane.Spec.NodeSelector),
+			Tolerations:        append([]corev1.Toleration(nil), coderControlPlane.Spec.Tolerations...),
+			TopologySpreadConstraints: append(
+				[]corev1.TopologySpreadConstraint(nil),
+				coderControlPlane.Spec.TopologySpreadConstraints...,
+			),
+		}
+		if coderControlPlane.Spec.PodSecurityContext != nil {
+			podSpec.SecurityContext = coderControlPlane.Spec.PodSecurityContext
+		}
+		if coderControlPlane.Spec.Affinity != nil {
+			podSpec.Affinity = coderControlPlane.Spec.Affinity
+		}
 
 		deployment.Spec.Replicas = &replicas
 		deployment.Spec.Selector = &metav1.LabelSelector{MatchLabels: maps.Clone(labels)}
 		deployment.Spec.Template = corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{Labels: maps.Clone(labels)},
-			Spec: corev1.PodSpec{
-				ImagePullSecrets: coderControlPlane.Spec.ImagePullSecrets,
-				Containers: []corev1.Container{{
-					Name:  "coder",
-					Image: image,
-					Args:  args,
-					Env:   coderControlPlane.Spec.ExtraEnv,
-					Ports: []corev1.ContainerPort{{
-						Name:          "http",
-						ContainerPort: controlPlaneTargetPort,
-						Protocol:      corev1.ProtocolTCP,
-					}},
-				}},
-			},
+			Spec:       podSpec,
 		}
 
 		return nil
@@ -323,14 +1170,39 @@ func (r *CoderControlPlaneReconciler) reconcileService(ctx context.Context, code
 			servicePort = defaultControlPlanePort
 		}
 
-		service.Spec.Type = serviceType
-		service.Spec.Selector = maps.Clone(labels)
-		service.Spec.Ports = []corev1.ServicePort{{
+		tlsEnabled := controlPlaneTLSEnabled(coderControlPlane)
+		primaryServicePort := corev1.ServicePort{
 			Name:       "http",
 			Port:       servicePort,
 			Protocol:   corev1.ProtocolTCP,
 			TargetPort: intstr.FromInt(int(controlPlaneTargetPort)),
-		}}
+		}
+		if tlsEnabled && servicePort == 443 {
+			primaryServicePort.Name = "https"
+			primaryServicePort.TargetPort = intstr.FromInt(int(controlPlaneTLSTargetPort))
+		}
+
+		servicePorts := []corev1.ServicePort{primaryServicePort}
+		if tlsEnabled && servicePort == 443 {
+			servicePorts = append(servicePorts, corev1.ServicePort{
+				Name:       "http",
+				Port:       defaultControlPlanePort,
+				Protocol:   corev1.ProtocolTCP,
+				TargetPort: intstr.FromInt(int(controlPlaneTargetPort)),
+			})
+		}
+		if tlsEnabled && servicePort != 443 {
+			servicePorts = append(servicePorts, corev1.ServicePort{
+				Name:       "https",
+				Port:       443,
+				Protocol:   corev1.ProtocolTCP,
+				TargetPort: intstr.FromInt(int(controlPlaneTLSTargetPort)),
+			})
+		}
+
+		service.Spec.Type = serviceType
+		service.Spec.Selector = maps.Clone(labels)
+		service.Spec.Ports = servicePorts
 		return nil
 	})
 	if err != nil {
@@ -340,6 +1212,344 @@ func (r *CoderControlPlaneReconciler) reconcileService(ctx context.Context, code
 	// Avoid an immediate cached read-after-write here; cache propagation lag can
 	// transiently return NotFound for just-created objects and produce noisy reconcile errors.
 	return service, nil
+}
+
+func (r *CoderControlPlaneReconciler) reconcileExposure(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) (bool, error) {
+	if coderControlPlane == nil {
+		return false, fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+
+	exposeSpec := coderControlPlane.Spec.Expose
+	if exposeSpec == nil || (exposeSpec.Ingress == nil && exposeSpec.Gateway == nil) {
+		if err := r.cleanupOwnedIngress(ctx, coderControlPlane); err != nil {
+			return false, fmt.Errorf("cleanup managed ingress: %w", err)
+		}
+		if err := r.cleanupOwnedHTTPRoute(ctx, coderControlPlane); err != nil {
+			return false, fmt.Errorf("cleanup managed httproute: %w", err)
+		}
+		return false, nil
+	}
+
+	if exposeSpec.Ingress != nil && exposeSpec.Gateway != nil {
+		return false, fmt.Errorf("assertion failed: only one of ingress or gateway exposure may be configured")
+	}
+
+	if exposeSpec.Ingress != nil {
+		if err := r.reconcileIngress(ctx, coderControlPlane); err != nil {
+			return false, err
+		}
+		if err := r.cleanupOwnedHTTPRoute(ctx, coderControlPlane); err != nil {
+			return false, fmt.Errorf("cleanup managed httproute: %w", err)
+		}
+		return false, nil
+	}
+
+	httpRouteReconciled, err := r.reconcileHTTPRoute(ctx, coderControlPlane)
+	if err != nil {
+		return false, err
+	}
+	if err := r.cleanupOwnedIngress(ctx, coderControlPlane); err != nil {
+		return false, fmt.Errorf("cleanup managed ingress: %w", err)
+	}
+
+	return httpRouteReconciled, nil
+}
+
+func (r *CoderControlPlaneReconciler) reconcileIngress(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+	if coderControlPlane.Spec.Expose == nil || coderControlPlane.Spec.Expose.Ingress == nil {
+		return fmt.Errorf("assertion failed: ingress exposure spec must not be nil")
+	}
+
+	ingressExpose := coderControlPlane.Spec.Expose.Ingress
+	primaryHost := strings.TrimSpace(ingressExpose.Host)
+	if primaryHost == "" {
+		return fmt.Errorf("assertion failed: ingress host must not be empty")
+	}
+
+	wildcardHost := strings.TrimSpace(ingressExpose.WildcardHost)
+	backendServicePort, backendPortErr := httpRouteBackendServicePort(coderControlPlane)
+	if backendPortErr != nil {
+		return backendPortErr
+	}
+
+	ingress := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: coderControlPlane.Name, Namespace: coderControlPlane.Namespace}}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, ingress, func() error {
+		labels := controlPlaneLabels(coderControlPlane.Name)
+		ingress.Labels = maps.Clone(labels)
+		ingress.Annotations = maps.Clone(ingressExpose.Annotations)
+
+		pathTypePrefix := networkingv1.PathTypePrefix
+		rules := []networkingv1.IngressRule{
+			{
+				Host: primaryHost,
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{
+							{
+								Path:     "/",
+								PathType: &pathTypePrefix,
+								Backend: networkingv1.IngressBackend{
+									Service: &networkingv1.IngressServiceBackend{
+										Name: coderControlPlane.Name,
+										Port: networkingv1.ServiceBackendPort{Number: backendServicePort},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		if wildcardHost != "" {
+			rules = append(rules, networkingv1.IngressRule{
+				Host: wildcardHost,
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{
+							{
+								Path:     "/",
+								PathType: &pathTypePrefix,
+								Backend: networkingv1.IngressBackend{
+									Service: &networkingv1.IngressServiceBackend{
+										Name: coderControlPlane.Name,
+										Port: networkingv1.ServiceBackendPort{Number: backendServicePort},
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+		}
+
+		var tls []networkingv1.IngressTLS
+		if ingressExpose.TLS != nil {
+			secretName := strings.TrimSpace(ingressExpose.TLS.SecretName)
+			if secretName != "" {
+				tls = append(tls, networkingv1.IngressTLS{
+					SecretName: secretName,
+					Hosts:      []string{primaryHost},
+				})
+			}
+
+			wildcardSecretName := strings.TrimSpace(ingressExpose.TLS.WildcardSecretName)
+			if wildcardSecretName != "" {
+				if wildcardHost == "" {
+					return fmt.Errorf("assertion failed: ingress wildcard host must not be empty when wildcard TLS secret is set")
+				}
+				tls = append(tls, networkingv1.IngressTLS{
+					SecretName: wildcardSecretName,
+					Hosts:      []string{wildcardHost},
+				})
+			}
+		}
+
+		ingress.Spec = networkingv1.IngressSpec{
+			IngressClassName: ingressExpose.ClassName,
+			Rules:            rules,
+			TLS:              tls,
+		}
+
+		if err := controllerutil.SetControllerReference(coderControlPlane, ingress, r.Scheme); err != nil {
+			return fmt.Errorf("set controller reference: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("reconcile control plane ingress: %w", err)
+	}
+
+	return nil
+}
+
+func (r *CoderControlPlaneReconciler) reconcileHTTPRoute(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) (bool, error) {
+	if coderControlPlane == nil {
+		return false, fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+	if coderControlPlane.Spec.Expose == nil || coderControlPlane.Spec.Expose.Gateway == nil {
+		return false, fmt.Errorf("assertion failed: gateway exposure spec must not be nil")
+	}
+
+	gatewayExpose := coderControlPlane.Spec.Expose.Gateway
+	primaryHost := strings.TrimSpace(gatewayExpose.Host)
+	if primaryHost == "" {
+		return false, fmt.Errorf("assertion failed: gateway host must not be empty")
+	}
+
+	if len(gatewayExpose.ParentRefs) == 0 {
+		return false, fmt.Errorf("assertion failed: gateway parentRefs must not be empty")
+	}
+
+	httpRoute := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: coderControlPlane.Name, Namespace: coderControlPlane.Namespace}}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, httpRoute, func() error {
+		labels := controlPlaneLabels(coderControlPlane.Name)
+		httpRoute.Labels = maps.Clone(labels)
+
+		parentRefs := make([]gatewayv1.ParentReference, 0, len(gatewayExpose.ParentRefs))
+		for i := range gatewayExpose.ParentRefs {
+			parentRefSpec := gatewayExpose.ParentRefs[i]
+			parentRefName := strings.TrimSpace(parentRefSpec.Name)
+			if parentRefName == "" {
+				return fmt.Errorf("assertion failed: gateway parentRef[%d] name must not be empty", i)
+			}
+
+			parentRef := gatewayv1.ParentReference{Name: gatewayv1.ObjectName(parentRefName)}
+			if parentRefSpec.Namespace != nil {
+				namespace := strings.TrimSpace(*parentRefSpec.Namespace)
+				if namespace == "" {
+					return fmt.Errorf("assertion failed: gateway parentRef[%d] namespace must not be empty when set", i)
+				}
+				namespaceRef := gatewayv1.Namespace(namespace)
+				parentRef.Namespace = &namespaceRef
+			}
+			if parentRefSpec.SectionName != nil {
+				sectionName := strings.TrimSpace(*parentRefSpec.SectionName)
+				if sectionName == "" {
+					return fmt.Errorf("assertion failed: gateway parentRef[%d] sectionName must not be empty when set", i)
+				}
+				sectionNameRef := gatewayv1.SectionName(sectionName)
+				parentRef.SectionName = &sectionNameRef
+			}
+
+			parentRefs = append(parentRefs, parentRef)
+		}
+
+		hostnames := []gatewayv1.Hostname{gatewayv1.Hostname(primaryHost)}
+		wildcardHost := strings.TrimSpace(gatewayExpose.WildcardHost)
+		if wildcardHost != "" {
+			hostnames = append(hostnames, gatewayv1.Hostname(wildcardHost))
+		}
+
+		servicePort, err := httpRouteBackendServicePort(coderControlPlane)
+		if err != nil {
+			return err
+		}
+		backendPort := gatewayv1.PortNumber(servicePort)
+		serviceKind := gatewayv1.Kind("Service")
+		serviceGroup := gatewayv1.Group("")
+		pathTypePrefix := gatewayv1.PathMatchPathPrefix
+		pathPrefix := "/"
+
+		httpRoute.Spec = gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: parentRefs},
+			Hostnames:       hostnames,
+			Rules: []gatewayv1.HTTPRouteRule{
+				{
+					Matches: []gatewayv1.HTTPRouteMatch{
+						{
+							Path: &gatewayv1.HTTPPathMatch{
+								Type:  &pathTypePrefix,
+								Value: &pathPrefix,
+							},
+						},
+					},
+					BackendRefs: []gatewayv1.HTTPBackendRef{
+						{
+							BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Group: &serviceGroup,
+									Kind:  &serviceKind,
+									Name:  gatewayv1.ObjectName(coderControlPlane.Name),
+									Port:  &backendPort,
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		if err := controllerutil.SetControllerReference(coderControlPlane, httpRoute, r.Scheme); err != nil {
+			return fmt.Errorf("set controller reference: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		if meta.IsNoMatchError(err) {
+			ctrl.LoggerFrom(ctx).WithName("controller").WithName("codercontrolplane").Info(
+				"Gateway API CRDs not available, retrying HTTPRoute reconciliation",
+			)
+			return true, nil
+		}
+		return false, fmt.Errorf("reconcile control plane httproute: %w", err)
+	}
+
+	return true, nil
+}
+
+func (r *CoderControlPlaneReconciler) cleanupOwnedIngress(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+
+	ingress := &networkingv1.Ingress{}
+	namespacedName := types.NamespacedName{Name: coderControlPlane.Name, Namespace: coderControlPlane.Namespace}
+	err := r.Get(ctx, namespacedName, ingress)
+	switch {
+	case err == nil:
+	case apierrors.IsNotFound(err):
+		return nil
+	default:
+		return fmt.Errorf("get control plane ingress %s: %w", namespacedName, err)
+	}
+
+	if !isOwnedByCoderControlPlane(ingress, coderControlPlane) {
+		return nil
+	}
+
+	if err := r.Delete(ctx, ingress); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete control plane ingress %s: %w", namespacedName, err)
+	}
+
+	return nil
+}
+
+func (r *CoderControlPlaneReconciler) cleanupOwnedHTTPRoute(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+
+	httpRoute := &gatewayv1.HTTPRoute{}
+	namespacedName := types.NamespacedName{Name: coderControlPlane.Name, Namespace: coderControlPlane.Namespace}
+	err := r.Get(ctx, namespacedName, httpRoute)
+	switch {
+	case err == nil:
+	case apierrors.IsNotFound(err), meta.IsNoMatchError(err):
+		return nil
+	default:
+		return fmt.Errorf("get control plane httproute %s: %w", namespacedName, err)
+	}
+
+	if !isOwnedByCoderControlPlane(httpRoute, coderControlPlane) {
+		return nil
+	}
+
+	if err := r.Delete(ctx, httpRoute); err != nil && !apierrors.IsNotFound(err) && !meta.IsNoMatchError(err) {
+		return fmt.Errorf("delete control plane httproute %s: %w", namespacedName, err)
+	}
+
+	return nil
+}
+
+func isOwnedByCoderControlPlane(object metav1.Object, coderControlPlane *coderv1alpha1.CoderControlPlane) bool {
+	if object == nil || coderControlPlane == nil {
+		return false
+	}
+
+	ownerReference := metav1.GetControllerOf(object)
+	if ownerReference == nil {
+		return false
+	}
+
+	return ownerReference.APIVersion == coderv1alpha1.GroupVersion.String() &&
+		ownerReference.Kind == "CoderControlPlane" &&
+		ownerReference.Name == coderControlPlane.Name &&
+		ownerReference.UID == coderControlPlane.UID
 }
 
 func (r *CoderControlPlaneReconciler) desiredStatus(
@@ -359,12 +1569,34 @@ func (r *CoderControlPlaneReconciler) desiredStatus(
 		phase = coderv1alpha1.CoderControlPlanePhaseReady
 	}
 
+	scheme := "http"
+	statusPort := servicePort
+	if controlPlaneTLSEnabled(coderControlPlane) {
+		scheme = "https"
+		statusPort = 443
+	}
+
 	nextStatus.ObservedGeneration = coderControlPlane.Generation
 	nextStatus.ReadyReplicas = deployment.Status.ReadyReplicas
-	nextStatus.URL = fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", service.Name, service.Namespace, servicePort)
+	nextStatus.URL = fmt.Sprintf("%s://%s.%s.svc.cluster.local:%d", scheme, service.Name, service.Namespace, statusPort)
 	nextStatus.Phase = phase
 
 	return nextStatus
+}
+
+func controlPlaneSDKURL(coderControlPlane *coderv1alpha1.CoderControlPlane) string {
+	if coderControlPlane == nil {
+		return ""
+	}
+
+	// Always use HTTP for in-cluster SDK calls. TLS certs are typically provisioned
+	// for external hostnames and may fail verification against *.svc.cluster.local.
+	servicePort, err := httpRouteBackendServicePort(coderControlPlane)
+	if err != nil {
+		return ""
+	}
+
+	return fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", coderControlPlane.Name, coderControlPlane.Namespace, servicePort)
 }
 
 func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
@@ -527,8 +1759,9 @@ func (r *CoderControlPlaneReconciler) reconcileLicense(
 		return ctrl.Result{}, nil
 	}
 
-	if strings.TrimSpace(nextStatus.URL) == "" {
-		return ctrl.Result{}, fmt.Errorf("assertion failed: control plane URL must not be empty when licenseSecretRef is configured")
+	controlPlaneURL := controlPlaneSDKURL(coderControlPlane)
+	if strings.TrimSpace(controlPlaneURL) == "" {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: control plane SDK URL must not be empty when licenseSecretRef is configured")
 	}
 
 	operatorTokenSecretName := strings.TrimSpace(nextStatus.OperatorTokenSecretRef.Name)
@@ -628,7 +1861,7 @@ func (r *CoderControlPlaneReconciler) reconcileLicense(
 	}
 
 	if nextStatus.LicenseLastApplied != nil && nextStatus.LicenseLastAppliedHash == licenseHash {
-		hasAnyLicense, hasLicenseErr := r.LicenseUploader.HasAnyLicense(ctx, nextStatus.URL, operatorToken)
+		hasAnyLicense, hasLicenseErr := r.LicenseUploader.HasAnyLicense(ctx, controlPlaneURL, operatorToken)
 		if hasLicenseErr != nil {
 			var sdkErr *codersdk.Error
 			if errors.As(hasLicenseErr, &sdkErr) {
@@ -686,7 +1919,7 @@ func (r *CoderControlPlaneReconciler) reconcileLicense(
 		}
 	}
 
-	if err := r.LicenseUploader.AddLicense(ctx, nextStatus.URL, operatorToken, licenseJWT); err != nil {
+	if err := r.LicenseUploader.AddLicense(ctx, controlPlaneURL, operatorToken, licenseJWT); err != nil {
 		if isDuplicateLicenseUploadError(err) {
 			now := metav1.Now()
 			nextStatus.LicenseLastApplied = &now
@@ -787,8 +2020,9 @@ func (r *CoderControlPlaneReconciler) reconcileEntitlements(
 		nextStatus.OperatorTokenSecretRef == nil {
 		return ctrl.Result{}, nil
 	}
-	if strings.TrimSpace(nextStatus.URL) == "" {
-		return ctrl.Result{}, fmt.Errorf("assertion failed: control plane URL must not be empty when querying entitlements")
+	controlPlaneURL := controlPlaneSDKURL(coderControlPlane)
+	if strings.TrimSpace(controlPlaneURL) == "" {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: control plane SDK URL must not be empty when querying entitlements")
 	}
 	if r.EntitlementsInspector == nil {
 		return ctrl.Result{}, nil
@@ -812,7 +2046,7 @@ func (r *CoderControlPlaneReconciler) reconcileEntitlements(
 		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
 	}
 
-	entitlements, err := r.EntitlementsInspector.Entitlements(ctx, nextStatus.URL, operatorToken)
+	entitlements, err := r.EntitlementsInspector.Entitlements(ctx, controlPlaneURL, operatorToken)
 	if err != nil {
 		var sdkErr *codersdk.Error
 		if errors.As(err, &sdkErr) {
@@ -962,19 +2196,7 @@ func (r *CoderControlPlaneReconciler) cleanupDisabledOperatorAccess(
 }
 
 func isManagedOperatorTokenSecret(secret *corev1.Secret, coderControlPlane *coderv1alpha1.CoderControlPlane) bool {
-	if secret == nil || coderControlPlane == nil {
-		return false
-	}
-
-	ownerReference := metav1.GetControllerOf(secret)
-	if ownerReference == nil {
-		return false
-	}
-
-	return ownerReference.APIVersion == coderv1alpha1.GroupVersion.String() &&
-		ownerReference.Kind == "CoderControlPlane" &&
-		ownerReference.Name == coderControlPlane.Name &&
-		ownerReference.UID == coderControlPlane.UID
+	return isOwnedByCoderControlPlane(secret, coderControlPlane)
 }
 
 func (r *CoderControlPlaneReconciler) resolvePostgresURLFromExtraEnv(
@@ -1013,6 +2235,92 @@ func (r *CoderControlPlaneReconciler) resolvePostgresURLFromExtraEnv(
 	}
 
 	return r.readSecretValue(ctx, coderControlPlane.Namespace, secretRef.Name, secretRef.Key)
+}
+
+func (r *CoderControlPlaneReconciler) envFromDefinesEnvVar(
+	ctx context.Context,
+	namespace string,
+	envFromSources []corev1.EnvFromSource,
+	envVarName string,
+) (bool, error) {
+	if strings.TrimSpace(namespace) == "" {
+		return false, fmt.Errorf("assertion failed: namespace must not be empty")
+	}
+	if strings.TrimSpace(envVarName) == "" {
+		return false, fmt.Errorf("assertion failed: environment variable name must not be empty")
+	}
+
+	var reader client.Reader = r.Client
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	if reader == nil {
+		return false, fmt.Errorf("assertion failed: reader must not be nil")
+	}
+
+	for i := range envFromSources {
+		envFromSource := envFromSources[i]
+		lookupKey, includeSource, err := envFromLookupKeyForEnvVar(envFromSource.Prefix, envVarName)
+		if err != nil {
+			return false, err
+		}
+		if !includeSource {
+			continue
+		}
+
+		if envFromSource.ConfigMapRef != nil {
+			configMapName := strings.TrimSpace(envFromSource.ConfigMapRef.Name)
+			if configMapName == "" {
+				return false, fmt.Errorf("assertion failed: envFrom[%d].configMapRef.name must not be empty", i)
+			}
+
+			configMap := &corev1.ConfigMap{}
+			err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: configMapName}, configMap)
+			if err != nil {
+				if !apierrors.IsNotFound(err) {
+					return false, fmt.Errorf("get envFrom[%d] configmap %s/%s: %w", i, namespace, configMapName, err)
+				}
+			} else if _, ok := configMap.Data[lookupKey]; ok {
+				return true, nil
+			}
+		}
+
+		if envFromSource.SecretRef != nil {
+			secretName := strings.TrimSpace(envFromSource.SecretRef.Name)
+			if secretName == "" {
+				return false, fmt.Errorf("assertion failed: envFrom[%d].secretRef.name must not be empty", i)
+			}
+
+			secret := &corev1.Secret{}
+			err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: secretName}, secret)
+			if err != nil {
+				if !apierrors.IsNotFound(err) {
+					return false, fmt.Errorf("get envFrom[%d] secret %s/%s: %w", i, namespace, secretName, err)
+				}
+			} else if _, ok := secret.Data[lookupKey]; ok {
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+func envFromLookupKeyForEnvVar(prefix, envVarName string) (string, bool, error) {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return envVarName, true, nil
+	}
+	if !strings.HasPrefix(envVarName, prefix) {
+		return "", false, nil
+	}
+
+	lookupKey := strings.TrimPrefix(envVarName, prefix)
+	if strings.TrimSpace(lookupKey) == "" {
+		return "", false, nil
+	}
+
+	return lookupKey, true, nil
 }
 
 func findEnvVar(envVars []corev1.EnvVar, name string) (*corev1.EnvVar, error) {
@@ -1073,6 +2381,65 @@ func operatorAccessTokenSecretName(coderControlPlane *coderv1alpha1.CoderControl
 	}
 
 	return fmt.Sprintf("%s-%s%s", coderControlPlane.Name[:available], hashSuffix, operatorTokenSecretSuffix)
+}
+
+func volumeNameForSecret(prefix, secretName string) string {
+	normalizedSecretName := strings.TrimSpace(strings.ToLower(secretName))
+	sanitizedSecretName := sanitizeDNSLabel(normalizedSecretName)
+	candidate := fmt.Sprintf("%s-%s", prefix, sanitizedSecretName)
+	if len(candidate) <= 63 && sanitizedSecretName == normalizedSecretName {
+		return candidate
+	}
+
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(prefix))
+	_, _ = hasher.Write([]byte{0})
+	_, _ = hasher.Write([]byte(secretName))
+	hashSuffix := fmt.Sprintf("%08x", hasher.Sum32())
+
+	available := 63 - len(prefix) - len(hashSuffix) - 2
+	if available < 1 {
+		available = 1
+	}
+	if len(sanitizedSecretName) > available {
+		sanitizedSecretName = sanitizedSecretName[:available]
+		sanitizedSecretName = strings.Trim(sanitizedSecretName, "-")
+		if sanitizedSecretName == "" {
+			sanitizedSecretName = "x"
+		}
+	}
+
+	return fmt.Sprintf("%s-%s-%s", prefix, sanitizedSecretName, hashSuffix)
+}
+
+func sanitizeDNSLabel(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return "x"
+	}
+
+	builder := strings.Builder{}
+	builder.Grow(len(value))
+	lastWasDash := false
+	for i := 0; i < len(value); i++ {
+		char := value[i]
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') {
+			builder.WriteByte(char)
+			lastWasDash = false
+			continue
+		}
+		if !lastWasDash {
+			builder.WriteByte('-')
+			lastWasDash = true
+		}
+	}
+
+	sanitized := strings.Trim(builder.String(), "-")
+	if sanitized == "" {
+		return "x"
+	}
+
+	return sanitized
 }
 
 func (r *CoderControlPlaneReconciler) ensureOperatorTokenSecret(
@@ -1207,6 +2574,147 @@ func indexByLicenseSecretName(obj client.Object) []string {
 	return []string{licenseSecretName}
 }
 
+func indexByEnvFromConfigMapName(obj client.Object) []string {
+	coderControlPlane, ok := obj.(*coderv1alpha1.CoderControlPlane)
+	if !ok {
+		return nil
+	}
+
+	configMapNames := map[string]struct{}{}
+	for i := range coderControlPlane.Spec.EnvFrom {
+		configMapRef := coderControlPlane.Spec.EnvFrom[i].ConfigMapRef
+		if configMapRef == nil {
+			continue
+		}
+		configMapName := strings.TrimSpace(configMapRef.Name)
+		if configMapName == "" {
+			continue
+		}
+		configMapNames[configMapName] = struct{}{}
+	}
+
+	indexedNames := make([]string, 0, len(configMapNames))
+	for configMapName := range configMapNames {
+		indexedNames = append(indexedNames, configMapName)
+	}
+
+	return indexedNames
+}
+
+func indexByEnvFromSecretName(obj client.Object) []string {
+	coderControlPlane, ok := obj.(*coderv1alpha1.CoderControlPlane)
+	if !ok {
+		return nil
+	}
+
+	secretNames := map[string]struct{}{}
+	for i := range coderControlPlane.Spec.EnvFrom {
+		secretRef := coderControlPlane.Spec.EnvFrom[i].SecretRef
+		if secretRef == nil {
+			continue
+		}
+		secretName := strings.TrimSpace(secretRef.Name)
+		if secretName == "" {
+			continue
+		}
+		secretNames[secretName] = struct{}{}
+	}
+
+	indexedNames := make([]string, 0, len(secretNames))
+	for secretName := range secretNames {
+		indexedNames = append(indexedNames, secretName)
+	}
+
+	return indexedNames
+}
+
+func (r *CoderControlPlaneReconciler) reconcileRequestsForEnvFromConfigMap(
+	ctx context.Context,
+	obj client.Object,
+) []reconcile.Request {
+	configMap, ok := obj.(*corev1.ConfigMap)
+	if !ok {
+		return nil
+	}
+
+	return r.reconcileRequestsForIndexedControlPlanes(ctx, configMap.Namespace, envFromConfigMapNameFieldIndex, configMap.Name)
+}
+
+func (r *CoderControlPlaneReconciler) reconcileRequestsForEnvFromSecret(
+	ctx context.Context,
+	obj client.Object,
+) []reconcile.Request {
+	secret, ok := obj.(*corev1.Secret)
+	if !ok {
+		return nil
+	}
+
+	return r.reconcileRequestsForIndexedControlPlanes(ctx, secret.Namespace, envFromSecretNameFieldIndex, secret.Name)
+}
+
+func mergeReconcileRequests(requestGroups ...[]reconcile.Request) []reconcile.Request {
+	if len(requestGroups) == 0 {
+		return nil
+	}
+
+	seen := map[string]struct{}{}
+	merged := make([]reconcile.Request, 0)
+	for i := range requestGroups {
+		for j := range requestGroups[i] {
+			request := requestGroups[i][j]
+			if strings.TrimSpace(request.Name) == "" || strings.TrimSpace(request.Namespace) == "" {
+				continue
+			}
+			key := namespacedResourceKey(request.Namespace, request.Name)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			merged = append(merged, request)
+		}
+	}
+
+	return merged
+}
+
+func (r *CoderControlPlaneReconciler) reconcileRequestsForIndexedControlPlanes(
+	ctx context.Context,
+	namespace string,
+	indexField string,
+	indexValue string,
+) []reconcile.Request {
+	namespace = strings.TrimSpace(namespace)
+	indexField = strings.TrimSpace(indexField)
+	indexValue = strings.TrimSpace(indexValue)
+	if namespace == "" || indexField == "" || indexValue == "" {
+		return nil
+	}
+
+	var coderControlPlanes coderv1alpha1.CoderControlPlaneList
+	if err := r.List(
+		ctx,
+		&coderControlPlanes,
+		client.InNamespace(namespace),
+		client.MatchingFields{indexField: indexValue},
+	); err != nil {
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(coderControlPlanes.Items))
+	for i := range coderControlPlanes.Items {
+		coderControlPlane := coderControlPlanes.Items[i]
+		if strings.TrimSpace(coderControlPlane.Name) == "" || strings.TrimSpace(coderControlPlane.Namespace) == "" {
+			continue
+		}
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
+			Name:      coderControlPlane.Name,
+			Namespace: coderControlPlane.Namespace,
+		}})
+	}
+
+	return requests
+}
+
 func (r *CoderControlPlaneReconciler) reconcileRequestsForLicenseSecret(
 	ctx context.Context,
 	obj client.Object,
@@ -1219,28 +2727,15 @@ func (r *CoderControlPlaneReconciler) reconcileRequestsForLicenseSecret(
 		return nil
 	}
 
-	var coderControlPlanes coderv1alpha1.CoderControlPlaneList
-	if err := r.List(
+	licenseSecretRequests := r.reconcileRequestsForIndexedControlPlanes(
 		ctx,
-		&coderControlPlanes,
-		client.InNamespace(secret.Namespace),
-		client.MatchingFields{licenseSecretNameFieldIndex: secret.Name},
-	); err != nil {
-		return nil
-	}
+		secret.Namespace,
+		licenseSecretNameFieldIndex,
+		secret.Name,
+	)
+	envFromSecretRequests := r.reconcileRequestsForEnvFromSecret(ctx, secret)
 
-	requests := make([]reconcile.Request, 0, len(coderControlPlanes.Items))
-	for _, coderControlPlane := range coderControlPlanes.Items {
-		if strings.TrimSpace(coderControlPlane.Name) == "" || strings.TrimSpace(coderControlPlane.Namespace) == "" {
-			continue
-		}
-		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
-			Name:      coderControlPlane.Name,
-			Namespace: coderControlPlane.Namespace,
-		}})
-	}
-
-	return requests
+	return mergeReconcileRequests(licenseSecretRequests, envFromSecretRequests)
 }
 
 func isDuplicateLicenseUploadError(err error) bool {
@@ -1414,16 +2909,50 @@ func (r *CoderControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	); err != nil {
 		return fmt.Errorf("index coder control planes by license secret name: %w", err)
 	}
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&coderv1alpha1.CoderControlPlane{},
+		envFromConfigMapNameFieldIndex,
+		indexByEnvFromConfigMapName,
+	); err != nil {
+		return fmt.Errorf("index coder control planes by envFrom ConfigMap name: %w", err)
+	}
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&coderv1alpha1.CoderControlPlane{},
+		envFromSecretNameFieldIndex,
+		indexByEnvFromSecretName,
+	); err != nil {
+		return fmt.Errorf("index coder control planes by envFrom Secret name: %w", err)
+	}
 
-	return ctrl.NewControllerManagedBy(mgr).
+	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&coderv1alpha1.CoderControlPlane{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
+		Owns(&networkingv1.Ingress{}).
+		Owns(&corev1.ServiceAccount{}).
+		Owns(&rbacv1.Role{}).
+		Owns(&rbacv1.RoleBinding{}).
 		Owns(&corev1.Secret{}).
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.reconcileRequestsForLicenseSecret),
 		).
+		Watches(
+			&corev1.ConfigMap{},
+			handler.EnqueueRequestsFromMapFunc(r.reconcileRequestsForEnvFromConfigMap),
+		)
+
+	// Gateway API is optional; only watch HTTPRoutes when the CRD is installed.
+	httpRouteGVK := schema.GroupVersionKind{Group: gatewayv1.GroupVersion.Group, Version: gatewayv1.GroupVersion.Version, Kind: "HTTPRoute"}
+	if _, err := mgr.GetRESTMapper().RESTMapping(httpRouteGVK.GroupKind(), httpRouteGVK.Version); err == nil {
+		builder = builder.Owns(&gatewayv1.HTTPRoute{})
+	} else if !meta.IsNoMatchError(err) {
+		return fmt.Errorf("check HTTPRoute REST mapping: %w", err)
+	}
+
+	return builder.
 		Named("codercontrolplane").
 		Complete(r)
 }

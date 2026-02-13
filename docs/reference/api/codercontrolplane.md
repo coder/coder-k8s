@@ -21,6 +21,24 @@
 | `imagePullSecrets` | [LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#localobjectreference-v1-core) array | ImagePullSecrets are used by the pod to pull private images. |
 | `operatorAccess` | [OperatorAccessSpec](#operatoraccessspec) | OperatorAccess configures bootstrap API access to the coderd instance. |
 | `licenseSecretRef` | [SecretKeySelector](#secretkeyselector) | LicenseSecretRef references a Secret key containing a Coder Enterprise license JWT. When set, the controller uploads the license after the control plane is ready and re-uploads when the Secret value changes. |
+| `serviceAccount` | [ServiceAccountSpec](#serviceaccountspec) | ServiceAccount configures the ServiceAccount for the control plane pod. |
+| `rbac` | [RBACSpec](#rbacspec) | RBAC configures namespace-scoped RBAC for workspace provisioning. |
+| `resources` | [ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#resourcerequirements-v1-core) | Resources sets resource requests/limits for the control plane container. |
+| `securityContext` | [SecurityContext](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#securitycontext-v1-core) | SecurityContext sets the container security context. |
+| `podSecurityContext` | [PodSecurityContext](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#podsecuritycontext-v1-core) | PodSecurityContext sets the pod-level security context. |
+| `tls` | [TLSSpec](#tlsspec) | TLS configures Coder built-in TLS. |
+| `readinessProbe` | [ProbeSpec](#probespec) | ReadinessProbe configures the readiness probe for the control plane container. |
+| `livenessProbe` | [ProbeSpec](#probespec) | LivenessProbe configures the liveness probe for the control plane container. |
+| `envUseClusterAccessURL` | boolean | EnvUseClusterAccessURL injects a default CODER_ACCESS_URL when not explicitly set. |
+| `expose` | [ExposeSpec](#exposespec) | Expose configures external exposure via Ingress or Gateway API. |
+| `envFrom` | [EnvFromSource](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#envfromsource-v1-core) array | EnvFrom injects environment variables from ConfigMaps/Secrets. |
+| `volumes` | [Volume](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#volume-v1-core) array | Volumes are additional volumes to add to the pod. |
+| `volumeMounts` | [VolumeMount](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#volumemount-v1-core) array | VolumeMounts are additional volume mounts for the control plane container. |
+| `certs` | [CertsSpec](#certsspec) | Certs configures additional CA certificate mounts. |
+| `nodeSelector` | object (keys:string, values:string) | NodeSelector constrains pod scheduling to nodes matching labels. |
+| `tolerations` | [Toleration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#toleration-v1-core) array | Tolerations are applied to the control plane pod. |
+| `affinity` | [Affinity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#affinity-v1-core) | Affinity configures pod affinity/anti-affinity rules. |
+| `topologySpreadConstraints` | [TopologySpreadConstraint](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#topologyspreadconstraint-v1-core) array | TopologySpreadConstraints control pod topology spread. |
 
 ## Status
 
@@ -41,6 +59,75 @@
 
 ## Referenced types
 
+### CertSecretSelector
+
+CertSecretSelector identifies a key within a Secret for CA cert mounting.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | string | Name is the Secret name. |
+| `key` | string | Key is the key within the Secret data map. |
+
+### CertsSpec
+
+CertsSpec configures additional CA certificate mounts.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `secrets` | [CertSecretSelector](#certsecretselector) array | Secrets lists Secret key selectors for CA certificates. Each is mounted at `/etc/ssl/certs/\{name\}.crt`. |
+
+### ExposeSpec
+
+ExposeSpec configures external exposure for the control plane.
+At most one of Ingress or Gateway may be set.
++kubebuilder:validation:XValidation:rule="!(has(self.ingress) && has(self.gateway))",message="only one of ingress or gateway may be set"
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `ingress` | [IngressExposeSpec](#ingressexposespec) | Ingress configures a networking.k8s.io/v1 Ingress. |
+| `gateway` | [GatewayExposeSpec](#gatewayexposespec) | Gateway configures a gateway.networking.k8s.io/v1 HTTPRoute. |
+
+### GatewayExposeSpec
+
+GatewayExposeSpec defines Gateway API (HTTPRoute) exposure configuration.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `host` | string | Host is the primary hostname for the HTTPRoute. |
+| `wildcardHost` | string | WildcardHost is an optional wildcard hostname. |
+| `parentRefs` | [GatewayParentRef](#gatewayparentref) array | ParentRefs are Gateways that the HTTPRoute attaches to. At least one parentRef is required when gateway exposure is configured. |
+
+### GatewayParentRef
+
+GatewayParentRef identifies a Gateway for HTTPRoute attachment.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | string | Name is the Gateway name. |
+| `namespace` | string | Namespace is the Gateway namespace. |
+| `sectionName` | string | SectionName is the listener name within the Gateway. |
+
+### IngressExposeSpec
+
+IngressExposeSpec defines Ingress exposure configuration.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `className` | string | ClassName is the Ingress class name. |
+| `host` | string | Host is the primary hostname for the Ingress rule. |
+| `wildcardHost` | string | WildcardHost is an optional wildcard hostname (e.g., for workspace apps). |
+| `annotations` | object (keys:string, values:string) | Annotations are applied to the managed Ingress. |
+| `tls` | [IngressTLSExposeSpec](#ingresstlsexposespec) | TLS configures TLS termination at the Ingress. |
+
+### IngressTLSExposeSpec
+
+IngressTLSExposeSpec defines TLS configuration for the Ingress.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `secretName` | string | SecretName is the TLS Secret for the primary host. |
+| `wildcardSecretName` | string | WildcardSecretName is the TLS Secret for the wildcard host. |
+
 ### OperatorAccessSpec
 
 OperatorAccessSpec configures the controller-managed coderd operator user.
@@ -49,6 +136,30 @@ OperatorAccessSpec configures the controller-managed coderd operator user.
 | --- | --- | --- |
 | `disabled` | boolean | Disabled turns off creation and management of the `coder-k8s-operator` user and API token. |
 | `generatedTokenSecretName` | string | GeneratedTokenSecretName stores the generated operator API token. |
+
+### ProbeSpec
+
+ProbeSpec configures a Kubernetes probe with an enable toggle.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `enabled` | boolean | Enabled toggles the probe on or off. When omitted, readiness defaults to enabled while liveness defaults to disabled. |
+| `initialDelaySeconds` | integer | InitialDelaySeconds is the delay before the probe starts. |
+| `periodSeconds` | integer | PeriodSeconds controls how often the probe is performed. |
+| `timeoutSeconds` | integer | TimeoutSeconds is the probe timeout. |
+| `successThreshold` | integer | SuccessThreshold is the minimum consecutive successes for the probe to be considered successful. |
+| `failureThreshold` | integer | FailureThreshold is the minimum consecutive failures for the probe to be considered failed. |
+
+### RBACSpec
+
+RBACSpec configures namespace-scoped RBAC for workspace provisioning.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `workspacePerms` | boolean | WorkspacePerms enables Role/RoleBinding creation for workspace resources. When omitted, the default is true. |
+| `enableDeployments` | boolean | EnableDeployments grants apps/deployments permissions (only when WorkspacePerms is true). When omitted, the default is true. |
+| `extraRules` | [PolicyRule](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#policyrule-v1-rbac) array | ExtraRules are appended to the managed Role rules. |
+| `workspaceNamespaces` | string array | WorkspaceNamespaces lists additional namespaces for Role/RoleBinding creation. |
 
 ### SecretKeySelector
 
@@ -59,6 +170,17 @@ SecretKeySelector identifies a key in a Secret.
 | `name` | string | Name is the Kubernetes Secret name. |
 | `key` | string | Key is the key inside the Secret data map. |
 
+### ServiceAccountSpec
+
+ServiceAccountSpec configures the ServiceAccount used by the Coder pod.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `disableCreate` | boolean | DisableCreate skips ServiceAccount creation (use an existing SA). |
+| `name` | string | Name overrides the ServiceAccount name. Defaults to the CoderControlPlane name. |
+| `annotations` | object (keys:string, values:string) | Annotations are applied to the managed ServiceAccount. |
+| `labels` | object (keys:string, values:string) | Labels are applied to the managed ServiceAccount. |
+
 ### ServiceSpec
 
 ServiceSpec defines the Service configuration reconciled by the operator.
@@ -68,6 +190,14 @@ ServiceSpec defines the Service configuration reconciled by the operator.
 | `type` | [ServiceType](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#servicetype-v1-core) | Type controls the Kubernetes service type. |
 | `port` | integer | Port controls the exposed service port. |
 | `annotations` | object (keys:string, values:string) | Annotations are applied to the reconciled service object. |
+
+### TLSSpec
+
+TLSSpec configures Coder built-in TLS.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `secretNames` | string array | SecretNames lists TLS secrets to mount for built-in TLS. When non-empty, TLS is enabled on the Coder control plane. |
 
 ## Source
 

@@ -3,19 +3,33 @@ package controller_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"hash/fnv"
 	"net/http"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/coderbootstrap"
@@ -110,6 +124,7 @@ func (f *fakeEntitlementsInspector) Entitlements(_ context.Context, coderURL, se
 }
 
 func TestReconcile_NotFound(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	r := &controller.CoderControlPlaneReconciler{
 		Client: k8sClient,
 		Scheme: scheme,
@@ -130,6 +145,7 @@ func TestReconcile_NotFound(t *testing.T) {
 }
 
 func TestReconcile_ExistingResource(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 	replicas := int32(2)
 
@@ -185,7 +201,7 @@ func TestReconcile_ExistingResource(t *testing.T) {
 		t.Fatalf("expected one container in deployment pod spec, got %d", len(deployment.Spec.Template.Spec.Containers))
 	}
 	container := deployment.Spec.Template.Spec.Containers[0]
-	expectedArgs := []string{"--http-address=0.0.0.0:3000", "--prometheus-enable=false"}
+	expectedArgs := []string{"--http-address=0.0.0.0:8080", "--prometheus-enable=false"}
 	if !reflect.DeepEqual(container.Args, expectedArgs) {
 		t.Fatalf("expected container args %v, got %v", expectedArgs, container.Args)
 	}
@@ -200,6 +216,7 @@ func TestReconcile_ExistingResource(t *testing.T) {
 }
 
 func TestReconcile_StatusPersistence(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 	replicas := int32(1)
 
@@ -250,6 +267,7 @@ func TestReconcile_StatusPersistence(t *testing.T) {
 }
 
 func TestReconcile_OwnerReferences(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	cp := &coderv1alpha1.CoderControlPlane{
@@ -288,6 +306,7 @@ func TestReconcile_OwnerReferences(t *testing.T) {
 }
 
 func TestReconcile_SpecUpdatePropagates(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 	initialReplicas := int32(1)
 
@@ -358,6 +377,7 @@ func TestReconcile_SpecUpdatePropagates(t *testing.T) {
 }
 
 func TestReconcile_PhaseTransitionToReady(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	cp := &coderv1alpha1.CoderControlPlane{
@@ -417,6 +437,7 @@ func TestReconcile_PhaseTransitionToReady(t *testing.T) {
 }
 
 func TestReconcile_LicenseSecretRefNil_DoesNotUpload(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	cp := &coderv1alpha1.CoderControlPlane{
@@ -481,6 +502,7 @@ func TestReconcile_LicenseSecretRefNil_DoesNotUpload(t *testing.T) {
 }
 
 func TestReconcile_LicensePendingUntilControlPlaneReady(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	licenseSecret := &corev1.Secret{
@@ -543,6 +565,7 @@ func TestReconcile_LicensePendingUntilControlPlaneReady(t *testing.T) {
 }
 
 func TestReconcile_LicenseAppliesOnceAndTracksHash(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	licenseSecret := &corev1.Secret{
@@ -636,7 +659,165 @@ func TestReconcile_LicenseAppliesOnceAndTracksHash(t *testing.T) {
 	}
 }
 
+func TestReconcile_LicenseUsesInternalHTTPURLWhenTLSEnabled(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	licenseSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-tls-internal-url-secret", Namespace: "default"},
+		Data: map[string][]byte{
+			coderv1alpha1.DefaultLicenseSecretKey: []byte("license-jwt-tls-internal-url"),
+		},
+	}
+	if err := k8sClient.Create(ctx, licenseSecret); err != nil {
+		t.Fatalf("create license secret: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, licenseSecret)
+	})
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-tls-internal-url", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			ExtraEnv: []corev1.EnvVar{{
+				Name:  "CODER_PG_CONNECTION_URL",
+				Value: "postgres://example/license-tls-internal-url",
+			}},
+			TLS: coderv1alpha1.TLSSpec{
+				SecretNames: []string{"coder-internal-tls-secret"},
+			},
+			LicenseSecretRef: &coderv1alpha1.SecretKeySelector{Name: licenseSecret.Name},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create test CoderControlPlane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	provisioner := &fakeOperatorAccessProvisioner{token: "operator-token-license-tls-url"}
+	uploader := &fakeLicenseUploader{}
+	r := &controller.CoderControlPlaneReconciler{
+		Client:                    k8sClient,
+		Scheme:                    scheme,
+		OperatorAccessProvisioner: provisioner,
+		LicenseUploader:           uploader,
+	}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("first reconcile control plane: %v", err)
+	}
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+		t.Fatalf("get reconciled deployment: %v", err)
+	}
+	deployment.Status.ReadyReplicas = 1
+	deployment.Status.Replicas = 1
+	if err := k8sClient.Status().Update(ctx, deployment); err != nil {
+		t.Fatalf("update deployment status: %v", err)
+	}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("second reconcile control plane: %v", err)
+	}
+	if len(uploader.calls) != 1 {
+		t.Fatalf("expected one license upload call, got %d", len(uploader.calls))
+	}
+	if got := uploader.calls[0].coderURL; got != "http://test-license-tls-internal-url.default.svc.cluster.local:80" {
+		t.Fatalf("expected license upload URL %q, got %q", "http://test-license-tls-internal-url.default.svc.cluster.local:80", got)
+	}
+
+	reconciled := &coderv1alpha1.CoderControlPlane{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, reconciled); err != nil {
+		t.Fatalf("get reconciled control plane: %v", err)
+	}
+	if !strings.HasPrefix(reconciled.Status.URL, "https://") {
+		t.Fatalf("expected status URL to remain https when TLS is enabled, got %q", reconciled.Status.URL)
+	}
+}
+
+func TestReconcile_LicenseUsesInternalHTTPURLWhenTLSAndServicePort443(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	licenseSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-tls-443-url-secret", Namespace: "default"},
+		Data: map[string][]byte{
+			coderv1alpha1.DefaultLicenseSecretKey: []byte("license-jwt-tls-443-url"),
+		},
+	}
+	if err := k8sClient.Create(ctx, licenseSecret); err != nil {
+		t.Fatalf("create license secret: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, licenseSecret)
+	})
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-tls-443-url", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			ExtraEnv: []corev1.EnvVar{{
+				Name:  "CODER_PG_CONNECTION_URL",
+				Value: "postgres://example/license-tls-443-url",
+			}},
+			Service: coderv1alpha1.ServiceSpec{Port: 443},
+			TLS: coderv1alpha1.TLSSpec{
+				SecretNames: []string{"coder-internal-tls-443-secret"},
+			},
+			LicenseSecretRef: &coderv1alpha1.SecretKeySelector{Name: licenseSecret.Name},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create test CoderControlPlane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	provisioner := &fakeOperatorAccessProvisioner{token: "operator-token-license-tls-443-url"}
+	uploader := &fakeLicenseUploader{}
+	r := &controller.CoderControlPlaneReconciler{
+		Client:                    k8sClient,
+		Scheme:                    scheme,
+		OperatorAccessProvisioner: provisioner,
+		LicenseUploader:           uploader,
+	}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("first reconcile control plane: %v", err)
+	}
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+		t.Fatalf("get reconciled deployment: %v", err)
+	}
+	deployment.Status.ReadyReplicas = 1
+	deployment.Status.Replicas = 1
+	if err := k8sClient.Status().Update(ctx, deployment); err != nil {
+		t.Fatalf("update deployment status: %v", err)
+	}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("second reconcile control plane: %v", err)
+	}
+	if len(uploader.calls) != 1 {
+		t.Fatalf("expected one license upload call, got %d", len(uploader.calls))
+	}
+	if got := uploader.calls[0].coderURL; got != "http://test-license-tls-443-url.default.svc.cluster.local:80" {
+		t.Fatalf("expected license upload URL %q, got %q", "http://test-license-tls-443-url.default.svc.cluster.local:80", got)
+	}
+
+	reconciled := &coderv1alpha1.CoderControlPlane{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, reconciled); err != nil {
+		t.Fatalf("get reconciled control plane: %v", err)
+	}
+	if !strings.HasPrefix(reconciled.Status.URL, "https://") {
+		t.Fatalf("expected status URL to remain https when TLS is enabled, got %q", reconciled.Status.URL)
+	}
+}
+
 func TestReconcile_LicenseReuploadsWhenBackendHasNoLicenses(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	licenseSecret := &corev1.Secret{
@@ -712,6 +893,7 @@ func TestReconcile_LicenseReuploadsWhenBackendHasNoLicenses(t *testing.T) {
 }
 
 func TestReconcile_LicenseRotationUploadsNewSecretValue(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	licenseSecret := &corev1.Secret{
@@ -811,6 +993,7 @@ func TestReconcile_LicenseRotationUploadsNewSecretValue(t *testing.T) {
 }
 
 func TestReconcile_LicenseRollbackDuplicateUploadConverges(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	licenseSecret := &corev1.Secret{
@@ -937,6 +1120,7 @@ func TestReconcile_LicenseRollbackDuplicateUploadConverges(t *testing.T) {
 }
 
 func TestReconcile_LicenseNotSupportedSetsConditionWithoutRequeue(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	licenseSecret := &corev1.Secret{
@@ -1022,6 +1206,7 @@ func TestReconcile_LicenseNotSupportedSetsConditionWithoutRequeue(t *testing.T) 
 }
 
 func TestReconcile_DefaultsApplied(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	cp := &coderv1alpha1.CoderControlPlane{
@@ -1071,6 +1256,7 @@ func TestReconcile_DefaultsApplied(t *testing.T) {
 }
 
 func TestReconcile_DefaultOperatorAccess_MissingPostgresURL(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	cp := &coderv1alpha1.CoderControlPlane{
@@ -1122,6 +1308,7 @@ func TestReconcile_DefaultOperatorAccess_MissingPostgresURL(t *testing.T) {
 }
 
 func TestReconcile_OperatorAccess_Disabled(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	cp := &coderv1alpha1.CoderControlPlane{
@@ -1179,6 +1366,7 @@ func TestReconcile_OperatorAccess_Disabled(t *testing.T) {
 }
 
 func TestReconcile_OperatorAccess_Disabled_DoesNotDeleteUnmanagedSecret(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	cp := &coderv1alpha1.CoderControlPlane{
@@ -1248,6 +1436,7 @@ func TestReconcile_OperatorAccess_Disabled_DoesNotDeleteUnmanagedSecret(t *testi
 }
 
 func TestReconcile_OperatorAccess_Disabled_RevokesWithoutStatusOrManagedSecret(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	cp := &coderv1alpha1.CoderControlPlane{
@@ -1304,6 +1493,7 @@ func TestReconcile_OperatorAccess_Disabled_RevokesWithoutStatusOrManagedSecret(t
 }
 
 func TestReconcile_OperatorAccess_Disabled_RevokesTokenAndDeletesSecret(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	cp := &coderv1alpha1.CoderControlPlane{
@@ -1396,6 +1586,7 @@ func TestReconcile_OperatorAccess_Disabled_RevokesTokenAndDeletesSecret(t *testi
 }
 
 func TestReconcile_OperatorAccess_Disabled_RetriesRevocationAfterFailure(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	cp := &coderv1alpha1.CoderControlPlane{
@@ -1494,6 +1685,7 @@ func TestReconcile_OperatorAccess_Disabled_RetriesRevocationAfterFailure(t *test
 }
 
 func TestReconcile_OperatorAccess_MalformedManagedSecret_ReprovisionsToken(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	cp := &coderv1alpha1.CoderControlPlane{
@@ -1558,6 +1750,7 @@ func TestReconcile_OperatorAccess_MalformedManagedSecret_ReprovisionsToken(t *te
 }
 
 func TestReconcile_OperatorAccess_UsesDistinctTokenNamesPerControlPlane(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	cp1 := &coderv1alpha1.CoderControlPlane{
@@ -1624,6 +1817,7 @@ func TestReconcile_OperatorAccess_UsesDistinctTokenNamesPerControlPlane(t *testi
 }
 
 func TestReconcile_OperatorAccess_ResolvesLiteralPostgresURLAndCreatesTokenSecret(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	cp := &coderv1alpha1.CoderControlPlane{
@@ -1711,6 +1905,7 @@ func TestReconcile_OperatorAccess_ResolvesLiteralPostgresURLAndCreatesTokenSecre
 }
 
 func TestReconcile_OperatorAccess_ResolvesPostgresURLFromSecretRef(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	postgresURLSecret := &corev1.Secret{
@@ -1799,6 +1994,7 @@ func TestReconcile_OperatorAccess_ResolvesPostgresURLFromSecretRef(t *testing.T)
 }
 
 func TestReconcile_EntitlementsStatusFields(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
 	testCases := []struct {
@@ -1946,6 +2142,2638 @@ func TestReconcile_EntitlementsStatusFields(t *testing.T) {
 	}
 }
 
+func TestReconcile_ServiceAccount(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	testCases := []struct {
+		name                string
+		controlPlaneName    string
+		serviceAccount      coderv1alpha1.ServiceAccountSpec
+		expectedName        string
+		expectCreated       bool
+		expectedLabels      map[string]string
+		expectedAnnotations map[string]string
+	}{
+		{
+			name:             "DefaultName",
+			controlPlaneName: "test-serviceaccount-default",
+			expectedName:     "test-serviceaccount-default",
+			expectCreated:    true,
+		},
+		{
+			name:             "CustomName",
+			controlPlaneName: "test-serviceaccount-custom",
+			serviceAccount: coderv1alpha1.ServiceAccountSpec{
+				Name: "custom-service-account",
+			},
+			expectedName:  "custom-service-account",
+			expectCreated: true,
+		},
+		{
+			name:             "CustomLabelsAndAnnotations",
+			controlPlaneName: "test-serviceaccount-metadata",
+			serviceAccount: coderv1alpha1.ServiceAccountSpec{
+				Name: "test-serviceaccount-metadata-sa",
+				Labels: map[string]string{
+					"custom-label": "label-value",
+				},
+				Annotations: map[string]string{
+					"custom-annotation": "annotation-value",
+				},
+			},
+			expectedName:  "test-serviceaccount-metadata-sa",
+			expectCreated: true,
+			expectedLabels: map[string]string{
+				"custom-label": "label-value",
+			},
+			expectedAnnotations: map[string]string{
+				"custom-annotation": "annotation-value",
+			},
+		},
+		{
+			name:             "CreationDisabled",
+			controlPlaneName: "test-serviceaccount-disabled",
+			serviceAccount: coderv1alpha1.ServiceAccountSpec{
+				DisableCreate: true,
+			},
+			expectedName:  "test-serviceaccount-disabled",
+			expectCreated: false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			cp := &coderv1alpha1.CoderControlPlane{
+				ObjectMeta: metav1.ObjectMeta{Name: testCase.controlPlaneName, Namespace: "default"},
+				Spec: coderv1alpha1.CoderControlPlaneSpec{
+					Image:          "test-serviceaccount:latest",
+					ServiceAccount: testCase.serviceAccount,
+				},
+			}
+			if err := k8sClient.Create(ctx, cp); err != nil {
+				t.Fatalf("create control plane: %v", err)
+			}
+			t.Cleanup(func() {
+				_ = k8sClient.Delete(ctx, cp)
+			})
+
+			r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+				t.Fatalf("reconcile control plane: %v", err)
+			}
+
+			serviceAccount := &corev1.ServiceAccount{}
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: testCase.expectedName, Namespace: cp.Namespace}, serviceAccount)
+			if !testCase.expectCreated {
+				if !apierrors.IsNotFound(err) {
+					t.Fatalf("expected service account %s/%s to be absent, got error: %v", cp.Namespace, testCase.expectedName, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("get service account: %v", err)
+			}
+
+			if serviceAccount.Name != testCase.expectedName {
+				t.Fatalf("expected service account name %q, got %q", testCase.expectedName, serviceAccount.Name)
+			}
+			if serviceAccount.Labels["app.kubernetes.io/name"] != "coder-control-plane" {
+				t.Fatalf("expected managed label app.kubernetes.io/name=coder-control-plane, got %q", serviceAccount.Labels["app.kubernetes.io/name"])
+			}
+			if serviceAccount.Labels["app.kubernetes.io/instance"] != cp.Name {
+				t.Fatalf("expected managed label app.kubernetes.io/instance=%q, got %q", cp.Name, serviceAccount.Labels["app.kubernetes.io/instance"])
+			}
+			if serviceAccount.Labels["app.kubernetes.io/managed-by"] != "coder-k8s" {
+				t.Fatalf("expected managed label app.kubernetes.io/managed-by=coder-k8s, got %q", serviceAccount.Labels["app.kubernetes.io/managed-by"])
+			}
+			for key, value := range testCase.expectedLabels {
+				if serviceAccount.Labels[key] != value {
+					t.Fatalf("expected service account label %q=%q, got %q", key, value, serviceAccount.Labels[key])
+				}
+			}
+			for key, value := range testCase.expectedAnnotations {
+				if serviceAccount.Annotations[key] != value {
+					t.Fatalf("expected service account annotation %q=%q, got %q", key, value, serviceAccount.Annotations[key])
+				}
+			}
+		})
+	}
+
+	t.Run("DisableCreateDetachesManagedServiceAccount", func(t *testing.T) {
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-serviceaccount-disable-detach", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-serviceaccount:latest",
+				ServiceAccount: coderv1alpha1.ServiceAccountSpec{
+					Name: "test-serviceaccount-disable-detach-sa",
+					Labels: map[string]string{
+						"app.kubernetes.io/instance": "custom-instance-label",
+					},
+				},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		namespacedName := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+			t.Fatalf("reconcile control plane before disabling service account creation: %v", err)
+		}
+
+		serviceAccountName := cp.Spec.ServiceAccount.Name
+		serviceAccount := &corev1.ServiceAccount{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: serviceAccountName, Namespace: cp.Namespace}, serviceAccount); err != nil {
+			t.Fatalf("get managed service account: %v", err)
+		}
+		if got := serviceAccount.Labels["app.kubernetes.io/instance"]; got != "custom-instance-label" {
+			t.Fatalf("expected reserved instance label override to be applied, got %q", got)
+		}
+		ownerReference := metav1.GetControllerOf(serviceAccount)
+		if ownerReference == nil || ownerReference.UID != cp.UID {
+			t.Fatalf("expected service account to be controller-owned before disableCreate=true, got %#v", ownerReference)
+		}
+
+		latest := &coderv1alpha1.CoderControlPlane{}
+		if err := k8sClient.Get(ctx, namespacedName, latest); err != nil {
+			t.Fatalf("get latest control plane for disableCreate update: %v", err)
+		}
+		latest.Spec.ServiceAccount.DisableCreate = true
+		if err := k8sClient.Update(ctx, latest); err != nil {
+			t.Fatalf("update control plane to disable service account creation: %v", err)
+		}
+
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+			t.Fatalf("reconcile control plane after disabling service account creation: %v", err)
+		}
+
+		serviceAccount = &corev1.ServiceAccount{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: serviceAccountName, Namespace: cp.Namespace}, serviceAccount); err != nil {
+			t.Fatalf("get service account after disableCreate=true: %v", err)
+		}
+		if ownerReference := metav1.GetControllerOf(serviceAccount); ownerReference != nil {
+			t.Fatalf("expected service account controller reference to be removed when disableCreate=true, got %#v", ownerReference)
+		}
+	})
+}
+
+func TestReconcile_WorkspaceRBAC(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	t.Run("RoleAndRoleBindingCreated", func(t *testing.T) {
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-workspace-rbac-default", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-workspace-rbac:latest",
+				ServiceAccount: coderv1alpha1.ServiceAccountSpec{
+					Name: "test-workspace-rbac-default-sa",
+				},
+				RBAC: coderv1alpha1.RBACSpec{
+					WorkspacePerms:    ptrTo(true),
+					EnableDeployments: ptrTo(true),
+				},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		serviceAccountName := cp.Spec.ServiceAccount.Name
+		roleName := expectedWorkspaceRoleName(t, cp, serviceAccountName)
+		roleBindingName := expectedWorkspaceRoleBindingName(t, cp, serviceAccountName)
+		role := &rbacv1.Role{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: cp.Namespace}, role); err != nil {
+			t.Fatalf("get workspace role: %v", err)
+		}
+		if !roleContainsRuleForResource(role.Rules, "", "pods") {
+			t.Fatal("expected workspace role to include pods permissions")
+		}
+		if !roleContainsRuleForResource(role.Rules, "", "persistentvolumeclaims") {
+			t.Fatal("expected workspace role to include persistentvolumeclaims permissions")
+		}
+		if !roleContainsRuleForResource(role.Rules, "apps", "deployments") {
+			t.Fatal("expected workspace role to include deployments permissions")
+		}
+
+		roleBinding := &rbacv1.RoleBinding{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleBindingName, Namespace: cp.Namespace}, roleBinding); err != nil {
+			t.Fatalf("get workspace role binding: %v", err)
+		}
+		if roleBinding.RoleRef.Kind != "Role" || roleBinding.RoleRef.Name != roleName {
+			t.Fatalf("expected role binding roleRef to Role %q, got %#v", roleName, roleBinding.RoleRef)
+		}
+		if len(roleBinding.Subjects) != 1 {
+			t.Fatalf("expected one role binding subject, got %d", len(roleBinding.Subjects))
+		}
+		subject := roleBinding.Subjects[0]
+		if subject.Kind != rbacv1.ServiceAccountKind || subject.Name != serviceAccountName || subject.Namespace != cp.Namespace {
+			t.Fatalf("expected role binding service account subject %s/%s, got %#v", cp.Namespace, serviceAccountName, subject)
+		}
+	})
+
+	t.Run("LongServiceAccountNameKeepsRoleNameWithinKubernetesLimit", func(t *testing.T) {
+		serviceAccountName := strings.Repeat("a", 253)
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-workspace-rbac-long-role-name", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-workspace-rbac:latest",
+				ServiceAccount: coderv1alpha1.ServiceAccountSpec{
+					Name: serviceAccountName,
+				},
+				RBAC: coderv1alpha1.RBACSpec{
+					WorkspacePerms: ptrTo(true),
+				},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane with long service account name: %v", err)
+		}
+
+		roleBindingName := expectedWorkspaceRoleBindingName(t, cp, serviceAccountName)
+		roleBinding := &rbacv1.RoleBinding{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleBindingName, Namespace: cp.Namespace}, roleBinding); err != nil {
+			t.Fatalf("get workspace role binding: %v", err)
+		}
+		roleName := roleBinding.RoleRef.Name
+		expectedRoleName := expectedWorkspaceRoleName(t, cp, serviceAccountName)
+		if roleName != expectedRoleName {
+			t.Fatalf("expected workspace role name %q, got %q", expectedRoleName, roleName)
+		}
+		if len(roleName) > 253 {
+			t.Fatalf("expected workspace role name length <= 253, got %d (%q)", len(roleName), roleName)
+		}
+		if !strings.HasSuffix(roleName, "-workspace-perms") {
+			t.Fatalf("expected workspace role name to retain suffix %q, got %q", "-workspace-perms", roleName)
+		}
+
+		role := &rbacv1.Role{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: cp.Namespace}, role); err != nil {
+			t.Fatalf("get truncated workspace role: %v", err)
+		}
+		if !roleContainsRuleForResource(role.Rules, "", "pods") {
+			t.Fatal("expected truncated workspace role to include pods permissions")
+		}
+	})
+
+	t.Run("DeploymentsRuleDisabled", func(t *testing.T) {
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-workspace-rbac-no-deployments", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-workspace-rbac:latest",
+				ServiceAccount: coderv1alpha1.ServiceAccountSpec{
+					Name: "test-workspace-rbac-no-deployments-sa",
+				},
+				RBAC: coderv1alpha1.RBACSpec{
+					WorkspacePerms:    ptrTo(true),
+					EnableDeployments: ptrTo(false),
+				},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		roleName := expectedWorkspaceRoleName(t, cp, cp.Spec.ServiceAccount.Name)
+		role := &rbacv1.Role{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: cp.Namespace}, role); err != nil {
+			t.Fatalf("get workspace role: %v", err)
+		}
+		if roleContainsRuleForResource(role.Rules, "apps", "deployments") {
+			t.Fatal("expected workspace role deployments permissions to be omitted when enableDeployments=false")
+		}
+	})
+
+	t.Run("RBACDisabled", func(t *testing.T) {
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-workspace-rbac-disabled", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-workspace-rbac:latest",
+				RBAC: coderv1alpha1.RBACSpec{
+					WorkspacePerms: ptrTo(false),
+				},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		roleName := expectedWorkspaceRoleName(t, cp, cp.Name)
+		roleBindingName := expectedWorkspaceRoleBindingName(t, cp, cp.Name)
+		role := &rbacv1.Role{}
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: cp.Namespace}, role)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("expected workspace role to be absent when RBAC is disabled, got error: %v", err)
+		}
+
+		roleBinding := &rbacv1.RoleBinding{}
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: roleBindingName, Namespace: cp.Namespace}, roleBinding)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("expected workspace role binding to be absent when RBAC is disabled, got error: %v", err)
+		}
+	})
+
+	t.Run("RBACDisabledCleansPreviouslyManagedRoles", func(t *testing.T) {
+		workspaceNamespace := "workspace-rbac-cleanup-disabled"
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: workspaceNamespace}}
+		if err := k8sClient.Create(ctx, namespace); err != nil && !apierrors.IsAlreadyExists(err) {
+			t.Fatalf("create workspace namespace: %v", err)
+		}
+
+		serviceAccountName := "test-workspace-rbac-cleanup-disabled-sa"
+		cp := createCoderControlPlaneUnstructured(ctx, t, "test-workspace-rbac-cleanup-disabled", "default", map[string]any{
+			"image": "test-workspace-rbac:latest",
+			"serviceAccount": map[string]any{
+				"name": serviceAccountName,
+			},
+			"rbac": map[string]any{
+				"workspacePerms":      true,
+				"enableDeployments":   true,
+				"workspaceNamespaces": []any{workspaceNamespace},
+			},
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		namespacedName := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+			t.Fatalf("reconcile control plane before disable: %v", err)
+		}
+
+		roleName := expectedWorkspaceRoleName(t, cp, serviceAccountName)
+		roleBindingName := expectedWorkspaceRoleBindingName(t, cp, serviceAccountName)
+		for _, namespaceName := range []string{cp.Namespace, workspaceNamespace} {
+			role := &rbacv1.Role{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: namespaceName}, role); err != nil {
+				t.Fatalf("expected workspace role %s/%s to exist before disabling RBAC: %v", namespaceName, roleName, err)
+			}
+			roleBinding := &rbacv1.RoleBinding{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleBindingName, Namespace: namespaceName}, roleBinding); err != nil {
+				t.Fatalf("expected workspace role binding %s/%s to exist before disabling RBAC: %v", namespaceName, roleBindingName, err)
+			}
+		}
+
+		unstructuredCP := &unstructured.Unstructured{}
+		unstructuredCP.SetAPIVersion(coderv1alpha1.GroupVersion.String())
+		unstructuredCP.SetKind("CoderControlPlane")
+		if err := k8sClient.Get(ctx, namespacedName, unstructuredCP); err != nil {
+			t.Fatalf("get unstructured control plane for RBAC disable update: %v", err)
+		}
+		if err := unstructured.SetNestedField(unstructuredCP.Object, false, "spec", "rbac", "workspacePerms"); err != nil {
+			t.Fatalf("set spec.rbac.workspacePerms=false: %v", err)
+		}
+		if err := k8sClient.Update(ctx, unstructuredCP); err != nil {
+			t.Fatalf("update control plane to disable workspace RBAC: %v", err)
+		}
+
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+			t.Fatalf("reconcile control plane after disable: %v", err)
+		}
+
+		for _, namespaceName := range []string{cp.Namespace, workspaceNamespace} {
+			role := &rbacv1.Role{}
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: namespaceName}, role)
+			if !apierrors.IsNotFound(err) {
+				t.Fatalf("expected workspace role %s/%s to be removed after disabling RBAC, got: %v", namespaceName, roleName, err)
+			}
+			roleBinding := &rbacv1.RoleBinding{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: roleBindingName, Namespace: namespaceName}, roleBinding)
+			if !apierrors.IsNotFound(err) {
+				t.Fatalf("expected workspace role binding %s/%s to be removed after disabling RBAC, got: %v", namespaceName, roleBindingName, err)
+			}
+		}
+	})
+
+	t.Run("DeleteControlPlaneCleansCrossNamespaceRBAC", func(t *testing.T) {
+		workspaceNamespace := "workspace-rbac-cleanup-delete"
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: workspaceNamespace}}
+		if err := k8sClient.Create(ctx, namespace); err != nil && !apierrors.IsAlreadyExists(err) {
+			t.Fatalf("create workspace namespace: %v", err)
+		}
+
+		serviceAccountName := "test-workspace-rbac-cleanup-delete-sa"
+		cp := createCoderControlPlaneUnstructured(ctx, t, "test-workspace-rbac-cleanup-delete", "default", map[string]any{
+			"image": "test-workspace-rbac:latest",
+			"serviceAccount": map[string]any{
+				"name": serviceAccountName,
+			},
+			"rbac": map[string]any{
+				"workspacePerms":      true,
+				"enableDeployments":   true,
+				"workspaceNamespaces": []any{workspaceNamespace},
+			},
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		namespacedName := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}
+		result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
+		if err != nil {
+			t.Fatalf("reconcile control plane before delete: %v", err)
+		}
+		if result.RequeueAfter <= 0 {
+			t.Fatalf("expected cross-namespace workspace RBAC to request periodic drift requeue, got %+v", result)
+		}
+
+		roleName := expectedWorkspaceRoleName(t, cp, serviceAccountName)
+		roleBindingName := expectedWorkspaceRoleBindingName(t, cp, serviceAccountName)
+		role := &rbacv1.Role{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: workspaceNamespace}, role); err != nil {
+			t.Fatalf("expected cross-namespace role %s/%s before delete: %v", workspaceNamespace, roleName, err)
+		}
+		roleBinding := &rbacv1.RoleBinding{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleBindingName, Namespace: workspaceNamespace}, roleBinding); err != nil {
+			t.Fatalf("expected cross-namespace role binding %s/%s before delete: %v", workspaceNamespace, roleBindingName, err)
+		}
+
+		if err := k8sClient.Delete(ctx, cp); err != nil {
+			t.Fatalf("delete control plane: %v", err)
+		}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+			t.Fatalf("reconcile control plane deletion: %v", err)
+		}
+
+		role = &rbacv1.Role{}
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: workspaceNamespace}, role)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("expected cross-namespace role %s/%s to be removed after control plane deletion, got: %v", workspaceNamespace, roleName, err)
+		}
+		roleBinding = &rbacv1.RoleBinding{}
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: roleBindingName, Namespace: workspaceNamespace}, roleBinding)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("expected cross-namespace role binding %s/%s to be removed after control plane deletion, got: %v", workspaceNamespace, roleBindingName, err)
+		}
+	})
+
+	t.Run("DeleteControlPlaneWithWhitespaceServiceAccountNameStillFinalizes", func(t *testing.T) {
+		workspaceNamespace := "workspace-rbac-finalizer-invalid-sa"
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: workspaceNamespace}}
+		if err := k8sClient.Create(ctx, namespace); err != nil && !apierrors.IsAlreadyExists(err) {
+			t.Fatalf("create workspace namespace: %v", err)
+		}
+
+		serviceAccountName := "test-workspace-rbac-finalizer-invalid-sa"
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-workspace-rbac-finalizer-invalid-sa", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-workspace-rbac:latest",
+				ServiceAccount: coderv1alpha1.ServiceAccountSpec{
+					Name: serviceAccountName,
+				},
+				RBAC: coderv1alpha1.RBACSpec{
+					WorkspacePerms:      ptrTo(true),
+					WorkspaceNamespaces: []string{workspaceNamespace},
+				},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(context.Background(), cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		namespacedName := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+			t.Fatalf("reconcile control plane before invalidating service account name: %v", err)
+		}
+
+		roleName := expectedWorkspaceRoleName(t, cp, serviceAccountName)
+		roleBindingName := expectedWorkspaceRoleBindingName(t, cp, serviceAccountName)
+		role := &rbacv1.Role{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: workspaceNamespace}, role); err != nil {
+			t.Fatalf("expected cross-namespace role %s/%s before delete: %v", workspaceNamespace, roleName, err)
+		}
+		roleBinding := &rbacv1.RoleBinding{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleBindingName, Namespace: workspaceNamespace}, roleBinding); err != nil {
+			t.Fatalf("expected cross-namespace role binding %s/%s before delete: %v", workspaceNamespace, roleBindingName, err)
+		}
+
+		latest := &coderv1alpha1.CoderControlPlane{}
+		if err := k8sClient.Get(ctx, namespacedName, latest); err != nil {
+			t.Fatalf("get control plane before invalid service account update: %v", err)
+		}
+		latest.Spec.ServiceAccount.Name = "   "
+		if err := k8sClient.Update(ctx, latest); err != nil {
+			t.Fatalf("update control plane with whitespace service account name: %v", err)
+		}
+
+		if err := k8sClient.Delete(ctx, latest); err != nil {
+			t.Fatalf("delete control plane: %v", err)
+		}
+
+		for i := 0; i < 3; i++ {
+			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+				t.Fatalf("reconcile control plane deletion with invalid service account name: %v", err)
+			}
+
+			current := &coderv1alpha1.CoderControlPlane{}
+			err := k8sClient.Get(ctx, namespacedName, current)
+			if apierrors.IsNotFound(err) {
+				break
+			}
+			if err != nil {
+				t.Fatalf("get control plane after deletion reconcile: %v", err)
+			}
+			if i == 2 {
+				t.Fatalf("expected control plane to be finalized and deleted, finalizers=%v", current.Finalizers)
+			}
+		}
+
+		role = &rbacv1.Role{}
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: workspaceNamespace}, role)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("expected cross-namespace role %s/%s to be removed after control plane deletion, got: %v", workspaceNamespace, roleName, err)
+		}
+		roleBinding = &rbacv1.RoleBinding{}
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: roleBindingName, Namespace: workspaceNamespace}, roleBinding)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("expected cross-namespace role binding %s/%s to be removed after control plane deletion, got: %v", workspaceNamespace, roleBindingName, err)
+		}
+	})
+
+	t.Run("RBACCleanupPreservesUnmanagedLabeledResources", func(t *testing.T) {
+		workspaceNamespace := "workspace-rbac-preserve-unmanaged"
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: workspaceNamespace}}
+		if err := k8sClient.Create(ctx, namespace); err != nil && !apierrors.IsAlreadyExists(err) {
+			t.Fatalf("create workspace namespace: %v", err)
+		}
+
+		serviceAccountName := "test-workspace-rbac-preserve-unmanaged-sa"
+		cp := createCoderControlPlaneUnstructured(ctx, t, "test-workspace-rbac-preserve-unmanaged", "default", map[string]any{
+			"image": "test-workspace-rbac:latest",
+			"serviceAccount": map[string]any{
+				"name": serviceAccountName,
+			},
+			"rbac": map[string]any{
+				"workspacePerms":      true,
+				"enableDeployments":   true,
+				"workspaceNamespaces": []any{workspaceNamespace},
+			},
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		namespacedName := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+			t.Fatalf("reconcile control plane before creating unmanaged RBAC: %v", err)
+		}
+
+		workspaceLabels := map[string]string{
+			"app.kubernetes.io/name":            "coder-control-plane",
+			"app.kubernetes.io/instance":        cp.Name,
+			"app.kubernetes.io/managed-by":      "coder-k8s",
+			"coder.com/control-plane":           cp.Name,
+			"coder.com/control-plane-namespace": cp.Namespace,
+		}
+		manualRoleName := "manual-external-workspace-role"
+		manualRole := &rbacv1.Role{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      manualRoleName,
+				Namespace: workspaceNamespace,
+				Labels:    workspaceLabels,
+			},
+			Rules: []rbacv1.PolicyRule{{
+				APIGroups: []string{""},
+				Resources: []string{"configmaps"},
+				Verbs:     []string{"get"},
+			}},
+		}
+		if err := k8sClient.Create(ctx, manualRole); err != nil {
+			t.Fatalf("create unmanaged role with matching labels: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(context.Background(), manualRole)
+		})
+
+		manualRoleBindingName := "manual-external-workspace-rolebinding"
+		manualRoleBinding := &rbacv1.RoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      manualRoleBindingName,
+				Namespace: workspaceNamespace,
+				Labels:    workspaceLabels,
+			},
+			RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: manualRoleName},
+			Subjects: []rbacv1.Subject{{
+				Kind:      rbacv1.ServiceAccountKind,
+				Name:      serviceAccountName,
+				Namespace: cp.Namespace,
+			}},
+		}
+		if err := k8sClient.Create(ctx, manualRoleBinding); err != nil {
+			t.Fatalf("create unmanaged role binding with matching labels: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(context.Background(), manualRoleBinding)
+		})
+
+		unstructuredCP := &unstructured.Unstructured{}
+		unstructuredCP.SetAPIVersion(coderv1alpha1.GroupVersion.String())
+		unstructuredCP.SetKind("CoderControlPlane")
+		if err := k8sClient.Get(ctx, namespacedName, unstructuredCP); err != nil {
+			t.Fatalf("get unstructured control plane for RBAC disable update: %v", err)
+		}
+		if err := unstructured.SetNestedField(unstructuredCP.Object, false, "spec", "rbac", "workspacePerms"); err != nil {
+			t.Fatalf("set spec.rbac.workspacePerms=false: %v", err)
+		}
+		if err := k8sClient.Update(ctx, unstructuredCP); err != nil {
+			t.Fatalf("update control plane to disable workspace RBAC: %v", err)
+		}
+
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+			t.Fatalf("reconcile control plane after disabling workspace RBAC: %v", err)
+		}
+
+		manualRole = &rbacv1.Role{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: manualRoleName, Namespace: workspaceNamespace}, manualRole); err != nil {
+			t.Fatalf("expected unmanaged role with matching labels to be preserved, got: %v", err)
+		}
+		manualRoleBinding = &rbacv1.RoleBinding{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: manualRoleBindingName, Namespace: workspaceNamespace}, manualRoleBinding); err != nil {
+			t.Fatalf("expected unmanaged role binding with matching labels to be preserved, got: %v", err)
+		}
+	})
+
+	t.Run("ExtraRulesAppended", func(t *testing.T) {
+		extraRule := rbacv1.PolicyRule{
+			APIGroups: []string{""},
+			Resources: []string{"configmaps"},
+			Verbs:     []string{"get", "list"},
+		}
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-workspace-rbac-extra-rules", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-workspace-rbac:latest",
+				ServiceAccount: coderv1alpha1.ServiceAccountSpec{
+					Name: "test-workspace-rbac-extra-rules-sa",
+				},
+				RBAC: coderv1alpha1.RBACSpec{
+					WorkspacePerms:    ptrTo(true),
+					EnableDeployments: ptrTo(true),
+					ExtraRules:        []rbacv1.PolicyRule{extraRule},
+				},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		roleName := expectedWorkspaceRoleName(t, cp, cp.Spec.ServiceAccount.Name)
+		role := &rbacv1.Role{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: cp.Namespace}, role); err != nil {
+			t.Fatalf("get workspace role: %v", err)
+		}
+		if !roleContainsRuleForResource(role.Rules, "", "configmaps") {
+			t.Fatal("expected workspace role to include extra configmaps rule")
+		}
+	})
+}
+
+func TestReconcile_DeploymentAlignment(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	t.Run("PortAndHAEnvAndDefaultAccessURL", func(t *testing.T) {
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-default", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-deployment-alignment:latest",
+				ServiceAccount: coderv1alpha1.ServiceAccountSpec{
+					Name: "test-deployment-alignment-sa",
+				},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		deployment := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+			t.Fatalf("get deployment: %v", err)
+		}
+		if len(deployment.Spec.Template.Spec.Containers) != 1 {
+			t.Fatalf("expected one deployment container, got %d", len(deployment.Spec.Template.Spec.Containers))
+		}
+		container := deployment.Spec.Template.Spec.Containers[0]
+		if len(container.Args) == 0 || container.Args[0] != "--http-address=0.0.0.0:8080" {
+			t.Fatalf("expected deployment arg --http-address=0.0.0.0:8080, got %v", container.Args)
+		}
+		if !containerHasPort(container, "http", 8080) {
+			t.Fatalf("expected deployment container to expose http port 8080, got %+v", container.Ports)
+		}
+
+		kubePodIPEnv := mustFindEnvVar(t, container.Env, "KUBE_POD_IP")
+		if kubePodIPEnv.ValueFrom == nil || kubePodIPEnv.ValueFrom.FieldRef == nil || kubePodIPEnv.ValueFrom.FieldRef.FieldPath != "status.podIP" {
+			t.Fatalf("expected KUBE_POD_IP fieldRef status.podIP, got %#v", kubePodIPEnv.ValueFrom)
+		}
+		if got := mustFindEnvVar(t, container.Env, "CODER_DERP_SERVER_RELAY_URL").Value; got != "http://$(KUBE_POD_IP):8080" {
+			t.Fatalf("expected CODER_DERP_SERVER_RELAY_URL %q, got %q", "http://$(KUBE_POD_IP):8080", got)
+		}
+		expectedAccessURL := "http://" + cp.Name + "." + cp.Namespace + ".svc.cluster.local"
+		if got := mustFindEnvVar(t, container.Env, "CODER_ACCESS_URL").Value; got != expectedAccessURL {
+			t.Fatalf("expected default CODER_ACCESS_URL %q, got %q", expectedAccessURL, got)
+		}
+
+		if deployment.Spec.Template.Spec.ServiceAccountName != cp.Spec.ServiceAccount.Name {
+			t.Fatalf("expected pod serviceAccountName %q, got %q", cp.Spec.ServiceAccount.Name, deployment.Spec.Template.Spec.ServiceAccountName)
+		}
+	})
+
+	t.Run("DefaultAccessURLIncludesCustomServicePort", func(t *testing.T) {
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-custom-service-port", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-deployment-alignment:latest",
+				Service: coderv1alpha1.ServiceSpec{
+					Port: 8080,
+				},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		deployment := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+			t.Fatalf("get deployment: %v", err)
+		}
+		container := deployment.Spec.Template.Spec.Containers[0]
+		expectedAccessURL := "http://" + cp.Name + "." + cp.Namespace + ".svc.cluster.local:8080"
+		if got := mustFindEnvVar(t, container.Env, "CODER_ACCESS_URL").Value; got != expectedAccessURL {
+			t.Fatalf("expected default CODER_ACCESS_URL %q, got %q", expectedAccessURL, got)
+		}
+	})
+
+	t.Run("UserDefinedAccessURLTakesPrecedence", func(t *testing.T) {
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-custom-access-url", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-deployment-alignment:latest",
+				ExtraEnv: []corev1.EnvVar{{
+					Name:  "CODER_ACCESS_URL",
+					Value: "https://coder.example.com",
+				}},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		deployment := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+			t.Fatalf("get deployment: %v", err)
+		}
+		container := deployment.Spec.Template.Spec.Containers[0]
+		if countEnvVar(container.Env, "CODER_ACCESS_URL") != 1 {
+			t.Fatalf("expected exactly one CODER_ACCESS_URL env var, got %d", countEnvVar(container.Env, "CODER_ACCESS_URL"))
+		}
+		if got := mustFindEnvVar(t, container.Env, "CODER_ACCESS_URL").Value; got != "https://coder.example.com" {
+			t.Fatalf("expected user-defined CODER_ACCESS_URL to win, got %q", got)
+		}
+	})
+
+	t.Run("EnvFromAccessURLTakesPrecedence", func(t *testing.T) {
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-access-url", Namespace: "default"},
+			Data: map[string]string{
+				"CODER_ACCESS_URL": "https://envfrom.example.test",
+			},
+		}
+		if err := k8sClient.Create(ctx, configMap); err != nil {
+			t.Fatalf("create configmap: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, configMap)
+		})
+
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-access-url", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-deployment-alignment:latest",
+				EnvFrom: []corev1.EnvFromSource{{
+					ConfigMapRef: &corev1.ConfigMapEnvSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: configMap.Name},
+					},
+				}},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		deployment := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+			t.Fatalf("get deployment: %v", err)
+		}
+		container := deployment.Spec.Template.Spec.Containers[0]
+		if countEnvVar(container.Env, "CODER_ACCESS_URL") != 0 {
+			t.Fatalf("expected operator to skip default CODER_ACCESS_URL when envFrom is configured, got %v", container.Env)
+		}
+	})
+
+	t.Run("EnvFromWithoutAccessURLKeepsDefault", func(t *testing.T) {
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-unrelated", Namespace: "default"},
+			Data: map[string]string{
+				"UNRELATED_ENV": "value",
+			},
+		}
+		if err := k8sClient.Create(ctx, configMap); err != nil {
+			t.Fatalf("create configmap: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, configMap)
+		})
+
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-unrelated", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-deployment-alignment:latest",
+				EnvFrom: []corev1.EnvFromSource{{
+					ConfigMapRef: &corev1.ConfigMapEnvSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: configMap.Name},
+					},
+				}},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		deployment := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+			t.Fatalf("get deployment: %v", err)
+		}
+		container := deployment.Spec.Template.Spec.Containers[0]
+		if countEnvVar(container.Env, "CODER_ACCESS_URL") != 1 {
+			t.Fatalf("expected exactly one default CODER_ACCESS_URL env var, got %d", countEnvVar(container.Env, "CODER_ACCESS_URL"))
+		}
+		expectedAccessURL := "http://" + cp.Name + "." + cp.Namespace + ".svc.cluster.local"
+		if got := mustFindEnvVar(t, container.Env, "CODER_ACCESS_URL").Value; got != expectedAccessURL {
+			t.Fatalf("expected default CODER_ACCESS_URL %q, got %q", expectedAccessURL, got)
+		}
+	})
+
+	t.Run("OptionalMissingEnvFromKeepsDefault", func(t *testing.T) {
+		optional := true
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-optional-missing", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-deployment-alignment:latest",
+				EnvFrom: []corev1.EnvFromSource{{
+					ConfigMapRef: &corev1.ConfigMapEnvSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "missing-optional-envfrom"},
+						Optional:             &optional,
+					},
+				}},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		deployment := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+			t.Fatalf("get deployment: %v", err)
+		}
+		container := deployment.Spec.Template.Spec.Containers[0]
+		expectedAccessURL := "http://" + cp.Name + "." + cp.Namespace + ".svc.cluster.local"
+		if got := mustFindEnvVar(t, container.Env, "CODER_ACCESS_URL").Value; got != expectedAccessURL {
+			t.Fatalf("expected default CODER_ACCESS_URL %q, got %q", expectedAccessURL, got)
+		}
+	})
+
+	t.Run("EnvFromPrefixEqualToAccessURLKeepsDefault", func(t *testing.T) {
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-prefix-equal", Namespace: "default"},
+			Data: map[string]string{
+				"UNRELATED_ENV": "value",
+			},
+		}
+		if err := k8sClient.Create(ctx, configMap); err != nil {
+			t.Fatalf("create configmap: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, configMap)
+		})
+
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-prefix-equal", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-deployment-alignment:latest",
+				EnvFrom: []corev1.EnvFromSource{{
+					Prefix: "CODER_ACCESS_URL",
+					ConfigMapRef: &corev1.ConfigMapEnvSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: configMap.Name},
+					},
+				}},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		deployment := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+			t.Fatalf("get deployment: %v", err)
+		}
+		container := deployment.Spec.Template.Spec.Containers[0]
+		expectedAccessURL := "http://" + cp.Name + "." + cp.Namespace + ".svc.cluster.local"
+		if got := mustFindEnvVar(t, container.Env, "CODER_ACCESS_URL").Value; got != expectedAccessURL {
+			t.Fatalf("expected default CODER_ACCESS_URL %q, got %q", expectedAccessURL, got)
+		}
+	})
+
+	t.Run("EnvFromBinaryDataDoesNotSuppressDefault", func(t *testing.T) {
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-binary", Namespace: "default"},
+			BinaryData: map[string][]byte{
+				"CODER_ACCESS_URL": []byte("https://binary-data.example.test"),
+			},
+		}
+		if err := k8sClient.Create(ctx, configMap); err != nil {
+			t.Fatalf("create configmap: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, configMap)
+		})
+
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-binary", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-deployment-alignment:latest",
+				EnvFrom: []corev1.EnvFromSource{{
+					ConfigMapRef: &corev1.ConfigMapEnvSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: configMap.Name},
+					},
+				}},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		deployment := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+			t.Fatalf("get deployment: %v", err)
+		}
+		container := deployment.Spec.Template.Spec.Containers[0]
+		expectedAccessURL := "http://" + cp.Name + "." + cp.Namespace + ".svc.cluster.local"
+		if got := mustFindEnvVar(t, container.Env, "CODER_ACCESS_URL").Value; got != expectedAccessURL {
+			t.Fatalf("expected default CODER_ACCESS_URL %q, got %q", expectedAccessURL, got)
+		}
+	})
+
+	t.Run("EnvFromWithConfigMapAndSecretRefsIsRejectedAtAdmission", func(t *testing.T) {
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-both-refs", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-deployment-alignment:latest",
+				EnvFrom: []corev1.EnvFromSource{{
+					ConfigMapRef: &corev1.ConfigMapEnvSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "both-refs-configmap"},
+					},
+					SecretRef: &corev1.SecretEnvSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "both-refs-secret"},
+					},
+				}},
+			},
+		}
+		err := k8sClient.Create(ctx, cp)
+		if err == nil {
+			t.Fatal("expected create to fail when envFrom entry sets both configMapRef and secretRef")
+		}
+		if !apierrors.IsInvalid(err) {
+			t.Fatalf("expected invalid error for envFrom entry with both refs, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "envFrom") {
+			t.Fatalf("expected envFrom validation error, got: %v", err)
+		}
+	})
+
+	t.Run("ResourcesAndSecurityContextsApplied", func(t *testing.T) {
+		runAsUser := int64(1001)
+		allowPrivilegeEscalation := false
+		fsGroup := int64(2001)
+		resources := &corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resourceMustParse(t, "250m"),
+				corev1.ResourceMemory: resourceMustParse(t, "128Mi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resourceMustParse(t, "500m"),
+				corev1.ResourceMemory: resourceMustParse(t, "256Mi"),
+			},
+		}
+		securityContext := &corev1.SecurityContext{
+			RunAsUser:                &runAsUser,
+			AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+		}
+		podSecurityContext := &corev1.PodSecurityContext{FSGroup: &fsGroup}
+
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-security", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image:              "test-deployment-alignment:latest",
+				Resources:          resources,
+				SecurityContext:    securityContext,
+				PodSecurityContext: podSecurityContext,
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		deployment := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+			t.Fatalf("get deployment: %v", err)
+		}
+		container := deployment.Spec.Template.Spec.Containers[0]
+		if !reflect.DeepEqual(container.Resources, *resources) {
+			t.Fatalf("expected container resources %#v, got %#v", *resources, container.Resources)
+		}
+		if !reflect.DeepEqual(container.SecurityContext, securityContext) {
+			t.Fatalf("expected container security context %#v, got %#v", securityContext, container.SecurityContext)
+		}
+		if !reflect.DeepEqual(deployment.Spec.Template.Spec.SecurityContext, podSecurityContext) {
+			t.Fatalf("expected pod security context %#v, got %#v", podSecurityContext, deployment.Spec.Template.Spec.SecurityContext)
+		}
+	})
+}
+
+func TestReconcile_ProbeConfiguration(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	t.Run("ReadinessEnabledByDefault", func(t *testing.T) {
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-probe-defaults", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-probes:latest",
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		deployment := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+			t.Fatalf("get deployment: %v", err)
+		}
+		container := deployment.Spec.Template.Spec.Containers[0]
+		if container.ReadinessProbe == nil {
+			t.Fatal("expected readiness probe to be configured by default")
+		}
+		if container.ReadinessProbe.HTTPGet == nil {
+			t.Fatal("expected readiness probe to use HTTP GET")
+		}
+		if container.ReadinessProbe.HTTPGet.Path != "/healthz" {
+			t.Fatalf("expected readiness probe path %q, got %q", "/healthz", container.ReadinessProbe.HTTPGet.Path)
+		}
+		if container.ReadinessProbe.HTTPGet.Port != intstr.FromString("http") {
+			t.Fatalf("expected readiness probe port name %q, got %#v", "http", container.ReadinessProbe.HTTPGet.Port)
+		}
+		if container.ReadinessProbe.PeriodSeconds != 10 {
+			t.Fatalf("expected readiness probe default periodSeconds=10, got %d", container.ReadinessProbe.PeriodSeconds)
+		}
+		if container.ReadinessProbe.TimeoutSeconds != 1 {
+			t.Fatalf("expected readiness probe default timeoutSeconds=1, got %d", container.ReadinessProbe.TimeoutSeconds)
+		}
+		if container.ReadinessProbe.SuccessThreshold != 1 {
+			t.Fatalf("expected readiness probe default successThreshold=1, got %d", container.ReadinessProbe.SuccessThreshold)
+		}
+		if container.ReadinessProbe.FailureThreshold != 3 {
+			t.Fatalf("expected readiness probe default failureThreshold=3, got %d", container.ReadinessProbe.FailureThreshold)
+		}
+	})
+
+	t.Run("LivenessProbeDisabled", func(t *testing.T) {
+		cp := createCoderControlPlaneUnstructured(ctx, t, "test-probe-liveness-disabled", "default", map[string]any{
+			"image": "test-probes:latest",
+			"livenessProbe": map[string]any{
+				"enabled": false,
+			},
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		deployment := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+			t.Fatalf("get deployment: %v", err)
+		}
+		container := deployment.Spec.Template.Spec.Containers[0]
+		if container.LivenessProbe != nil {
+			t.Fatalf("expected liveness probe to be disabled, got %#v", container.LivenessProbe)
+		}
+	})
+
+	t.Run("LivenessProbeEmptyObjectRemainsDisabled", func(t *testing.T) {
+		cp := createCoderControlPlaneUnstructured(ctx, t, "test-probe-liveness-empty-object", "default", map[string]any{
+			"image":         "test-probes:latest",
+			"livenessProbe": map[string]any{},
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		deployment := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+			t.Fatalf("get deployment: %v", err)
+		}
+		container := deployment.Spec.Template.Spec.Containers[0]
+		if container.LivenessProbe != nil {
+			t.Fatalf("expected liveness probe to stay disabled for empty object, got %#v", container.LivenessProbe)
+		}
+	})
+
+	t.Run("BothProbesEnabledWithCustomTiming", func(t *testing.T) {
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-probe-custom", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-probes:latest",
+				ReadinessProbe: coderv1alpha1.ProbeSpec{
+					Enabled:             ptrTo(true),
+					InitialDelaySeconds: 3,
+					PeriodSeconds:       ptrTo(int32(7)),
+					TimeoutSeconds:      ptrTo(int32(2)),
+					SuccessThreshold:    ptrTo(int32(2)),
+					FailureThreshold:    ptrTo(int32(5)),
+				},
+				LivenessProbe: coderv1alpha1.ProbeSpec{
+					Enabled:             ptrTo(true),
+					InitialDelaySeconds: 11,
+					PeriodSeconds:       ptrTo(int32(13)),
+					TimeoutSeconds:      ptrTo(int32(4)),
+					SuccessThreshold:    ptrTo(int32(1)),
+					FailureThreshold:    ptrTo(int32(6)),
+				},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		deployment := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+			t.Fatalf("get deployment: %v", err)
+		}
+		container := deployment.Spec.Template.Spec.Containers[0]
+		if container.ReadinessProbe == nil || container.LivenessProbe == nil {
+			t.Fatalf("expected both probes to be configured, got readiness=%#v liveness=%#v", container.ReadinessProbe, container.LivenessProbe)
+		}
+		if container.ReadinessProbe.InitialDelaySeconds != 3 || container.ReadinessProbe.PeriodSeconds != 7 || container.ReadinessProbe.TimeoutSeconds != 2 || container.ReadinessProbe.SuccessThreshold != 2 || container.ReadinessProbe.FailureThreshold != 5 {
+			t.Fatalf("unexpected readiness probe settings: %#v", container.ReadinessProbe)
+		}
+		if container.LivenessProbe.InitialDelaySeconds != 11 || container.LivenessProbe.PeriodSeconds != 13 || container.LivenessProbe.TimeoutSeconds != 4 || container.LivenessProbe.SuccessThreshold != 1 || container.LivenessProbe.FailureThreshold != 6 {
+			t.Fatalf("unexpected liveness probe settings: %#v", container.LivenessProbe)
+		}
+	})
+}
+
+func TestReconcile_TLSAlignment(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-tls-alignment", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-tls:latest",
+			TLS: coderv1alpha1.TLSSpec{
+				SecretNames: []string{"my-tls"},
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create control plane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("reconcile control plane: %v", err)
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	container := deployment.Spec.Template.Spec.Containers[0]
+	if got := mustFindEnvVar(t, container.Env, "CODER_TLS_ENABLE").Value; got != "true" {
+		t.Fatalf("expected CODER_TLS_ENABLE=true, got %q", got)
+	}
+	if got := mustFindEnvVar(t, container.Env, "CODER_TLS_ADDRESS").Value; got != "0.0.0.0:8443" {
+		t.Fatalf("expected CODER_TLS_ADDRESS=0.0.0.0:8443, got %q", got)
+	}
+	if got := mustFindEnvVar(t, container.Env, "CODER_TLS_CERT_FILE").Value; got != "/etc/ssl/certs/coder/my-tls/tls.crt" {
+		t.Fatalf("expected CODER_TLS_CERT_FILE for my-tls secret, got %q", got)
+	}
+	if got := mustFindEnvVar(t, container.Env, "CODER_TLS_KEY_FILE").Value; got != "/etc/ssl/certs/coder/my-tls/tls.key" {
+		t.Fatalf("expected CODER_TLS_KEY_FILE for my-tls secret, got %q", got)
+	}
+	if !containerHasPort(container, "https", 8443) {
+		t.Fatalf("expected deployment container to expose https port 8443, got %+v", container.Ports)
+	}
+	if !podHasSecretVolume(deployment.Spec.Template.Spec, "tls-my-tls", "my-tls") {
+		t.Fatalf("expected pod volume tls-my-tls to mount secret my-tls, got %+v", deployment.Spec.Template.Spec.Volumes)
+	}
+	if !containerHasVolumeMount(container, "tls-my-tls", "/etc/ssl/certs/coder/my-tls") {
+		t.Fatalf("expected container volume mount tls-my-tls at /etc/ssl/certs/coder/my-tls, got %+v", container.VolumeMounts)
+	}
+	if got := mustFindEnvVar(t, container.Env, "CODER_ACCESS_URL").Value; got != "https://test-tls-alignment.default.svc.cluster.local" {
+		t.Fatalf("expected default CODER_ACCESS_URL to use https, got %q", got)
+	}
+
+	service := &corev1.Service{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, service); err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	if !serviceHasPort(service.Spec.Ports, "https", 443) {
+		t.Fatalf("expected service https port 443, got %+v", service.Spec.Ports)
+	}
+
+	reconciled := &coderv1alpha1.CoderControlPlane{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, reconciled); err != nil {
+		t.Fatalf("get reconciled control plane: %v", err)
+	}
+	expectedStatusURL := "https://" + cp.Name + "." + cp.Namespace + ".svc.cluster.local:443"
+	if reconciled.Status.URL != expectedStatusURL {
+		t.Fatalf("expected status URL %q when TLS is enabled, got %q", expectedStatusURL, reconciled.Status.URL)
+	}
+}
+
+func TestReconcile_TLSDeduplicatesSecretNames(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-tls-secret-dedup", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-tls-dedup:latest",
+			TLS: coderv1alpha1.TLSSpec{
+				SecretNames: []string{"my-tls-dedup", "my-tls-dedup"},
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create control plane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("reconcile control plane: %v", err)
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+
+	podSpec := deployment.Spec.Template.Spec
+	tlsVolumeName := secretVolumeName(podSpec, "my-tls-dedup")
+	if tlsVolumeName == "" {
+		t.Fatalf("expected TLS volume for secret my-tls-dedup, got %+v", podSpec.Volumes)
+	}
+	volumeCount := 0
+	for _, volume := range podSpec.Volumes {
+		if volume.Name == tlsVolumeName {
+			volumeCount++
+		}
+	}
+	if volumeCount != 1 {
+		t.Fatalf("expected exactly one TLS volume named %q, got %+v", tlsVolumeName, podSpec.Volumes)
+	}
+
+	container := podSpec.Containers[0]
+	mountCount := 0
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == tlsVolumeName {
+			mountCount++
+		}
+	}
+	if mountCount != 1 {
+		t.Fatalf("expected exactly one TLS volume mount named %q, got %+v", tlsVolumeName, container.VolumeMounts)
+	}
+
+	if got := mustFindEnvVar(t, container.Env, "CODER_TLS_CERT_FILE").Value; got != "/etc/ssl/certs/coder/my-tls-dedup/tls.crt" {
+		t.Fatalf("expected CODER_TLS_CERT_FILE for my-tls-dedup secret, got %q", got)
+	}
+	if got := mustFindEnvVar(t, container.Env, "CODER_TLS_KEY_FILE").Value; got != "/etc/ssl/certs/coder/my-tls-dedup/tls.key" {
+		t.Fatalf("expected CODER_TLS_KEY_FILE for my-tls-dedup secret, got %q", got)
+	}
+}
+
+func TestReconcile_TLSWithServicePort443(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-tls-service-port-443", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-tls-443:latest",
+			Service: coderv1alpha1.ServiceSpec{
+				Port: 443,
+			},
+			TLS: coderv1alpha1.TLSSpec{
+				SecretNames: []string{"my-tls-443"},
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create control plane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("reconcile control plane: %v", err)
+	}
+
+	service := &corev1.Service{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, service); err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	if len(service.Spec.Ports) != 2 {
+		t.Fatalf("expected two service ports when service.port=443 and TLS is enabled, got %+v", service.Spec.Ports)
+	}
+	if !serviceHasPort(service.Spec.Ports, "https", 443) {
+		t.Fatalf("expected TLS-enabled service to expose https port 443, got %+v", service.Spec.Ports)
+	}
+	if !serviceHasPort(service.Spec.Ports, "http", 80) {
+		t.Fatalf("expected TLS-enabled service on port 443 to also expose http port 80, got %+v", service.Spec.Ports)
+	}
+	for _, port := range service.Spec.Ports {
+		if port.Name == "https" && port.TargetPort != intstr.FromInt(8443) {
+			t.Fatalf("expected https service port target 8443, got %+v", port.TargetPort)
+		}
+		if port.Name == "http" && port.TargetPort != intstr.FromInt(8080) {
+			t.Fatalf("expected http service port target 8080, got %+v", port.TargetPort)
+		}
+	}
+}
+
+func TestReconcile_TLSAndCertSecretVolumeNameSanitization(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-tls-cert-volume-sanitization", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-tls-sanitization:latest",
+			TLS: coderv1alpha1.TLSSpec{
+				SecretNames: []string{"my.tls.secret"},
+			},
+			Certs: coderv1alpha1.CertsSpec{
+				Secrets: []coderv1alpha1.CertSecretSelector{{
+					Name: "extra.ca.secret",
+					Key:  "ca.crt",
+				}},
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create control plane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("reconcile control plane: %v", err)
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	podSpec := deployment.Spec.Template.Spec
+	container := podSpec.Containers[0]
+
+	tlsVolumeName := secretVolumeName(podSpec, "my.tls.secret")
+	if tlsVolumeName == "" {
+		t.Fatalf("expected TLS volume for dotted secret, got %+v", podSpec.Volumes)
+	}
+	if !strings.HasPrefix(tlsVolumeName, "tls-my-tls-secret") {
+		t.Fatalf("expected TLS volume name to start with %q, got %q", "tls-my-tls-secret", tlsVolumeName)
+	}
+	if !containerHasVolumeMount(container, tlsVolumeName, "/etc/ssl/certs/coder/my.tls.secret") {
+		t.Fatalf("expected TLS volume mount name %q for dotted secret, got %+v", tlsVolumeName, container.VolumeMounts)
+	}
+
+	certVolumeName := secretVolumeName(podSpec, "extra.ca.secret")
+	if certVolumeName == "" {
+		t.Fatalf("expected cert volume for dotted secret, got %+v", podSpec.Volumes)
+	}
+	if !strings.HasPrefix(certVolumeName, "ca-cert-extra-ca-secret") {
+		t.Fatalf("expected cert volume name to start with %q, got %q", "ca-cert-extra-ca-secret", certVolumeName)
+	}
+	if !containerHasVolumeMount(container, certVolumeName, "/etc/ssl/certs/extra.ca.secret.crt") {
+		t.Fatalf("expected cert volume mount name %q for dotted secret, got %+v", certVolumeName, container.VolumeMounts)
+	}
+}
+
+func TestReconcile_CertSecretsWithSharedSecretNameReuseVolume(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cert-secret-shared-volume", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-certs-shared-volume:latest",
+			Certs: coderv1alpha1.CertsSpec{
+				Secrets: []coderv1alpha1.CertSecretSelector{
+					{Name: "shared.ca.secret", Key: "ca.crt"},
+					{Name: "shared.ca.secret", Key: "alt.crt"},
+				},
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create control plane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("reconcile control plane: %v", err)
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	podSpec := deployment.Spec.Template.Spec
+	container := podSpec.Containers[0]
+
+	certVolumeName := ""
+	certVolumeCount := 0
+	for _, volume := range podSpec.Volumes {
+		if volume.Secret == nil || volume.Secret.SecretName != "shared.ca.secret" {
+			continue
+		}
+		certVolumeCount++
+		certVolumeName = volume.Name
+	}
+	if certVolumeCount != 1 {
+		t.Fatalf("expected exactly one cert volume for shared secret, got %d volumes: %+v", certVolumeCount, podSpec.Volumes)
+	}
+
+	expectedMountBySubPath := map[string]string{
+		"ca.crt":  "/etc/ssl/certs/shared.ca.secret-ca.crt",
+		"alt.crt": "/etc/ssl/certs/shared.ca.secret-alt.crt",
+	}
+	mountCount := 0
+	for _, mount := range container.VolumeMounts {
+		if mount.Name != certVolumeName {
+			continue
+		}
+		expectedPath, ok := expectedMountBySubPath[mount.SubPath]
+		if !ok {
+			t.Fatalf("unexpected cert subPath %q for mount %#v", mount.SubPath, mount)
+		}
+		if mount.MountPath != expectedPath {
+			t.Fatalf("expected mount path %q for subPath %q, got %q", expectedPath, mount.SubPath, mount.MountPath)
+		}
+		mountCount++
+	}
+	if mountCount != len(expectedMountBySubPath) {
+		t.Fatalf("expected %d cert volume mounts for shared secret, got %d mounts: %+v", len(expectedMountBySubPath), mountCount, container.VolumeMounts)
+	}
+}
+
+func TestReconcile_CertSecretMountFileNormalizationAvoidsPathCollisions(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cert-normalized-mount-collision", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-certs-mount-collision:latest",
+			Certs: coderv1alpha1.CertsSpec{
+				Secrets: []coderv1alpha1.CertSecretSelector{
+					{Name: "foo", Key: "ca.crt"},
+					{Name: "foo.crt", Key: "ca.crt"},
+				},
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create control plane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("reconcile control plane: %v", err)
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	container := deployment.Spec.Template.Spec.Containers[0]
+
+	mountPaths := map[string]struct{}{}
+	for _, mount := range container.VolumeMounts {
+		if !strings.HasPrefix(mount.MountPath, "/etc/ssl/certs/foo") {
+			continue
+		}
+		mountPaths[mount.MountPath] = struct{}{}
+	}
+	if len(mountPaths) != 2 {
+		t.Fatalf("expected two unique normalized cert mount paths, got %d: %#v", len(mountPaths), mountPaths)
+	}
+	if _, ok := mountPaths["/etc/ssl/certs/foo.crt"]; !ok {
+		t.Fatalf("expected normalized mount path %q, got %#v", "/etc/ssl/certs/foo.crt", mountPaths)
+	}
+	if _, ok := mountPaths["/etc/ssl/certs/foo-2.crt"]; !ok {
+		t.Fatalf("expected deduplicated mount path %q, got %#v", "/etc/ssl/certs/foo-2.crt", mountPaths)
+	}
+}
+
+func TestReconcile_PassThroughConfiguration(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	affinity := &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{
+					{
+						MatchExpressions: []corev1.NodeSelectorRequirement{{
+							Key:      "kubernetes.io/os",
+							Operator: corev1.NodeSelectorOpIn,
+							Values:   []string{"linux"},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pass-through", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-pass-through:latest",
+			Volumes: []corev1.Volume{{
+				Name: "extra-volume",
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{},
+				},
+			}},
+			VolumeMounts: []corev1.VolumeMount{{
+				Name:      "extra-volume",
+				MountPath: "/var/lib/coder-extra",
+			}},
+			EnvFrom: []corev1.EnvFromSource{{
+				ConfigMapRef: &corev1.ConfigMapEnvSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "coder-extra-env"},
+				},
+			}},
+			NodeSelector: map[string]string{"topology.kubernetes.io/region": "us-west"},
+			Tolerations: []corev1.Toleration{{
+				Key:      "dedicated",
+				Operator: corev1.TolerationOpExists,
+				Effect:   corev1.TaintEffectNoSchedule,
+			}},
+			Affinity: affinity,
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create control plane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("reconcile control plane: %v", err)
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	podSpec := deployment.Spec.Template.Spec
+	container := podSpec.Containers[0]
+
+	if !reflect.DeepEqual(container.EnvFrom, cp.Spec.EnvFrom) {
+		t.Fatalf("expected container EnvFrom %#v, got %#v", cp.Spec.EnvFrom, container.EnvFrom)
+	}
+	if !containerHasVolumeMount(container, "extra-volume", "/var/lib/coder-extra") {
+		t.Fatalf("expected container to include extra volume mount, got %+v", container.VolumeMounts)
+	}
+	if !podHasVolume(podSpec, "extra-volume") {
+		t.Fatalf("expected pod to include extra volume, got %+v", podSpec.Volumes)
+	}
+	if !reflect.DeepEqual(podSpec.NodeSelector, cp.Spec.NodeSelector) {
+		t.Fatalf("expected pod node selector %#v, got %#v", cp.Spec.NodeSelector, podSpec.NodeSelector)
+	}
+	if !reflect.DeepEqual(podSpec.Tolerations, cp.Spec.Tolerations) {
+		t.Fatalf("expected pod tolerations %#v, got %#v", cp.Spec.Tolerations, podSpec.Tolerations)
+	}
+	if !reflect.DeepEqual(podSpec.Affinity, cp.Spec.Affinity) {
+		t.Fatalf("expected pod affinity %#v, got %#v", cp.Spec.Affinity, podSpec.Affinity)
+	}
+}
+
+func TestReconcile_IngressExposure(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	t.Run("IngressCreated", func(t *testing.T) {
+		className := "nginx"
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-ingress-created", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-ingress:latest",
+				Expose: &coderv1alpha1.ExposeSpec{
+					Ingress: &coderv1alpha1.IngressExposeSpec{
+						Host:      "coder.example.test",
+						ClassName: &className,
+						Annotations: map[string]string{
+							"nginx.ingress.kubernetes.io/proxy-read-timeout": "300",
+						},
+					},
+				},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		ingress := &networkingv1.Ingress{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, ingress); err != nil {
+			t.Fatalf("get ingress: %v", err)
+		}
+		if ingress.Spec.IngressClassName == nil || *ingress.Spec.IngressClassName != className {
+			t.Fatalf("expected ingress className %q, got %#v", className, ingress.Spec.IngressClassName)
+		}
+		if ingress.Annotations["nginx.ingress.kubernetes.io/proxy-read-timeout"] != "300" {
+			t.Fatalf("expected ingress annotation to be preserved, got %q", ingress.Annotations["nginx.ingress.kubernetes.io/proxy-read-timeout"])
+		}
+		if len(ingress.Spec.Rules) != 1 {
+			t.Fatalf("expected one ingress rule, got %d", len(ingress.Spec.Rules))
+		}
+		rule := ingress.Spec.Rules[0]
+		if rule.Host != "coder.example.test" {
+			t.Fatalf("expected ingress host %q, got %q", "coder.example.test", rule.Host)
+		}
+		if rule.HTTP == nil || len(rule.HTTP.Paths) != 1 {
+			t.Fatalf("expected one ingress HTTP path, got %#v", rule.HTTP)
+		}
+		path := rule.HTTP.Paths[0]
+		if path.Path != "/" {
+			t.Fatalf("expected ingress path %q, got %q", "/", path.Path)
+		}
+		if path.Backend.Service == nil {
+			t.Fatal("expected ingress backend service to be configured")
+		}
+		if path.Backend.Service.Name != cp.Name {
+			t.Fatalf("expected ingress backend service name %q, got %q", cp.Name, path.Backend.Service.Name)
+		}
+		if path.Backend.Service.Port.Number != 80 {
+			t.Fatalf("expected ingress backend service port 80, got %d", path.Backend.Service.Port.Number)
+		}
+	})
+
+	t.Run("IngressTLSServicePort443UsesHTTPBackend", func(t *testing.T) {
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-ingress-tls-service-port-443-backend", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image:   "test-ingress:latest",
+				Service: coderv1alpha1.ServiceSpec{Port: 443},
+				TLS:     coderv1alpha1.TLSSpec{SecretNames: []string{"ingress-backend-tls"}},
+				Expose: &coderv1alpha1.ExposeSpec{
+					Ingress: &coderv1alpha1.IngressExposeSpec{
+						Host:         "tls-443.ingress.example.test",
+						WildcardHost: "*.tls-443.ingress.example.test",
+					},
+				},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		ingress := &networkingv1.Ingress{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, ingress); err != nil {
+			t.Fatalf("get ingress: %v", err)
+		}
+		for _, rule := range ingress.Spec.Rules {
+			if rule.HTTP == nil || len(rule.HTTP.Paths) != 1 {
+				t.Fatalf("expected one ingress HTTP path for host %q, got %#v", rule.Host, rule.HTTP)
+			}
+			path := rule.HTTP.Paths[0]
+			if path.Backend.Service == nil {
+				t.Fatalf("expected ingress backend service for host %q", rule.Host)
+			}
+			if got := path.Backend.Service.Port.Number; got != 80 {
+				t.Fatalf("expected ingress backend service port 80 for host %q, got %d", rule.Host, got)
+			}
+		}
+	})
+
+	t.Run("IngressTLSAndWildcardHost", func(t *testing.T) {
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-ingress-tls-wildcard", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-ingress:latest",
+				Expose: &coderv1alpha1.ExposeSpec{
+					Ingress: &coderv1alpha1.IngressExposeSpec{
+						Host:         "coder.example.test",
+						WildcardHost: "*.apps.example.test",
+						TLS: &coderv1alpha1.IngressTLSExposeSpec{
+							SecretName:         "coder-tls",
+							WildcardSecretName: "coder-wildcard-tls",
+						},
+					},
+				},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		ingress := &networkingv1.Ingress{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, ingress); err != nil {
+			t.Fatalf("get ingress: %v", err)
+		}
+		if len(ingress.Spec.Rules) != 2 {
+			t.Fatalf("expected two ingress rules for primary and wildcard hosts, got %d", len(ingress.Spec.Rules))
+		}
+		if !ingressHasHost(ingress.Spec.Rules, "coder.example.test") {
+			t.Fatal("expected ingress rules to include primary host")
+		}
+		if !ingressHasHost(ingress.Spec.Rules, "*.apps.example.test") {
+			t.Fatal("expected ingress rules to include wildcard host")
+		}
+		if len(ingress.Spec.TLS) != 2 {
+			t.Fatalf("expected two ingress TLS entries, got %d", len(ingress.Spec.TLS))
+		}
+		if !ingressTLSContainsSecretAndHost(ingress.Spec.TLS, "coder-tls", "coder.example.test") {
+			t.Fatal("expected ingress TLS to include primary host secret")
+		}
+		if !ingressTLSContainsSecretAndHost(ingress.Spec.TLS, "coder-wildcard-tls", "*.apps.example.test") {
+			t.Fatal("expected ingress TLS to include wildcard host secret")
+		}
+	})
+
+	t.Run("IngressCleanupOnRemoval", func(t *testing.T) {
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-ingress-cleanup", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-ingress:latest",
+				Expose: &coderv1alpha1.ExposeSpec{
+					Ingress: &coderv1alpha1.IngressExposeSpec{
+						Host: "cleanup.example.test",
+					},
+				},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		namespacedName := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+			t.Fatalf("first reconcile control plane: %v", err)
+		}
+		ingress := &networkingv1.Ingress{}
+		if err := k8sClient.Get(ctx, namespacedName, ingress); err != nil {
+			t.Fatalf("expected ingress to exist before cleanup, got: %v", err)
+		}
+
+		latest := &coderv1alpha1.CoderControlPlane{}
+		if err := k8sClient.Get(ctx, namespacedName, latest); err != nil {
+			t.Fatalf("get latest control plane: %v", err)
+		}
+		latest.Spec.Expose = nil
+		if err := k8sClient.Update(ctx, latest); err != nil {
+			t.Fatalf("update control plane to remove exposure: %v", err)
+		}
+
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+			t.Fatalf("second reconcile control plane: %v", err)
+		}
+		err := k8sClient.Get(ctx, namespacedName, ingress)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("expected ingress to be deleted after exposure removal, got: %v", err)
+		}
+	})
+}
+
+func TestReconcile_HTTPRouteExposure(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+	ensureHTTPRouteCRDInstalled(t)
+
+	gatewayNamespace := "default"
+	sectionName := "https"
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-httproute-created", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-httproute:latest",
+			Expose: &coderv1alpha1.ExposeSpec{
+				Gateway: &coderv1alpha1.GatewayExposeSpec{
+					Host:         "coder.gateway.example.test",
+					WildcardHost: "*.apps.gateway.example.test",
+					ParentRefs: []coderv1alpha1.GatewayParentRef{
+						{
+							Name:        "coder-gateway",
+							Namespace:   &gatewayNamespace,
+							SectionName: &sectionName,
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create control plane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	namespacedName := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}
+	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
+	if err != nil {
+		t.Fatalf("reconcile control plane: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("expected gateway exposure to request periodic drift requeue, got %+v", result)
+	}
+
+	httpRoute := &gatewayv1.HTTPRoute{}
+	if err := k8sClient.Get(ctx, namespacedName, httpRoute); err != nil {
+		t.Fatalf("get httproute: %v", err)
+	}
+	if len(httpRoute.Spec.Hostnames) != 2 {
+		t.Fatalf("expected two hostnames on httproute, got %d", len(httpRoute.Spec.Hostnames))
+	}
+	if !httpRouteHasHostname(httpRoute.Spec.Hostnames, "coder.gateway.example.test") {
+		t.Fatal("expected httproute to include primary host")
+	}
+	if !httpRouteHasHostname(httpRoute.Spec.Hostnames, "*.apps.gateway.example.test") {
+		t.Fatal("expected httproute to include wildcard host")
+	}
+	if len(httpRoute.Spec.ParentRefs) != 1 {
+		t.Fatalf("expected one parentRef, got %d", len(httpRoute.Spec.ParentRefs))
+	}
+	parentRef := httpRoute.Spec.ParentRefs[0]
+	if string(parentRef.Name) != "coder-gateway" {
+		t.Fatalf("expected parentRef name %q, got %q", "coder-gateway", parentRef.Name)
+	}
+	if parentRef.Namespace == nil || string(*parentRef.Namespace) != gatewayNamespace {
+		t.Fatalf("expected parentRef namespace %q, got %#v", gatewayNamespace, parentRef.Namespace)
+	}
+	if parentRef.SectionName == nil || string(*parentRef.SectionName) != sectionName {
+		t.Fatalf("expected parentRef sectionName %q, got %#v", sectionName, parentRef.SectionName)
+	}
+	if len(httpRoute.Spec.Rules) != 1 {
+		t.Fatalf("expected one httproute rule, got %d", len(httpRoute.Spec.Rules))
+	}
+	rule := httpRoute.Spec.Rules[0]
+	if len(rule.Matches) != 1 || rule.Matches[0].Path == nil || rule.Matches[0].Path.Value == nil || *rule.Matches[0].Path.Value != "/" {
+		t.Fatalf("expected httproute prefix path match on '/', got %#v", rule.Matches)
+	}
+	if len(rule.BackendRefs) != 1 {
+		t.Fatalf("expected one backendRef, got %d", len(rule.BackendRefs))
+	}
+	backendRef := rule.BackendRefs[0].BackendObjectReference
+	if string(backendRef.Name) != cp.Name {
+		t.Fatalf("expected backend service name %q, got %q", cp.Name, backendRef.Name)
+	}
+	if backendRef.Kind == nil || string(*backendRef.Kind) != "Service" {
+		t.Fatalf("expected backend kind Service, got %#v", backendRef.Kind)
+	}
+	if backendRef.Group == nil || string(*backendRef.Group) != "" {
+		t.Fatalf("expected backend group to be empty for core Service, got %#v", backendRef.Group)
+	}
+	if backendRef.Port == nil || int32(*backendRef.Port) != 80 {
+		t.Fatalf("expected backend port 80, got %#v", backendRef.Port)
+	}
+}
+
+func TestReconcile_HTTPRouteExposure_TLSServicePort443UsesHTTPBackend(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+	ensureHTTPRouteCRDInstalled(t)
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-httproute-tls-443-backend-http", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-httproute:latest",
+			Service: coderv1alpha1.ServiceSpec{
+				Port: 443,
+			},
+			TLS: coderv1alpha1.TLSSpec{
+				SecretNames: []string{"test-httproute-tls-secret"},
+			},
+			Expose: &coderv1alpha1.ExposeSpec{
+				Gateway: &coderv1alpha1.GatewayExposeSpec{
+					Host: "tls-443.gateway.example.test",
+					ParentRefs: []coderv1alpha1.GatewayParentRef{{
+						Name: "coder-gateway",
+					}},
+				},
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create control plane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	namespacedName := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+		t.Fatalf("reconcile control plane: %v", err)
+	}
+
+	service := &corev1.Service{}
+	if err := k8sClient.Get(ctx, namespacedName, service); err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	if !serviceHasPort(service.Spec.Ports, "https", 443) {
+		t.Fatalf("expected TLS-enabled service to expose https port 443, got %#v", service.Spec.Ports)
+	}
+	if !serviceHasPort(service.Spec.Ports, "http", 80) {
+		t.Fatalf("expected TLS-enabled service on port 443 to also expose http port 80 for gateway backends, got %#v", service.Spec.Ports)
+	}
+
+	httpRoute := &gatewayv1.HTTPRoute{}
+	if err := k8sClient.Get(ctx, namespacedName, httpRoute); err != nil {
+		t.Fatalf("get httproute: %v", err)
+	}
+	if len(httpRoute.Spec.Rules) != 1 || len(httpRoute.Spec.Rules[0].BackendRefs) != 1 {
+		t.Fatalf("expected one backendRef, got %#v", httpRoute.Spec.Rules)
+	}
+	backendRef := httpRoute.Spec.Rules[0].BackendRefs[0].BackendObjectReference
+	if backendRef.Port == nil || int32(*backendRef.Port) != 80 {
+		t.Fatalf("expected HTTPRoute backend port 80 when service.port=443 with TLS enabled, got %#v", backendRef.Port)
+	}
+}
+
+func TestReconcile_HTTPRouteExposure_RequiresParentRefs(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+	ensureHTTPRouteCRDInstalled(t)
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-httproute-parentrefs-required", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-httproute:latest",
+			Expose: &coderv1alpha1.ExposeSpec{
+				Gateway: &coderv1alpha1.GatewayExposeSpec{
+					Host: "missing-parentrefs.gateway.example.test",
+				},
+			},
+		},
+	}
+	err := k8sClient.Create(ctx, cp)
+	if err == nil {
+		t.Fatal("expected create to fail when gateway parentRefs are missing")
+	}
+	if !apierrors.IsInvalid(err) {
+		t.Fatalf("expected invalid error for missing gateway parentRefs, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "parentRefs") {
+		t.Fatalf("expected missing parentRefs validation error, got: %v", err)
+	}
+}
+
+func TestReconcile_HTTPRouteExposure_CRDMissingIsGraceful(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+	if err := gatewayv1.Install(scheme); err != nil {
+		t.Fatalf("register gateway API types in scheme: %v", err)
+	}
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-httproute-crd-missing", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-httproute:latest",
+			Expose: &coderv1alpha1.ExposeSpec{
+				Gateway: &coderv1alpha1.GatewayExposeSpec{
+					Host: "missing-crd.gateway.example.test",
+					ParentRefs: []coderv1alpha1.GatewayParentRef{{
+						Name: "missing-crd-gateway",
+					}},
+				},
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create control plane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	clientWithNoMatch := &httpRouteNoMatchClient{Client: k8sClient}
+	r := &controller.CoderControlPlaneReconciler{Client: clientWithNoMatch, Scheme: scheme}
+	namespacedName := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}
+	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
+	if err != nil {
+		t.Fatalf("expected reconcile to gracefully ignore missing Gateway CRDs, got error: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("expected missing Gateway CRDs to request periodic requeue, got %+v", result)
+	}
+	if clientWithNoMatch.HTTPRouteGetCalls() == 0 {
+		t.Fatal("expected gateway exposure reconciliation to attempt HTTPRoute get")
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, namespacedName, deployment); err != nil {
+		t.Fatalf("expected deployment reconciliation to continue when gateway CRDs are missing: %v", err)
+	}
+}
+
+func createCoderControlPlaneUnstructured(ctx context.Context, t *testing.T, name, namespace string, spec map[string]any) *coderv1alpha1.CoderControlPlane {
+	t.Helper()
+
+	if strings.TrimSpace(name) == "" {
+		t.Fatal("assertion failed: control plane name must not be empty")
+	}
+	if strings.TrimSpace(namespace) == "" {
+		t.Fatal("assertion failed: control plane namespace must not be empty")
+	}
+
+	controlPlane := &unstructured.Unstructured{}
+	controlPlane.SetAPIVersion(coderv1alpha1.GroupVersion.String())
+	controlPlane.SetKind("CoderControlPlane")
+	controlPlane.SetName(name)
+	controlPlane.SetNamespace(namespace)
+	controlPlane.Object["spec"] = spec
+
+	if err := k8sClient.Create(ctx, controlPlane); err != nil {
+		t.Fatalf("create unstructured control plane %s/%s: %v", namespace, name, err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(context.Background(), controlPlane)
+	})
+
+	typed := &coderv1alpha1.CoderControlPlane{}
+	namespacedName := types.NamespacedName{Name: name, Namespace: namespace}
+	if err := k8sClient.Get(ctx, namespacedName, typed); err != nil {
+		t.Fatalf("get typed control plane %s: %v", namespacedName, err)
+	}
+	if typed.Name != name || typed.Namespace != namespace {
+		t.Fatalf("assertion failed: fetched control plane %s/%s does not match expected %s/%s", typed.Namespace, typed.Name, namespace, name)
+	}
+
+	return typed
+}
+
+func roleContainsRuleForResource(rules []rbacv1.PolicyRule, apiGroup, resource string) bool {
+	for _, rule := range rules {
+		if !sliceContainsString(rule.APIGroups, apiGroup) {
+			continue
+		}
+		if !sliceContainsString(rule.Resources, resource) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func mustFindEnvVar(t *testing.T, envVars []corev1.EnvVar, name string) corev1.EnvVar {
+	t.Helper()
+
+	for _, envVar := range envVars {
+		if envVar.Name == name {
+			return envVar
+		}
+	}
+	t.Fatalf("expected environment variable %q to exist, got %v", name, envVars)
+	return corev1.EnvVar{}
+}
+
+func countEnvVar(envVars []corev1.EnvVar, name string) int {
+	count := 0
+	for _, envVar := range envVars {
+		if envVar.Name == name {
+			count++
+		}
+	}
+	return count
+}
+
+func containerHasPort(container corev1.Container, name string, port int32) bool {
+	for _, containerPort := range container.Ports {
+		if containerPort.Name == name && containerPort.ContainerPort == port {
+			return true
+		}
+	}
+	return false
+}
+
+func podHasSecretVolume(podSpec corev1.PodSpec, volumeName, secretName string) bool {
+	for _, volume := range podSpec.Volumes {
+		if volume.Name != volumeName {
+			continue
+		}
+		if volume.Secret != nil && volume.Secret.SecretName == secretName {
+			return true
+		}
+	}
+	return false
+}
+
+func secretVolumeName(podSpec corev1.PodSpec, secretName string) string {
+	for _, volume := range podSpec.Volumes {
+		if volume.Secret == nil {
+			continue
+		}
+		if volume.Secret.SecretName == secretName {
+			return volume.Name
+		}
+	}
+	return ""
+}
+
+func podHasVolume(podSpec corev1.PodSpec, volumeName string) bool {
+	for _, volume := range podSpec.Volumes {
+		if volume.Name == volumeName {
+			return true
+		}
+	}
+	return false
+}
+
+func containerHasVolumeMount(container corev1.Container, mountName, mountPath string) bool {
+	for _, volumeMount := range container.VolumeMounts {
+		if volumeMount.Name == mountName && volumeMount.MountPath == mountPath {
+			return true
+		}
+	}
+	return false
+}
+
+func serviceHasPort(servicePorts []corev1.ServicePort, name string, port int32) bool {
+	for _, servicePort := range servicePorts {
+		if servicePort.Name == name && servicePort.Port == port {
+			return true
+		}
+	}
+	return false
+}
+
+func ingressHasHost(rules []networkingv1.IngressRule, host string) bool {
+	for _, rule := range rules {
+		if rule.Host == host {
+			return true
+		}
+	}
+	return false
+}
+
+func ingressTLSContainsSecretAndHost(entries []networkingv1.IngressTLS, secretName, host string) bool {
+	for _, entry := range entries {
+		if entry.SecretName != secretName {
+			continue
+		}
+		if sliceContainsString(entry.Hosts, host) {
+			return true
+		}
+	}
+	return false
+}
+
+func httpRouteHasHostname(hostnames []gatewayv1.Hostname, hostname string) bool {
+	for _, item := range hostnames {
+		if string(item) == hostname {
+			return true
+		}
+	}
+	return false
+}
+
+func sliceContainsString(values []string, candidate string) bool {
+	for _, value := range values {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func expectedWorkspaceRoleName(t *testing.T, cp *coderv1alpha1.CoderControlPlane, serviceAccountName string) string {
+	t.Helper()
+
+	scopeHash := expectedWorkspaceRBACScopeHash(t, cp)
+	return expectedScopedWorkspaceRBACName(t, serviceAccountName, scopeHash, "-workspace-perms")
+}
+
+func expectedWorkspaceRoleBindingName(t *testing.T, cp *coderv1alpha1.CoderControlPlane, serviceAccountName string) string {
+	t.Helper()
+
+	scopeHash := expectedWorkspaceRBACScopeHash(t, cp)
+	return expectedScopedWorkspaceRBACName(t, serviceAccountName, scopeHash, "")
+}
+
+func expectedWorkspaceRBACScopeHash(t *testing.T, cp *coderv1alpha1.CoderControlPlane) string {
+	t.Helper()
+	if cp == nil {
+		t.Fatal("expected control plane must not be nil")
+	}
+	if strings.TrimSpace(cp.Namespace) == "" {
+		t.Fatal("expected control plane namespace must not be empty")
+	}
+	if strings.TrimSpace(cp.Name) == "" {
+		t.Fatal("expected control plane name must not be empty")
+	}
+
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(cp.Namespace))
+	_, _ = hasher.Write([]byte{0})
+	_, _ = hasher.Write([]byte(cp.Name))
+	return fmt.Sprintf("%08x", hasher.Sum32())
+}
+
+func expectedScopedWorkspaceRBACName(t *testing.T, baseName, scopeHash, suffix string) string {
+	t.Helper()
+
+	normalizedBaseName := strings.TrimSpace(baseName)
+	if normalizedBaseName == "" {
+		t.Fatal("expected workspace RBAC base name must not be empty")
+	}
+	if strings.TrimSpace(scopeHash) == "" {
+		t.Fatal("expected workspace RBAC scope hash must not be empty")
+	}
+
+	const kubernetesObjectNameMaxLength = 253
+
+	candidate := fmt.Sprintf("%s-%s%s", normalizedBaseName, scopeHash, suffix)
+	if len(candidate) <= kubernetesObjectNameMaxLength {
+		return candidate
+	}
+
+	available := kubernetesObjectNameMaxLength - len(scopeHash) - len(suffix) - 1
+	if available < 1 {
+		t.Fatalf("expected workspace RBAC name prefix capacity to be positive, got %d", available)
+	}
+
+	truncatedPrefix := normalizedBaseName
+	if len(truncatedPrefix) > available {
+		truncatedPrefix = truncatedPrefix[:available]
+	}
+	truncatedPrefix = strings.Trim(truncatedPrefix, "-.")
+	if truncatedPrefix == "" {
+		truncatedPrefix = "workspace"
+	}
+
+	result := fmt.Sprintf("%s-%s%s", truncatedPrefix, scopeHash, suffix)
+	if len(result) > kubernetesObjectNameMaxLength {
+		t.Fatalf("expected workspace RBAC name %q to be <= %d characters", result, kubernetesObjectNameMaxLength)
+	}
+
+	return result
+}
+
+func resourceMustParse(t *testing.T, quantity string) resource.Quantity {
+	t.Helper()
+
+	parsedQuantity, err := resource.ParseQuantity(quantity)
+	if err != nil {
+		t.Fatalf("parse resource quantity %q: %v", quantity, err)
+	}
+	return parsedQuantity
+}
+
+var (
+	ensureGatewaySchemeOnce sync.Once
+	ensureGatewaySchemeErr  error
+)
+
+func ensureGatewaySchemeRegistered(t *testing.T) {
+	t.Helper()
+
+	ensureGatewaySchemeOnce.Do(func() {
+		if scheme == nil {
+			ensureGatewaySchemeErr = errors.New("assertion failed: test scheme must not be nil")
+			return
+		}
+		ensureGatewaySchemeErr = gatewayv1.Install(scheme)
+	})
+	if ensureGatewaySchemeErr != nil {
+		t.Fatalf("register gateway API types in test scheme: %v", ensureGatewaySchemeErr)
+	}
+}
+
+var ensureHTTPRouteCRDOnce sync.Once
+
+func ensureHTTPRouteCRDInstalled(t *testing.T) {
+	t.Helper()
+
+	var installErr error
+	ensureHTTPRouteCRDOnce.Do(func() {
+		if err := gatewayv1.Install(scheme); err != nil {
+			installErr = err
+			return
+		}
+
+		apiextensionsClient, err := apiextensionsclientset.NewForConfig(cfg)
+		if err != nil {
+			installErr = err
+			return
+		}
+
+		const httpRouteCRDName = "httproutes.gateway.networking.k8s.io"
+		_, err = apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().Get(context.Background(), httpRouteCRDName, metav1.GetOptions{})
+		if err == nil {
+			return
+		}
+		if !apierrors.IsNotFound(err) {
+			installErr = err
+			return
+		}
+
+		httpRouteCRD := &apiextensionsv1.CustomResourceDefinition{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: httpRouteCRDName,
+				Annotations: map[string]string{
+					"api-approved.kubernetes.io": "https://github.com/kubernetes-sigs/gateway-api",
+				},
+			},
+			Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+				Group: gatewayv1.GroupVersion.Group,
+				Names: apiextensionsv1.CustomResourceDefinitionNames{
+					Plural:   "httproutes",
+					Singular: "httproute",
+					Kind:     "HTTPRoute",
+					ListKind: "HTTPRouteList",
+				},
+				Scope: apiextensionsv1.NamespaceScoped,
+				Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{
+					Name:    gatewayv1.GroupVersion.Version,
+					Served:  true,
+					Storage: true,
+					Schema: &apiextensionsv1.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensionsv1.JSONSchemaProps{
+								"spec": {
+									Type:                   "object",
+									XPreserveUnknownFields: ptrTo(true),
+								},
+								"status": {
+									Type:                   "object",
+									XPreserveUnknownFields: ptrTo(true),
+								},
+							},
+						},
+					},
+				}},
+			},
+		}
+		if _, err := apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().Create(context.Background(), httpRouteCRD, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+			installErr = err
+			return
+		}
+
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			storedCRD, getErr := apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().Get(context.Background(), httpRouteCRDName, metav1.GetOptions{})
+			if getErr != nil {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			if customResourceDefinitionEstablished(storedCRD) {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		installErr = errors.New("timed out waiting for HTTPRoute CRD establishment")
+	})
+	if installErr != nil {
+		t.Fatalf("install HTTPRoute CRD for test: %v", installErr)
+	}
+}
+
+func customResourceDefinitionEstablished(customResourceDefinition *apiextensionsv1.CustomResourceDefinition) bool {
+	if customResourceDefinition == nil {
+		return false
+	}
+	for _, condition := range customResourceDefinition.Status.Conditions {
+		if condition.Type == apiextensionsv1.Established && condition.Status == apiextensionsv1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
+type httpRouteNoMatchClient struct {
+	ctrlclient.Client
+	mu                sync.Mutex
+	httpRouteGetCalls int
+}
+
+func (c *httpRouteNoMatchClient) Get(ctx context.Context, key types.NamespacedName, object ctrlclient.Object, opts ...ctrlclient.GetOption) error {
+	if _, ok := object.(*gatewayv1.HTTPRoute); ok {
+		c.mu.Lock()
+		c.httpRouteGetCalls++
+		c.mu.Unlock()
+		return &apimeta.NoResourceMatchError{PartialResource: schema.GroupVersionResource{
+			Group:    gatewayv1.GroupVersion.Group,
+			Version:  gatewayv1.GroupVersion.Version,
+			Resource: "httproutes",
+		}}
+	}
+	return c.Client.Get(ctx, key, object, opts...)
+}
+
+func (c *httpRouteNoMatchClient) HTTPRouteGetCalls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.httpRouteGetCalls
+}
+
 func ptrTo[T any](value T) *T {
 	return &value
 }
@@ -1969,6 +4797,7 @@ func assertSingleControllerOwnerReference(t *testing.T, ownerReferences []metav1
 }
 
 func TestReconcile_NilClient(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	r := &controller.CoderControlPlaneReconciler{
 		Client: nil,
 		Scheme: scheme,
@@ -1991,6 +4820,7 @@ func TestReconcile_NilClient(t *testing.T) {
 }
 
 func TestReconcile_NilScheme(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
 	r := &controller.CoderControlPlaneReconciler{
 		Client: k8sClient,
 		Scheme: nil,
