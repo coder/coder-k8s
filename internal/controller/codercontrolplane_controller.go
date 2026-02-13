@@ -197,6 +197,7 @@ type CoderControlPlaneReconciler struct {
 // +kubebuilder:rbac:groups=coder.com,resources=codercontrolplanes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=coder.com,resources=codercontrolplanes/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
@@ -2105,7 +2106,7 @@ func (r *CoderControlPlaneReconciler) envFromDefinesEnvVar(
 			return false, fmt.Errorf("assertion failed: envFrom[%d] must not set both configMapRef and secretRef", i)
 		}
 
-		lookupKey, includeSource, err := envFromLookupKeyForEnvVar(i, envFromSource.Prefix, envVarName)
+		lookupKey, includeSource, err := envFromLookupKeyForEnvVar(envFromSource.Prefix, envVarName)
 		if err != nil {
 			return false, err
 		}
@@ -2159,7 +2160,7 @@ func (r *CoderControlPlaneReconciler) envFromDefinesEnvVar(
 	return false, nil
 }
 
-func envFromLookupKeyForEnvVar(index int, prefix, envVarName string) (string, bool, error) {
+func envFromLookupKeyForEnvVar(prefix, envVarName string) (string, bool, error) {
 	prefix = strings.TrimSpace(prefix)
 	if prefix == "" {
 		return envVarName, true, nil
@@ -2170,7 +2171,7 @@ func envFromLookupKeyForEnvVar(index int, prefix, envVarName string) (string, bo
 
 	lookupKey := strings.TrimPrefix(envVarName, prefix)
 	if strings.TrimSpace(lookupKey) == "" {
-		return "", false, fmt.Errorf("assertion failed: envFrom[%d] prefix %q must not consume the entire environment variable name %q", index, prefix, envVarName)
+		return "", false, nil
 	}
 
 	return lookupKey, true, nil

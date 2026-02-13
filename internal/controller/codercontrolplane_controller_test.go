@@ -2982,6 +2982,55 @@ func TestReconcile_DeploymentAlignment(t *testing.T) {
 		}
 	})
 
+	t.Run("EnvFromPrefixEqualToAccessURLKeepsDefault", func(t *testing.T) {
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-prefix-equal", Namespace: "default"},
+			Data: map[string]string{
+				"UNRELATED_ENV": "value",
+			},
+		}
+		if err := k8sClient.Create(ctx, configMap); err != nil {
+			t.Fatalf("create configmap: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, configMap)
+		})
+
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-prefix-equal", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-deployment-alignment:latest",
+				EnvFrom: []corev1.EnvFromSource{{
+					Prefix: "CODER_ACCESS_URL",
+					ConfigMapRef: &corev1.ConfigMapEnvSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: configMap.Name},
+					},
+				}},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		deployment := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+			t.Fatalf("get deployment: %v", err)
+		}
+		container := deployment.Spec.Template.Spec.Containers[0]
+		expectedAccessURL := "http://" + cp.Name + "." + cp.Namespace + ".svc.cluster.local"
+		if got := mustFindEnvVar(t, container.Env, "CODER_ACCESS_URL").Value; got != expectedAccessURL {
+			t.Fatalf("expected default CODER_ACCESS_URL %q, got %q", expectedAccessURL, got)
+		}
+	})
+
 	t.Run("ResourcesAndSecurityContextsApplied", func(t *testing.T) {
 		runAsUser := int64(1001)
 		allowPrivilegeEscalation := false
