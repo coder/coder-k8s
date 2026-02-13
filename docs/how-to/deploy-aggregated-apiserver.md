@@ -1,65 +1,96 @@
 # Deploy the aggregated API server (in-cluster)
 
-This guide shows how to deploy the `coder-k8s` **aggregated API server** and register it with the Kubernetes API aggregation layer.
-
-The aggregated API server serves:
+This guide deploys the aggregated API server for:
 
 - API group: `aggregation.coder.com`
 - Version: `v1alpha1`
 - Resources: `coderworkspaces`, `codertemplates`
 
-## 1. Create the namespace
+## 1) Create namespace and RBAC
 
 ```bash
 kubectl create namespace coder-system
-```
-
-## 2. Apply RBAC
-
-Apply generated RBAC manifests (including the shared `coder-k8s` ServiceAccount and bindings):
-
-```bash
 kubectl apply -f config/rbac/
 ```
 
-## 3. Deploy the service and deployment
+## 2) Apply service and APIService manifests
 
 ```bash
 kubectl apply -f deploy/apiserver-service.yaml
-kubectl apply -f deploy/deployment.yaml
-```
-
-`deploy/deployment.yaml` defaults to `--app=all`, which runs the controller, aggregated API server, and MCP server in a single pod.
-
-For split deployments, you can still run individual components by setting `--app=controller`, `--app=aggregated-apiserver`, or `--app=mcp-http` in the Deployment args.
-
-## 4. Register the APIService
-
-```bash
 kubectl apply -f deploy/apiserver-apiservice.yaml
 ```
 
-## 5. Verify
+## 3) Choose a deployment model
 
-Wait for the deployment:
+### Option A: all-in-one mode (recommended for most dev/test setups)
+
+`deploy/deployment.yaml` defaults to `--app=all`, which includes the aggregated API server.
+
+```bash
+kubectl apply -f deploy/deployment.yaml
+```
+
+In this mode, backend Coder client configuration is discovered dynamically from eligible `CoderControlPlane` resources.
+
+### Option B: standalone aggregated API mode (`--app=aggregated-apiserver`)
+
+Use this when you want a split deployment and explicit backend configuration.
+
+1. Apply deployment manifest:
+
+```bash
+kubectl apply -f deploy/deployment.yaml
+```
+
+1. Configure required args:
+
+```bash
+CODER_URL="https://coder.example.com"
+CODER_SESSION_TOKEN="replace-me"
+CODER_NAMESPACE="coder-system"
+
+kubectl -n coder-system set args deployment/coder-k8s --containers=coder-k8s -- \
+  --app=aggregated-apiserver \
+  --coder-url="${CODER_URL}" \
+  --coder-session-token="${CODER_SESSION_TOKEN}" \
+  --coder-namespace="${CODER_NAMESPACE}"
+```
+
+1. Update probes to HTTPS on port `6443` for standalone mode:
+
+```bash
+kubectl -n coder-system patch deployment coder-k8s --type='merge' -p '{
+  "spec": {
+    "template": {
+      "spec": {
+        "containers": [
+          {
+            "name": "coder-k8s",
+            "livenessProbe": {
+              "httpGet": {"scheme": "HTTPS", "path": "/healthz", "port": 6443}
+            },
+            "readinessProbe": {
+              "httpGet": {"scheme": "HTTPS", "path": "/readyz", "port": 6443}
+            }
+          }
+        ]
+      }
+    }
+  }
+}'
+```
+
+## 4) Verify
 
 ```bash
 kubectl rollout status deployment/coder-k8s -n coder-system
-```
-
-Check the APIService:
-
-```bash
 kubectl get apiservice v1alpha1.aggregation.coder.com
-```
-
-List resources served by the aggregated API server:
-
-```bash
 kubectl get coderworkspaces.aggregation.coder.com -A
 kubectl get codertemplates.aggregation.coder.com -A
+kubectl logs -n coder-system deploy/coder-k8s
 ```
 
 ## TLS note
 
-`deploy/apiserver-apiservice.yaml` currently sets `insecureSkipTLSVerify: true`, which is convenient for development but not appropriate for production.
+`deploy/apiserver-apiservice.yaml` uses `insecureSkipTLSVerify: true` for development convenience.
+Use proper CA-backed TLS wiring for production environments.

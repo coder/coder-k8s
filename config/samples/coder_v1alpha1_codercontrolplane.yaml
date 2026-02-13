@@ -4,7 +4,8 @@ metadata:
   name: codercontrolplane-sample
   namespace: default
 spec:
-  image: "ghcr.io/coder/coder-k8s:main"
-  licenseSecretRef:
-    name: coder-license
-    key: license
+  image: "ghcr.io/coder/coder:latest"
+  # Optional Enterprise license upload:
+  # licenseSecretRef:
+  #   name: coder-license
+  #   key: license

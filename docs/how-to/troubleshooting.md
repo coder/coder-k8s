@@ -1,85 +1,103 @@
 # Troubleshooting
 
-## The binary exits immediately with "--app flag is required"
+## I expected `--app` to be required, but behavior is different
 
-`coder-k8s` requires an explicit application mode.
+`coder-k8s` defaults to `--app=all` when you do not pass `--app`.
 
-For the controller:
+If you want to isolate components for debugging, set one explicit mode:
 
 ```bash
 GOFLAGS=-mod=vendor go run . --app=controller
-```
-
-For the aggregated API server:
-
-```bash
 GOFLAGS=-mod=vendor go run . --app=aggregated-apiserver
+GOFLAGS=-mod=vendor go run . --app=mcp-http
 ```
 
-## "no matches for kind" when applying a `CoderControlPlane`
+If you pass an unsupported value, startup fails with an `assertion failed: unsupported --app value ...` error.
 
-This usually means the CRD isn't installed in the cluster.
+## `no matches for kind` when applying `CoderControlPlane`
+
+Install (or reinstall) CRDs:
 
 ```bash
 make manifests
 kubectl apply -f config/crd/bases/
+kubectl get crd | grep coder.com
 ```
 
-## The controller is running, but reconciliation doesn't happen
+## Controller deployment is running, but reconciliation does not happen
 
-- Check controller logs:
+Use the resource names from the shipped manifests:
 
-  ```bash
-  kubectl logs -n coder-system deploy/coder-k8s-controller
-  ```
+- Deployment: `coder-k8s`
+- ClusterRole: `manager-role`
+- ClusterRoleBinding: `coder-k8s`
 
-- Confirm RBAC is applied:
-
-  ```bash
-  kubectl get clusterrole coder-k8s-controller
-  kubectl get clusterrolebinding coder-k8s-controller
-  ```
-
-## Aggregated `codertemplates` / `coderworkspaces` reads are empty or inconsistent
-
-If `kubectl get codertemplates.aggregation.coder.com` or `kubectl get coderworkspaces.aggregation.coder.com` returns empty data unexpectedly, check for CRD/APIService conflicts.
-
-When both of these exist at once:
-
-- `APIService` `v1alpha1.aggregation.coder.com`
-- CRDs `codertemplates.aggregation.coder.com` and/or `coderworkspaces.aggregation.coder.com`
-
-Kubernetes may not route reads the way you expect for demos.
+Check status and logs:
 
 ```bash
-kubectl get apiservice v1alpha1.aggregation.coder.com
-kubectl get crd codertemplates.aggregation.coder.com coderworkspaces.aggregation.coder.com
+kubectl get deploy -n coder-system coder-k8s
+kubectl logs -n coder-system deploy/coder-k8s
+kubectl get clusterrole manager-role
+kubectl get clusterrolebinding coder-k8s
 ```
 
-For APIService-based demos, remove the conflicting aggregation CRDs:
+Then inspect a specific control plane object:
 
 ```bash
-kubectl delete crd codertemplates.aggregation.coder.com coderworkspaces.aggregation.coder.com
-kubectl apply -f deploy/apiserver-apiservice.yaml
-kubectl wait --for=condition=Available apiservice/v1alpha1.aggregation.coder.com --timeout=120s
+kubectl get codercontrolplane -A
+kubectl describe codercontrolplane <name> -n <namespace>
 ```
 
-## Aggregated APIService shows `False` / `Unavailable`
+## `CoderControlPlane` stays `Pending`
 
-- Ensure the deployment and service exist:
+Typical causes:
 
-  ```bash
-  kubectl get deploy,svc -n coder-system | grep coder-k8s-apiserver
-  ```
+1. Control-plane Deployment has no ready pods.
+2. Operator bootstrap token is not ready yet.
+3. Optional license Secret is missing or invalid when `spec.licenseSecretRef` is set.
 
-- Inspect APIService status:
+Debug commands:
 
-  ```bash
-  kubectl describe apiservice v1alpha1.aggregation.coder.com
-  ```
+```bash
+kubectl get codercontrolplane -n <namespace> <name> -o yaml
+kubectl get deploy,svc -n <namespace>
+kubectl logs -n coder-system deploy/coder-k8s
+```
 
-- Check the aggregated API server logs:
+## Aggregated APIService is `False` / `Unavailable`
 
-  ```bash
-  kubectl logs -n coder-system deploy/coder-k8s-apiserver
-  ```
+Verify required resources:
+
+```bash
+kubectl get deploy -n coder-system coder-k8s
+kubectl get svc -n coder-system coder-k8s-apiserver
+kubectl get apiservice v1alpha1.aggregation.coder.com -o yaml
+kubectl logs -n coder-system deploy/coder-k8s
+```
+
+If you use APIService aggregation demos, avoid installing conflicting CRDs for the same aggregated resources (`coderworkspaces.aggregation.coder.com`, `codertemplates.aggregation.coder.com`).
+
+## Aggregated reads return `ServiceUnavailable`
+
+In `all` mode, this usually means no eligible `CoderControlPlane` exists yet (or operator access is not ready).
+
+In standalone `--app=aggregated-apiserver` mode, ensure all three are configured:
+
+- `--coder-url`
+- `--coder-session-token`
+- `--coder-namespace`
+
+Check logs for provider configuration messages:
+
+```bash
+kubectl logs -n coder-system deploy/coder-k8s
+```
+
+## Aggregated reads return `multiple eligible CoderControlPlane ...`
+
+Current dynamic provider behavior expects a single eligible control plane per request scope.
+
+If you have multiple ready control planes, narrow scope:
+
+- Query a single namespace (`-n <namespace>`), and/or
+- Run a dedicated aggregated API deployment pinned with `--coder-namespace`.

@@ -1,46 +1,69 @@
 # Deploy the controller (in-cluster)
 
-This guide shows how to deploy the `coder-k8s` **controller** to a Kubernetes cluster using manifests from `config/` and `deploy/`.
+This guide deploys `coder-k8s` in **controller-only mode** (`--app=controller`).
 
-## 1. Create the namespace
+!!! note
+    `deploy/deployment.yaml` defaults to `--app=all`. In this guide, we explicitly switch it to controller-only mode.
 
-The deployment manifests expect a `coder-system` namespace:
+## 1) Create namespace
 
 ```bash
 kubectl create namespace coder-system
 ```
 
-## 2. Install the CRDs
+## 2) Install CRDs
 
-Install the `CoderControlPlane` CRD:
+`config/crd/bases/` includes CRDs for:
+
+- `CoderControlPlane`
+- `CoderProvisioner`
+- `CoderWorkspaceProxy`
+
+Apply them:
 
 ```bash
 kubectl apply -f config/crd/bases/
 ```
 
-## 3. Apply RBAC
+## 3) Apply RBAC
 
 ```bash
 kubectl apply -f config/rbac/
 ```
 
-## 4. Deploy `coder-k8s`
+## 4) Deploy and force controller-only mode
 
 ```bash
 kubectl apply -f deploy/deployment.yaml
+kubectl -n coder-system set args deployment/coder-k8s --containers=coder-k8s -- --app=controller
 ```
 
-`deploy/deployment.yaml` defaults to `--app=all`, which runs the controller, aggregated API server, and MCP server in a single pod.
-
-For split deployments, you can still run individual components by setting `--app=controller`, `--app=aggregated-apiserver`, or `--app=mcp-http` in the Deployment args.
-
-## 5. Verify
+## 5) Verify
 
 ```bash
 kubectl rollout status deployment/coder-k8s -n coder-system
 kubectl get pods -n coder-system
+kubectl logs -n coder-system deploy/coder-k8s
 ```
 
-## Customizing the image
+Optional smoke check:
 
-By default, `deploy/deployment.yaml` uses `ghcr.io/coder/coder-k8s:latest`. For a different image tag, edit the deployment manifest before applying it.
+```bash
+kubectl apply -f config/samples/coder_v1alpha1_codercontrolplane.yaml
+kubectl get codercontrolplanes -A
+```
+
+## Customizing image
+
+By default, `deploy/deployment.yaml` uses `ghcr.io/coder/coder-k8s:latest`.
+Edit the image tag before applying if you need a pinned version.
+
+## If you want all-in-one mode instead
+
+Skip `kubectl set args ... --app=controller` and keep the default `--app=all`, then also apply:
+
+```bash
+kubectl apply -f deploy/apiserver-service.yaml
+kubectl apply -f deploy/apiserver-apiservice.yaml
+kubectl apply -f deploy/mcp-service.yaml
+```
