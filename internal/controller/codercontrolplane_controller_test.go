@@ -3994,6 +3994,51 @@ func TestReconcile_IngressExposure(t *testing.T) {
 		}
 	})
 
+	t.Run("IngressTLSServicePort443UsesHTTPBackend", func(t *testing.T) {
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-ingress-tls-service-port-443-backend", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image:   "test-ingress:latest",
+				Service: coderv1alpha1.ServiceSpec{Port: 443},
+				TLS:     coderv1alpha1.TLSSpec{SecretNames: []string{"ingress-backend-tls"}},
+				Expose: &coderv1alpha1.ExposeSpec{
+					Ingress: &coderv1alpha1.IngressExposeSpec{
+						Host:         "tls-443.ingress.example.test",
+						WildcardHost: "*.tls-443.ingress.example.test",
+					},
+				},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		ingress := &networkingv1.Ingress{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, ingress); err != nil {
+			t.Fatalf("get ingress: %v", err)
+		}
+		for _, rule := range ingress.Spec.Rules {
+			if rule.HTTP == nil || len(rule.HTTP.Paths) != 1 {
+				t.Fatalf("expected one ingress HTTP path for host %q, got %#v", rule.Host, rule.HTTP)
+			}
+			path := rule.HTTP.Paths[0]
+			if path.Backend.Service == nil {
+				t.Fatalf("expected ingress backend service for host %q", rule.Host)
+			}
+			if got := path.Backend.Service.Port.Number; got != 80 {
+				t.Fatalf("expected ingress backend service port 80 for host %q, got %d", rule.Host, got)
+			}
+		}
+	})
+
 	t.Run("IngressTLSAndWildcardHost", func(t *testing.T) {
 		cp := &coderv1alpha1.CoderControlPlane{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-ingress-tls-wildcard", Namespace: "default"},

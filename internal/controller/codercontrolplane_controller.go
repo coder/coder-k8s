@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/util/retry"
@@ -1269,9 +1270,9 @@ func (r *CoderControlPlaneReconciler) reconcileIngress(ctx context.Context, code
 	}
 
 	wildcardHost := strings.TrimSpace(ingressExpose.WildcardHost)
-	servicePort := coderControlPlane.Spec.Service.Port
-	if servicePort == 0 {
-		servicePort = defaultControlPlanePort
+	backendServicePort, backendPortErr := httpRouteBackendServicePort(coderControlPlane)
+	if backendPortErr != nil {
+		return backendPortErr
 	}
 
 	ingress := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: coderControlPlane.Name, Namespace: coderControlPlane.Namespace}}
@@ -1293,7 +1294,7 @@ func (r *CoderControlPlaneReconciler) reconcileIngress(ctx context.Context, code
 								Backend: networkingv1.IngressBackend{
 									Service: &networkingv1.IngressServiceBackend{
 										Name: coderControlPlane.Name,
-										Port: networkingv1.ServiceBackendPort{Number: servicePort},
+										Port: networkingv1.ServiceBackendPort{Number: backendServicePort},
 									},
 								},
 							},
@@ -1314,7 +1315,7 @@ func (r *CoderControlPlaneReconciler) reconcileIngress(ctx context.Context, code
 								Backend: networkingv1.IngressBackend{
 									Service: &networkingv1.IngressServiceBackend{
 										Name: coderControlPlane.Name,
-										Port: networkingv1.ServiceBackendPort{Number: servicePort},
+										Port: networkingv1.ServiceBackendPort{Number: backendServicePort},
 									},
 								},
 							},
@@ -2925,7 +2926,7 @@ func (r *CoderControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("index coder control planes by envFrom Secret name: %w", err)
 	}
 
-	return ctrl.NewControllerManagedBy(mgr).
+	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&coderv1alpha1.CoderControlPlane{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
@@ -2941,7 +2942,17 @@ func (r *CoderControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(r.reconcileRequestsForEnvFromConfigMap),
-		).
+		)
+
+	// Gateway API is optional; only watch HTTPRoutes when the CRD is installed.
+	httpRouteGVK := schema.GroupVersionKind{Group: gatewayv1.GroupVersion.Group, Version: gatewayv1.GroupVersion.Version, Kind: "HTTPRoute"}
+	if _, err := mgr.GetRESTMapper().RESTMapping(httpRouteGVK.GroupKind(), httpRouteGVK.Version); err == nil {
+		builder = builder.Owns(&gatewayv1.HTTPRoute{})
+	} else if !meta.IsNoMatchError(err) {
+		return fmt.Errorf("check HTTPRoute REST mapping: %w", err)
+	}
+
+	return builder.
 		Named("codercontrolplane").
 		Complete(r)
 }
