@@ -2445,6 +2445,39 @@ func TestReconcile_DeploymentAlignment(t *testing.T) {
 		}
 	})
 
+	t.Run("DefaultAccessURLIncludesCustomServicePort", func(t *testing.T) {
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-custom-service-port", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-deployment-alignment:latest",
+				Service: coderv1alpha1.ServiceSpec{
+					Port: 8080,
+				},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		deployment := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+			t.Fatalf("get deployment: %v", err)
+		}
+		container := deployment.Spec.Template.Spec.Containers[0]
+		expectedAccessURL := "http://" + cp.Name + "." + cp.Namespace + ".svc.cluster.local:8080"
+		if got := mustFindEnvVar(t, container.Env, "CODER_ACCESS_URL").Value; got != expectedAccessURL {
+			t.Fatalf("expected default CODER_ACCESS_URL %q, got %q", expectedAccessURL, got)
+		}
+	})
+
 	t.Run("UserDefinedAccessURLTakesPrecedence", func(t *testing.T) {
 		cp := &coderv1alpha1.CoderControlPlane{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-custom-access-url", Namespace: "default"},

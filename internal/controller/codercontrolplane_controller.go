@@ -619,12 +619,22 @@ func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, c
 			}
 			if configuredAccessURL == nil {
 				scheme := "http"
+				accessURLPort := coderControlPlane.Spec.Service.Port
+				if accessURLPort == 0 {
+					accessURLPort = defaultControlPlanePort
+				}
 				if tlsEnabled {
 					scheme = "https"
+					accessURLPort = 443
+				}
+
+				accessURL := fmt.Sprintf("%s://%s.%s.svc.cluster.local", scheme, coderControlPlane.Name, coderControlPlane.Namespace)
+				if (scheme == "http" && accessURLPort != 80) || (scheme == "https" && accessURLPort != 443) {
+					accessURL = fmt.Sprintf("%s:%d", accessURL, accessURLPort)
 				}
 				env = append(env, corev1.EnvVar{
 					Name:  "CODER_ACCESS_URL",
-					Value: fmt.Sprintf("%s://%s.%s.svc.cluster.local", scheme, coderControlPlane.Name, coderControlPlane.Namespace),
+					Value: accessURL,
 				})
 			}
 		}
