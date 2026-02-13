@@ -27,12 +27,10 @@ rules:
   resources:
   - persistentvolumeclaims
   - pods
-  - secrets
-  - serviceaccounts
-  - services
   verbs:
   - create
   - delete
+  - deletecollection
   - get
   - list
   - patch
@@ -44,6 +42,20 @@ rules:
   - pods/log
   verbs:
   - get
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  - serviceaccounts
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - aggregation.coder.com
   resources:
@@ -62,6 +74,7 @@ rules:
   verbs:
   - create
   - delete
+  - deletecollection
   - get
   - list
   - patch
