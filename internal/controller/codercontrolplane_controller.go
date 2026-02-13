@@ -55,6 +55,8 @@ const (
 	operatorAccessRetryInterval = 30 * time.Second
 	operatorTokenSecretSuffix   = "-operator-token"
 
+	workspaceRBACFinalizer = "coder.com/workspace-rbac-cleanup"
+
 	// #nosec G101 -- this is a field index key, not a credential.
 	licenseSecretNameFieldIndex = ".spec.licenseSecretRef.name"
 
@@ -221,6 +223,14 @@ func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			coderControlPlane.Namespace, coderControlPlane.Name, req.Namespace, req.Name)
 	}
 
+	if !coderControlPlane.DeletionTimestamp.IsZero() {
+		return r.finalizeWorkspaceRBAC(ctx, coderControlPlane)
+	}
+
+	if err := r.ensureWorkspaceRBACFinalizer(ctx, req.NamespacedName, coderControlPlane); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if err := r.reconcileServiceAccount(ctx, coderControlPlane); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -286,6 +296,57 @@ func workspaceRBACLabels(cp *coderv1alpha1.CoderControlPlane) map[string]string 
 	return labels
 }
 
+func (r *CoderControlPlaneReconciler) ensureWorkspaceRBACFinalizer(
+	ctx context.Context,
+	namespacedName types.NamespacedName,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+	if coderControlPlane.Name != namespacedName.Name || coderControlPlane.Namespace != namespacedName.Namespace {
+		return fmt.Errorf("assertion failed: finalizer target %s/%s does not match request %s", coderControlPlane.Namespace, coderControlPlane.Name, namespacedName)
+	}
+	if controllerutil.ContainsFinalizer(coderControlPlane, workspaceRBACFinalizer) {
+		return nil
+	}
+
+	original := coderControlPlane.DeepCopy()
+	controllerutil.AddFinalizer(coderControlPlane, workspaceRBACFinalizer)
+	if err := r.Patch(ctx, coderControlPlane, client.MergeFrom(original)); err != nil {
+		return fmt.Errorf("add workspace RBAC finalizer: %w", err)
+	}
+	if err := r.Get(ctx, namespacedName, coderControlPlane); err != nil {
+		return fmt.Errorf("reload codercontrolplane %s after finalizer update: %w", namespacedName, err)
+	}
+
+	return nil
+}
+
+func (r *CoderControlPlaneReconciler) finalizeWorkspaceRBAC(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+) (ctrl.Result, error) {
+	if coderControlPlane == nil {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+	if !controllerutil.ContainsFinalizer(coderControlPlane, workspaceRBACFinalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	if err := r.cleanupManagedWorkspaceRBAC(ctx, coderControlPlane, nil, nil); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	original := coderControlPlane.DeepCopy()
+	controllerutil.RemoveFinalizer(coderControlPlane, workspaceRBACFinalizer)
+	if err := r.Patch(ctx, coderControlPlane, client.MergeFrom(original)); err != nil {
+		return ctrl.Result{}, fmt.Errorf("remove workspace RBAC finalizer: %w", err)
+	}
+
+	return ctrl.Result{}, nil
+}
+
 func (r *CoderControlPlaneReconciler) reconcileServiceAccount(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) error {
 	if coderControlPlane == nil {
 		return fmt.Errorf("assertion failed: coder control plane must not be nil")
@@ -323,17 +384,17 @@ func (r *CoderControlPlaneReconciler) reconcileWorkspaceRBAC(ctx context.Context
 	if coderControlPlane == nil {
 		return fmt.Errorf("assertion failed: coder control plane must not be nil")
 	}
-	if !coderControlPlane.Spec.RBAC.WorkspacePerms {
-		return nil
-	}
 
 	serviceAccountName := resolveServiceAccountName(coderControlPlane)
 	if strings.TrimSpace(serviceAccountName) == "" {
 		return fmt.Errorf("assertion failed: service account name must not be empty")
 	}
-
 	roleName := fmt.Sprintf("%s-workspace-perms", serviceAccountName)
 	roleBindingName := serviceAccountName
+
+	if !coderControlPlane.Spec.RBAC.WorkspacePerms {
+		return r.cleanupManagedWorkspaceRBAC(ctx, coderControlPlane, nil, nil)
+	}
 
 	rules := []rbacv1.PolicyRule{
 		{
@@ -358,6 +419,8 @@ func (r *CoderControlPlaneReconciler) reconcileWorkspaceRBAC(ctx context.Context
 
 	targetNamespaces := append([]string{coderControlPlane.Namespace}, coderControlPlane.Spec.RBAC.WorkspaceNamespaces...)
 	seenNamespaces := make(map[string]struct{}, len(targetNamespaces))
+	keepRoles := make(map[string]struct{}, len(targetNamespaces))
+	keepRoleBindings := make(map[string]struct{}, len(targetNamespaces))
 	for _, namespace := range targetNamespaces {
 		namespace = strings.TrimSpace(namespace)
 		if namespace == "" {
@@ -415,6 +478,60 @@ func (r *CoderControlPlaneReconciler) reconcileWorkspaceRBAC(ctx context.Context
 		})
 		if err != nil {
 			return fmt.Errorf("reconcile workspace role binding %s/%s: %w", namespace, roleBindingName, err)
+		}
+
+		keepRoles[namespacedResourceKey(namespace, roleName)] = struct{}{}
+		keepRoleBindings[namespacedResourceKey(namespace, roleBindingName)] = struct{}{}
+	}
+
+	return r.cleanupManagedWorkspaceRBAC(ctx, coderControlPlane, keepRoles, keepRoleBindings)
+}
+
+func namespacedResourceKey(namespace, name string) string {
+	return fmt.Sprintf("%s/%s", namespace, name)
+}
+
+func (r *CoderControlPlaneReconciler) cleanupManagedWorkspaceRBAC(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+	keepRoles map[string]struct{},
+	keepRoleBindings map[string]struct{},
+) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+
+	labels := workspaceRBACLabels(coderControlPlane)
+
+	roles := &rbacv1.RoleList{}
+	if err := r.List(ctx, roles, client.MatchingLabels(labels)); err != nil {
+		return fmt.Errorf("list managed workspace roles: %w", err)
+	}
+	for i := range roles.Items {
+		role := &roles.Items[i]
+		if keepRoles != nil {
+			if _, ok := keepRoles[namespacedResourceKey(role.Namespace, role.Name)]; ok {
+				continue
+			}
+		}
+		if err := r.Delete(ctx, role); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete managed workspace role %s/%s: %w", role.Namespace, role.Name, err)
+		}
+	}
+
+	roleBindings := &rbacv1.RoleBindingList{}
+	if err := r.List(ctx, roleBindings, client.MatchingLabels(labels)); err != nil {
+		return fmt.Errorf("list managed workspace role bindings: %w", err)
+	}
+	for i := range roleBindings.Items {
+		roleBinding := &roleBindings.Items[i]
+		if keepRoleBindings != nil {
+			if _, ok := keepRoleBindings[namespacedResourceKey(roleBinding.Namespace, roleBinding.Name)]; ok {
+				continue
+			}
+		}
+		if err := r.Delete(ctx, roleBinding); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete managed workspace role binding %s/%s: %w", roleBinding.Namespace, roleBinding.Name, err)
 		}
 	}
 
@@ -1051,13 +1168,15 @@ func (r *CoderControlPlaneReconciler) desiredStatus(
 	}
 
 	scheme := "http"
+	statusPort := servicePort
 	if controlPlaneTLSEnabled(coderControlPlane) {
 		scheme = "https"
+		statusPort = 443
 	}
 
 	nextStatus.ObservedGeneration = coderControlPlane.Generation
 	nextStatus.ReadyReplicas = deployment.Status.ReadyReplicas
-	nextStatus.URL = fmt.Sprintf("%s://%s.%s.svc.cluster.local:%d", scheme, service.Name, service.Namespace, servicePort)
+	nextStatus.URL = fmt.Sprintf("%s://%s.%s.svc.cluster.local:%d", scheme, service.Name, service.Namespace, statusPort)
 	nextStatus.Phase = phase
 
 	return nextStatus

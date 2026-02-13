@@ -2218,6 +2218,132 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 		}
 	})
 
+	t.Run("RBACDisabledCleansPreviouslyManagedRoles", func(t *testing.T) {
+		workspaceNamespace := "workspace-rbac-cleanup-disabled"
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: workspaceNamespace}}
+		if err := k8sClient.Create(ctx, namespace); err != nil && !apierrors.IsAlreadyExists(err) {
+			t.Fatalf("create workspace namespace: %v", err)
+		}
+
+		serviceAccountName := "test-workspace-rbac-cleanup-disabled-sa"
+		cp := createCoderControlPlaneUnstructured(ctx, t, "test-workspace-rbac-cleanup-disabled", "default", map[string]any{
+			"image": "test-workspace-rbac:latest",
+			"serviceAccount": map[string]any{
+				"name": serviceAccountName,
+			},
+			"rbac": map[string]any{
+				"workspacePerms":      true,
+				"enableDeployments":   true,
+				"workspaceNamespaces": []any{workspaceNamespace},
+			},
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		namespacedName := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+			t.Fatalf("reconcile control plane before disable: %v", err)
+		}
+
+		roleName := serviceAccountName + "-workspace-perms"
+		roleBindingName := serviceAccountName
+		for _, namespaceName := range []string{cp.Namespace, workspaceNamespace} {
+			role := &rbacv1.Role{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: namespaceName}, role); err != nil {
+				t.Fatalf("expected workspace role %s/%s to exist before disabling RBAC: %v", namespaceName, roleName, err)
+			}
+			roleBinding := &rbacv1.RoleBinding{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleBindingName, Namespace: namespaceName}, roleBinding); err != nil {
+				t.Fatalf("expected workspace role binding %s/%s to exist before disabling RBAC: %v", namespaceName, roleBindingName, err)
+			}
+		}
+
+		unstructuredCP := &unstructured.Unstructured{}
+		unstructuredCP.SetAPIVersion(coderv1alpha1.GroupVersion.String())
+		unstructuredCP.SetKind("CoderControlPlane")
+		if err := k8sClient.Get(ctx, namespacedName, unstructuredCP); err != nil {
+			t.Fatalf("get unstructured control plane for RBAC disable update: %v", err)
+		}
+		if err := unstructured.SetNestedField(unstructuredCP.Object, false, "spec", "rbac", "workspacePerms"); err != nil {
+			t.Fatalf("set spec.rbac.workspacePerms=false: %v", err)
+		}
+		if err := k8sClient.Update(ctx, unstructuredCP); err != nil {
+			t.Fatalf("update control plane to disable workspace RBAC: %v", err)
+		}
+
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+			t.Fatalf("reconcile control plane after disable: %v", err)
+		}
+
+		for _, namespaceName := range []string{cp.Namespace, workspaceNamespace} {
+			role := &rbacv1.Role{}
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: namespaceName}, role)
+			if !apierrors.IsNotFound(err) {
+				t.Fatalf("expected workspace role %s/%s to be removed after disabling RBAC, got: %v", namespaceName, roleName, err)
+			}
+			roleBinding := &rbacv1.RoleBinding{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: roleBindingName, Namespace: namespaceName}, roleBinding)
+			if !apierrors.IsNotFound(err) {
+				t.Fatalf("expected workspace role binding %s/%s to be removed after disabling RBAC, got: %v", namespaceName, roleBindingName, err)
+			}
+		}
+	})
+
+	t.Run("DeleteControlPlaneCleansCrossNamespaceRBAC", func(t *testing.T) {
+		workspaceNamespace := "workspace-rbac-cleanup-delete"
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: workspaceNamespace}}
+		if err := k8sClient.Create(ctx, namespace); err != nil && !apierrors.IsAlreadyExists(err) {
+			t.Fatalf("create workspace namespace: %v", err)
+		}
+
+		serviceAccountName := "test-workspace-rbac-cleanup-delete-sa"
+		cp := createCoderControlPlaneUnstructured(ctx, t, "test-workspace-rbac-cleanup-delete", "default", map[string]any{
+			"image": "test-workspace-rbac:latest",
+			"serviceAccount": map[string]any{
+				"name": serviceAccountName,
+			},
+			"rbac": map[string]any{
+				"workspacePerms":      true,
+				"enableDeployments":   true,
+				"workspaceNamespaces": []any{workspaceNamespace},
+			},
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		namespacedName := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+			t.Fatalf("reconcile control plane before delete: %v", err)
+		}
+
+		roleName := serviceAccountName + "-workspace-perms"
+		roleBindingName := serviceAccountName
+		role := &rbacv1.Role{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: workspaceNamespace}, role); err != nil {
+			t.Fatalf("expected cross-namespace role %s/%s before delete: %v", workspaceNamespace, roleName, err)
+		}
+		roleBinding := &rbacv1.RoleBinding{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleBindingName, Namespace: workspaceNamespace}, roleBinding); err != nil {
+			t.Fatalf("expected cross-namespace role binding %s/%s before delete: %v", workspaceNamespace, roleBindingName, err)
+		}
+
+		if err := k8sClient.Delete(ctx, cp); err != nil {
+			t.Fatalf("delete control plane: %v", err)
+		}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+			t.Fatalf("reconcile control plane deletion: %v", err)
+		}
+
+		role = &rbacv1.Role{}
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: workspaceNamespace}, role)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("expected cross-namespace role %s/%s to be removed after control plane deletion, got: %v", workspaceNamespace, roleName, err)
+		}
+		roleBinding = &rbacv1.RoleBinding{}
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: roleBindingName, Namespace: workspaceNamespace}, roleBinding)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("expected cross-namespace role binding %s/%s to be removed after control plane deletion, got: %v", workspaceNamespace, roleBindingName, err)
+		}
+	})
+
 	t.Run("ExtraRulesAppended", func(t *testing.T) {
 		extraRule := rbacv1.PolicyRule{
 			APIGroups: []string{""},
@@ -2597,8 +2723,9 @@ func TestReconcile_TLSAlignment(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, reconciled); err != nil {
 		t.Fatalf("get reconciled control plane: %v", err)
 	}
-	if !strings.HasPrefix(reconciled.Status.URL, "https://") {
-		t.Fatalf("expected status URL to use https when TLS is enabled, got %q", reconciled.Status.URL)
+	expectedStatusURL := "https://" + cp.Name + "." + cp.Namespace + ".svc.cluster.local:443"
+	if reconciled.Status.URL != expectedStatusURL {
+		t.Fatalf("expected status URL %q when TLS is enabled, got %q", expectedStatusURL, reconciled.Status.URL)
 	}
 }
 
