@@ -228,7 +228,7 @@ jobs:
       - name: Install CloudNativePG operator
         if: github.event_name != 'pull_request'
         run: |
-          kubectl apply --server-side -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.25/releases/cnpg-1.25.0.yaml
+          kubectl apply --server-side -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/v1.25.0/releases/cnpg-1.25.0.yaml
           kubectl wait --for=condition=Available deploy/cnpg-controller-manager -n cnpg-system --timeout=180s
 
       - name: Provision PostgreSQL and CoderControlPlane
