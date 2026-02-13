@@ -150,6 +150,21 @@ func NewScheme() *runtime.Scheme {
 	utilruntime.Must(metav1.AddMetaToScheme(scheme))
 	utilruntime.Must(metainternalversion.AddToScheme(scheme))
 	utilruntime.Must(aggregationv1alpha1.AddToScheme(scheme))
+
+	// Register aggregation types for the internal hub version so the generic API
+	// server can convert SSA requests between v1alpha1 and __internal.
+	aggregationInternalGroupVersion := schema.GroupVersion{
+		Group:   aggregationv1alpha1.SchemeGroupVersion.Group,
+		Version: runtime.APIVersionInternal,
+	}
+	scheme.AddKnownTypes(
+		aggregationInternalGroupVersion,
+		&aggregationv1alpha1.CoderWorkspace{},
+		&aggregationv1alpha1.CoderWorkspaceList{},
+		&aggregationv1alpha1.CoderTemplate{},
+		&aggregationv1alpha1.CoderTemplateList{},
+	)
+
 	return scheme
 }
 

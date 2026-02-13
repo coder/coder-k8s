@@ -12,6 +12,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/managedfields"
@@ -31,11 +32,20 @@ func TestNewSchemeRegistersAggregationKinds(t *testing.T) {
 		t.Fatal("expected non-nil scheme")
 	}
 
+	aggregationInternalGroupVersion := schema.GroupVersion{
+		Group:   aggregationv1alpha1.SchemeGroupVersion.Group,
+		Version: runtime.APIVersionInternal,
+	}
+
 	for _, gvk := range []schema.GroupVersionKind{
 		aggregationv1alpha1.SchemeGroupVersion.WithKind("CoderWorkspace"),
 		aggregationv1alpha1.SchemeGroupVersion.WithKind("CoderWorkspaceList"),
 		aggregationv1alpha1.SchemeGroupVersion.WithKind("CoderTemplate"),
 		aggregationv1alpha1.SchemeGroupVersion.WithKind("CoderTemplateList"),
+		aggregationInternalGroupVersion.WithKind("CoderWorkspace"),
+		aggregationInternalGroupVersion.WithKind("CoderWorkspaceList"),
+		aggregationInternalGroupVersion.WithKind("CoderTemplate"),
+		aggregationInternalGroupVersion.WithKind("CoderTemplateList"),
 	} {
 		if !scheme.Recognizes(gvk) {
 			t.Fatalf("expected scheme to recognize %s", gvk.String())
