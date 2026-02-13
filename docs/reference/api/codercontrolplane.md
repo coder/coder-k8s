@@ -143,7 +143,7 @@ ProbeSpec configures a Kubernetes probe with an enable toggle.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `enabled` | boolean | Enabled toggles the probe on or off. |
+| `enabled` | boolean | Enabled toggles the probe on or off. When omitted, readiness defaults to enabled while liveness defaults to disabled. |
 | `initialDelaySeconds` | integer | InitialDelaySeconds is the delay before the probe starts. |
 | `periodSeconds` | integer | PeriodSeconds controls how often the probe is performed. |
 | `timeoutSeconds` | integer | TimeoutSeconds is the probe timeout. |

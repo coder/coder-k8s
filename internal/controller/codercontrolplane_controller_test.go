@@ -3005,13 +3005,34 @@ func TestReconcile_ProbeConfiguration(t *testing.T) {
 		}
 	})
 
+	t.Run("LivenessProbeEmptyObjectRemainsDisabled", func(t *testing.T) {
+		cp := createCoderControlPlaneUnstructured(ctx, t, "test-probe-liveness-empty-object", "default", map[string]any{
+			"image":         "test-probes:latest",
+			"livenessProbe": map[string]any{},
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		deployment := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+			t.Fatalf("get deployment: %v", err)
+		}
+		container := deployment.Spec.Template.Spec.Containers[0]
+		if container.LivenessProbe != nil {
+			t.Fatalf("expected liveness probe to stay disabled for empty object, got %#v", container.LivenessProbe)
+		}
+	})
+
 	t.Run("BothProbesEnabledWithCustomTiming", func(t *testing.T) {
 		cp := &coderv1alpha1.CoderControlPlane{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-probe-custom", Namespace: "default"},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-probes:latest",
 				ReadinessProbe: coderv1alpha1.ProbeSpec{
-					Enabled:             true,
+					Enabled:             ptrTo(true),
 					InitialDelaySeconds: 3,
 					PeriodSeconds:       ptrTo(int32(7)),
 					TimeoutSeconds:      ptrTo(int32(2)),
@@ -3019,7 +3040,7 @@ func TestReconcile_ProbeConfiguration(t *testing.T) {
 					FailureThreshold:    ptrTo(int32(5)),
 				},
 				LivenessProbe: coderv1alpha1.ProbeSpec{
-					Enabled:             true,
+					Enabled:             ptrTo(true),
 					InitialDelaySeconds: 11,
 					PeriodSeconds:       ptrTo(int32(13)),
 					TimeoutSeconds:      ptrTo(int32(4)),

@@ -958,7 +958,7 @@ spec:
                   secrets:
                     description: |-
                       Secrets lists Secret key selectors for CA certificates.
-                      Each is mounted at /etc/ssl/certs/<name>.crt.
+                      Each is mounted at `/etc/ssl/certs/{name}.crt`.
                     items:
                       description: CertSecretSelector identifies a key within a Secret
                         for CA cert mounting.
@@ -1312,8 +1312,9 @@ spec:
                   plane container.
                 properties:
                   enabled:
-                    default: true
-                    description: Enabled toggles the probe on or off.
+                    description: |-
+                      Enabled toggles the probe on or off.
+                      When omitted, readiness defaults to enabled while liveness defaults to disabled.
                     type: boolean
                   failureThreshold:
                     description: FailureThreshold is the minimum consecutive failures
@@ -1673,8 +1674,9 @@ spec:
                   control plane container.
                 properties:
                   enabled:
-                    default: true
-                    description: Enabled toggles the probe on or off.
+                    description: |-
+                      Enabled toggles the probe on or off.
+                      When omitted, readiness defaults to enabled while liveness defaults to disabled.
                     type: boolean
                   failureThreshold:
                     description: FailureThreshold is the minimum consecutive failures

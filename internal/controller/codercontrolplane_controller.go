@@ -721,6 +721,14 @@ func (r *CoderControlPlaneReconciler) cleanupManagedWorkspaceRBAC(
 	return nil
 }
 
+func probeEnabled(explicit *bool, defaultEnabled bool) bool {
+	if explicit == nil {
+		return defaultEnabled
+	}
+
+	return *explicit
+}
+
 func buildProbe(spec coderv1alpha1.ProbeSpec, path, portName string) *corev1.Probe {
 	probe := &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
@@ -930,10 +938,10 @@ func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, c
 		if coderControlPlane.Spec.Resources != nil {
 			container.Resources = *coderControlPlane.Spec.Resources
 		}
-		if coderControlPlane.Spec.ReadinessProbe.Enabled {
+		if probeEnabled(coderControlPlane.Spec.ReadinessProbe.Enabled, true) {
 			container.ReadinessProbe = buildProbe(coderControlPlane.Spec.ReadinessProbe, "/healthz", "http")
 		}
-		if coderControlPlane.Spec.LivenessProbe.Enabled {
+		if probeEnabled(coderControlPlane.Spec.LivenessProbe.Enabled, false) {
 			container.LivenessProbe = buildProbe(coderControlPlane.Spec.LivenessProbe, "/healthz", "http")
 		}
 

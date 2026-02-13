@@ -69,8 +69,8 @@ type TLSSpec struct {
 // ProbeSpec configures a Kubernetes probe with an enable toggle.
 type ProbeSpec struct {
 	// Enabled toggles the probe on or off.
-	// +kubebuilder:default=true
-	Enabled bool `json:"enabled,omitempty"`
+	// When omitted, readiness defaults to enabled while liveness defaults to disabled.
+	Enabled *bool `json:"enabled,omitempty"`
 	// InitialDelaySeconds is the delay before the probe starts.
 	// +kubebuilder:default=0
 	InitialDelaySeconds int32 `json:"initialDelaySeconds,omitempty"`
