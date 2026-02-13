@@ -2258,6 +2258,9 @@ func TestReconcile_ServiceAccount(t *testing.T) {
 				Image: "test-serviceaccount:latest",
 				ServiceAccount: coderv1alpha1.ServiceAccountSpec{
 					Name: "test-serviceaccount-disable-detach-sa",
+					Labels: map[string]string{
+						"app.kubernetes.io/instance": "custom-instance-label",
+					},
 				},
 			},
 		}
@@ -2278,6 +2281,9 @@ func TestReconcile_ServiceAccount(t *testing.T) {
 		serviceAccount := &corev1.ServiceAccount{}
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: serviceAccountName, Namespace: cp.Namespace}, serviceAccount); err != nil {
 			t.Fatalf("get managed service account: %v", err)
+		}
+		if got := serviceAccount.Labels["app.kubernetes.io/instance"]; got != "custom-instance-label" {
+			t.Fatalf("expected reserved instance label override to be applied, got %q", got)
 		}
 		ownerReference := metav1.GetControllerOf(serviceAccount)
 		if ownerReference == nil || ownerReference.UID != cp.UID {

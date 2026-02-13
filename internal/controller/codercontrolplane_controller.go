@@ -534,9 +534,8 @@ func (r *CoderControlPlaneReconciler) detachManagedServiceAccounts(
 		ctx,
 		serviceAccounts,
 		client.InNamespace(coderControlPlane.Namespace),
-		client.MatchingLabels(controlPlaneLabels(coderControlPlane.Name)),
 	); err != nil {
-		return fmt.Errorf("list managed service accounts: %w", err)
+		return fmt.Errorf("list service accounts for detachment: %w", err)
 	}
 
 	for i := range serviceAccounts.Items {
