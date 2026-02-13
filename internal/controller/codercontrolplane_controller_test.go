@@ -2851,18 +2851,26 @@ func TestReconcile_TLSAndCertSecretVolumeNameSanitization(t *testing.T) {
 	podSpec := deployment.Spec.Template.Spec
 	container := podSpec.Containers[0]
 
-	if !podHasSecretVolume(podSpec, "tls-my-tls-secret", "my.tls.secret") {
-		t.Fatalf("expected sanitized TLS volume name for dotted secret, got %+v", podSpec.Volumes)
+	tlsVolumeName := secretVolumeName(podSpec, "my.tls.secret")
+	if tlsVolumeName == "" {
+		t.Fatalf("expected TLS volume for dotted secret, got %+v", podSpec.Volumes)
 	}
-	if !containerHasVolumeMount(container, "tls-my-tls-secret", "/etc/ssl/certs/coder/my.tls.secret") {
-		t.Fatalf("expected sanitized TLS volume mount name for dotted secret, got %+v", container.VolumeMounts)
+	if !strings.HasPrefix(tlsVolumeName, "tls-my-tls-secret") {
+		t.Fatalf("expected TLS volume name to start with %q, got %q", "tls-my-tls-secret", tlsVolumeName)
+	}
+	if !containerHasVolumeMount(container, tlsVolumeName, "/etc/ssl/certs/coder/my.tls.secret") {
+		t.Fatalf("expected TLS volume mount name %q for dotted secret, got %+v", tlsVolumeName, container.VolumeMounts)
 	}
 
-	if !podHasSecretVolume(podSpec, "ca-cert-extra-ca-secret", "extra.ca.secret") {
-		t.Fatalf("expected sanitized cert volume name for dotted secret, got %+v", podSpec.Volumes)
+	certVolumeName := secretVolumeName(podSpec, "extra.ca.secret")
+	if certVolumeName == "" {
+		t.Fatalf("expected cert volume for dotted secret, got %+v", podSpec.Volumes)
 	}
-	if !containerHasVolumeMount(container, "ca-cert-extra-ca-secret", "/etc/ssl/certs/extra.ca.secret.crt") {
-		t.Fatalf("expected sanitized cert volume mount name for dotted secret, got %+v", container.VolumeMounts)
+	if !strings.HasPrefix(certVolumeName, "ca-cert-extra-ca-secret") {
+		t.Fatalf("expected cert volume name to start with %q, got %q", "ca-cert-extra-ca-secret", certVolumeName)
+	}
+	if !containerHasVolumeMount(container, certVolumeName, "/etc/ssl/certs/extra.ca.secret.crt") {
+		t.Fatalf("expected cert volume mount name %q for dotted secret, got %+v", certVolumeName, container.VolumeMounts)
 	}
 }
 
@@ -3351,6 +3359,18 @@ func podHasSecretVolume(podSpec corev1.PodSpec, volumeName, secretName string) b
 		}
 	}
 	return false
+}
+
+func secretVolumeName(podSpec corev1.PodSpec, secretName string) string {
+	for _, volume := range podSpec.Volumes {
+		if volume.Secret == nil {
+			continue
+		}
+		if volume.Secret.SecretName == secretName {
+			return volume.Name
+		}
+	}
+	return ""
 }
 
 func podHasVolume(podSpec corev1.PodSpec, volumeName string) bool {

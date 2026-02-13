@@ -1924,9 +1924,10 @@ func operatorAccessTokenSecretName(coderControlPlane *coderv1alpha1.CoderControl
 }
 
 func volumeNameForSecret(prefix, secretName string) string {
-	sanitizedSecretName := sanitizeDNSLabel(strings.TrimSpace(secretName))
+	normalizedSecretName := strings.TrimSpace(strings.ToLower(secretName))
+	sanitizedSecretName := sanitizeDNSLabel(normalizedSecretName)
 	candidate := fmt.Sprintf("%s-%s", prefix, sanitizedSecretName)
-	if len(candidate) <= 63 {
+	if len(candidate) <= 63 && sanitizedSecretName == normalizedSecretName {
 		return candidate
 	}
 
