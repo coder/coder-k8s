@@ -3,6 +3,8 @@ package controller_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"hash/fnv"
 	"net/http"
 	"reflect"
 	"strings"
@@ -2344,7 +2346,8 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 		}
 
 		serviceAccountName := cp.Spec.ServiceAccount.Name
-		roleName := serviceAccountName + "-workspace-perms"
+		roleName := expectedWorkspaceRoleName(t, cp, serviceAccountName)
+		roleBindingName := expectedWorkspaceRoleBindingName(t, cp, serviceAccountName)
 		role := &rbacv1.Role{}
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: cp.Namespace}, role); err != nil {
 			t.Fatalf("get workspace role: %v", err)
@@ -2360,7 +2363,7 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 		}
 
 		roleBinding := &rbacv1.RoleBinding{}
-		if err := k8sClient.Get(ctx, types.NamespacedName{Name: serviceAccountName, Namespace: cp.Namespace}, roleBinding); err != nil {
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleBindingName, Namespace: cp.Namespace}, roleBinding); err != nil {
 			t.Fatalf("get workspace role binding: %v", err)
 		}
 		if roleBinding.RoleRef.Kind != "Role" || roleBinding.RoleRef.Name != roleName {
@@ -2401,13 +2404,15 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 			t.Fatalf("reconcile control plane with long service account name: %v", err)
 		}
 
+		roleBindingName := expectedWorkspaceRoleBindingName(t, cp, serviceAccountName)
 		roleBinding := &rbacv1.RoleBinding{}
-		if err := k8sClient.Get(ctx, types.NamespacedName{Name: serviceAccountName, Namespace: cp.Namespace}, roleBinding); err != nil {
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleBindingName, Namespace: cp.Namespace}, roleBinding); err != nil {
 			t.Fatalf("get workspace role binding: %v", err)
 		}
 		roleName := roleBinding.RoleRef.Name
-		if roleName == serviceAccountName+"-workspace-perms" {
-			t.Fatalf("expected long service account name to trigger role name truncation, got %q", roleName)
+		expectedRoleName := expectedWorkspaceRoleName(t, cp, serviceAccountName)
+		if roleName != expectedRoleName {
+			t.Fatalf("expected workspace role name %q, got %q", expectedRoleName, roleName)
 		}
 		if len(roleName) > 253 {
 			t.Fatalf("expected workspace role name length <= 253, got %d (%q)", len(roleName), roleName)
@@ -2451,7 +2456,7 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 			t.Fatalf("reconcile control plane: %v", err)
 		}
 
-		roleName := cp.Spec.ServiceAccount.Name + "-workspace-perms"
+		roleName := expectedWorkspaceRoleName(t, cp, cp.Spec.ServiceAccount.Name)
 		role := &rbacv1.Role{}
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: cp.Namespace}, role); err != nil {
 			t.Fatalf("get workspace role: %v", err)
@@ -2483,14 +2488,16 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 			t.Fatalf("reconcile control plane: %v", err)
 		}
 
+		roleName := expectedWorkspaceRoleName(t, cp, cp.Name)
+		roleBindingName := expectedWorkspaceRoleBindingName(t, cp, cp.Name)
 		role := &rbacv1.Role{}
-		err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name + "-workspace-perms", Namespace: cp.Namespace}, role)
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: cp.Namespace}, role)
 		if !apierrors.IsNotFound(err) {
 			t.Fatalf("expected workspace role to be absent when RBAC is disabled, got error: %v", err)
 		}
 
 		roleBinding := &rbacv1.RoleBinding{}
-		err = k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, roleBinding)
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: roleBindingName, Namespace: cp.Namespace}, roleBinding)
 		if !apierrors.IsNotFound(err) {
 			t.Fatalf("expected workspace role binding to be absent when RBAC is disabled, got error: %v", err)
 		}
@@ -2522,8 +2529,8 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 			t.Fatalf("reconcile control plane before disable: %v", err)
 		}
 
-		roleName := serviceAccountName + "-workspace-perms"
-		roleBindingName := serviceAccountName
+		roleName := expectedWorkspaceRoleName(t, cp, serviceAccountName)
+		roleBindingName := expectedWorkspaceRoleBindingName(t, cp, serviceAccountName)
 		for _, namespaceName := range []string{cp.Namespace, workspaceNamespace} {
 			role := &rbacv1.Role{}
 			if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: namespaceName}, role); err != nil {
@@ -2596,8 +2603,8 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 			t.Fatalf("expected cross-namespace workspace RBAC to request periodic drift requeue, got %+v", result)
 		}
 
-		roleName := serviceAccountName + "-workspace-perms"
-		roleBindingName := serviceAccountName
+		roleName := expectedWorkspaceRoleName(t, cp, serviceAccountName)
+		roleBindingName := expectedWorkspaceRoleBindingName(t, cp, serviceAccountName)
 		role := &rbacv1.Role{}
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: workspaceNamespace}, role); err != nil {
 			t.Fatalf("expected cross-namespace role %s/%s before delete: %v", workspaceNamespace, roleName, err)
@@ -2660,8 +2667,8 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 			t.Fatalf("reconcile control plane before invalidating service account name: %v", err)
 		}
 
-		roleName := serviceAccountName + "-workspace-perms"
-		roleBindingName := serviceAccountName
+		roleName := expectedWorkspaceRoleName(t, cp, serviceAccountName)
+		roleBindingName := expectedWorkspaceRoleBindingName(t, cp, serviceAccountName)
 		role := &rbacv1.Role{}
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: workspaceNamespace}, role); err != nil {
 			t.Fatalf("expected cross-namespace role %s/%s before delete: %v", workspaceNamespace, roleName, err)
@@ -2847,7 +2854,7 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 			t.Fatalf("reconcile control plane: %v", err)
 		}
 
-		roleName := cp.Spec.ServiceAccount.Name + "-workspace-perms"
+		roleName := expectedWorkspaceRoleName(t, cp, cp.Spec.ServiceAccount.Name)
 		role := &rbacv1.Role{}
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: roleName, Namespace: cp.Namespace}, role); err != nil {
 			t.Fatalf("get workspace role: %v", err)
@@ -4227,6 +4234,79 @@ func sliceContainsString(values []string, candidate string) bool {
 		}
 	}
 	return false
+}
+
+func expectedWorkspaceRoleName(t *testing.T, cp *coderv1alpha1.CoderControlPlane, serviceAccountName string) string {
+	t.Helper()
+
+	scopeHash := expectedWorkspaceRBACScopeHash(t, cp)
+	return expectedScopedWorkspaceRBACName(t, serviceAccountName, scopeHash, "-workspace-perms")
+}
+
+func expectedWorkspaceRoleBindingName(t *testing.T, cp *coderv1alpha1.CoderControlPlane, serviceAccountName string) string {
+	t.Helper()
+
+	scopeHash := expectedWorkspaceRBACScopeHash(t, cp)
+	return expectedScopedWorkspaceRBACName(t, serviceAccountName, scopeHash, "")
+}
+
+func expectedWorkspaceRBACScopeHash(t *testing.T, cp *coderv1alpha1.CoderControlPlane) string {
+	t.Helper()
+	if cp == nil {
+		t.Fatal("expected control plane must not be nil")
+	}
+	if strings.TrimSpace(cp.Namespace) == "" {
+		t.Fatal("expected control plane namespace must not be empty")
+	}
+	if strings.TrimSpace(cp.Name) == "" {
+		t.Fatal("expected control plane name must not be empty")
+	}
+
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(cp.Namespace))
+	_, _ = hasher.Write([]byte{0})
+	_, _ = hasher.Write([]byte(cp.Name))
+	return fmt.Sprintf("%08x", hasher.Sum32())
+}
+
+func expectedScopedWorkspaceRBACName(t *testing.T, baseName, scopeHash, suffix string) string {
+	t.Helper()
+
+	normalizedBaseName := strings.TrimSpace(baseName)
+	if normalizedBaseName == "" {
+		t.Fatal("expected workspace RBAC base name must not be empty")
+	}
+	if strings.TrimSpace(scopeHash) == "" {
+		t.Fatal("expected workspace RBAC scope hash must not be empty")
+	}
+
+	const kubernetesObjectNameMaxLength = 253
+
+	candidate := fmt.Sprintf("%s-%s%s", normalizedBaseName, scopeHash, suffix)
+	if len(candidate) <= kubernetesObjectNameMaxLength {
+		return candidate
+	}
+
+	available := kubernetesObjectNameMaxLength - len(scopeHash) - len(suffix) - 1
+	if available < 1 {
+		t.Fatalf("expected workspace RBAC name prefix capacity to be positive, got %d", available)
+	}
+
+	truncatedPrefix := normalizedBaseName
+	if len(truncatedPrefix) > available {
+		truncatedPrefix = truncatedPrefix[:available]
+	}
+	truncatedPrefix = strings.Trim(truncatedPrefix, "-.")
+	if truncatedPrefix == "" {
+		truncatedPrefix = "workspace"
+	}
+
+	result := fmt.Sprintf("%s-%s%s", truncatedPrefix, scopeHash, suffix)
+	if len(result) > kubernetesObjectNameMaxLength {
+		t.Fatalf("expected workspace RBAC name %q to be <= %d characters", result, kubernetesObjectNameMaxLength)
+	}
+
+	return result
 }
 
 func resourceMustParse(t *testing.T, quantity string) resource.Quantity {

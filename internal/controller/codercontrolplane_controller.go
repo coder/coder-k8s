@@ -299,27 +299,45 @@ func resolveServiceAccountName(cp *coderv1alpha1.CoderControlPlane) string {
 	return cp.Name
 }
 
-func workspaceRoleName(serviceAccountName string) (string, error) {
-	normalizedServiceAccountName := strings.TrimSpace(serviceAccountName)
-	if normalizedServiceAccountName == "" {
-		return "", fmt.Errorf("assertion failed: service account name must not be empty")
+func workspaceRBACScopeHash(coderControlPlane *coderv1alpha1.CoderControlPlane) (string, error) {
+	if coderControlPlane == nil {
+		return "", fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+	if strings.TrimSpace(coderControlPlane.Namespace) == "" {
+		return "", fmt.Errorf("assertion failed: coder control plane namespace must not be empty")
+	}
+	if strings.TrimSpace(coderControlPlane.Name) == "" {
+		return "", fmt.Errorf("assertion failed: coder control plane name must not be empty")
 	}
 
-	candidate := normalizedServiceAccountName + workspaceRoleNameSuffix
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(coderControlPlane.Namespace))
+	_, _ = hasher.Write([]byte{0})
+	_, _ = hasher.Write([]byte(coderControlPlane.Name))
+
+	return fmt.Sprintf("%08x", hasher.Sum32()), nil
+}
+
+func scopedWorkspaceRBACName(baseName, scopeHash, suffix string) (string, error) {
+	normalizedBaseName := strings.TrimSpace(baseName)
+	if normalizedBaseName == "" {
+		return "", fmt.Errorf("assertion failed: workspace RBAC base name must not be empty")
+	}
+	if strings.TrimSpace(scopeHash) == "" {
+		return "", fmt.Errorf("assertion failed: workspace RBAC scope hash must not be empty")
+	}
+
+	candidate := fmt.Sprintf("%s-%s%s", normalizedBaseName, scopeHash, suffix)
 	if len(candidate) <= kubernetesObjectNameMaxLength {
 		return candidate, nil
 	}
 
-	hasher := fnv.New32a()
-	_, _ = hasher.Write([]byte(normalizedServiceAccountName))
-	hashSuffix := fmt.Sprintf("%08x", hasher.Sum32())
-
-	available := kubernetesObjectNameMaxLength - len(workspaceRoleNameSuffix) - len(hashSuffix) - 1
+	available := kubernetesObjectNameMaxLength - len(scopeHash) - len(suffix) - 1
 	if available < 1 {
-		return "", fmt.Errorf("assertion failed: workspace role name prefix capacity must be positive")
+		return "", fmt.Errorf("assertion failed: workspace RBAC name prefix capacity must be positive")
 	}
 
-	truncatedPrefix := normalizedServiceAccountName
+	truncatedPrefix := normalizedBaseName
 	if len(truncatedPrefix) > available {
 		truncatedPrefix = truncatedPrefix[:available]
 	}
@@ -328,12 +346,30 @@ func workspaceRoleName(serviceAccountName string) (string, error) {
 		truncatedPrefix = "workspace"
 	}
 
-	result := fmt.Sprintf("%s-%s%s", truncatedPrefix, hashSuffix, workspaceRoleNameSuffix)
+	result := fmt.Sprintf("%s-%s%s", truncatedPrefix, scopeHash, suffix)
 	if len(result) > kubernetesObjectNameMaxLength {
-		return "", fmt.Errorf("assertion failed: workspace role name %q exceeds %d characters", result, kubernetesObjectNameMaxLength)
+		return "", fmt.Errorf("assertion failed: workspace RBAC name %q exceeds %d characters", result, kubernetesObjectNameMaxLength)
 	}
 
 	return result, nil
+}
+
+func workspaceRoleName(coderControlPlane *coderv1alpha1.CoderControlPlane, serviceAccountName string) (string, error) {
+	scopeHash, err := workspaceRBACScopeHash(coderControlPlane)
+	if err != nil {
+		return "", err
+	}
+
+	return scopedWorkspaceRBACName(serviceAccountName, scopeHash, workspaceRoleNameSuffix)
+}
+
+func workspaceRoleBindingName(coderControlPlane *coderv1alpha1.CoderControlPlane, serviceAccountName string) (string, error) {
+	scopeHash, err := workspaceRBACScopeHash(coderControlPlane)
+	if err != nil {
+		return "", err
+	}
+
+	return scopedWorkspaceRBACName(serviceAccountName, scopeHash, "")
 }
 
 func boolOrDefault(explicit *bool, defaultValue bool) bool {
@@ -613,11 +649,14 @@ func (r *CoderControlPlaneReconciler) reconcileWorkspaceRBAC(ctx context.Context
 	if ownerUID == "" {
 		return fmt.Errorf("assertion failed: coder control plane UID must not be empty")
 	}
-	roleName, err := workspaceRoleName(serviceAccountName)
+	roleName, err := workspaceRoleName(coderControlPlane, serviceAccountName)
 	if err != nil {
 		return err
 	}
-	roleBindingName := serviceAccountName
+	roleBindingName, err := workspaceRoleBindingName(coderControlPlane, serviceAccountName)
+	if err != nil {
+		return err
+	}
 
 	if !workspacePermsEnabled(coderControlPlane.Spec.RBAC.WorkspacePerms) {
 		return r.cleanupManagedWorkspaceRBAC(ctx, coderControlPlane, nil, nil)
@@ -735,11 +774,14 @@ func (r *CoderControlPlaneReconciler) cleanupManagedWorkspaceRBAC(
 	if serviceAccountName == "" {
 		serviceAccountName = coderControlPlane.Name
 	}
-	expectedRoleName, err := workspaceRoleName(serviceAccountName)
+	expectedRoleName, err := workspaceRoleName(coderControlPlane, serviceAccountName)
 	if err != nil {
 		return err
 	}
-	expectedRoleBindingName := serviceAccountName
+	expectedRoleBindingName, err := workspaceRoleBindingName(coderControlPlane, serviceAccountName)
+	if err != nil {
+		return err
+	}
 
 	labels := workspaceRBACLabels(coderControlPlane)
 
