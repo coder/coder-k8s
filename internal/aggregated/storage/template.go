@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"reflect"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -18,6 +21,24 @@ import (
 	"github.com/coder/coder-k8s/internal/aggregated/convert"
 	"github.com/coder/coder/v2/codersdk"
 )
+
+const (
+	templateVersionBuildWaitTimeoutEnv         = "CODER_K8S_TEMPLATE_BUILD_WAIT_TIMEOUT"
+	templateVersionBuildBackoffAfterEnv        = "CODER_K8S_TEMPLATE_BUILD_BACKOFF_AFTER"
+	templateVersionBuildInitialPollIntervalEnv = "CODER_K8S_TEMPLATE_BUILD_INITIAL_POLL_INTERVAL"
+	templateVersionBuildMaxPollIntervalEnv     = "CODER_K8S_TEMPLATE_BUILD_MAX_POLL_INTERVAL"
+	defaultTemplateVersionBuildWaitTimeout     = 25 * time.Minute
+	defaultTemplateVersionBuildBackoffAfter    = 2 * time.Minute
+	defaultTemplateVersionBuildInitialPoll     = 2 * time.Second
+	defaultTemplateVersionBuildMaxPollInterval = 10 * time.Second
+)
+
+type templateVersionBuildWaitConfig struct {
+	waitTimeout     time.Duration
+	backoffAfter    time.Duration
+	initialPoll     time.Duration
+	maxPollInterval time.Duration
+}
 
 var (
 	_ rest.Storage              = (*TemplateStorage)(nil)
@@ -475,6 +496,10 @@ func (s *TemplateStorage) Update(
 				return nil, false, fmt.Errorf("assertion failed: new template version ID must not be nil")
 			}
 
+			if waitErr := waitForTemplateVersionBuild(ctx, sdk, newVersion.ID); waitErr != nil {
+				return nil, false, fmt.Errorf("wait for template version %q build: %w", newVersion.ID.String(), waitErr)
+			}
+
 			if err := sdk.UpdateActiveTemplateVersion(ctx, templateID, codersdk.UpdateActiveTemplateVersion{ID: newVersion.ID}); err != nil {
 				return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
 			}
@@ -569,6 +594,199 @@ func (s *TemplateStorage) ConvertToTable(ctx context.Context, object, tableOptio
 	}
 
 	return s.tableConvertor.ConvertToTable(ctx, object, tableOptions)
+}
+
+func waitForTemplateVersionBuild(ctx context.Context, sdk *codersdk.Client, versionID uuid.UUID) error {
+	if ctx == nil {
+		return fmt.Errorf("assertion failed: context must not be nil")
+	}
+	if sdk == nil {
+		return fmt.Errorf("assertion failed: codersdk client must not be nil")
+	}
+	if versionID == uuid.Nil {
+		return fmt.Errorf("assertion failed: template version ID must not be nil")
+	}
+
+	waitConfig, waitConfigErr := loadTemplateVersionBuildWaitConfigFromEnv()
+	if waitConfigErr != nil {
+		return waitConfigErr
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, waitConfig.waitTimeout)
+	defer cancel()
+
+	pollInterval := waitConfig.initialPoll
+	pollStartTime := time.Now()
+
+	lastStatus := codersdk.ProvisionerJobUnknown
+	lastError := ""
+	for {
+		version, err := sdk.TemplateVersion(waitCtx, versionID)
+		if err != nil {
+			if waitCtx.Err() != nil {
+				return fmt.Errorf(
+					"template version %q build wait canceled after status %q: %w",
+					versionID.String(),
+					lastStatus,
+					waitCtx.Err(),
+				)
+			}
+			return fmt.Errorf("fetch template version %q: %w", versionID.String(), err)
+		}
+
+		status := version.Job.Status
+		if status == "" {
+			status = codersdk.ProvisionerJobUnknown
+		}
+		lastStatus = status
+		lastError = version.Job.Error
+
+		switch status {
+		case codersdk.ProvisionerJobSucceeded:
+			return nil
+		case codersdk.ProvisionerJobFailed, codersdk.ProvisionerJobCanceled:
+			if lastError == "" {
+				lastError = "template version build did not succeed"
+			}
+			return fmt.Errorf(
+				"template version %q build ended with status %q: %s",
+				versionID.String(),
+				status,
+				lastError,
+			)
+		case codersdk.ProvisionerJobPending, codersdk.ProvisionerJobRunning, codersdk.ProvisionerJobCanceling, codersdk.ProvisionerJobUnknown:
+			// Keep polling below.
+		default:
+			return fmt.Errorf(
+				"assertion failed: unexpected template version build status %q for version %q",
+				status,
+				versionID.String(),
+			)
+		}
+
+		if waitConfig.backoffAfter > 0 && time.Since(pollStartTime) >= waitConfig.backoffAfter && pollInterval < waitConfig.maxPollInterval {
+			nextPollInterval := pollInterval * 2
+			if nextPollInterval <= 0 || nextPollInterval > waitConfig.maxPollInterval {
+				nextPollInterval = waitConfig.maxPollInterval
+			}
+			pollInterval = nextPollInterval
+		}
+
+		select {
+		case <-waitCtx.Done():
+			if lastError == "" {
+				return fmt.Errorf(
+					"template version %q did not succeed within %s (last status: %q): %w",
+					versionID.String(),
+					waitConfig.waitTimeout,
+					lastStatus,
+					waitCtx.Err(),
+				)
+			}
+			return fmt.Errorf(
+				"template version %q did not succeed within %s (last status: %q, last error: %s): %w",
+				versionID.String(),
+				waitConfig.waitTimeout,
+				lastStatus,
+				lastError,
+				waitCtx.Err(),
+			)
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+func loadTemplateVersionBuildWaitConfigFromEnv() (templateVersionBuildWaitConfig, error) {
+	waitTimeout, waitTimeoutErr := parseDurationEnvOrDefault(templateVersionBuildWaitTimeoutEnv, defaultTemplateVersionBuildWaitTimeout)
+	if waitTimeoutErr != nil {
+		return templateVersionBuildWaitConfig{}, waitTimeoutErr
+	}
+	if waitTimeout <= 0 {
+		return templateVersionBuildWaitConfig{}, fmt.Errorf(
+			"assertion failed: %s must be > 0, got %s",
+			templateVersionBuildWaitTimeoutEnv,
+			waitTimeout,
+		)
+	}
+
+	backoffAfter, backoffAfterErr := parseDurationEnvOrDefault(templateVersionBuildBackoffAfterEnv, defaultTemplateVersionBuildBackoffAfter)
+	if backoffAfterErr != nil {
+		return templateVersionBuildWaitConfig{}, backoffAfterErr
+	}
+	if backoffAfter < 0 {
+		return templateVersionBuildWaitConfig{}, fmt.Errorf(
+			"assertion failed: %s must be >= 0, got %s",
+			templateVersionBuildBackoffAfterEnv,
+			backoffAfter,
+		)
+	}
+	if backoffAfter > waitTimeout {
+		return templateVersionBuildWaitConfig{}, fmt.Errorf(
+			"assertion failed: %s (%s) must be <= %s (%s)",
+			templateVersionBuildBackoffAfterEnv,
+			backoffAfter,
+			templateVersionBuildWaitTimeoutEnv,
+			waitTimeout,
+		)
+	}
+
+	initialPollInterval, initialPollIntervalErr := parseDurationEnvOrDefault(templateVersionBuildInitialPollIntervalEnv, defaultTemplateVersionBuildInitialPoll)
+	if initialPollIntervalErr != nil {
+		return templateVersionBuildWaitConfig{}, initialPollIntervalErr
+	}
+	if initialPollInterval <= 0 {
+		return templateVersionBuildWaitConfig{}, fmt.Errorf(
+			"assertion failed: %s must be > 0, got %s",
+			templateVersionBuildInitialPollIntervalEnv,
+			initialPollInterval,
+		)
+	}
+
+	maxPollInterval, maxPollIntervalErr := parseDurationEnvOrDefault(templateVersionBuildMaxPollIntervalEnv, defaultTemplateVersionBuildMaxPollInterval)
+	if maxPollIntervalErr != nil {
+		return templateVersionBuildWaitConfig{}, maxPollIntervalErr
+	}
+	if maxPollInterval <= 0 {
+		return templateVersionBuildWaitConfig{}, fmt.Errorf(
+			"assertion failed: %s must be > 0, got %s",
+			templateVersionBuildMaxPollIntervalEnv,
+			maxPollInterval,
+		)
+	}
+	if maxPollInterval < initialPollInterval {
+		return templateVersionBuildWaitConfig{}, fmt.Errorf(
+			"assertion failed: %s (%s) must be >= %s (%s)",
+			templateVersionBuildMaxPollIntervalEnv,
+			maxPollInterval,
+			templateVersionBuildInitialPollIntervalEnv,
+			initialPollInterval,
+		)
+	}
+
+	return templateVersionBuildWaitConfig{
+		waitTimeout:     waitTimeout,
+		backoffAfter:    backoffAfter,
+		initialPoll:     initialPollInterval,
+		maxPollInterval: maxPollInterval,
+	}, nil
+}
+
+func parseDurationEnvOrDefault(envName string, defaultValue time.Duration) (time.Duration, error) {
+	if envName == "" {
+		return 0, fmt.Errorf("assertion failed: environment variable name must not be empty")
+	}
+
+	rawValue := strings.TrimSpace(os.Getenv(envName))
+	if rawValue == "" {
+		return defaultValue, nil
+	}
+
+	parsedValue, parseErr := time.ParseDuration(rawValue)
+	if parseErr != nil {
+		return 0, fmt.Errorf("parse %s=%q: %w", envName, rawValue, parseErr)
+	}
+
+	return parsedValue, nil
 }
 
 func (s *TemplateStorage) clientForNamespace(ctx context.Context, namespace string) (*codersdk.Client, error) {

@@ -90,6 +90,26 @@ kubectl get codertemplates.aggregation.coder.com -A
 kubectl logs -n coder-system deploy/coder-k8s
 ```
 
+## Template build wait tuning
+
+When updating `CoderTemplate.spec.files`, the aggregated API server now waits for
+Coder to finish building the new template version before promoting it active.
+
+The wait behavior is configurable via environment variables on the
+`coder-k8s` deployment:
+
+- `CODER_K8S_TEMPLATE_BUILD_WAIT_TIMEOUT` (default: `25m`)
+- `CODER_K8S_TEMPLATE_BUILD_BACKOFF_AFTER` (default: `2m`)
+- `CODER_K8S_TEMPLATE_BUILD_INITIAL_POLL_INTERVAL` (default: `2s`)
+- `CODER_K8S_TEMPLATE_BUILD_MAX_POLL_INTERVAL` (default: `10s`)
+
+Behavior:
+
+- Polls at the initial interval for the first 2 minutes.
+- After that, poll interval doubles up to the max poll interval.
+- Fails if the version build ends in `failed`/`canceled` or the total wait
+  timeout is exceeded.
+
 ## TLS note
 
 `deploy/apiserver-apiservice.yaml` uses `insecureSkipTLSVerify: true` for development convenience.
