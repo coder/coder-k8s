@@ -737,7 +737,7 @@ func TestReconcile_LicenseUsesInternalHTTPURLWhenTLSEnabled(t *testing.T) {
 	}
 }
 
-func TestReconcile_LicenseUsesHTTPSWhenTLSAndServicePort443(t *testing.T) {
+func TestReconcile_LicenseUsesInternalHTTPURLWhenTLSAndServicePort443(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
@@ -803,8 +803,16 @@ func TestReconcile_LicenseUsesHTTPSWhenTLSAndServicePort443(t *testing.T) {
 	if len(uploader.calls) != 1 {
 		t.Fatalf("expected one license upload call, got %d", len(uploader.calls))
 	}
-	if got := uploader.calls[0].coderURL; got != "https://test-license-tls-443-url.default.svc.cluster.local:443" {
-		t.Fatalf("expected license upload URL %q, got %q", "https://test-license-tls-443-url.default.svc.cluster.local:443", got)
+	if got := uploader.calls[0].coderURL; got != "http://test-license-tls-443-url.default.svc.cluster.local:80" {
+		t.Fatalf("expected license upload URL %q, got %q", "http://test-license-tls-443-url.default.svc.cluster.local:80", got)
+	}
+
+	reconciled := &coderv1alpha1.CoderControlPlane{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, reconciled); err != nil {
+		t.Fatalf("get reconciled control plane: %v", err)
+	}
+	if !strings.HasPrefix(reconciled.Status.URL, "https://") {
+		t.Fatalf("expected status URL to remain https when TLS is enabled, got %q", reconciled.Status.URL)
 	}
 }
 
@@ -3529,6 +3537,70 @@ func TestReconcile_TLSAlignment(t *testing.T) {
 	expectedStatusURL := "https://" + cp.Name + "." + cp.Namespace + ".svc.cluster.local:443"
 	if reconciled.Status.URL != expectedStatusURL {
 		t.Fatalf("expected status URL %q when TLS is enabled, got %q", expectedStatusURL, reconciled.Status.URL)
+	}
+}
+
+func TestReconcile_TLSDeduplicatesSecretNames(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-tls-secret-dedup", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-tls-dedup:latest",
+			TLS: coderv1alpha1.TLSSpec{
+				SecretNames: []string{"my-tls-dedup", "my-tls-dedup"},
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create control plane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("reconcile control plane: %v", err)
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+
+	podSpec := deployment.Spec.Template.Spec
+	tlsVolumeName := secretVolumeName(podSpec, "my-tls-dedup")
+	if tlsVolumeName == "" {
+		t.Fatalf("expected TLS volume for secret my-tls-dedup, got %+v", podSpec.Volumes)
+	}
+	volumeCount := 0
+	for _, volume := range podSpec.Volumes {
+		if volume.Name == tlsVolumeName {
+			volumeCount++
+		}
+	}
+	if volumeCount != 1 {
+		t.Fatalf("expected exactly one TLS volume named %q, got %+v", tlsVolumeName, podSpec.Volumes)
+	}
+
+	container := podSpec.Containers[0]
+	mountCount := 0
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == tlsVolumeName {
+			mountCount++
+		}
+	}
+	if mountCount != 1 {
+		t.Fatalf("expected exactly one TLS volume mount named %q, got %+v", tlsVolumeName, container.VolumeMounts)
+	}
+
+	if got := mustFindEnvVar(t, container.Env, "CODER_TLS_CERT_FILE").Value; got != "/etc/ssl/certs/coder/my-tls-dedup/tls.crt" {
+		t.Fatalf("expected CODER_TLS_CERT_FILE for my-tls-dedup secret, got %q", got)
+	}
+	if got := mustFindEnvVar(t, container.Env, "CODER_TLS_KEY_FILE").Value; got != "/etc/ssl/certs/coder/my-tls-dedup/tls.key" {
+		t.Fatalf("expected CODER_TLS_KEY_FILE for my-tls-dedup secret, got %q", got)
 	}
 }
 

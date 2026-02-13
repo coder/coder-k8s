@@ -976,11 +976,17 @@ func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, c
 			tlsCertFiles := make([]string, 0, len(coderControlPlane.Spec.TLS.SecretNames))
 			tlsKeyFiles := make([]string, 0, len(coderControlPlane.Spec.TLS.SecretNames))
 
+			tlsSecretSeen := make(map[string]struct{}, len(coderControlPlane.Spec.TLS.SecretNames))
+
 			for _, secretName := range coderControlPlane.Spec.TLS.SecretNames {
 				secretName = strings.TrimSpace(secretName)
 				if secretName == "" {
 					return fmt.Errorf("assertion failed: tls secret name must not be empty")
 				}
+				if _, seen := tlsSecretSeen[secretName]; seen {
+					continue
+				}
+				tlsSecretSeen[secretName] = struct{}{}
 
 				volumeName := volumeNameForSecret("tls", secretName)
 				mountPath := fmt.Sprintf("/etc/ssl/certs/coder/%s", secretName)
@@ -1582,17 +1588,14 @@ func controlPlaneSDKURL(coderControlPlane *coderv1alpha1.CoderControlPlane) stri
 		return ""
 	}
 
-	servicePort := coderControlPlane.Spec.Service.Port
-	if servicePort == 0 {
-		servicePort = defaultControlPlanePort
+	// Always use HTTP for in-cluster SDK calls. TLS certs are typically provisioned
+	// for external hostnames and may fail verification against *.svc.cluster.local.
+	servicePort, err := httpRouteBackendServicePort(coderControlPlane)
+	if err != nil {
+		return ""
 	}
 
-	scheme := "http"
-	if controlPlaneTLSEnabled(coderControlPlane) && servicePort == 443 {
-		scheme = "https"
-	}
-
-	return fmt.Sprintf("%s://%s.%s.svc.cluster.local:%d", scheme, coderControlPlane.Name, coderControlPlane.Namespace, servicePort)
+	return fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", coderControlPlane.Name, coderControlPlane.Namespace, servicePort)
 }
 
 func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
