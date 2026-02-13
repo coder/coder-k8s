@@ -1,4 +1,8 @@
-# Deploy coder-k8s and the CloudNativePG example with Argo CD
+# Deploy operator stack with Argo CD
+
+This tutorial deploys `coder-k8s` and the CloudNativePG-backed example stack through Argo CD.
+
+Estimated time: **20–30 minutes**.
 
 By the end, your cluster will have:
 
