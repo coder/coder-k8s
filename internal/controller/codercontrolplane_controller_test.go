@@ -3633,6 +3633,46 @@ func TestReconcile_HTTPRouteExposure(t *testing.T) {
 	}
 }
 
+func TestReconcile_HTTPRouteExposure_RequiresParentRefs(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+	ensureHTTPRouteCRDInstalled(t)
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-httproute-parentrefs-required", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-httproute:latest",
+			Expose: &coderv1alpha1.ExposeSpec{
+				Gateway: &coderv1alpha1.GatewayExposeSpec{
+					Host: "missing-parentrefs.gateway.example.test",
+				},
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create control plane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	namespacedName := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
+	if err == nil {
+		t.Fatal("expected reconcile to fail when gateway parentRefs are missing")
+	}
+	if !strings.Contains(err.Error(), "gateway parentRefs must not be empty") {
+		t.Fatalf("expected missing parentRefs assertion error, got: %v", err)
+	}
+
+	httpRoute := &gatewayv1.HTTPRoute{}
+	err = k8sClient.Get(ctx, namespacedName, httpRoute)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected httproute to be absent when parentRefs are missing, got: %v", err)
+	}
+}
+
 func TestReconcile_HTTPRouteExposure_CRDMissingIsGraceful(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
@@ -3647,6 +3687,9 @@ func TestReconcile_HTTPRouteExposure_CRDMissingIsGraceful(t *testing.T) {
 			Expose: &coderv1alpha1.ExposeSpec{
 				Gateway: &coderv1alpha1.GatewayExposeSpec{
 					Host: "missing-crd.gateway.example.test",
+					ParentRefs: []coderv1alpha1.GatewayParentRef{{
+						Name: "missing-crd-gateway",
+					}},
 				},
 			},
 		},

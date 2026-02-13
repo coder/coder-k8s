@@ -1218,6 +1218,10 @@ func (r *CoderControlPlaneReconciler) reconcileHTTPRoute(ctx context.Context, co
 		return false, fmt.Errorf("assertion failed: gateway host must not be empty")
 	}
 
+	if len(gatewayExpose.ParentRefs) == 0 {
+		return false, fmt.Errorf("assertion failed: gateway parentRefs must not be empty")
+	}
+
 	httpRoute := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: coderControlPlane.Name, Namespace: coderControlPlane.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, httpRoute, func() error {
 		labels := controlPlaneLabels(coderControlPlane.Name)
