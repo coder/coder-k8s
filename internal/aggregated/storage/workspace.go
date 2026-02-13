@@ -570,11 +570,18 @@ func (s *WorkspaceStorage) Delete(
 		}
 	}
 
-	_, err = sdk.CreateWorkspaceBuild(ctx, workspace.ID, codersdk.CreateWorkspaceBuildRequest{
+	deleteBuild, err := sdk.CreateWorkspaceBuild(ctx, workspace.ID, codersdk.CreateWorkspaceBuildRequest{
 		Transition: codersdk.WorkspaceTransitionDelete,
 	})
 	if err != nil {
 		return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), name)
+	}
+
+	// Update the workspace snapshot with the delete-transition build so
+	// the watch event reflects the latest build state, not the pre-delete snapshot.
+	workspace.LatestBuild = deleteBuild
+	if !deleteBuild.UpdatedAt.IsZero() {
+		workspace.UpdatedAt = deleteBuild.UpdatedAt
 	}
 
 	workspaceObj := convert.WorkspaceToK8s(namespace, workspace)
