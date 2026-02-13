@@ -17,6 +17,7 @@ import (
 	"github.com/coder/coder/v2/codersdk"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -36,9 +37,10 @@ import (
 )
 
 const (
-	defaultCoderImage       = "ghcr.io/coder/coder:latest"
-	defaultControlPlanePort = int32(80)
-	controlPlaneTargetPort  = int32(3000)
+	defaultCoderImage         = "ghcr.io/coder/coder:latest"
+	defaultControlPlanePort   = int32(80)
+	controlPlaneTargetPort    = int32(8080)
+	controlPlaneTLSTargetPort = int32(8443)
 
 	postgresConnectionURLEnvVar = "CODER_PG_CONNECTION_URL"
 
@@ -190,6 +192,8 @@ type CoderControlPlaneReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile converges the desired CoderControlPlane spec into Deployment and Service resources.
 func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -211,6 +215,13 @@ func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if coderControlPlane.Name != req.Name || coderControlPlane.Namespace != req.Namespace {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: fetched object %s/%s does not match request %s/%s",
 			coderControlPlane.Namespace, coderControlPlane.Name, req.Namespace, req.Name)
+	}
+
+	if err := r.reconcileServiceAccount(ctx, coderControlPlane); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcileWorkspaceRBAC(ctx, coderControlPlane); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	deployment, err := r.reconcileDeployment(ctx, coderControlPlane)
@@ -247,7 +258,194 @@ func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	return mergeResults(operatorResult, licenseResult, entitlementsResult), nil
 }
 
+func resolveServiceAccountName(cp *coderv1alpha1.CoderControlPlane) string {
+	if cp.Spec.ServiceAccount.Name != "" {
+		return cp.Spec.ServiceAccount.Name
+	}
+	return cp.Name
+}
+
+func controlPlaneTLSEnabled(cp *coderv1alpha1.CoderControlPlane) bool {
+	if cp == nil {
+		return false
+	}
+	return len(cp.Spec.TLS.SecretNames) > 0
+}
+
+func workspaceRBACLabels(cp *coderv1alpha1.CoderControlPlane) map[string]string {
+	labels := maps.Clone(controlPlaneLabels(cp.Name))
+	labels["coder.com/control-plane"] = cp.Name
+	labels["coder.com/control-plane-namespace"] = cp.Namespace
+	return labels
+}
+
+func (r *CoderControlPlaneReconciler) reconcileServiceAccount(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+	if coderControlPlane.Spec.ServiceAccount.DisableCreate {
+		return nil
+	}
+
+	serviceAccountName := resolveServiceAccountName(coderControlPlane)
+	if strings.TrimSpace(serviceAccountName) == "" {
+		return fmt.Errorf("assertion failed: service account name must not be empty")
+	}
+
+	serviceAccount := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: serviceAccountName, Namespace: coderControlPlane.Namespace}}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, serviceAccount, func() error {
+		labels := maps.Clone(controlPlaneLabels(coderControlPlane.Name))
+		maps.Copy(labels, coderControlPlane.Spec.ServiceAccount.Labels)
+		serviceAccount.Labels = labels
+		serviceAccount.Annotations = maps.Clone(coderControlPlane.Spec.ServiceAccount.Annotations)
+
+		if err := controllerutil.SetControllerReference(coderControlPlane, serviceAccount, r.Scheme); err != nil {
+			return fmt.Errorf("set controller reference: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("reconcile control plane serviceaccount: %w", err)
+	}
+
+	return nil
+}
+
+func (r *CoderControlPlaneReconciler) reconcileWorkspaceRBAC(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+	if !coderControlPlane.Spec.RBAC.WorkspacePerms {
+		return nil
+	}
+
+	serviceAccountName := resolveServiceAccountName(coderControlPlane)
+	if strings.TrimSpace(serviceAccountName) == "" {
+		return fmt.Errorf("assertion failed: service account name must not be empty")
+	}
+
+	roleName := fmt.Sprintf("%s-workspace-perms", serviceAccountName)
+	roleBindingName := serviceAccountName
+
+	rules := []rbacv1.PolicyRule{
+		{
+			APIGroups: []string{""},
+			Resources: []string{"pods"},
+			Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"},
+		},
+		{
+			APIGroups: []string{""},
+			Resources: []string{"persistentvolumeclaims"},
+			Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"},
+		},
+	}
+	if coderControlPlane.Spec.RBAC.EnableDeployments {
+		rules = append(rules, rbacv1.PolicyRule{
+			APIGroups: []string{"apps"},
+			Resources: []string{"deployments"},
+			Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"},
+		})
+	}
+	rules = append(rules, coderControlPlane.Spec.RBAC.ExtraRules...)
+
+	targetNamespaces := append([]string{coderControlPlane.Namespace}, coderControlPlane.Spec.RBAC.WorkspaceNamespaces...)
+	seenNamespaces := make(map[string]struct{}, len(targetNamespaces))
+	for _, namespace := range targetNamespaces {
+		namespace = strings.TrimSpace(namespace)
+		if namespace == "" {
+			return fmt.Errorf("assertion failed: workspace namespace must not be empty")
+		}
+		if _, seen := seenNamespaces[namespace]; seen {
+			continue
+		}
+		seenNamespaces[namespace] = struct{}{}
+
+		labels := workspaceRBACLabels(coderControlPlane)
+
+		role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: roleName, Namespace: namespace}}
+		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, role, func() error {
+			role.Labels = maps.Clone(labels)
+			role.Rules = append([]rbacv1.PolicyRule(nil), rules...)
+
+			if namespace == coderControlPlane.Namespace {
+				if err := controllerutil.SetControllerReference(coderControlPlane, role, r.Scheme); err != nil {
+					return fmt.Errorf("set controller reference: %w", err)
+				}
+			} else {
+				role.OwnerReferences = nil
+			}
+
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("reconcile workspace role %s/%s: %w", namespace, roleName, err)
+		}
+
+		roleBinding := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: roleBindingName, Namespace: namespace}}
+		_, err = controllerutil.CreateOrUpdate(ctx, r.Client, roleBinding, func() error {
+			roleBinding.Labels = maps.Clone(labels)
+			roleBinding.RoleRef = rbacv1.RoleRef{
+				APIGroup: rbacv1.GroupName,
+				Kind:     "Role",
+				Name:     roleName,
+			}
+			roleBinding.Subjects = []rbacv1.Subject{{
+				Kind:      rbacv1.ServiceAccountKind,
+				Name:      serviceAccountName,
+				Namespace: coderControlPlane.Namespace,
+			}}
+
+			if namespace == coderControlPlane.Namespace {
+				if err := controllerutil.SetControllerReference(coderControlPlane, roleBinding, r.Scheme); err != nil {
+					return fmt.Errorf("set controller reference: %w", err)
+				}
+			} else {
+				roleBinding.OwnerReferences = nil
+			}
+
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("reconcile workspace role binding %s/%s: %w", namespace, roleBindingName, err)
+		}
+	}
+
+	return nil
+}
+
+func buildProbe(spec coderv1alpha1.ProbeSpec, path, portName string) *corev1.Probe {
+	probe := &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path:   path,
+				Port:   intstr.FromString(portName),
+				Scheme: corev1.URISchemeHTTP,
+			},
+		},
+		InitialDelaySeconds: spec.InitialDelaySeconds,
+	}
+	if spec.PeriodSeconds != nil {
+		probe.PeriodSeconds = *spec.PeriodSeconds
+	}
+	if spec.TimeoutSeconds != nil {
+		probe.TimeoutSeconds = *spec.TimeoutSeconds
+	}
+	if spec.SuccessThreshold != nil {
+		probe.SuccessThreshold = *spec.SuccessThreshold
+	}
+	if spec.FailureThreshold != nil {
+		probe.FailureThreshold = *spec.FailureThreshold
+	}
+
+	return probe
+}
+
 func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) (*appsv1.Deployment, error) {
+	if coderControlPlane == nil {
+		return nil, fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+
 	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: coderControlPlane.Name, Namespace: coderControlPlane.Namespace}}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deployment, func() error {
@@ -268,27 +466,170 @@ func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, c
 			image = defaultCoderImage
 		}
 
-		args := []string{"--http-address=0.0.0.0:3000"}
+		serviceAccountName := resolveServiceAccountName(coderControlPlane)
+		if strings.TrimSpace(serviceAccountName) == "" {
+			return fmt.Errorf("assertion failed: service account name must not be empty")
+		}
+
+		args := []string{"--http-address=0.0.0.0:8080"}
 		args = append(args, coderControlPlane.Spec.ExtraArgs...)
+
+		env := []corev1.EnvVar{
+			{
+				Name: "KUBE_POD_IP",
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"},
+				},
+			},
+			{
+				Name:  "CODER_DERP_SERVER_RELAY_URL",
+				Value: "http://$(KUBE_POD_IP):8080",
+			},
+		}
+
+		tlsEnabled := controlPlaneTLSEnabled(coderControlPlane)
+		if coderControlPlane.Spec.EnvUseClusterAccessURL == nil || *coderControlPlane.Spec.EnvUseClusterAccessURL {
+			configuredAccessURL, err := findEnvVar(coderControlPlane.Spec.ExtraEnv, "CODER_ACCESS_URL")
+			if err != nil {
+				return err
+			}
+			if configuredAccessURL == nil {
+				scheme := "http"
+				if tlsEnabled {
+					scheme = "https"
+				}
+				env = append(env, corev1.EnvVar{
+					Name:  "CODER_ACCESS_URL",
+					Value: fmt.Sprintf("%s://%s.%s.svc.cluster.local", scheme, coderControlPlane.Name, coderControlPlane.Namespace),
+				})
+			}
+		}
+
+		ports := []corev1.ContainerPort{{
+			Name:          "http",
+			ContainerPort: controlPlaneTargetPort,
+			Protocol:      corev1.ProtocolTCP,
+		}}
+
+		volumes := make([]corev1.Volume, 0, len(coderControlPlane.Spec.TLS.SecretNames)+len(coderControlPlane.Spec.Certs.Secrets)+len(coderControlPlane.Spec.Volumes))
+		volumeMounts := make([]corev1.VolumeMount, 0, len(coderControlPlane.Spec.TLS.SecretNames)+len(coderControlPlane.Spec.Certs.Secrets)+len(coderControlPlane.Spec.VolumeMounts))
+		if tlsEnabled {
+			tlsCertFiles := make([]string, 0, len(coderControlPlane.Spec.TLS.SecretNames))
+			tlsKeyFiles := make([]string, 0, len(coderControlPlane.Spec.TLS.SecretNames))
+
+			for _, secretName := range coderControlPlane.Spec.TLS.SecretNames {
+				secretName = strings.TrimSpace(secretName)
+				if secretName == "" {
+					return fmt.Errorf("assertion failed: tls secret name must not be empty")
+				}
+
+				volumeName := fmt.Sprintf("tls-%s", secretName)
+				mountPath := fmt.Sprintf("/etc/ssl/certs/coder/%s", secretName)
+				volumes = append(volumes, corev1.Volume{
+					Name: volumeName,
+					VolumeSource: corev1.VolumeSource{
+						Secret: &corev1.SecretVolumeSource{SecretName: secretName},
+					},
+				})
+				volumeMounts = append(volumeMounts, corev1.VolumeMount{
+					Name:      volumeName,
+					MountPath: mountPath,
+					ReadOnly:  true,
+				})
+
+				tlsCertFiles = append(tlsCertFiles, fmt.Sprintf("%s/tls.crt", mountPath))
+				tlsKeyFiles = append(tlsKeyFiles, fmt.Sprintf("%s/tls.key", mountPath))
+			}
+
+			env = append(env,
+				corev1.EnvVar{Name: "CODER_TLS_ENABLE", Value: "true"},
+				corev1.EnvVar{Name: "CODER_TLS_ADDRESS", Value: "0.0.0.0:8443"},
+				corev1.EnvVar{Name: "CODER_TLS_CERT_FILE", Value: strings.Join(tlsCertFiles, ",")},
+				corev1.EnvVar{Name: "CODER_TLS_KEY_FILE", Value: strings.Join(tlsKeyFiles, ",")},
+			)
+
+			ports = append(ports, corev1.ContainerPort{
+				Name:          "https",
+				ContainerPort: controlPlaneTLSTargetPort,
+				Protocol:      corev1.ProtocolTCP,
+			})
+		}
+
+		for _, secret := range coderControlPlane.Spec.Certs.Secrets {
+			secret.Name = strings.TrimSpace(secret.Name)
+			secret.Key = strings.TrimSpace(secret.Key)
+			if secret.Name == "" {
+				return fmt.Errorf("assertion failed: cert secret name must not be empty")
+			}
+			if secret.Key == "" {
+				return fmt.Errorf("assertion failed: cert secret key must not be empty")
+			}
+
+			volumeName := fmt.Sprintf("ca-cert-%s", secret.Name)
+			volumes = append(volumes, corev1.Volume{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{SecretName: secret.Name},
+				},
+			})
+			volumeMounts = append(volumeMounts, corev1.VolumeMount{
+				Name:      volumeName,
+				MountPath: fmt.Sprintf("/etc/ssl/certs/%s.crt", secret.Name),
+				SubPath:   secret.Key,
+				ReadOnly:  true,
+			})
+		}
+
+		env = append(env, coderControlPlane.Spec.ExtraEnv...)
+		volumes = append(volumes, coderControlPlane.Spec.Volumes...)
+		volumeMounts = append(volumeMounts, coderControlPlane.Spec.VolumeMounts...)
+
+		container := corev1.Container{
+			Name:         "coder",
+			Image:        image,
+			Args:         args,
+			Env:          env,
+			EnvFrom:      coderControlPlane.Spec.EnvFrom,
+			Ports:        ports,
+			VolumeMounts: volumeMounts,
+		}
+		if coderControlPlane.Spec.SecurityContext != nil {
+			container.SecurityContext = coderControlPlane.Spec.SecurityContext
+		}
+		if coderControlPlane.Spec.Resources != nil {
+			container.Resources = *coderControlPlane.Spec.Resources
+		}
+		if coderControlPlane.Spec.ReadinessProbe.Enabled {
+			container.ReadinessProbe = buildProbe(coderControlPlane.Spec.ReadinessProbe, "/healthz", "http")
+		}
+		if coderControlPlane.Spec.LivenessProbe.Enabled {
+			container.LivenessProbe = buildProbe(coderControlPlane.Spec.LivenessProbe, "/healthz", "http")
+		}
+
+		podSpec := corev1.PodSpec{
+			ServiceAccountName: serviceAccountName,
+			ImagePullSecrets:   coderControlPlane.Spec.ImagePullSecrets,
+			Containers:         []corev1.Container{container},
+			Volumes:            volumes,
+			NodeSelector:       maps.Clone(coderControlPlane.Spec.NodeSelector),
+			Tolerations:        append([]corev1.Toleration(nil), coderControlPlane.Spec.Tolerations...),
+			TopologySpreadConstraints: append(
+				[]corev1.TopologySpreadConstraint(nil),
+				coderControlPlane.Spec.TopologySpreadConstraints...,
+			),
+		}
+		if coderControlPlane.Spec.PodSecurityContext != nil {
+			podSpec.SecurityContext = coderControlPlane.Spec.PodSecurityContext
+		}
+		if coderControlPlane.Spec.Affinity != nil {
+			podSpec.Affinity = coderControlPlane.Spec.Affinity
+		}
 
 		deployment.Spec.Replicas = &replicas
 		deployment.Spec.Selector = &metav1.LabelSelector{MatchLabels: maps.Clone(labels)}
 		deployment.Spec.Template = corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{Labels: maps.Clone(labels)},
-			Spec: corev1.PodSpec{
-				ImagePullSecrets: coderControlPlane.Spec.ImagePullSecrets,
-				Containers: []corev1.Container{{
-					Name:  "coder",
-					Image: image,
-					Args:  args,
-					Env:   coderControlPlane.Spec.ExtraEnv,
-					Ports: []corev1.ContainerPort{{
-						Name:          "http",
-						ContainerPort: controlPlaneTargetPort,
-						Protocol:      corev1.ProtocolTCP,
-					}},
-				}},
-			},
+			Spec:       podSpec,
 		}
 
 		return nil
@@ -323,14 +664,24 @@ func (r *CoderControlPlaneReconciler) reconcileService(ctx context.Context, code
 			servicePort = defaultControlPlanePort
 		}
 
-		service.Spec.Type = serviceType
-		service.Spec.Selector = maps.Clone(labels)
-		service.Spec.Ports = []corev1.ServicePort{{
+		servicePorts := []corev1.ServicePort{{
 			Name:       "http",
 			Port:       servicePort,
 			Protocol:   corev1.ProtocolTCP,
 			TargetPort: intstr.FromInt(int(controlPlaneTargetPort)),
 		}}
+		if controlPlaneTLSEnabled(coderControlPlane) {
+			servicePorts = append(servicePorts, corev1.ServicePort{
+				Name:       "https",
+				Port:       443,
+				Protocol:   corev1.ProtocolTCP,
+				TargetPort: intstr.FromInt(int(controlPlaneTLSTargetPort)),
+			})
+		}
+
+		service.Spec.Type = serviceType
+		service.Spec.Selector = maps.Clone(labels)
+		service.Spec.Ports = servicePorts
 		return nil
 	})
 	if err != nil {
@@ -359,9 +710,14 @@ func (r *CoderControlPlaneReconciler) desiredStatus(
 		phase = coderv1alpha1.CoderControlPlanePhaseReady
 	}
 
+	scheme := "http"
+	if controlPlaneTLSEnabled(coderControlPlane) {
+		scheme = "https"
+	}
+
 	nextStatus.ObservedGeneration = coderControlPlane.Generation
 	nextStatus.ReadyReplicas = deployment.Status.ReadyReplicas
-	nextStatus.URL = fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", service.Name, service.Namespace, servicePort)
+	nextStatus.URL = fmt.Sprintf("%s://%s.%s.svc.cluster.local:%d", scheme, service.Name, service.Namespace, servicePort)
 	nextStatus.Phase = phase
 
 	return nextStatus
@@ -1419,6 +1775,9 @@ func (r *CoderControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&coderv1alpha1.CoderControlPlane{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
+		Owns(&corev1.ServiceAccount{}).
+		Owns(&rbacv1.Role{}).
+		Owns(&rbacv1.RoleBinding{}).
 		Owns(&corev1.Secret{}).
 		Watches(
 			&corev1.Secret{},
