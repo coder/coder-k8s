@@ -13,8 +13,9 @@ const (
 
 	// CoderProvisionerConditionControlPlaneReady indicates whether the referenced control plane is reachable.
 	CoderProvisionerConditionControlPlaneReady = "ControlPlaneReady"
-	// CoderProvisionerConditionBootstrapSecretReady indicates whether the bootstrap credentials secret is available.
-	CoderProvisionerConditionBootstrapSecretReady = "BootstrapSecretReady"
+	// CoderProvisionerConditionOperatorAccessReady indicates whether operator-managed
+	// access from the referenced control plane is ready for provisioner key management.
+	CoderProvisionerConditionOperatorAccessReady = "OperatorAccessReady"
 	// CoderProvisionerConditionProvisionerKeyReady indicates whether the provisioner key exists in coderd.
 	CoderProvisionerConditionProvisionerKeyReady = "ProvisionerKeyReady"
 	// CoderProvisionerConditionProvisionerKeySecretReady indicates whether the provisioner key secret is populated.
@@ -32,13 +33,6 @@ const (
 	ProvisionerKeyCleanupFinalizer = "coder.com/provisioner-key-cleanup"
 )
 
-// CoderProvisionerBootstrapSpec configures credentials for provisioner key management.
-type CoderProvisionerBootstrapSpec struct {
-	// CredentialsSecretRef points to a Secret containing a Coder session token
-	// with permission to manage provisioner keys.
-	CredentialsSecretRef SecretKeySelector `json:"credentialsSecretRef"`
-}
-
 // CoderProvisionerKeySpec configures provisioner key naming and storage.
 type CoderProvisionerKeySpec struct {
 	// Name is the provisioner key name in coderd. Defaults to the CR name.
@@ -55,12 +49,12 @@ type CoderProvisionerKeySpec struct {
 // CoderProvisionerSpec defines the desired state of a CoderProvisioner.
 type CoderProvisionerSpec struct {
 	// ControlPlaneRef identifies which CoderControlPlane instance to join.
+	// Provisioner key management uses operator-managed access from this
+	// control plane's status.operatorTokenSecretRef.
 	ControlPlaneRef corev1.LocalObjectReference `json:"controlPlaneRef"`
 	// OrganizationName is the Coder organization. Defaults to "default".
 	// +kubebuilder:validation:MaxLength=128
 	OrganizationName string `json:"organizationName,omitempty"`
-	// Bootstrap configures credentials for provisioner key management.
-	Bootstrap CoderProvisionerBootstrapSpec `json:"bootstrap"`
 	// Key configures provisioner key naming and secret storage.
 	Key CoderProvisionerKeySpec `json:"key,omitempty"`
 	// Replicas is the desired number of provisioner pods.

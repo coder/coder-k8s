@@ -13,9 +13,8 @@
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `controlPlaneRef` | [LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#localobjectreference-v1-core) | ControlPlaneRef identifies which CoderControlPlane instance to join. |
+| `controlPlaneRef` | [LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#localobjectreference-v1-core) | ControlPlaneRef identifies which CoderControlPlane instance to join. Provisioner key management uses operator-managed access from this control plane's status.operatorTokenSecretRef. |
 | `organizationName` | string | OrganizationName is the Coder organization. Defaults to "default". |
-| `bootstrap` | [CoderProvisionerBootstrapSpec](#coderprovisionerbootstrapspec) | Bootstrap configures credentials for provisioner key management. |
 | `key` | [CoderProvisionerKeySpec](#coderprovisionerkeyspec) | Key configures provisioner key naming and secret storage. |
 | `replicas` | integer | Replicas is the desired number of provisioner pods. |
 | `tags` | object (keys:string, values:string) | Tags are attached to the provisioner key for job routing. |
@@ -44,14 +43,6 @@
 | `secretRef` | [SecretKeySelector](#secretkeyselector) | SecretRef references the provisioner key secret data currently in use. |
 
 ## Referenced types
-
-### CoderProvisionerBootstrapSpec
-
-CoderProvisionerBootstrapSpec configures credentials for provisioner key management.
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `credentialsSecretRef` | [SecretKeySelector](#secretkeyselector) | CredentialsSecretRef points to a Secret containing a Coder session token with permission to manage provisioner keys. |
 
 ### CoderProvisionerKeySpec
 

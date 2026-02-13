@@ -50,30 +50,11 @@ spec:
           spec:
             description: CoderProvisionerSpec defines the desired state of a CoderProvisioner.
             properties:
-              bootstrap:
-                description: Bootstrap configures credentials for provisioner key
-                  management.
-                properties:
-                  credentialsSecretRef:
-                    description: |-
-                      CredentialsSecretRef points to a Secret containing a Coder session token
-                      with permission to manage provisioner keys.
-                    properties:
-                      key:
-                        description: Key is the key inside the Secret data map.
-                        type: string
-                      name:
-                        description: Name is the Kubernetes Secret name.
-                        type: string
-                    required:
-                    - name
-                    type: object
-                required:
-                - credentialsSecretRef
-                type: object
               controlPlaneRef:
-                description: ControlPlaneRef identifies which CoderControlPlane instance
-                  to join.
+                description: |-
+                  ControlPlaneRef identifies which CoderControlPlane instance to join.
+                  Provisioner key management uses operator-managed access from this
+                  control plane's status.operatorTokenSecretRef.
                 properties:
                   name:
                     default: ""
@@ -369,7 +350,6 @@ spec:
                 format: int64
                 type: integer
             required:
-            - bootstrap
             - controlPlaneRef
             type: object
           status:

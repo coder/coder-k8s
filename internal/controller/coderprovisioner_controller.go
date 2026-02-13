@@ -50,6 +50,7 @@ const (
 	provisionerRateLimitJitterRatio  = 0.2
 
 	externalProvisionerEntitlementRetryInterval = 2 * time.Minute
+	provisionerOperatorAccessRetryInterval      = 15 * time.Second
 
 	// #nosec G101 -- this is a field index key, not a credential.
 	provisionerControlPlaneRefNameFieldIndex = ".spec.controlPlaneRef.name"
@@ -171,24 +172,27 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	organizationName := provisionerOrganizationName(provisioner.Spec.OrganizationName)
 	keyName, keySecretName, keySecretKey := provisionerKeyConfig(provisioner)
 
-	sessionToken, err := r.readBootstrapSessionToken(ctx, provisioner)
+	sessionToken, operatorAccessResult, operatorAccessReason, operatorAccessMessage, err := r.readOperatorSessionToken(ctx, provisioner, controlPlane)
 	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if operatorAccessResult.RequeueAfter > 0 {
 		setCondition(
 			provisioner,
-			coderv1alpha1.CoderProvisionerConditionBootstrapSecretReady,
+			coderv1alpha1.CoderProvisionerConditionOperatorAccessReady,
 			metav1.ConditionFalse,
-			"BootstrapSecretUnavailable",
-			fmt.Sprintf("Failed to read bootstrap credentials: %v", err),
+			operatorAccessReason,
+			operatorAccessMessage,
 		)
 		_ = r.Status().Update(ctx, provisioner)
-		return ctrl.Result{}, err
+		return operatorAccessResult, nil
 	}
 	setCondition(
 		provisioner,
-		coderv1alpha1.CoderProvisionerConditionBootstrapSecretReady,
+		coderv1alpha1.CoderProvisionerConditionOperatorAccessReady,
 		metav1.ConditionTrue,
-		"BootstrapSecretAvailable",
-		"Bootstrap credentials secret is available",
+		operatorAccessReason,
+		operatorAccessMessage,
 	)
 
 	entitlementResult, entitlementErr := r.reconcileExternalProvisionerEntitlement(ctx, provisioner, controlPlane, sessionToken)
@@ -643,28 +647,40 @@ func (r *CoderProvisionerReconciler) reconcileDeletion(ctx context.Context, prov
 	}
 
 	// Best-effort remote key cleanup: if the referenced control plane,
-	// its URL, bootstrap credentials, or any other prerequisite is
+	// its URL, operator access token, or any other prerequisite is
 	// unavailable, log a warning and proceed to finalizer removal so the
 	// CR does not get stuck in Terminating. This is common during
 	// namespace teardown, when the control plane was never ready, or
-	// when credentials were misconfigured.
+	// when operator access bootstrap has not completed.
 	controlPlaneURL := provisioner.Status.ControlPlaneURL
-	if controlPlaneURL == "" {
-		controlPlane, err := r.fetchControlPlane(ctx, provisioner)
-		if err != nil {
-			log.Info("unable to reach referenced CoderControlPlane during deletion, skipping remote key cleanup",
-				"controlPlaneRef", provisioner.Spec.ControlPlaneRef.Name, "error", err)
-		} else {
-			controlPlaneURL = controlPlane.Status.URL
+	controlPlaneName := strings.TrimSpace(provisioner.Spec.ControlPlaneRef.Name)
+	var controlPlane *coderv1alpha1.CoderControlPlane
+	if controlPlaneName != "" {
+		controlPlane = &coderv1alpha1.CoderControlPlane{}
+		namespacedName := types.NamespacedName{Name: controlPlaneName, Namespace: provisioner.Namespace}
+		if err := r.Get(ctx, namespacedName, controlPlane); err != nil {
+			log.Info("unable to read referenced CoderControlPlane during deletion, skipping remote key cleanup",
+				"controlPlaneRef", controlPlaneName, "error", err)
+			controlPlane = nil
+		} else if controlPlane.Name != controlPlaneName || controlPlane.Namespace != provisioner.Namespace {
+			return ctrl.Result{}, fmt.Errorf("assertion failed: fetched control plane %s/%s does not match expected %s/%s",
+				controlPlane.Namespace, controlPlane.Name, provisioner.Namespace, controlPlaneName)
 		}
 	}
+	if controlPlaneURL == "" && controlPlane != nil {
+		controlPlaneURL = strings.TrimSpace(controlPlane.Status.URL)
+	}
 
-	if controlPlaneURL != "" {
-		sessionToken, tokenErr := r.readBootstrapSessionToken(ctx, provisioner)
-		if tokenErr != nil {
-			log.Info("unable to read bootstrap credentials during deletion, skipping remote key cleanup",
-				"credentialsSecretRef", provisioner.Spec.Bootstrap.CredentialsSecretRef.Name, "error", tokenErr)
-		} else {
+	if controlPlaneURL != "" && controlPlane != nil {
+		sessionToken, tokenResult, tokenReason, tokenMessage, tokenErr := r.readOperatorSessionToken(ctx, provisioner, controlPlane)
+		switch {
+		case tokenErr != nil:
+			log.Info("unable to resolve operator access token during deletion, skipping remote key cleanup",
+				"error", tokenErr)
+		case tokenResult.RequeueAfter > 0:
+			log.Info("operator access is not ready during deletion, skipping remote key cleanup",
+				"reason", tokenReason, "message", tokenMessage)
+		default:
 			if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
 				ctx,
 				controlPlaneURL,
@@ -726,23 +742,54 @@ func (r *CoderProvisionerReconciler) fetchControlPlane(ctx context.Context, prov
 	return controlPlane, nil
 }
 
-func (r *CoderProvisionerReconciler) readBootstrapSessionToken(ctx context.Context, provisioner *coderv1alpha1.CoderProvisioner) (string, error) {
-	credentialsRef := provisioner.Spec.Bootstrap.CredentialsSecretRef
-	if credentialsRef.Name == "" {
-		return "", fmt.Errorf("coderprovisioner %s/%s spec.bootstrap.credentialsSecretRef.name is required", provisioner.Namespace, provisioner.Name)
+func (r *CoderProvisionerReconciler) readOperatorSessionToken(
+	ctx context.Context,
+	provisioner *coderv1alpha1.CoderProvisioner,
+	controlPlane *coderv1alpha1.CoderControlPlane,
+) (string, ctrl.Result, string, string, error) {
+	if provisioner == nil {
+		return "", ctrl.Result{}, "", "", fmt.Errorf("assertion failed: coder provisioner must not be nil")
+	}
+	if controlPlane == nil {
+		return "", ctrl.Result{}, "", "", fmt.Errorf("assertion failed: coder control plane must not be nil")
 	}
 
-	credentialsKey := credentialsRef.Key
-	if credentialsKey == "" {
-		credentialsKey = coderv1alpha1.DefaultTokenSecretKey
+	if !controlPlane.Status.OperatorAccessReady {
+		return "", ctrl.Result{RequeueAfter: provisionerOperatorAccessRetryInterval},
+			"OperatorAccessNotReady",
+			fmt.Sprintf("Waiting for CoderControlPlane %s/%s status.operatorAccessReady=true before reconciling provisioner keys.", controlPlane.Namespace, controlPlane.Name),
+			nil
 	}
 
-	token, err := r.readSecretValue(ctx, provisioner.Namespace, credentialsRef.Name, credentialsKey)
+	operatorTokenRef := controlPlane.Status.OperatorTokenSecretRef
+	if operatorTokenRef == nil {
+		return "", ctrl.Result{RequeueAfter: provisionerOperatorAccessRetryInterval},
+			"OperatorTokenSecretRefMissing",
+			fmt.Sprintf("Waiting for CoderControlPlane %s/%s status.operatorTokenSecretRef to be set by operator access bootstrap.", controlPlane.Namespace, controlPlane.Name),
+			nil
+	}
+
+	operatorTokenSecretName := strings.TrimSpace(operatorTokenRef.Name)
+	if operatorTokenSecretName == "" {
+		return "", ctrl.Result{RequeueAfter: provisionerOperatorAccessRetryInterval},
+			"OperatorTokenSecretRefInvalid",
+			fmt.Sprintf("Waiting for CoderControlPlane %s/%s status.operatorTokenSecretRef.name to be non-empty.", controlPlane.Namespace, controlPlane.Name),
+			nil
+	}
+	operatorTokenSecretKey := strings.TrimSpace(operatorTokenRef.Key)
+	if operatorTokenSecretKey == "" {
+		operatorTokenSecretKey = coderv1alpha1.DefaultTokenSecretKey
+	}
+
+	token, err := r.readSecretValue(ctx, provisioner.Namespace, operatorTokenSecretName, operatorTokenSecretKey)
 	if err != nil {
-		return "", fmt.Errorf("read bootstrap credentials secret %q/%q key %q: %w", provisioner.Namespace, credentialsRef.Name, credentialsKey, err)
+		return "", ctrl.Result{RequeueAfter: provisionerOperatorAccessRetryInterval},
+			"OperatorTokenSecretUnavailable",
+			fmt.Sprintf("Failed to read operator token Secret %q/%q key %q from referenced control plane status: %v", provisioner.Namespace, operatorTokenSecretName, operatorTokenSecretKey, err),
+			nil
 	}
 
-	return token, nil
+	return token, ctrl.Result{}, "OperatorAccessReady", "Operator-managed access token from referenced control plane is available", nil
 }
 
 func (r *CoderProvisionerReconciler) reconcileExternalProvisionerEntitlement(
@@ -761,7 +808,7 @@ func (r *CoderProvisionerReconciler) reconcileExternalProvisionerEntitlement(
 		return ctrl.Result{}, fmt.Errorf("assertion failed: coder control plane URL must not be empty")
 	}
 	if sessionToken == "" {
-		return ctrl.Result{}, fmt.Errorf("assertion failed: bootstrap session token must not be empty")
+		return ctrl.Result{}, fmt.Errorf("assertion failed: operator session token must not be empty")
 	}
 
 	if controlPlane.Status.EntitlementsLastChecked != nil {
@@ -806,7 +853,7 @@ func (r *CoderProvisionerReconciler) reconcileExternalProvisionerEntitlement(
 				message = "Coder deployment does not expose /api/v2/entitlements; cannot verify license."
 			case http.StatusUnauthorized, http.StatusForbidden:
 				reason = "Forbidden"
-				message = "Bootstrap token is not authorized to read entitlements; retrying."
+				message = "Operator access token is not authorized to read entitlements; retrying."
 			}
 		}
 

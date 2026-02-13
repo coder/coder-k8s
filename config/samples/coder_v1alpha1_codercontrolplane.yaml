@@ -2,7 +2,7 @@ apiVersion: coder.com/v1alpha1
 kind: CoderControlPlane
 metadata:
   name: codercontrolplane-sample
-  namespace: default
+  namespace: coder
 spec:
   image: "ghcr.io/coder/coder:latest"
   # Optional Enterprise license upload:
