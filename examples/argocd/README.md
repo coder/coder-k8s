@@ -19,7 +19,7 @@ The generated Argo CD `Application` uses multiple sources to deploy:
 ## Apply one manifest
 
 ```bash
-kubectl apply -f examples/argocd/applicationset.yaml
+kubectl apply -f https://raw.githubusercontent.com/coder/coder-k8s/main/examples/argocd/applicationset.yaml
 ```
 
 That creates:

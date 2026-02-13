@@ -44,6 +44,11 @@
     "mkdocs",
     "pymdownx",
     "readyz",
+    "applicationset",
+    "applicationsets",
+    "cnpg",
+    "pooler",
+    "finalizer",
     "superfences"
   ],
   "ignorePaths": [
