@@ -502,6 +502,38 @@ func TestValidateUnsupportedWatchListOptions(t *testing.T) {
 	}
 }
 
+func TestStopAwareWatch(t *testing.T) {
+	t.Parallel()
+
+	w := newStopAwareWatch(watch.NewEmptyWatch())
+	if w == nil {
+		t.Fatal("assertion failed: stop-aware watch must not be nil")
+	}
+
+	w.Stop()
+	select {
+	case <-w.Done():
+	default:
+		t.Fatal("expected stop-aware watch done channel to close after Stop")
+	}
+
+	// Stop must be idempotent.
+	w.Stop()
+}
+
+func TestNewStopAwareWatchPanicsOnNil(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatal("expected panic when creating stop-aware watch with nil interface")
+		}
+	}()
+
+	_ = newStopAwareWatch(nil)
+}
+
 func TestValidateFieldSelector(t *testing.T) {
 	t.Parallel()
 

@@ -212,6 +212,7 @@ func (s *WorkspaceStorage) Watch(ctx context.Context, opts *metainternalversion.
 	if err != nil {
 		return nil, fmt.Errorf("failed to create workspace watcher: %w", err)
 	}
+	stopAwareWatcher := newStopAwareWatch(w)
 
 	var timeoutTimer *time.Timer
 	if opts != nil && opts.TimeoutSeconds != nil && *opts.TimeoutSeconds > 0 {
@@ -220,8 +221,11 @@ func (s *WorkspaceStorage) Watch(ctx context.Context, opts *metainternalversion.
 
 	go func() {
 		if timeoutTimer == nil {
-			<-ctx.Done()
-			w.Stop()
+			select {
+			case <-ctx.Done():
+				stopAwareWatcher.Stop()
+			case <-stopAwareWatcher.Done():
+			}
 			return
 		}
 
@@ -229,15 +233,17 @@ func (s *WorkspaceStorage) Watch(ctx context.Context, opts *metainternalversion.
 		select {
 		case <-ctx.Done():
 		case <-timeoutTimer.C:
+		case <-stopAwareWatcher.Done():
+			return
 		}
-		w.Stop()
+		stopAwareWatcher.Stop()
 	}()
 
 	if filter != nil {
-		return watch.Filter(w, filter), nil
+		return watch.Filter(stopAwareWatcher, filter), nil
 	}
 
-	return w, nil
+	return stopAwareWatcher, nil
 }
 
 // Create creates a CoderWorkspace through codersdk.

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"sync"
 
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -56,6 +57,34 @@ func validateUnsupportedWatchListOptions(opts *metainternalversion.ListOptions) 
 	}
 
 	return nil
+}
+
+type stopAwareWatch struct {
+	watch.Interface
+	stopped chan struct{}
+	once    sync.Once
+}
+
+func newStopAwareWatch(w watch.Interface) *stopAwareWatch {
+	if w == nil {
+		panic("assertion failed: watch interface must not be nil")
+	}
+
+	return &stopAwareWatch{
+		Interface: w,
+		stopped:   make(chan struct{}),
+	}
+}
+
+func (w *stopAwareWatch) Stop() {
+	w.once.Do(func() {
+		close(w.stopped)
+		w.Interface.Stop()
+	})
+}
+
+func (w *stopAwareWatch) Done() <-chan struct{} {
+	return w.stopped
 }
 
 // filterForListOptions builds a watch.FilterFunc that applies namespace, label, and field selector filtering.
