@@ -61,9 +61,9 @@ Verify generated resources:
 
 ```bash
 kubectl get deployment provisioner-coderprovisioner-sample -n coder
-kubectl get serviceaccount coderprovisioner-sample-provisioner -n coder
+kubectl get sa coderprovisioner-sample-provisioner -n coder
 kubectl get role provisioner-coderprovisioner-sample -n coder
-kubectl get rolebinding provisioner-coderprovisioner-sample -n coder
+kubectl get rb provisioner-coderprovisioner-sample -n coder
 kubectl get secret coderprovisioner-sample-provisioner-key -n coder
 ```
 
