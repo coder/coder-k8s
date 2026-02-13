@@ -2813,6 +2813,59 @@ func TestReconcile_TLSWithServicePort443(t *testing.T) {
 	}
 }
 
+func TestReconcile_TLSAndCertSecretVolumeNameSanitization(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-tls-cert-volume-sanitization", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-tls-sanitization:latest",
+			TLS: coderv1alpha1.TLSSpec{
+				SecretNames: []string{"my.tls.secret"},
+			},
+			Certs: coderv1alpha1.CertsSpec{
+				Secrets: []coderv1alpha1.CertSecretSelector{{
+					Name: "extra.ca.secret",
+					Key:  "ca.crt",
+				}},
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create control plane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("reconcile control plane: %v", err)
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	podSpec := deployment.Spec.Template.Spec
+	container := podSpec.Containers[0]
+
+	if !podHasSecretVolume(podSpec, "tls-my-tls-secret", "my.tls.secret") {
+		t.Fatalf("expected sanitized TLS volume name for dotted secret, got %+v", podSpec.Volumes)
+	}
+	if !containerHasVolumeMount(container, "tls-my-tls-secret", "/etc/ssl/certs/coder/my.tls.secret") {
+		t.Fatalf("expected sanitized TLS volume mount name for dotted secret, got %+v", container.VolumeMounts)
+	}
+
+	if !podHasSecretVolume(podSpec, "ca-cert-extra-ca-secret", "extra.ca.secret") {
+		t.Fatalf("expected sanitized cert volume name for dotted secret, got %+v", podSpec.Volumes)
+	}
+	if !containerHasVolumeMount(container, "ca-cert-extra-ca-secret", "/etc/ssl/certs/extra.ca.secret.crt") {
+		t.Fatalf("expected sanitized cert volume mount name for dotted secret, got %+v", container.VolumeMounts)
+	}
+}
+
 func TestReconcile_PassThroughConfiguration(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()

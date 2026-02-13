@@ -684,7 +684,7 @@ func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, c
 					return fmt.Errorf("assertion failed: tls secret name must not be empty")
 				}
 
-				volumeName := fmt.Sprintf("tls-%s", secretName)
+				volumeName := volumeNameForSecret("tls", secretName)
 				mountPath := fmt.Sprintf("/etc/ssl/certs/coder/%s", secretName)
 				volumes = append(volumes, corev1.Volume{
 					Name: volumeName,
@@ -726,7 +726,7 @@ func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, c
 				return fmt.Errorf("assertion failed: cert secret key must not be empty")
 			}
 
-			volumeName := fmt.Sprintf("ca-cert-%s", secret.Name)
+			volumeName := volumeNameForSecret("ca-cert", secret.Name)
 			volumes = append(volumes, corev1.Volume{
 				Name: volumeName,
 				VolumeSource: corev1.VolumeSource{
@@ -1921,6 +1921,64 @@ func operatorAccessTokenSecretName(coderControlPlane *coderv1alpha1.CoderControl
 	}
 
 	return fmt.Sprintf("%s-%s%s", coderControlPlane.Name[:available], hashSuffix, operatorTokenSecretSuffix)
+}
+
+func volumeNameForSecret(prefix, secretName string) string {
+	sanitizedSecretName := sanitizeDNSLabel(strings.TrimSpace(secretName))
+	candidate := fmt.Sprintf("%s-%s", prefix, sanitizedSecretName)
+	if len(candidate) <= 63 {
+		return candidate
+	}
+
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(prefix))
+	_, _ = hasher.Write([]byte{0})
+	_, _ = hasher.Write([]byte(secretName))
+	hashSuffix := fmt.Sprintf("%08x", hasher.Sum32())
+
+	available := 63 - len(prefix) - len(hashSuffix) - 2
+	if available < 1 {
+		available = 1
+	}
+	if len(sanitizedSecretName) > available {
+		sanitizedSecretName = sanitizedSecretName[:available]
+		sanitizedSecretName = strings.Trim(sanitizedSecretName, "-")
+		if sanitizedSecretName == "" {
+			sanitizedSecretName = "x"
+		}
+	}
+
+	return fmt.Sprintf("%s-%s-%s", prefix, sanitizedSecretName, hashSuffix)
+}
+
+func sanitizeDNSLabel(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return "x"
+	}
+
+	builder := strings.Builder{}
+	builder.Grow(len(value))
+	lastWasDash := false
+	for i := 0; i < len(value); i++ {
+		char := value[i]
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') {
+			builder.WriteByte(char)
+			lastWasDash = false
+			continue
+		}
+		if !lastWasDash {
+			builder.WriteByte('-')
+			lastWasDash = true
+		}
+	}
+
+	sanitized := strings.Trim(builder.String(), "-")
+	if sanitized == "" {
+		return "x"
+	}
+
+	return sanitized
 }
 
 func (r *CoderControlPlaneReconciler) ensureOperatorTokenSecret(
