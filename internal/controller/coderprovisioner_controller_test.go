@@ -518,14 +518,16 @@ func TestCoderProvisionerReconciler_BasicCreate(t *testing.T) {
 	container := deployment.Spec.Template.Spec.Containers[0]
 	require.Equal(t, "provisioner", container.Name)
 	require.Equal(t, "provisioner-image:test", container.Image)
-	require.Equal(t, []string{"provisionerd", "start", "--test-mode=true"}, container.Args)
+	require.Equal(t, []string{"coder"}, container.Command)
+	require.Equal(t, []string{"provisioner", "start", "--test-mode=true"}, container.Args)
 
 	envByName := make(map[string]corev1.EnvVar, len(container.Env))
 	for _, envVar := range container.Env {
 		envByName[envVar.Name] = envVar
 	}
 	require.Equal(t, "https://coder.example.com", envByName["CODER_URL"].Value)
-	require.Equal(t, "acme", envByName["CODER_ORGANIZATION"].Value)
+	_, hasOrganizationEnv := envByName["CODER_ORGANIZATION"]
+	require.False(t, hasOrganizationEnv)
 	require.Equal(t, "extra-value", envByName["EXTRA_ENV"].Value)
 	keyEnv, ok := envByName["CODER_PROVISIONER_DAEMON_KEY"]
 	require.True(t, ok)

@@ -69,7 +69,7 @@ type CoderProvisionerSpec struct {
 	Tags map[string]string `json:"tags,omitempty"`
 	// Image is the container image. Defaults to the control plane image.
 	Image string `json:"image,omitempty"`
-	// ExtraArgs are appended after "provisionerd start".
+	// ExtraArgs are appended after "provisioner start".
 	ExtraArgs []string `json:"extraArgs,omitempty"`
 	// ExtraEnv are injected into the provisioner container.
 	ExtraEnv []corev1.EnvVar `json:"extraEnv,omitempty"`
