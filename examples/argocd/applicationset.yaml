@@ -1,0 +1,40 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: coder-k8s-stack
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: coder-k8s-example
+spec:
+  goTemplate: true
+  goTemplateOptions:
+    - missingkey=error
+  generators:
+    - list:
+        elements:
+          - name: coder-k8s-stack
+            destinationServer: https://kubernetes.default.svc
+            repoURL: https://github.com/coder/coder-k8s.git
+            targetRevision: main
+            path: examples/argocd/apps
+  template:
+    metadata:
+      name: "{{ .name }}"
+      namespace: argocd
+      labels:
+        app.kubernetes.io/part-of: coder-k8s-example
+    spec:
+      project: default
+      source:
+        repoURL: "{{ .repoURL }}"
+        targetRevision: "{{ .targetRevision }}"
+        path: "{{ .path }}"
+      destination:
+        server: "{{ .destinationServer }}"
+        namespace: argocd
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true

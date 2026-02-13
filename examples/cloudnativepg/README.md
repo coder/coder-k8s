@@ -46,6 +46,8 @@ kubectl apply -f examples/cloudnativepg/
 
 The namespace manifest is prefixed (`00-namespace.yaml`) so `kubectl apply -f` creates `coder` before namespaced resources.
 
+These manifests also include Argo CD sync-wave annotations so the same directory works with [`examples/argocd/`](../argocd/): namespace (`wave 0`) -> CloudNativePG `Cluster` (`wave 1`) -> `CoderControlPlane` (`wave 2`).
+
 Wait for PostgreSQL and verify the generated Secret:
 
 ```bash

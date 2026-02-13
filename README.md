@@ -74,6 +74,7 @@ make docs-serve
 ## Examples
 
 - [`examples/cloudnativepg/`](examples/cloudnativepg/) — Deploy a `CoderControlPlane` with a CloudNativePG-managed PostgreSQL backend.
+- [`examples/argocd/`](examples/argocd/) — Bootstrap CloudNativePG + `coder-k8s` + PostgreSQL + `CoderControlPlane` from one Argo CD `ApplicationSet`.
 
 ## KIND development cluster (k9s demos)
 
