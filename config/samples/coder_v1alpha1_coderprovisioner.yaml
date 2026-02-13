@@ -2,25 +2,16 @@
 #
 # Prerequisites:
 #   1. A CoderControlPlane resource must exist in the same namespace.
-#   2. Create the bootstrap credentials Secret with a valid Coder session token:
-#
-#      kubectl create secret generic coder-bootstrap-token \
-#        --namespace=default \
-#        --from-literal=token=<YOUR_SESSION_TOKEN>
-#
-#      IMPORTANT: Never commit real tokens to source control.
+#   2. The referenced CoderControlPlane status must report operator access ready:
+#      status.operatorAccessReady=true and status.operatorTokenSecretRef set.
 apiVersion: coder.com/v1alpha1
 kind: CoderProvisioner
 metadata:
   name: coderprovisioner-sample
-  namespace: default
+  namespace: coder
 spec:
   controlPlaneRef:
     name: codercontrolplane-sample
-  bootstrap:
-    credentialsSecretRef:
-      name: coder-bootstrap-token
-      key: token
   # key:
   #   name: my-provisioner-key    # Provisioner key name in coderd (defaults to CR name)
   #   secretName: my-key-secret   # K8s Secret to store the key (defaults to "{name}-provisioner-key")

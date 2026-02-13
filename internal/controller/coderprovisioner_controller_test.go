@@ -39,7 +39,8 @@ func createTestNamespace(ctx context.Context, t *testing.T, prefix string) strin
 	return namespaceName
 }
 
-// createTestControlPlane creates a test CoderControlPlane and optionally sets status.url.
+// createTestControlPlane creates a test CoderControlPlane. When url is non-empty,
+// it also provisions an operator token Secret and marks operator access ready.
 func createTestControlPlane(ctx context.Context, t *testing.T, namespace, name, url string) *coderv1alpha1.CoderControlPlane {
 	t.Helper()
 
@@ -51,7 +52,25 @@ func createTestControlPlane(ctx context.Context, t *testing.T, namespace, name, 
 	}
 	require.NoError(t, k8sClient.Create(ctx, controlPlane))
 	if url != "" {
+		operatorSecretName := fmt.Sprintf("%s-operator-token", name)
+		operatorTokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: operatorSecretName, Namespace: namespace},
+			Type:       corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				coderv1alpha1.DefaultTokenSecretKey: []byte("operator-session-token"),
+			},
+		}
+		require.NoError(t, k8sClient.Create(ctx, operatorTokenSecret))
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(context.Background(), operatorTokenSecret)
+		})
+
 		controlPlane.Status.URL = url
+		controlPlane.Status.OperatorAccessReady = true
+		controlPlane.Status.OperatorTokenSecretRef = &coderv1alpha1.SecretKeySelector{
+			Name: operatorSecretName,
+			Key:  coderv1alpha1.DefaultTokenSecretKey,
+		}
 		require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
 	}
 	t.Cleanup(func() {
@@ -59,28 +78,6 @@ func createTestControlPlane(ctx context.Context, t *testing.T, namespace, name, 
 	})
 
 	return controlPlane
-}
-
-// createBootstrapSecret creates the bootstrap credentials secret used by provisioner reconciliation.
-func createBootstrapSecret(ctx context.Context, t *testing.T, namespace, name, key, value string) *corev1.Secret {
-	t.Helper()
-
-	if key == "" {
-		key = coderv1alpha1.DefaultTokenSecretKey
-	}
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Type:       corev1.SecretTypeOpaque,
-		Data: map[string][]byte{
-			key: []byte(value),
-		},
-	}
-	require.NoError(t, k8sClient.Create(ctx, secret))
-	t.Cleanup(func() {
-		_ = k8sClient.Delete(context.Background(), secret)
-	})
-
-	return secret
 }
 
 func expectedProvisionerResourceName(name string) string {
@@ -183,7 +180,6 @@ func createTestProvisioner(
 	namespace string,
 	name string,
 	controlPlaneName string,
-	bootstrapSecretName string,
 ) *coderv1alpha1.CoderProvisioner {
 	t.Helper()
 
@@ -191,12 +187,6 @@ func createTestProvisioner(
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: coderv1alpha1.CoderProvisionerSpec{
 			ControlPlaneRef: corev1.LocalObjectReference{Name: controlPlaneName},
-			Bootstrap: coderv1alpha1.CoderProvisionerBootstrapSpec{
-				CredentialsSecretRef: coderv1alpha1.SecretKeySelector{
-					Name: bootstrapSecretName,
-					Key:  coderv1alpha1.DefaultTokenSecretKey,
-				},
-			},
 		},
 	}
 	require.NoError(t, k8sClient.Create(ctx, provisioner))
@@ -217,11 +207,10 @@ func TestCoderProvisionerReconciler_EntitlementFastPathNotEntitled(t *testing.T)
 	controlPlane.Status.EntitlementsLastChecked = &now
 	controlPlane.Status.ExternalProvisionerDaemonsEntitlement = string(codersdk.EntitlementNotEntitled)
 	require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
-	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-ent-fast", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 	bootstrapClient := &fakeBootstrapClient{}
 	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
-	provisioner := createTestProvisioner(ctx, t, namespace, "provisioner-ent-fast", controlPlane.Name, bootstrapSecret.Name)
+	provisioner := createTestProvisioner(ctx, t, namespace, "provisioner-ent-fast", controlPlane.Name)
 	namespacedName := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
 
 	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
@@ -252,7 +241,6 @@ func TestCoderProvisionerReconciler_EntitlementFallbackNotEntitled(t *testing.T)
 	ctx := context.Background()
 	namespace := createTestNamespace(ctx, t, "coderprov-ent-fallback")
 	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-ent-fallback", "https://coder.example.com")
-	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-ent-fallback", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 	bootstrapClient := &fakeBootstrapClient{
 		entitlementsResponse: codersdk.Entitlements{
@@ -262,7 +250,7 @@ func TestCoderProvisionerReconciler_EntitlementFallbackNotEntitled(t *testing.T)
 		},
 	}
 	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
-	provisioner := createTestProvisioner(ctx, t, namespace, "provisioner-ent-fallback", controlPlane.Name, bootstrapSecret.Name)
+	provisioner := createTestProvisioner(ctx, t, namespace, "provisioner-ent-fallback", controlPlane.Name)
 	namespacedName := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
 
 	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
@@ -292,7 +280,6 @@ func TestCoderProvisionerReconciler_EntitlementFastPathNotEntitledStaleRechecks(
 	controlPlane.Status.EntitlementsLastChecked = &staleCheckedAt
 	controlPlane.Status.ExternalProvisionerDaemonsEntitlement = string(codersdk.EntitlementNotEntitled)
 	require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
-	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-ent-stale", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 	bootstrapClient := &fakeBootstrapClient{
 		entitlementsResponse: codersdk.Entitlements{
@@ -308,7 +295,7 @@ func TestCoderProvisionerReconciler_EntitlementFastPathNotEntitledStaleRechecks(
 		}},
 	}
 	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
-	provisioner := createTestProvisioner(ctx, t, namespace, "provisioner-ent-stale", controlPlane.Name, bootstrapSecret.Name)
+	provisioner := createTestProvisioner(ctx, t, namespace, "provisioner-ent-stale", controlPlane.Name)
 	namespacedName := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
 
 	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
@@ -338,7 +325,6 @@ func TestCoderProvisionerReconciler_EntitlementFastPathEntitledStaleRechecks(t *
 	controlPlane.Status.EntitlementsLastChecked = &staleCheckedAt
 	controlPlane.Status.ExternalProvisionerDaemonsEntitlement = string(codersdk.EntitlementEntitled)
 	require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
-	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-entitled-stale", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 	bootstrapClient := &fakeBootstrapClient{
 		entitlementsResponse: codersdk.Entitlements{
@@ -348,7 +334,7 @@ func TestCoderProvisionerReconciler_EntitlementFastPathEntitledStaleRechecks(t *
 		},
 	}
 	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
-	provisioner := createTestProvisioner(ctx, t, namespace, "provisioner-entitled-stale", controlPlane.Name, bootstrapSecret.Name)
+	provisioner := createTestProvisioner(ctx, t, namespace, "provisioner-entitled-stale", controlPlane.Name)
 	namespacedName := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
 
 	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
@@ -374,13 +360,12 @@ func TestCoderProvisionerReconciler_EntitlementFallbackForbidden(t *testing.T) {
 	ctx := context.Background()
 	namespace := createTestNamespace(ctx, t, "coderprov-ent-forbidden")
 	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-ent-forbidden", "https://coder.example.com")
-	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-ent-forbidden", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 	bootstrapClient := &fakeBootstrapClient{
 		entitlementsErr: codersdk.NewTestError(http.StatusForbidden, http.MethodGet, "/api/v2/entitlements"),
 	}
 	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
-	provisioner := createTestProvisioner(ctx, t, namespace, "provisioner-ent-forbidden", controlPlane.Name, bootstrapSecret.Name)
+	provisioner := createTestProvisioner(ctx, t, namespace, "provisioner-ent-forbidden", controlPlane.Name)
 	namespacedName := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
 
 	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
@@ -406,7 +391,6 @@ func TestCoderProvisionerReconciler_BasicCreate(t *testing.T) {
 	ctx := context.Background()
 	namespace := createTestNamespace(ctx, t, "coderprov-basic")
 	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-basic", "https://coder.example.com")
-	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 	organizationID := uuid.New()
 	provisionerKeyID := uuid.New()
@@ -434,12 +418,6 @@ func TestCoderProvisionerReconciler_BasicCreate(t *testing.T) {
 		Spec: coderv1alpha1.CoderProvisionerSpec{
 			ControlPlaneRef:  corev1.LocalObjectReference{Name: controlPlane.Name},
 			OrganizationName: "acme",
-			Bootstrap: coderv1alpha1.CoderProvisionerBootstrapSpec{
-				CredentialsSecretRef: coderv1alpha1.SecretKeySelector{
-					Name: bootstrapSecret.Name,
-					Key:  coderv1alpha1.DefaultTokenSecretKey,
-				},
-			},
 			Key: coderv1alpha1.CoderProvisionerKeySpec{
 				Name:       "provisioner-key-name",
 				SecretName: "provisioner-basic-key",
@@ -468,6 +446,8 @@ func TestCoderProvisionerReconciler_BasicCreate(t *testing.T) {
 	require.Contains(t, reconciledProvisioner.Finalizers, coderv1alpha1.ProvisionerKeyCleanupFinalizer)
 
 	require.Equal(t, 1, bootstrapClient.provisionerKeyCalls)
+	require.Len(t, bootstrapClient.provisionerKeyRequests, 1)
+	require.Equal(t, "operator-session-token", bootstrapClient.provisionerKeyRequests[0].SessionToken)
 	require.Equal(t, 0, bootstrapClient.deleteKeyCalls)
 
 	keySecret := &corev1.Secret{}
@@ -559,7 +539,6 @@ func TestCoderProvisionerReconciler_ExistingSecret(t *testing.T) {
 	ctx := context.Background()
 	namespace := createTestNamespace(ctx, t, "coderprov-existing")
 	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-existing", "https://coder.example.com")
-	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 	provisionerName := "provisioner-existing"
 	secretName := fmt.Sprintf("%s-provisioner-key", provisionerName)
@@ -579,10 +558,7 @@ func TestCoderProvisionerReconciler_ExistingSecret(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: provisionerName, Namespace: namespace},
 		Spec: coderv1alpha1.CoderProvisionerSpec{
 			ControlPlaneRef: corev1.LocalObjectReference{Name: controlPlane.Name},
-			Bootstrap: coderv1alpha1.CoderProvisionerBootstrapSpec{
-				CredentialsSecretRef: coderv1alpha1.SecretKeySelector{Name: bootstrapSecret.Name, Key: coderv1alpha1.DefaultTokenSecretKey},
-			},
-			Image: "provisioner-image:test",
+			Image:           "provisioner-image:test",
 		},
 	}
 	require.NoError(t, k8sClient.Create(ctx, provisioner))
@@ -653,16 +629,12 @@ func TestCoderProvisionerReconciler_Deletion(t *testing.T) {
 	ctx := context.Background()
 	namespace := createTestNamespace(ctx, t, "coderprov-delete")
 	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-delete", "https://coder.example.com")
-	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 	provisioner := &coderv1alpha1.CoderProvisioner{
 		ObjectMeta: metav1.ObjectMeta{Name: "provisioner-delete", Namespace: namespace},
 		Spec: coderv1alpha1.CoderProvisionerSpec{
 			ControlPlaneRef: corev1.LocalObjectReference{Name: controlPlane.Name},
-			Bootstrap: coderv1alpha1.CoderProvisionerBootstrapSpec{
-				CredentialsSecretRef: coderv1alpha1.SecretKeySelector{Name: bootstrapSecret.Name, Key: coderv1alpha1.DefaultTokenSecretKey},
-			},
-			Image: "provisioner-image:test",
+			Image:           "provisioner-image:test",
 			Key: coderv1alpha1.CoderProvisionerKeySpec{
 				Name: "cleanup-key",
 			},
@@ -713,16 +685,12 @@ func TestCoderProvisionerReconciler_DeletionControlPlaneGone(t *testing.T) {
 	ctx := context.Background()
 	namespace := createTestNamespace(ctx, t, "coderprov-delete-cpgone")
 	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-cpgone", "https://coder.example.com")
-	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 	provisioner := &coderv1alpha1.CoderProvisioner{
 		ObjectMeta: metav1.ObjectMeta{Name: "provisioner-cpgone", Namespace: namespace},
 		Spec: coderv1alpha1.CoderProvisionerSpec{
 			ControlPlaneRef: corev1.LocalObjectReference{Name: controlPlane.Name},
-			Bootstrap: coderv1alpha1.CoderProvisionerBootstrapSpec{
-				CredentialsSecretRef: coderv1alpha1.SecretKeySelector{Name: bootstrapSecret.Name, Key: coderv1alpha1.DefaultTokenSecretKey},
-			},
-			Image: "provisioner-image:test",
+			Image:           "provisioner-image:test",
 		},
 	}
 	require.NoError(t, k8sClient.Create(ctx, provisioner))
@@ -747,9 +715,9 @@ func TestCoderProvisionerReconciler_DeletionControlPlaneGone(t *testing.T) {
 
 	reconcileProvisioner(ctx, t, reconciler, namespacedName)
 
-	// DeleteProvisionerKey should still be called once using the persisted
-	// status.ControlPlaneURL even when the control plane object is already gone.
-	require.Equal(t, 1, bootstrapClient.deleteKeyCalls)
+	// DeleteProvisionerKey cannot run once operator token source is gone with the
+	// deleted control plane, but finalizer cleanup must still complete.
+	require.Equal(t, 0, bootstrapClient.deleteKeyCalls)
 
 	// The finalizer should still be removed.
 	require.Eventually(t, func() bool {
@@ -834,15 +802,11 @@ func TestCoderProvisionerReconciler_ControlPlaneNotReady(t *testing.T) {
 	ctx := context.Background()
 	namespace := createTestNamespace(ctx, t, "coderprov-cpnotready")
 	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-notready", "")
-	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 	provisioner := &coderv1alpha1.CoderProvisioner{
 		ObjectMeta: metav1.ObjectMeta{Name: "provisioner-notready", Namespace: namespace},
 		Spec: coderv1alpha1.CoderProvisionerSpec{
 			ControlPlaneRef: corev1.LocalObjectReference{Name: controlPlane.Name},
-			Bootstrap: coderv1alpha1.CoderProvisionerBootstrapSpec{
-				CredentialsSecretRef: coderv1alpha1.SecretKeySelector{Name: bootstrapSecret.Name, Key: coderv1alpha1.DefaultTokenSecretKey},
-			},
 		},
 	}
 	require.NoError(t, k8sClient.Create(ctx, provisioner))
@@ -868,15 +832,11 @@ func TestCoderProvisionerReconciler_RotationOnSecretLoss(t *testing.T) {
 	ctx := context.Background()
 	namespace := createTestNamespace(ctx, t, "coderprov-rotation")
 	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-rotation", "https://coder.example.com")
-	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 	provisioner := &coderv1alpha1.CoderProvisioner{
 		ObjectMeta: metav1.ObjectMeta{Name: "provisioner-rotation", Namespace: namespace},
 		Spec: coderv1alpha1.CoderProvisionerSpec{
 			ControlPlaneRef: corev1.LocalObjectReference{Name: controlPlane.Name},
-			Bootstrap: coderv1alpha1.CoderProvisionerBootstrapSpec{
-				CredentialsSecretRef: coderv1alpha1.SecretKeySelector{Name: bootstrapSecret.Name, Key: coderv1alpha1.DefaultTokenSecretKey},
-			},
 			Key: coderv1alpha1.CoderProvisionerKeySpec{
 				Name:       "rotation-key",
 				SecretName: "provisioner-rotation-key",
@@ -919,17 +879,13 @@ func TestCoderProvisionerReconciler_TagsDrift(t *testing.T) {
 	ctx := context.Background()
 	namespace := createTestNamespace(ctx, t, "coderprov-tags-drift")
 	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-tags", "https://coder.example.com")
-	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 	provisioner := &coderv1alpha1.CoderProvisioner{
 		ObjectMeta: metav1.ObjectMeta{Name: "provisioner-tags", Namespace: namespace},
 		Spec: coderv1alpha1.CoderProvisionerSpec{
 			ControlPlaneRef: corev1.LocalObjectReference{Name: controlPlane.Name},
-			Bootstrap: coderv1alpha1.CoderProvisionerBootstrapSpec{
-				CredentialsSecretRef: coderv1alpha1.SecretKeySelector{Name: bootstrapSecret.Name, Key: coderv1alpha1.DefaultTokenSecretKey},
-			},
-			Key:  coderv1alpha1.CoderProvisionerKeySpec{Name: "tags-drift-key"},
-			Tags: map[string]string{"region": "us-east"},
+			Key:             coderv1alpha1.CoderProvisionerKeySpec{Name: "tags-drift-key"},
+			Tags:            map[string]string{"region": "us-east"},
 		},
 	}
 	require.NoError(t, k8sClient.Create(ctx, provisioner))
@@ -982,15 +938,11 @@ func TestCoderProvisionerReconciler_KeyNameDrift(t *testing.T) {
 	ctx := context.Background()
 	namespace := createTestNamespace(ctx, t, "coderprov-key-drift")
 	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-key", "https://coder.example.com")
-	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 	provisioner := &coderv1alpha1.CoderProvisioner{
 		ObjectMeta: metav1.ObjectMeta{Name: "provisioner-key-drift", Namespace: namespace},
 		Spec: coderv1alpha1.CoderProvisionerSpec{
 			ControlPlaneRef: corev1.LocalObjectReference{Name: controlPlane.Name},
-			Bootstrap: coderv1alpha1.CoderProvisionerBootstrapSpec{
-				CredentialsSecretRef: coderv1alpha1.SecretKeySelector{Name: bootstrapSecret.Name, Key: coderv1alpha1.DefaultTokenSecretKey},
-			},
 			Key: coderv1alpha1.CoderProvisionerKeySpec{
 				Name:       "key-v1",
 				SecretName: "provisioner-key-drift-secret",
@@ -1045,15 +997,11 @@ func TestCoderProvisionerReconciler_ReadyPhaseAndConditions(t *testing.T) {
 	ctx := context.Background()
 	namespace := createTestNamespace(ctx, t, "coderprov-ready")
 	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-ready", "https://coder.example.com")
-	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 	provisioner := &coderv1alpha1.CoderProvisioner{
 		ObjectMeta: metav1.ObjectMeta{Name: "provisioner-ready", Namespace: namespace},
 		Spec: coderv1alpha1.CoderProvisionerSpec{
 			ControlPlaneRef: corev1.LocalObjectReference{Name: controlPlane.Name},
-			Bootstrap: coderv1alpha1.CoderProvisionerBootstrapSpec{
-				CredentialsSecretRef: coderv1alpha1.SecretKeySelector{Name: bootstrapSecret.Name, Key: coderv1alpha1.DefaultTokenSecretKey},
-			},
 		},
 	}
 	require.NoError(t, k8sClient.Create(ctx, provisioner))
@@ -1090,7 +1038,7 @@ func TestCoderProvisionerReconciler_ReadyPhaseAndConditions(t *testing.T) {
 	require.Equal(t, "MinimumReplicasReady", deploymentReadyCondition.Reason)
 
 	requireCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionControlPlaneReady, metav1.ConditionTrue)
-	requireCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionBootstrapSecretReady, metav1.ConditionTrue)
+	requireCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionOperatorAccessReady, metav1.ConditionTrue)
 	requireCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady, metav1.ConditionTrue)
 	requireCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionProvisionerKeySecretReady, metav1.ConditionTrue)
 }
@@ -1102,15 +1050,11 @@ func TestCoderProvisionerReconciler_ConditionsOnFailure(t *testing.T) {
 		ctx := context.Background()
 		namespace := createTestNamespace(ctx, t, "coderprov-cond-cp")
 		controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-cond-cp", "")
-		bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 		provisioner := &coderv1alpha1.CoderProvisioner{
 			ObjectMeta: metav1.ObjectMeta{Name: "provisioner-cond-cp", Namespace: namespace},
 			Spec: coderv1alpha1.CoderProvisionerSpec{
 				ControlPlaneRef: corev1.LocalObjectReference{Name: controlPlane.Name},
-				Bootstrap: coderv1alpha1.CoderProvisionerBootstrapSpec{
-					CredentialsSecretRef: coderv1alpha1.SecretKeySelector{Name: bootstrapSecret.Name, Key: coderv1alpha1.DefaultTokenSecretKey},
-				},
 			},
 		}
 		require.NoError(t, k8sClient.Create(ctx, provisioner))
@@ -1134,18 +1078,18 @@ func TestCoderProvisionerReconciler_ConditionsOnFailure(t *testing.T) {
 		require.Equal(t, "ControlPlaneUnavailable", controlPlaneCondition.Reason)
 	})
 
-	t.Run("bootstrap secret unavailable", func(t *testing.T) {
+	t.Run("operator access not ready", func(t *testing.T) {
 		ctx := context.Background()
-		namespace := createTestNamespace(ctx, t, "coderprov-cond-bootstrap")
-		controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-cond-bootstrap", "https://coder.example.com")
+		namespace := createTestNamespace(ctx, t, "coderprov-cond-operator-not-ready")
+		controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-cond-operator-not-ready", "https://coder.example.com")
+		controlPlane.Status.OperatorAccessReady = false
+		controlPlane.Status.OperatorTokenSecretRef = nil
+		require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
 
 		provisioner := &coderv1alpha1.CoderProvisioner{
-			ObjectMeta: metav1.ObjectMeta{Name: "provisioner-cond-bootstrap", Namespace: namespace},
+			ObjectMeta: metav1.ObjectMeta{Name: "provisioner-cond-operator-not-ready", Namespace: namespace},
 			Spec: coderv1alpha1.CoderProvisionerSpec{
 				ControlPlaneRef: corev1.LocalObjectReference{Name: controlPlane.Name},
-				Bootstrap: coderv1alpha1.CoderProvisionerBootstrapSpec{
-					CredentialsSecretRef: coderv1alpha1.SecretKeySelector{Name: "missing-bootstrap-secret", Key: coderv1alpha1.DefaultTokenSecretKey},
-				},
 			},
 		}
 		require.NoError(t, k8sClient.Create(ctx, provisioner))
@@ -1159,17 +1103,134 @@ func TestCoderProvisionerReconciler_ConditionsOnFailure(t *testing.T) {
 
 		reconcileProvisioner(ctx, t, reconciler, request)
 		result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: request})
-		require.ErrorContains(t, err, "read bootstrap credentials secret")
-		require.Equal(t, ctrl.Result{}, result)
+		require.NoError(t, err)
+		require.Greater(t, result.RequeueAfter, time.Duration(0))
 		require.Equal(t, 0, bootstrapClient.provisionerKeyCalls)
 
 		reconciled := &coderv1alpha1.CoderProvisioner{}
 		require.NoError(t, k8sClient.Get(ctx, request, reconciled))
 		requireCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionControlPlaneReady, metav1.ConditionTrue)
-		requireCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionBootstrapSecretReady, metav1.ConditionFalse)
-		bootstrapCondition := findCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionBootstrapSecretReady)
-		require.Equal(t, "BootstrapSecretUnavailable", bootstrapCondition.Reason)
+		requireCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionOperatorAccessReady, metav1.ConditionFalse)
+		operatorAccessCondition := findCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionOperatorAccessReady)
+		require.Equal(t, "OperatorAccessNotReady", operatorAccessCondition.Reason)
+		require.Contains(t, operatorAccessCondition.Message, "status.operatorAccessReady=true")
 	})
+
+	t.Run("operator token secret ref missing", func(t *testing.T) {
+		ctx := context.Background()
+		namespace := createTestNamespace(ctx, t, "coderprov-cond-operator-token-missing")
+		controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-cond-operator-token-missing", "https://coder.example.com")
+		controlPlane.Status.OperatorAccessReady = true
+		controlPlane.Status.OperatorTokenSecretRef = nil
+		require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
+
+		provisioner := &coderv1alpha1.CoderProvisioner{
+			ObjectMeta: metav1.ObjectMeta{Name: "provisioner-cond-operator-token-missing", Namespace: namespace},
+			Spec: coderv1alpha1.CoderProvisionerSpec{
+				ControlPlaneRef: corev1.LocalObjectReference{Name: controlPlane.Name},
+			},
+		}
+		require.NoError(t, k8sClient.Create(ctx, provisioner))
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(context.Background(), provisioner)
+		})
+
+		bootstrapClient := &fakeBootstrapClient{}
+		reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
+		request := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
+
+		reconcileProvisioner(ctx, t, reconciler, request)
+		result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: request})
+		require.NoError(t, err)
+		require.Greater(t, result.RequeueAfter, time.Duration(0))
+		require.Equal(t, 0, bootstrapClient.provisionerKeyCalls)
+
+		reconciled := &coderv1alpha1.CoderProvisioner{}
+		require.NoError(t, k8sClient.Get(ctx, request, reconciled))
+		requireCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionOperatorAccessReady, metav1.ConditionFalse)
+		operatorAccessCondition := findCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionOperatorAccessReady)
+		require.Equal(t, "OperatorTokenSecretRefMissing", operatorAccessCondition.Reason)
+	})
+
+	t.Run("operator token secret ref invalid", func(t *testing.T) {
+		ctx := context.Background()
+		namespace := createTestNamespace(ctx, t, "coderprov-cond-operator-token-invalid")
+		controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-cond-operator-token-invalid", "https://coder.example.com")
+		controlPlane.Status.OperatorAccessReady = true
+		controlPlane.Status.OperatorTokenSecretRef = &coderv1alpha1.SecretKeySelector{
+			Name: "",
+			Key:  coderv1alpha1.DefaultTokenSecretKey,
+		}
+		require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
+
+		provisioner := &coderv1alpha1.CoderProvisioner{
+			ObjectMeta: metav1.ObjectMeta{Name: "provisioner-cond-operator-token-invalid", Namespace: namespace},
+			Spec: coderv1alpha1.CoderProvisionerSpec{
+				ControlPlaneRef: corev1.LocalObjectReference{Name: controlPlane.Name},
+			},
+		}
+		require.NoError(t, k8sClient.Create(ctx, provisioner))
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(context.Background(), provisioner)
+		})
+
+		bootstrapClient := &fakeBootstrapClient{}
+		reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
+		request := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
+
+		reconcileProvisioner(ctx, t, reconciler, request)
+		result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: request})
+		require.NoError(t, err)
+		require.Greater(t, result.RequeueAfter, time.Duration(0))
+		require.Equal(t, 0, bootstrapClient.provisionerKeyCalls)
+
+		reconciled := &coderv1alpha1.CoderProvisioner{}
+		require.NoError(t, k8sClient.Get(ctx, request, reconciled))
+		requireCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionOperatorAccessReady, metav1.ConditionFalse)
+		operatorAccessCondition := findCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionOperatorAccessReady)
+		require.Equal(t, "OperatorTokenSecretRefInvalid", operatorAccessCondition.Reason)
+	})
+}
+
+func TestCoderProvisionerReconciler_OperatorTokenSecretRefEmptyKeyDefaults(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	namespace := createTestNamespace(ctx, t, "coderprov-operator-token-default-key")
+	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-operator-token-default-key", "https://coder.example.com")
+	require.NotNil(t, controlPlane.Status.OperatorTokenSecretRef)
+	controlPlane.Status.OperatorTokenSecretRef = &coderv1alpha1.SecretKeySelector{
+		Name: controlPlane.Status.OperatorTokenSecretRef.Name,
+		Key:  "",
+	}
+	require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
+
+	provisioner := &coderv1alpha1.CoderProvisioner{
+		ObjectMeta: metav1.ObjectMeta{Name: "provisioner-operator-token-default-key", Namespace: namespace},
+		Spec: coderv1alpha1.CoderProvisionerSpec{
+			ControlPlaneRef: corev1.LocalObjectReference{Name: controlPlane.Name},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, provisioner))
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(context.Background(), provisioner)
+	})
+
+	bootstrapClient := &fakeBootstrapClient{
+		provisionerKeyResponses: []coderbootstrap.EnsureProvisionerKeyResponse{{
+			KeyName: provisioner.Name,
+			Key:     "provisioner-key-material",
+		}},
+	}
+	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
+	request := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
+
+	reconcileProvisioner(ctx, t, reconciler, request)
+	reconcileProvisioner(ctx, t, reconciler, request)
+
+	require.Equal(t, 1, bootstrapClient.provisionerKeyCalls)
+	require.Len(t, bootstrapClient.provisionerKeyRequests, 1)
+	require.Equal(t, "operator-session-token", bootstrapClient.provisionerKeyRequests[0].SessionToken)
 }
 
 func TestCoderProvisionerReconciler_RateLimitBackoff(t *testing.T) {
@@ -1178,16 +1239,12 @@ func TestCoderProvisionerReconciler_RateLimitBackoff(t *testing.T) {
 	ctx := context.Background()
 	namespace := createTestNamespace(ctx, t, "coderprov-rate-limit")
 	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-rate-limit", "https://coder.example.com")
-	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 	provisioner := &coderv1alpha1.CoderProvisioner{
 		ObjectMeta: metav1.ObjectMeta{Name: "provisioner-rate-limit", Namespace: namespace},
 		Spec: coderv1alpha1.CoderProvisionerSpec{
 			ControlPlaneRef: corev1.LocalObjectReference{Name: controlPlane.Name},
-			Bootstrap: coderv1alpha1.CoderProvisionerBootstrapSpec{
-				CredentialsSecretRef: coderv1alpha1.SecretKeySelector{Name: bootstrapSecret.Name, Key: coderv1alpha1.DefaultTokenSecretKey},
-			},
-			Key: coderv1alpha1.CoderProvisionerKeySpec{Name: "rate-limit-key"},
+			Key:             coderv1alpha1.CoderProvisionerKeySpec{Name: "rate-limit-key"},
 		},
 	}
 	require.NoError(t, k8sClient.Create(ctx, provisioner))
@@ -1234,7 +1291,6 @@ func TestCoderProvisionerReconciler_LongNameTruncation(t *testing.T) {
 	ctx := context.Background()
 	namespace := createTestNamespace(ctx, t, "coderprov-longname")
 	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-longname", "https://coder.example.com")
-	bootstrapSecret := createBootstrapSecret(ctx, t, namespace, "bootstrap-creds", coderv1alpha1.DefaultTokenSecretKey, "session-token")
 
 	provisionerName := strings.Repeat("a", 180)
 	deploymentCandidateName := fmt.Sprintf("provisioner-%s", provisionerName)
@@ -1250,9 +1306,6 @@ func TestCoderProvisionerReconciler_LongNameTruncation(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: provisionerName, Namespace: namespace},
 		Spec: coderv1alpha1.CoderProvisionerSpec{
 			ControlPlaneRef: corev1.LocalObjectReference{Name: controlPlane.Name},
-			Bootstrap: coderv1alpha1.CoderProvisionerBootstrapSpec{
-				CredentialsSecretRef: coderv1alpha1.SecretKeySelector{Name: bootstrapSecret.Name, Key: coderv1alpha1.DefaultTokenSecretKey},
-			},
 		},
 	}
 	require.NoError(t, k8sClient.Create(ctx, provisioner))

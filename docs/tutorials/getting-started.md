@@ -34,6 +34,12 @@ Install CRDs into your cluster:
 kubectl apply -f config/crd/bases/
 ```
 
+Create the sample namespace used by shipped manifests:
+
+```bash
+kubectl create namespace coder
+```
+
 ## 2) Run the controller locally
 
 Start controller mode (terminal A):
@@ -58,19 +64,19 @@ Check resource status:
 
 ```bash
 kubectl get codercontrolplanes -A
-kubectl describe codercontrolplane codercontrolplane-sample -n default
+kubectl describe codercontrolplane codercontrolplane-sample -n coder
 ```
 
 The controller creates a Deployment + Service named after the control plane (`codercontrolplane-sample`) in the same namespace.
 
 ```bash
-kubectl get deploy,svc -n default
+kubectl get deploy,svc -n coder
 ```
 
 ## 5) Clean up (optional)
 
 ```bash
-kubectl delete codercontrolplane codercontrolplane-sample -n default
+kubectl delete codercontrolplane codercontrolplane-sample -n coder
 ```
 
 If you used `kind-dev-up`, you can remove the cluster with:
