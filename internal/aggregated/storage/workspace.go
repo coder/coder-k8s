@@ -3,12 +3,15 @@ package storage
 import (
 	"context"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
 
@@ -22,6 +25,7 @@ var (
 	_ rest.Storage              = (*WorkspaceStorage)(nil)
 	_ rest.Getter               = (*WorkspaceStorage)(nil)
 	_ rest.Lister               = (*WorkspaceStorage)(nil)
+	_ rest.Watcher              = (*WorkspaceStorage)(nil)
 	_ rest.Creater              = (*WorkspaceStorage)(nil) //nolint:misspell // Kubernetes rest interface name is Creater.
 	_ rest.Updater              = (*WorkspaceStorage)(nil)
 	_ rest.GracefulDeleter      = (*WorkspaceStorage)(nil)
@@ -33,6 +37,8 @@ var (
 type WorkspaceStorage struct {
 	provider       coder.ClientProvider
 	tableConvertor rest.TableConvertor
+	broadcaster    *watch.Broadcaster
+	destroyOnce    sync.Once
 }
 
 // NewWorkspaceStorage builds codersdk-backed storage for CoderWorkspace resources.
@@ -44,6 +50,7 @@ func NewWorkspaceStorage(provider coder.ClientProvider) *WorkspaceStorage {
 	return &WorkspaceStorage{
 		provider:       provider,
 		tableConvertor: rest.NewDefaultTableConvertor(aggregationv1alpha1.Resource("coderworkspaces")),
+		broadcaster:    watch.NewBroadcaster(watchBroadcasterQueueLen, watch.DropIfChannelFull),
 	}
 }
 
@@ -53,7 +60,17 @@ func (s *WorkspaceStorage) New() runtime.Object {
 }
 
 // Destroy cleans up storage resources.
-func (s *WorkspaceStorage) Destroy() {}
+func (s *WorkspaceStorage) Destroy() {
+	if s == nil {
+		return
+	}
+
+	s.destroyOnce.Do(func() {
+		if s.broadcaster != nil {
+			s.broadcaster.Shutdown()
+		}
+	})
+}
 
 // NamespaceScoped returns true because CoderWorkspace is namespaced.
 func (s *WorkspaceStorage) NamespaceScoped() bool {
@@ -152,6 +169,60 @@ func (s *WorkspaceStorage) List(ctx context.Context, _ *metainternalversion.List
 	return list, nil
 }
 
+// Watch watches CoderWorkspace objects backed by codersdk.
+func (s *WorkspaceStorage) Watch(ctx context.Context, opts *metainternalversion.ListOptions) (watch.Interface, error) {
+	if s == nil {
+		return nil, fmt.Errorf("assertion failed: workspace storage must not be nil")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("assertion failed: context must not be nil")
+	}
+	if s.broadcaster == nil {
+		return nil, fmt.Errorf("assertion failed: workspace broadcaster must not be nil")
+	}
+
+	requestNamespace, err := namespaceFromRequestContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	filter, err := filterForListOptions(requestNamespace, opts)
+	if err != nil {
+		return nil, apierrors.NewBadRequest(fmt.Sprintf("invalid watch options: %v", err))
+	}
+
+	w, err := s.broadcaster.Watch()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create workspace watcher: %w", err)
+	}
+
+	var timeoutTimer *time.Timer
+	if opts != nil && opts.TimeoutSeconds != nil && *opts.TimeoutSeconds > 0 {
+		timeoutTimer = time.NewTimer(time.Duration(*opts.TimeoutSeconds) * time.Second)
+	}
+
+	go func() {
+		if timeoutTimer == nil {
+			<-ctx.Done()
+			w.Stop()
+			return
+		}
+
+		defer timeoutTimer.Stop()
+		select {
+		case <-ctx.Done():
+		case <-timeoutTimer.C:
+		}
+		w.Stop()
+	}()
+
+	if filter != nil {
+		return watch.Filter(w, filter), nil
+	}
+
+	return w, nil
+}
+
 // Create creates a CoderWorkspace through codersdk.
 func (s *WorkspaceStorage) Create(
 	ctx context.Context,
@@ -167,6 +238,9 @@ func (s *WorkspaceStorage) Create(
 	}
 	if obj == nil {
 		return nil, fmt.Errorf("assertion failed: object must not be nil")
+	}
+	if s.broadcaster == nil {
+		return nil, fmt.Errorf("assertion failed: workspace broadcaster must not be nil")
 	}
 
 	workspaceObj, ok := obj.(*aggregationv1alpha1.CoderWorkspace)
@@ -285,7 +359,15 @@ func (s *WorkspaceStorage) Create(
 		// transition can be retried safely via a subsequent Update.
 	}
 
-	return convert.WorkspaceToK8s(namespace, createdWorkspace), nil
+	result := convert.WorkspaceToK8s(namespace, createdWorkspace)
+	if result == nil {
+		return nil, fmt.Errorf("assertion failed: converted workspace must not be nil")
+	}
+
+	//nolint:errcheck // Best-effort watch event broadcast.
+	_ = s.broadcaster.Action(watch.Added, result.DeepCopy())
+
+	return result, nil
 }
 
 // Update updates workspace run state through codersdk build transitions.
@@ -309,6 +391,9 @@ func (s *WorkspaceStorage) Update(
 	}
 	if objInfo == nil {
 		return nil, false, fmt.Errorf("assertion failed: updated object info must not be nil")
+	}
+	if s.broadcaster == nil {
+		return nil, false, fmt.Errorf("assertion failed: workspace broadcaster must not be nil")
 	}
 	if forceAllowCreate {
 		return nil, false, apierrors.NewMethodNotSupported(
@@ -425,7 +510,15 @@ func (s *WorkspaceStorage) Update(
 		currentWorkspace.UpdatedAt = build.UpdatedAt
 	}
 
-	return convert.WorkspaceToK8s(namespace, currentWorkspace), false, nil
+	result := convert.WorkspaceToK8s(namespace, currentWorkspace)
+	if result == nil {
+		return nil, false, fmt.Errorf("assertion failed: converted workspace must not be nil")
+	}
+
+	//nolint:errcheck // Best-effort watch event broadcast.
+	_ = s.broadcaster.Action(watch.Modified, result.DeepCopy())
+
+	return result, false, nil
 }
 
 // Delete requests workspace deletion through a codersdk build transition.
@@ -443,6 +536,9 @@ func (s *WorkspaceStorage) Delete(
 	}
 	if name == "" {
 		return nil, false, fmt.Errorf("assertion failed: workspace name must not be empty")
+	}
+	if s.broadcaster == nil {
+		return nil, false, fmt.Errorf("assertion failed: workspace broadcaster must not be nil")
 	}
 
 	namespace, badNamespaceErr := requiredNamespaceFromRequestContext(ctx)
@@ -480,6 +576,16 @@ func (s *WorkspaceStorage) Delete(
 	if err != nil {
 		return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), name)
 	}
+
+	workspaceObj := convert.WorkspaceToK8s(namespace, workspace)
+	if workspaceObj == nil {
+		return nil, false, fmt.Errorf("assertion failed: converted workspace must not be nil")
+	}
+
+	// Workspace deletion is asynchronous in Coder. Emit a Modified event
+	// to signal that deletion was requested, rather than a Deleted event.
+	//nolint:errcheck // Best-effort watch event broadcast.
+	_ = s.broadcaster.Action(watch.Modified, workspaceObj.DeepCopy())
 
 	// Deletion is asynchronous in Coder: we only enqueue a delete build transition here.
 	// Report deleted=false so Kubernetes callers know the resource is not gone yet.

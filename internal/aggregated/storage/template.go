@@ -8,6 +8,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,6 +16,7 @@ import (
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/apiserver/pkg/registry/rest"
 
 	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
@@ -47,6 +49,7 @@ var (
 	_ rest.Storage              = (*TemplateStorage)(nil)
 	_ rest.Getter               = (*TemplateStorage)(nil)
 	_ rest.Lister               = (*TemplateStorage)(nil)
+	_ rest.Watcher              = (*TemplateStorage)(nil)
 	_ rest.Creater              = (*TemplateStorage)(nil) //nolint:misspell // Kubernetes rest interface name is Creater.
 	_ rest.Updater              = (*TemplateStorage)(nil)
 	_ rest.GracefulDeleter      = (*TemplateStorage)(nil)
@@ -60,6 +63,8 @@ var (
 type TemplateStorage struct {
 	provider       coder.ClientProvider
 	tableConvertor rest.TableConvertor
+	broadcaster    *watch.Broadcaster
+	destroyOnce    sync.Once
 }
 
 // NewTemplateStorage builds codersdk-backed storage for CoderTemplate resources.
@@ -71,6 +76,7 @@ func NewTemplateStorage(provider coder.ClientProvider) *TemplateStorage {
 	return &TemplateStorage{
 		provider:       provider,
 		tableConvertor: rest.NewDefaultTableConvertor(aggregationv1alpha1.Resource("codertemplates")),
+		broadcaster:    watch.NewBroadcaster(watchBroadcasterQueueLen, watch.DropIfChannelFull),
 	}
 }
 
@@ -80,7 +86,17 @@ func (s *TemplateStorage) New() runtime.Object {
 }
 
 // Destroy cleans up storage resources.
-func (s *TemplateStorage) Destroy() {}
+func (s *TemplateStorage) Destroy() {
+	if s == nil {
+		return
+	}
+
+	s.destroyOnce.Do(func() {
+		if s.broadcaster != nil {
+			s.broadcaster.Shutdown()
+		}
+	})
+}
 
 // NamespaceScoped returns true because CoderTemplate is namespaced.
 func (s *TemplateStorage) NamespaceScoped() bool {
@@ -189,6 +205,60 @@ func (s *TemplateStorage) List(ctx context.Context, _ *metainternalversion.ListO
 	return list, nil
 }
 
+// Watch watches CoderTemplate objects backed by codersdk.
+func (s *TemplateStorage) Watch(ctx context.Context, opts *metainternalversion.ListOptions) (watch.Interface, error) {
+	if s == nil {
+		return nil, fmt.Errorf("assertion failed: template storage must not be nil")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("assertion failed: context must not be nil")
+	}
+	if s.broadcaster == nil {
+		return nil, fmt.Errorf("assertion failed: template broadcaster must not be nil")
+	}
+
+	requestNamespace, err := namespaceFromRequestContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	filter, err := filterForListOptions(requestNamespace, opts)
+	if err != nil {
+		return nil, apierrors.NewBadRequest(fmt.Sprintf("invalid watch options: %v", err))
+	}
+
+	w, err := s.broadcaster.Watch()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create template watcher: %w", err)
+	}
+
+	var timeoutTimer *time.Timer
+	if opts != nil && opts.TimeoutSeconds != nil && *opts.TimeoutSeconds > 0 {
+		timeoutTimer = time.NewTimer(time.Duration(*opts.TimeoutSeconds) * time.Second)
+	}
+
+	go func() {
+		if timeoutTimer == nil {
+			<-ctx.Done()
+			w.Stop()
+			return
+		}
+
+		defer timeoutTimer.Stop()
+		select {
+		case <-ctx.Done():
+		case <-timeoutTimer.C:
+		}
+		w.Stop()
+	}()
+
+	if filter != nil {
+		return watch.Filter(w, filter), nil
+	}
+
+	return w, nil
+}
+
 // Create creates a CoderTemplate through codersdk.
 func (s *TemplateStorage) Create(
 	ctx context.Context,
@@ -204,6 +274,9 @@ func (s *TemplateStorage) Create(
 	}
 	if obj == nil {
 		return nil, fmt.Errorf("assertion failed: object must not be nil")
+	}
+	if s.broadcaster == nil {
+		return nil, fmt.Errorf("assertion failed: template broadcaster must not be nil")
 	}
 
 	templateObj, ok := obj.(*aggregationv1alpha1.CoderTemplate)
@@ -284,7 +357,15 @@ func (s *TemplateStorage) Create(
 			return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
 		}
 
-		return convert.TemplateToK8s(namespace, createdTemplate), nil
+		result := convert.TemplateToK8s(namespace, createdTemplate)
+		if result == nil {
+			return nil, fmt.Errorf("assertion failed: converted template must not be nil")
+		}
+
+		//nolint:errcheck // Best-effort watch event broadcast.
+		_ = s.broadcaster.Action(watch.Added, result.DeepCopy())
+
+		return result, nil
 	}
 
 	request, err := convert.TemplateCreateRequestFromK8s(templateObj, templateName)
@@ -297,7 +378,15 @@ func (s *TemplateStorage) Create(
 		return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
 	}
 
-	return convert.TemplateToK8s(namespace, createdTemplate), nil
+	result := convert.TemplateToK8s(namespace, createdTemplate)
+	if result == nil {
+		return nil, fmt.Errorf("assertion failed: converted template must not be nil")
+	}
+
+	//nolint:errcheck // Best-effort watch event broadcast.
+	_ = s.broadcaster.Action(watch.Added, result.DeepCopy())
+
+	return result, nil
 }
 
 // Update applies a template metadata/source reconcile.
@@ -321,6 +410,9 @@ func (s *TemplateStorage) Update(
 	}
 	if objInfo == nil {
 		return nil, false, fmt.Errorf("assertion failed: updated object info must not be nil")
+	}
+	if s.broadcaster == nil {
+		return nil, false, fmt.Errorf("assertion failed: template broadcaster must not be nil")
 	}
 	if forceAllowCreate {
 		return nil, false, apierrors.NewMethodNotSupported(
@@ -531,7 +623,18 @@ func (s *TemplateStorage) Update(
 		return nil, false, err
 	}
 
-	return refreshedObj, false, nil
+	result, ok := refreshedObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok {
+		return nil, false, fmt.Errorf("assertion failed: expected *CoderTemplate, got %T", refreshedObj)
+	}
+	if result == nil {
+		return nil, false, fmt.Errorf("assertion failed: refreshed template must not be nil")
+	}
+
+	//nolint:errcheck // Best-effort watch event broadcast.
+	_ = s.broadcaster.Action(watch.Modified, result.DeepCopy())
+
+	return result, false, nil
 }
 
 // Delete deletes a CoderTemplate through codersdk.
@@ -549,6 +652,9 @@ func (s *TemplateStorage) Delete(
 	}
 	if name == "" {
 		return nil, false, fmt.Errorf("assertion failed: template name must not be empty")
+	}
+	if s.broadcaster == nil {
+		return nil, false, fmt.Errorf("assertion failed: template broadcaster must not be nil")
 	}
 
 	namespace, badNamespaceErr := requiredNamespaceFromRequestContext(ctx)
@@ -585,6 +691,15 @@ func (s *TemplateStorage) Delete(
 	if err := sdk.DeleteTemplate(ctx, template.ID); err != nil {
 		return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
 	}
+
+	templateObj := convert.TemplateToK8s(namespace, template)
+	if templateObj == nil {
+		return nil, false, fmt.Errorf("assertion failed: converted template must not be nil")
+	}
+
+	// Emit a Deleted event with the last-known template state.
+	//nolint:errcheck // Best-effort watch event broadcast.
+	_ = s.broadcaster.Action(watch.Deleted, templateObj.DeepCopy())
 
 	return &metav1.Status{Status: metav1.StatusSuccess}, true, nil
 }
