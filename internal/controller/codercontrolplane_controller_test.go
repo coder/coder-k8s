@@ -3644,6 +3644,77 @@ func TestReconcile_TLSAndCertSecretVolumeNameSanitization(t *testing.T) {
 	}
 }
 
+func TestReconcile_CertSecretsWithSharedSecretNameReuseVolume(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cert-secret-shared-volume", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-certs-shared-volume:latest",
+			Certs: coderv1alpha1.CertsSpec{
+				Secrets: []coderv1alpha1.CertSecretSelector{
+					{Name: "shared.ca.secret", Key: "ca.crt"},
+					{Name: "shared.ca.secret", Key: "alt.crt"},
+				},
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create control plane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("reconcile control plane: %v", err)
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	podSpec := deployment.Spec.Template.Spec
+	container := podSpec.Containers[0]
+
+	certVolumeName := ""
+	certVolumeCount := 0
+	for _, volume := range podSpec.Volumes {
+		if volume.Secret == nil || volume.Secret.SecretName != "shared.ca.secret" {
+			continue
+		}
+		certVolumeCount++
+		certVolumeName = volume.Name
+	}
+	if certVolumeCount != 1 {
+		t.Fatalf("expected exactly one cert volume for shared secret, got %d volumes: %+v", certVolumeCount, podSpec.Volumes)
+	}
+
+	expectedMountBySubPath := map[string]string{
+		"ca.crt":  "/etc/ssl/certs/shared.ca.secret-ca.crt",
+		"alt.crt": "/etc/ssl/certs/shared.ca.secret-alt.crt",
+	}
+	mountCount := 0
+	for _, mount := range container.VolumeMounts {
+		if mount.Name != certVolumeName {
+			continue
+		}
+		expectedPath, ok := expectedMountBySubPath[mount.SubPath]
+		if !ok {
+			t.Fatalf("unexpected cert subPath %q for mount %#v", mount.SubPath, mount)
+		}
+		if mount.MountPath != expectedPath {
+			t.Fatalf("expected mount path %q for subPath %q, got %q", expectedPath, mount.SubPath, mount.MountPath)
+		}
+		mountCount++
+	}
+	if mountCount != len(expectedMountBySubPath) {
+		t.Fatalf("expected %d cert volume mounts for shared secret, got %d mounts: %+v", len(expectedMountBySubPath), mountCount, container.VolumeMounts)
+	}
+}
+
 func TestReconcile_PassThroughConfiguration(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()

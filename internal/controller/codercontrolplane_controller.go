@@ -1012,7 +1012,20 @@ func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, c
 			})
 		}
 
-		for _, secret := range coderControlPlane.Spec.Certs.Secrets {
+		certSecretNameCounts := make(map[string]int, len(coderControlPlane.Spec.Certs.Secrets))
+		for i := range coderControlPlane.Spec.Certs.Secrets {
+			secretName := strings.TrimSpace(coderControlPlane.Spec.Certs.Secrets[i].Name)
+			if secretName == "" {
+				continue
+			}
+			certSecretNameCounts[secretName]++
+		}
+
+		certVolumeNameBySecret := make(map[string]string, len(certSecretNameCounts))
+		certMountFileCount := make(map[string]int, len(coderControlPlane.Spec.Certs.Secrets))
+		certSelectorSeen := make(map[string]struct{}, len(coderControlPlane.Spec.Certs.Secrets))
+		for i := range coderControlPlane.Spec.Certs.Secrets {
+			secret := coderControlPlane.Spec.Certs.Secrets[i]
 			secret.Name = strings.TrimSpace(secret.Name)
 			secret.Key = strings.TrimSpace(secret.Key)
 			if secret.Name == "" {
@@ -1022,16 +1035,43 @@ func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, c
 				return fmt.Errorf("assertion failed: cert secret key must not be empty")
 			}
 
-			volumeName := volumeNameForSecret("ca-cert", secret.Name)
-			volumes = append(volumes, corev1.Volume{
-				Name: volumeName,
-				VolumeSource: corev1.VolumeSource{
-					Secret: &corev1.SecretVolumeSource{SecretName: secret.Name},
-				},
-			})
+			selectorKey := fmt.Sprintf("%s\x00%s", secret.Name, secret.Key)
+			if _, seen := certSelectorSeen[selectorKey]; seen {
+				continue
+			}
+			certSelectorSeen[selectorKey] = struct{}{}
+
+			volumeName, volumeExists := certVolumeNameBySecret[secret.Name]
+			if !volumeExists {
+				volumeName = volumeNameForSecret("ca-cert", secret.Name)
+				certVolumeNameBySecret[secret.Name] = volumeName
+				volumes = append(volumes, corev1.Volume{
+					Name: volumeName,
+					VolumeSource: corev1.VolumeSource{
+						Secret: &corev1.SecretVolumeSource{SecretName: secret.Name},
+					},
+				})
+			}
+
+			mountFileBase := secret.Name
+			if certSecretNameCounts[secret.Name] > 1 {
+				mountFileBase = fmt.Sprintf("%s-%s", secret.Name, secret.Key)
+			}
+			mountFileCount := certMountFileCount[mountFileBase]
+			certMountFileCount[mountFileBase] = mountFileCount + 1
+
+			mountFileName := mountFileBase
+			if !strings.HasSuffix(mountFileName, ".crt") {
+				mountFileName += ".crt"
+			}
+			if mountFileCount > 0 {
+				mountFileName = strings.TrimSuffix(mountFileName, ".crt")
+				mountFileName = fmt.Sprintf("%s-%d.crt", mountFileName, mountFileCount+1)
+			}
+
 			volumeMounts = append(volumeMounts, corev1.VolumeMount{
 				Name:      volumeName,
-				MountPath: fmt.Sprintf("/etc/ssl/certs/%s.crt", secret.Name),
+				MountPath: fmt.Sprintf("/etc/ssl/certs/%s", mountFileName),
 				SubPath:   secret.Key,
 				ReadOnly:  true,
 			})
