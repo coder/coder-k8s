@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ type ControlPlaneClientProvider struct {
 var (
 	_ ClientProvider    = (*ControlPlaneClientProvider)(nil)
 	_ NamespaceResolver = (*ControlPlaneClientProvider)(nil)
+	_ NamespaceLister   = (*ControlPlaneClientProvider)(nil)
 )
 
 // NewControlPlaneClientProvider constructs a dynamic ClientProvider backed by CoderControlPlane resources.
@@ -204,6 +206,45 @@ func (p *ControlPlaneClientProvider) DefaultNamespace(ctx context.Context) (stri
 	default:
 		return "", apierrors.NewBadRequest(multipleEligibleControlPlaneMessage(""))
 	}
+}
+
+// EligibleNamespaces returns namespaces served by eligible CoderControlPlane instances.
+func (p *ControlPlaneClientProvider) EligibleNamespaces(ctx context.Context) ([]string, error) {
+	if p == nil {
+		return nil, fmt.Errorf("assertion failed: control plane client provider must not be nil")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("assertion failed: context must not be nil")
+	}
+
+	eligible, err := p.findEligibleControlPlanes(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	if len(eligible) == 0 {
+		return nil, apierrors.NewServiceUnavailable(noEligibleControlPlaneMessage(""))
+	}
+
+	byNamespace := make(map[string]int, len(eligible))
+	for i := range eligible {
+		namespace := strings.TrimSpace(eligible[i].Namespace)
+		if namespace == "" {
+			return nil, fmt.Errorf("assertion failed: eligible CoderControlPlane namespace must not be empty")
+		}
+		byNamespace[namespace]++
+	}
+
+	namespaces := make([]string, 0, len(byNamespace))
+	for namespace, count := range byNamespace {
+		if count > 1 {
+			return nil, apierrors.NewBadRequest(multipleEligibleControlPlaneMessage(namespace))
+		}
+		namespaces = append(namespaces, namespace)
+	}
+
+	sort.Strings(namespaces)
+
+	return namespaces, nil
 }
 
 func (p *ControlPlaneClientProvider) findEligibleControlPlanes(

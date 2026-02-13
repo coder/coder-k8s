@@ -266,6 +266,161 @@ func TestControlPlaneClientProviderDefaultNamespaceReturnsBadRequestForMultipleE
 	}
 }
 
+func TestControlPlaneClientProviderEligibleNamespacesMultipleNamespaces(t *testing.T) {
+	t.Parallel()
+
+	ignoredControlPlane := eligibleControlPlane("team-a", "coder-disabled")
+	ignoredControlPlane.Spec.OperatorAccess.Disabled = true
+
+	provider, secretReader := newControlPlaneProviderForTest(
+		t,
+		[]coderv1alpha1.CoderControlPlane{
+			eligibleControlPlane("team-a", "coder-a"),
+			eligibleControlPlane("team-b", "coder-b"),
+			ignoredControlPlane,
+		},
+		nil,
+	)
+
+	namespaces, err := provider.EligibleNamespaces(context.Background())
+	if err != nil {
+		t.Fatalf("resolve eligible namespaces: %v", err)
+	}
+	if got, want := secretReader.getCalls, 0; got != want {
+		t.Fatalf("expected %d secret reads, got %d", want, got)
+	}
+	if got, want := len(namespaces), 2; got != want {
+		t.Fatalf("expected %d namespaces, got %d: %v", want, got, namespaces)
+	}
+	if got, want := namespaces[0], "team-a"; got != want {
+		t.Fatalf("expected first namespace %q, got %q", want, got)
+	}
+	if got, want := namespaces[1], "team-b"; got != want {
+		t.Fatalf("expected second namespace %q, got %q", want, got)
+	}
+}
+
+func TestControlPlaneClientProviderEligibleNamespacesNoEligible(t *testing.T) {
+	t.Parallel()
+
+	provider, secretReader := newControlPlaneProviderForTest(t, nil, nil)
+
+	namespaces, err := provider.EligibleNamespaces(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if namespaces != nil {
+		t.Fatalf("expected nil namespaces on error, got %v", namespaces)
+	}
+	if got, want := secretReader.getCalls, 0; got != want {
+		t.Fatalf("expected %d secret reads, got %d", want, got)
+	}
+	if !apierrors.IsServiceUnavailable(err) {
+		t.Fatalf("expected ServiceUnavailable, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "no eligible CoderControlPlane") {
+		t.Fatalf("expected no-eligible message, got %v", err)
+	}
+}
+
+func TestControlPlaneClientProviderEligibleNamespacesDuplicateInNamespace(t *testing.T) {
+	t.Parallel()
+
+	provider, secretReader := newControlPlaneProviderForTest(
+		t,
+		[]coderv1alpha1.CoderControlPlane{
+			eligibleControlPlane("team-a", "coder-a"),
+			eligibleControlPlane("team-a", "coder-b"),
+		},
+		nil,
+	)
+
+	namespaces, err := provider.EligibleNamespaces(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if namespaces != nil {
+		t.Fatalf("expected nil namespaces on error, got %v", namespaces)
+	}
+	if got, want := secretReader.getCalls, 0; got != want {
+		t.Fatalf("expected %d secret reads, got %d", want, got)
+	}
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected BadRequest, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "multi-instance support is planned") {
+		t.Fatalf("expected multi-instance message, got %v", err)
+	}
+}
+
+func TestControlPlaneClientProviderEligibleNamespacesSingleNamespace(t *testing.T) {
+	t.Parallel()
+
+	provider, secretReader := newControlPlaneProviderForTest(
+		t,
+		[]coderv1alpha1.CoderControlPlane{eligibleControlPlane("team-a", "coder-a")},
+		nil,
+	)
+
+	namespaces, err := provider.EligibleNamespaces(context.Background())
+	if err != nil {
+		t.Fatalf("resolve eligible namespaces: %v", err)
+	}
+	if got, want := secretReader.getCalls, 0; got != want {
+		t.Fatalf("expected %d secret reads, got %d", want, got)
+	}
+	if got, want := len(namespaces), 1; got != want {
+		t.Fatalf("expected %d namespace, got %d", want, got)
+	}
+	if got, want := namespaces[0], "team-a"; got != want {
+		t.Fatalf("expected namespace %q, got %q", want, got)
+	}
+}
+
+func TestControlPlaneClientProviderEligibleNamespacesAssertions(t *testing.T) {
+	t.Parallel()
+
+	provider, _ := newControlPlaneProviderForTest(t, nil, nil)
+
+	tests := []struct {
+		name            string
+		provider        *ControlPlaneClientProvider
+		ctx             context.Context
+		wantErrContains string
+	}{
+		{
+			name:            "rejects nil provider",
+			provider:        nil,
+			ctx:             context.Background(),
+			wantErrContains: "assertion failed: control plane client provider must not be nil",
+		},
+		{
+			name:            "rejects nil context",
+			provider:        provider,
+			ctx:             nil,
+			wantErrContains: "assertion failed: context must not be nil",
+		},
+	}
+
+	for _, testCase := range tests {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			namespaces, err := testCase.provider.EligibleNamespaces(testCase.ctx)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", testCase.wantErrContains)
+			}
+			if namespaces != nil {
+				t.Fatalf("expected nil namespaces on error, got %v", namespaces)
+			}
+			if !strings.Contains(err.Error(), testCase.wantErrContains) {
+				t.Fatalf("expected error containing %q, got %q", testCase.wantErrContains, err.Error())
+			}
+		})
+	}
+}
+
 func TestControlPlaneClientProviderClientForNamespaceDefaultsSecretKeyToToken(t *testing.T) {
 	t.Parallel()
 
