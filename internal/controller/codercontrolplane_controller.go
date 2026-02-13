@@ -788,13 +788,20 @@ func (r *CoderControlPlaneReconciler) reconcileService(ctx context.Context, code
 			servicePort = defaultControlPlanePort
 		}
 
-		servicePorts := []corev1.ServicePort{{
+		tlsEnabled := controlPlaneTLSEnabled(coderControlPlane)
+		primaryServicePort := corev1.ServicePort{
 			Name:       "http",
 			Port:       servicePort,
 			Protocol:   corev1.ProtocolTCP,
 			TargetPort: intstr.FromInt(int(controlPlaneTargetPort)),
-		}}
-		if controlPlaneTLSEnabled(coderControlPlane) {
+		}
+		if tlsEnabled && servicePort == 443 {
+			primaryServicePort.Name = "https"
+			primaryServicePort.TargetPort = intstr.FromInt(int(controlPlaneTLSTargetPort))
+		}
+
+		servicePorts := []corev1.ServicePort{primaryServicePort}
+		if tlsEnabled && servicePort != 443 {
 			servicePorts = append(servicePorts, corev1.ServicePort{
 				Name:       "https",
 				Port:       443,

@@ -2729,6 +2729,53 @@ func TestReconcile_TLSAlignment(t *testing.T) {
 	}
 }
 
+func TestReconcile_TLSWithServicePort443(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-tls-service-port-443", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-tls-443:latest",
+			Service: coderv1alpha1.ServiceSpec{
+				Port: 443,
+			},
+			TLS: coderv1alpha1.TLSSpec{
+				SecretNames: []string{"my-tls-443"},
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create control plane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("reconcile control plane: %v", err)
+	}
+
+	service := &corev1.Service{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, service); err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	if len(service.Spec.Ports) != 1 {
+		t.Fatalf("expected exactly one service port when service.port=443 and TLS is enabled, got %+v", service.Spec.Ports)
+	}
+	port := service.Spec.Ports[0]
+	if port.Name != "https" {
+		t.Fatalf("expected single service port to be named https, got %q", port.Name)
+	}
+	if port.Port != 443 {
+		t.Fatalf("expected single service port number 443, got %d", port.Port)
+	}
+	if port.TargetPort != intstr.FromInt(8443) {
+		t.Fatalf("expected single service port target 8443, got %+v", port.TargetPort)
+	}
+}
+
 func TestReconcile_PassThroughConfiguration(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
