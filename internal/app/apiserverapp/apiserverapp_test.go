@@ -11,10 +11,13 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
+	"k8s.io/apimachinery/pkg/util/managedfields"
 	genericoptions "k8s.io/apiserver/pkg/server/options"
 	openapiutil "k8s.io/kube-openapi/pkg/util"
+	"k8s.io/kube-openapi/pkg/validation/spec"
 
 	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
 	coderhelper "github.com/coder/coder-k8s/internal/aggregated/coder"
@@ -74,6 +77,109 @@ func TestOpenAPIDefinitionsIncludeTemplateFiles(t *testing.T) {
 	if got, ok := filesSchema.Extensions["x-kubernetes-map-type"]; !ok || got != "atomic" {
 		t.Fatalf("expected spec.files x-kubernetes-map-type atomic, got %v", got)
 	}
+}
+
+func TestOpenAPIDefinitionsIncludeTemplateGVKExtensionAndObjectMetadata(t *testing.T) {
+	t.Helper()
+
+	defs := getOpenAPIDefinitions(nil)
+	templateDefinitionName := openapiutil.GetCanonicalTypeName(&aggregationv1alpha1.CoderTemplate{})
+
+	def, ok := defs[templateDefinitionName]
+	if !ok {
+		t.Fatalf("expected OpenAPI definition for %s", templateDefinitionName)
+	}
+
+	for _, propertyName := range []string{"apiVersion", "kind", "metadata", "spec", "status"} {
+		if _, ok := def.Schema.Properties[propertyName]; !ok {
+			t.Fatalf("expected template schema to include %q", propertyName)
+		}
+	}
+
+	gvk := readGVKExtension(t, def.Schema)
+	if got, want := gvk["group"], aggregationv1alpha1.SchemeGroupVersion.Group; got != want {
+		t.Fatalf("expected template GVK group %q, got %v", want, got)
+	}
+	if got, want := gvk["version"], aggregationv1alpha1.SchemeGroupVersion.Version; got != want {
+		t.Fatalf("expected template GVK version %q, got %v", want, got)
+	}
+	if got, want := gvk["kind"], "CoderTemplate"; got != want {
+		t.Fatalf("expected template GVK kind %q, got %v", want, got)
+	}
+}
+
+func TestOpenAPIDefinitionsSupportManagedFieldsTypeConversionForTemplate(t *testing.T) {
+	t.Helper()
+
+	defs := getOpenAPIDefinitions(nil)
+	openAPISpec := make(map[string]*spec.Schema, len(defs))
+	for definitionName, definition := range defs {
+		definitionSchema := definition.Schema
+		openAPISpec[definitionName] = &definitionSchema
+	}
+
+	typeConverter, err := managedfields.NewTypeConverter(openAPISpec, false)
+	if err != nil {
+		t.Fatalf("build managed fields type converter from OpenAPI definitions: %v", err)
+	}
+	if typeConverter == nil {
+		t.Fatal("expected managed fields type converter to be non-nil")
+	}
+
+	template := &aggregationv1alpha1.CoderTemplate{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: aggregationv1alpha1.SchemeGroupVersion.String(),
+			Kind:       "CoderTemplate",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "default.my-template",
+			Namespace: "test-ns",
+		},
+		Spec: aggregationv1alpha1.CoderTemplateSpec{
+			Organization: "default",
+			VersionID:    "version-id",
+		},
+	}
+
+	if _, err := typeConverter.ObjectToTyped(template); err != nil {
+		t.Fatalf("convert template object to structured-merge typed value: %v", err)
+	}
+}
+
+func readGVKExtension(t *testing.T, schema spec.Schema) map[string]interface{} {
+	t.Helper()
+
+	extension, ok := schema.Extensions["x-kubernetes-group-version-kind"]
+	if !ok {
+		t.Fatal("expected x-kubernetes-group-version-kind OpenAPI extension")
+	}
+
+	gvkList, ok := extension.([]interface{})
+	if !ok {
+		t.Fatalf("expected GVK extension to be []interface{}, got %T", extension)
+	}
+	if len(gvkList) != 1 {
+		t.Fatalf("expected exactly one GVK entry, got %d", len(gvkList))
+	}
+
+	switch gvk := gvkList[0].(type) {
+	case map[string]interface{}:
+		return gvk
+	case map[interface{}]interface{}:
+		normalized := make(map[string]interface{}, len(gvk))
+		for key, value := range gvk {
+			keyString, ok := key.(string)
+			if !ok {
+				t.Fatalf("expected GVK extension map key to be string, got %T", key)
+			}
+			normalized[keyString] = value
+		}
+		return normalized
+	default:
+		t.Fatalf("expected GVK entry to be map, got %T", gvkList[0])
+	}
+
+	return nil
 }
 
 func TestInstallAPIGroupRegistersDiscovery(t *testing.T) {
@@ -195,6 +301,15 @@ func TestNewRecommendedConfigSetsExtendedRequestTimeout(t *testing.T) {
 
 	if got, want := recommendedConfig.RequestTimeout, defaultRequestTimeout; got != want {
 		t.Fatalf("expected request timeout %s, got %s", want, got)
+	}
+	if !recommendedConfig.SkipOpenAPIInstallation {
+		t.Fatal("expected OpenAPI handler installation to remain disabled until generic definitions are wired")
+	}
+	if recommendedConfig.OpenAPIConfig == nil {
+		t.Fatal("expected non-nil OpenAPI v2 config")
+	}
+	if recommendedConfig.OpenAPIV3Config == nil {
+		t.Fatal("expected non-nil OpenAPI v3 config")
 	}
 }
 

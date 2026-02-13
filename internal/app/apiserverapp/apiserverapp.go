@@ -345,10 +345,26 @@ func getOpenAPIDefinitions(_ openapicommon.ReferenceCallback) map[string]openapi
 	templateDefinitionName := openapiutil.GetCanonicalTypeName(&aggregationv1alpha1.CoderTemplate{})
 	templateListDefinitionName := openapiutil.GetCanonicalTypeName(&aggregationv1alpha1.CoderTemplateList{})
 
+	groupVersionKindExtension := func(kind string) spec.VendorExtensible {
+		return spec.VendorExtensible{
+			Extensions: spec.Extensions{
+				"x-kubernetes-group-version-kind": []interface{}{
+					map[string]interface{}{
+						"group":   aggregationv1alpha1.SchemeGroupVersion.Group,
+						"version": aggregationv1alpha1.SchemeGroupVersion.Version,
+						"kind":    kind,
+					},
+				},
+			},
+		}
+	}
+
 	boolSchema := spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"boolean"}}}
 	dateTimeSchema := spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"string"}, Format: "date-time"}}
 	int64Schema := spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"integer"}, Format: "int64"}}
 	stringSchema := spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"string"}}}
+	objectMetaSchema := spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"object"}}}
+	listMetaSchema := spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"object"}}}
 	filesSchema := spec.Schema{
 		VendorExtensible: spec.VendorExtensible{
 			Extensions: spec.Extensions{
@@ -365,9 +381,13 @@ func getOpenAPIDefinitions(_ openapicommon.ReferenceCallback) map[string]openapi
 	}
 
 	workspaceSchema := spec.Schema{
+		VendorExtensible: groupVersionKindExtension("CoderWorkspace"),
 		SchemaProps: spec.SchemaProps{
 			Type: []string{"object"},
 			Properties: map[string]spec.Schema{
+				"apiVersion": stringSchema,
+				"kind":       stringSchema,
+				"metadata":   objectMetaSchema,
 				"spec": {
 					SchemaProps: spec.SchemaProps{
 						Type: []string{"object"},
@@ -401,9 +421,13 @@ func getOpenAPIDefinitions(_ openapicommon.ReferenceCallback) map[string]openapi
 	}
 
 	templateSchema := spec.Schema{
+		VendorExtensible: groupVersionKindExtension("CoderTemplate"),
 		SchemaProps: spec.SchemaProps{
 			Type: []string{"object"},
 			Properties: map[string]spec.Schema{
+				"apiVersion": stringSchema,
+				"kind":       stringSchema,
+				"metadata":   objectMetaSchema,
 				"spec": {
 					SchemaProps: spec.SchemaProps{
 						Type: []string{"object"},
@@ -436,9 +460,13 @@ func getOpenAPIDefinitions(_ openapicommon.ReferenceCallback) map[string]openapi
 	}
 
 	workspaceListSchema := spec.Schema{
+		VendorExtensible: groupVersionKindExtension("CoderWorkspaceList"),
 		SchemaProps: spec.SchemaProps{
 			Type: []string{"object"},
 			Properties: map[string]spec.Schema{
+				"apiVersion": stringSchema,
+				"kind":       stringSchema,
+				"metadata":   listMetaSchema,
 				"items": {
 					SchemaProps: spec.SchemaProps{
 						Type:  []string{"array"},
@@ -450,9 +478,13 @@ func getOpenAPIDefinitions(_ openapicommon.ReferenceCallback) map[string]openapi
 	}
 
 	templateListSchema := spec.Schema{
+		VendorExtensible: groupVersionKindExtension("CoderTemplateList"),
 		SchemaProps: spec.SchemaProps{
 			Type: []string{"object"},
 			Properties: map[string]spec.Schema{
+				"apiVersion": stringSchema,
+				"kind":       stringSchema,
+				"metadata":   listMetaSchema,
 				"items": {
 					SchemaProps: spec.SchemaProps{
 						Type:  []string{"array"},
