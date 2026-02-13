@@ -144,7 +144,7 @@ type GatewayParentRef struct {
 // CertsSpec configures additional CA certificate mounts.
 type CertsSpec struct {
 	// Secrets lists Secret key selectors for CA certificates.
-	// Each is mounted at /etc/ssl/certs/<name>.crt.
+	// Each is mounted at `/etc/ssl/certs/{name}.crt`.
 	Secrets []CertSecretSelector `json:"secrets,omitempty"`
 }
 

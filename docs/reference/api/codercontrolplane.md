@@ -74,7 +74,7 @@ CertsSpec configures additional CA certificate mounts.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `secrets` | [CertSecretSelector](#certsecretselector) array | Secrets lists Secret key selectors for CA certificates. Each is mounted at /etc/ssl/certs/<name>.crt. |
+| `secrets` | [CertSecretSelector](#certsecretselector) array | Secrets lists Secret key selectors for CA certificates. Each is mounted at `/etc/ssl/certs/\{name\}.crt`. |
 
 ### ExposeSpec
 
