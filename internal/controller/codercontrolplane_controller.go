@@ -55,7 +55,8 @@ const (
 	operatorAccessRetryInterval = 30 * time.Second
 	operatorTokenSecretSuffix   = "-operator-token"
 
-	workspaceRBACFinalizer = "coder.com/workspace-rbac-cleanup"
+	workspaceRBACFinalizer          = "coder.com/workspace-rbac-cleanup"
+	workspaceRBACOwnerUIDAnnotation = "coder.com/workspace-rbac-owner-uid"
 
 	// #nosec G101 -- this is a field index key, not a credential.
 	licenseSecretNameFieldIndex = ".spec.licenseSecretRef.name"
@@ -323,6 +324,101 @@ func workspaceRBACLabels(cp *coderv1alpha1.CoderControlPlane) map[string]string 
 	return labels
 }
 
+func workspaceRBACAnnotations(ownerUID string) map[string]string {
+	return map[string]string{workspaceRBACOwnerUIDAnnotation: ownerUID}
+}
+
+func hasWorkspaceRBACIdentityLabels(object metav1.Object, coderControlPlane *coderv1alpha1.CoderControlPlane) bool {
+	if object == nil || coderControlPlane == nil {
+		return false
+	}
+
+	labels := object.GetLabels()
+	if labels == nil {
+		return false
+	}
+
+	return labels["coder.com/control-plane"] == coderControlPlane.Name &&
+		labels["coder.com/control-plane-namespace"] == coderControlPlane.Namespace
+}
+
+func hasWorkspaceRBACOwnerUID(object metav1.Object, coderControlPlane *coderv1alpha1.CoderControlPlane) bool {
+	if object == nil || coderControlPlane == nil {
+		return false
+	}
+
+	ownerUID := strings.TrimSpace(string(coderControlPlane.UID))
+	if ownerUID == "" {
+		return false
+	}
+
+	annotations := object.GetAnnotations()
+	if annotations == nil {
+		return false
+	}
+
+	return strings.TrimSpace(annotations[workspaceRBACOwnerUIDAnnotation]) == ownerUID
+}
+
+func isManagedWorkspaceRole(
+	role *rbacv1.Role,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+	expectedRoleName string,
+) bool {
+	if role == nil || coderControlPlane == nil {
+		return false
+	}
+	if isOwnedByCoderControlPlane(role, coderControlPlane) {
+		return true
+	}
+	if !hasWorkspaceRBACIdentityLabels(role, coderControlPlane) {
+		return false
+	}
+	if hasWorkspaceRBACOwnerUID(role, coderControlPlane) {
+		return true
+	}
+
+	return role.Namespace != coderControlPlane.Namespace && role.Name == expectedRoleName
+}
+
+func isManagedWorkspaceRoleBinding(
+	roleBinding *rbacv1.RoleBinding,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+	expectedRoleName string,
+	expectedRoleBindingName string,
+	expectedServiceAccountName string,
+) bool {
+	if roleBinding == nil || coderControlPlane == nil {
+		return false
+	}
+	if isOwnedByCoderControlPlane(roleBinding, coderControlPlane) {
+		return true
+	}
+	if !hasWorkspaceRBACIdentityLabels(roleBinding, coderControlPlane) {
+		return false
+	}
+	if hasWorkspaceRBACOwnerUID(roleBinding, coderControlPlane) {
+		return true
+	}
+	if roleBinding.Namespace == coderControlPlane.Namespace {
+		return false
+	}
+	if roleBinding.Name != expectedRoleBindingName {
+		return false
+	}
+	if roleBinding.RoleRef.APIGroup != rbacv1.GroupName || roleBinding.RoleRef.Kind != "Role" || roleBinding.RoleRef.Name != expectedRoleName {
+		return false
+	}
+	if len(roleBinding.Subjects) != 1 {
+		return false
+	}
+
+	subject := roleBinding.Subjects[0]
+	return subject.Kind == rbacv1.ServiceAccountKind &&
+		subject.Name == expectedServiceAccountName &&
+		subject.Namespace == coderControlPlane.Namespace
+}
+
 func (r *CoderControlPlaneReconciler) ensureWorkspaceRBACFinalizer(
 	ctx context.Context,
 	namespacedName types.NamespacedName,
@@ -379,7 +475,7 @@ func (r *CoderControlPlaneReconciler) reconcileServiceAccount(ctx context.Contex
 		return fmt.Errorf("assertion failed: coder control plane must not be nil")
 	}
 	if coderControlPlane.Spec.ServiceAccount.DisableCreate {
-		return nil
+		return r.detachManagedServiceAccounts(ctx, coderControlPlane)
 	}
 
 	serviceAccountName := resolveServiceAccountName(coderControlPlane)
@@ -407,6 +503,46 @@ func (r *CoderControlPlaneReconciler) reconcileServiceAccount(ctx context.Contex
 	return nil
 }
 
+func (r *CoderControlPlaneReconciler) detachManagedServiceAccounts(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+
+	serviceAccounts := &corev1.ServiceAccountList{}
+	if err := r.List(
+		ctx,
+		serviceAccounts,
+		client.InNamespace(coderControlPlane.Namespace),
+		client.MatchingLabels(controlPlaneLabels(coderControlPlane.Name)),
+	); err != nil {
+		return fmt.Errorf("list managed service accounts: %w", err)
+	}
+
+	for i := range serviceAccounts.Items {
+		serviceAccount := &serviceAccounts.Items[i]
+		if !isOwnedByCoderControlPlane(serviceAccount, coderControlPlane) {
+			continue
+		}
+
+		original := serviceAccount.DeepCopy()
+		if err := controllerutil.RemoveControllerReference(coderControlPlane, serviceAccount, r.Scheme); err != nil {
+			return fmt.Errorf("remove controller reference from service account %s/%s: %w", serviceAccount.Namespace, serviceAccount.Name, err)
+		}
+		if equality.Semantic.DeepEqual(original.OwnerReferences, serviceAccount.OwnerReferences) {
+			continue
+		}
+
+		if err := r.Patch(ctx, serviceAccount, client.MergeFrom(original)); err != nil {
+			return fmt.Errorf("patch detached service account %s/%s: %w", serviceAccount.Namespace, serviceAccount.Name, err)
+		}
+	}
+
+	return nil
+}
+
 func (r *CoderControlPlaneReconciler) reconcileWorkspaceRBAC(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) error {
 	if coderControlPlane == nil {
 		return fmt.Errorf("assertion failed: coder control plane must not be nil")
@@ -415,6 +551,10 @@ func (r *CoderControlPlaneReconciler) reconcileWorkspaceRBAC(ctx context.Context
 	serviceAccountName := resolveServiceAccountName(coderControlPlane)
 	if strings.TrimSpace(serviceAccountName) == "" {
 		return fmt.Errorf("assertion failed: service account name must not be empty")
+	}
+	ownerUID := strings.TrimSpace(string(coderControlPlane.UID))
+	if ownerUID == "" {
+		return fmt.Errorf("assertion failed: coder control plane UID must not be empty")
 	}
 	roleName := fmt.Sprintf("%s-workspace-perms", serviceAccountName)
 	roleBindingName := serviceAccountName
@@ -459,10 +599,12 @@ func (r *CoderControlPlaneReconciler) reconcileWorkspaceRBAC(ctx context.Context
 		seenNamespaces[namespace] = struct{}{}
 
 		labels := workspaceRBACLabels(coderControlPlane)
+		annotations := workspaceRBACAnnotations(ownerUID)
 
 		role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: roleName, Namespace: namespace}}
 		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, role, func() error {
 			role.Labels = maps.Clone(labels)
+			role.Annotations = maps.Clone(annotations)
 			role.Rules = append([]rbacv1.PolicyRule(nil), rules...)
 
 			if namespace == coderControlPlane.Namespace {
@@ -482,6 +624,7 @@ func (r *CoderControlPlaneReconciler) reconcileWorkspaceRBAC(ctx context.Context
 		roleBinding := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: roleBindingName, Namespace: namespace}}
 		_, err = controllerutil.CreateOrUpdate(ctx, r.Client, roleBinding, func() error {
 			roleBinding.Labels = maps.Clone(labels)
+			roleBinding.Annotations = maps.Clone(annotations)
 			roleBinding.RoleRef = rbacv1.RoleRef{
 				APIGroup: rbacv1.GroupName,
 				Kind:     "Role",
@@ -528,6 +671,13 @@ func (r *CoderControlPlaneReconciler) cleanupManagedWorkspaceRBAC(
 		return fmt.Errorf("assertion failed: coder control plane must not be nil")
 	}
 
+	serviceAccountName := resolveServiceAccountName(coderControlPlane)
+	if strings.TrimSpace(serviceAccountName) == "" {
+		return fmt.Errorf("assertion failed: service account name must not be empty")
+	}
+	expectedRoleName := fmt.Sprintf("%s-workspace-perms", serviceAccountName)
+	expectedRoleBindingName := serviceAccountName
+
 	labels := workspaceRBACLabels(coderControlPlane)
 
 	roles := &rbacv1.RoleList{}
@@ -540,6 +690,9 @@ func (r *CoderControlPlaneReconciler) cleanupManagedWorkspaceRBAC(
 			if _, ok := keepRoles[namespacedResourceKey(role.Namespace, role.Name)]; ok {
 				continue
 			}
+		}
+		if !isManagedWorkspaceRole(role, coderControlPlane, expectedRoleName) {
+			continue
 		}
 		if err := r.Delete(ctx, role); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("delete managed workspace role %s/%s: %w", role.Namespace, role.Name, err)
@@ -556,6 +709,9 @@ func (r *CoderControlPlaneReconciler) cleanupManagedWorkspaceRBAC(
 			if _, ok := keepRoleBindings[namespacedResourceKey(roleBinding.Namespace, roleBinding.Name)]; ok {
 				continue
 			}
+		}
+		if !isManagedWorkspaceRoleBinding(roleBinding, coderControlPlane, expectedRoleName, expectedRoleBindingName, serviceAccountName) {
+			continue
 		}
 		if err := r.Delete(ctx, roleBinding); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("delete managed workspace role binding %s/%s: %w", roleBinding.Namespace, roleBinding.Name, err)

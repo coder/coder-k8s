@@ -2101,6 +2101,62 @@ func TestReconcile_ServiceAccount(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("DisableCreateDetachesManagedServiceAccount", func(t *testing.T) {
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-serviceaccount-disable-detach", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-serviceaccount:latest",
+				ServiceAccount: coderv1alpha1.ServiceAccountSpec{
+					Name: "test-serviceaccount-disable-detach-sa",
+				},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		namespacedName := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+			t.Fatalf("reconcile control plane before disabling service account creation: %v", err)
+		}
+
+		serviceAccountName := cp.Spec.ServiceAccount.Name
+		serviceAccount := &corev1.ServiceAccount{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: serviceAccountName, Namespace: cp.Namespace}, serviceAccount); err != nil {
+			t.Fatalf("get managed service account: %v", err)
+		}
+		ownerReference := metav1.GetControllerOf(serviceAccount)
+		if ownerReference == nil || ownerReference.UID != cp.UID {
+			t.Fatalf("expected service account to be controller-owned before disableCreate=true, got %#v", ownerReference)
+		}
+
+		latest := &coderv1alpha1.CoderControlPlane{}
+		if err := k8sClient.Get(ctx, namespacedName, latest); err != nil {
+			t.Fatalf("get latest control plane for disableCreate update: %v", err)
+		}
+		latest.Spec.ServiceAccount.DisableCreate = true
+		if err := k8sClient.Update(ctx, latest); err != nil {
+			t.Fatalf("update control plane to disable service account creation: %v", err)
+		}
+
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+			t.Fatalf("reconcile control plane after disabling service account creation: %v", err)
+		}
+
+		serviceAccount = &corev1.ServiceAccount{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: serviceAccountName, Namespace: cp.Namespace}, serviceAccount); err != nil {
+			t.Fatalf("get service account after disableCreate=true: %v", err)
+		}
+		if ownerReference := metav1.GetControllerOf(serviceAccount); ownerReference != nil {
+			t.Fatalf("expected service account controller reference to be removed when disableCreate=true, got %#v", ownerReference)
+		}
+	})
+
 }
 
 func TestReconcile_WorkspaceRBAC(t *testing.T) {
@@ -2345,6 +2401,107 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 		err = k8sClient.Get(ctx, types.NamespacedName{Name: roleBindingName, Namespace: workspaceNamespace}, roleBinding)
 		if !apierrors.IsNotFound(err) {
 			t.Fatalf("expected cross-namespace role binding %s/%s to be removed after control plane deletion, got: %v", workspaceNamespace, roleBindingName, err)
+		}
+	})
+
+	t.Run("RBACCleanupPreservesUnmanagedLabeledResources", func(t *testing.T) {
+		workspaceNamespace := "workspace-rbac-preserve-unmanaged"
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: workspaceNamespace}}
+		if err := k8sClient.Create(ctx, namespace); err != nil && !apierrors.IsAlreadyExists(err) {
+			t.Fatalf("create workspace namespace: %v", err)
+		}
+
+		serviceAccountName := "test-workspace-rbac-preserve-unmanaged-sa"
+		cp := createCoderControlPlaneUnstructured(ctx, t, "test-workspace-rbac-preserve-unmanaged", "default", map[string]any{
+			"image": "test-workspace-rbac:latest",
+			"serviceAccount": map[string]any{
+				"name": serviceAccountName,
+			},
+			"rbac": map[string]any{
+				"workspacePerms":      true,
+				"enableDeployments":   true,
+				"workspaceNamespaces": []any{workspaceNamespace},
+			},
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		namespacedName := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+			t.Fatalf("reconcile control plane before creating unmanaged RBAC: %v", err)
+		}
+
+		workspaceLabels := map[string]string{
+			"app.kubernetes.io/name":            "coder-control-plane",
+			"app.kubernetes.io/instance":        cp.Name,
+			"app.kubernetes.io/managed-by":      "coder-k8s",
+			"coder.com/control-plane":           cp.Name,
+			"coder.com/control-plane-namespace": cp.Namespace,
+		}
+		manualRoleName := "manual-external-workspace-role"
+		manualRole := &rbacv1.Role{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      manualRoleName,
+				Namespace: workspaceNamespace,
+				Labels:    workspaceLabels,
+			},
+			Rules: []rbacv1.PolicyRule{{
+				APIGroups: []string{""},
+				Resources: []string{"configmaps"},
+				Verbs:     []string{"get"},
+			}},
+		}
+		if err := k8sClient.Create(ctx, manualRole); err != nil {
+			t.Fatalf("create unmanaged role with matching labels: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(context.Background(), manualRole)
+		})
+
+		manualRoleBindingName := "manual-external-workspace-rolebinding"
+		manualRoleBinding := &rbacv1.RoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      manualRoleBindingName,
+				Namespace: workspaceNamespace,
+				Labels:    workspaceLabels,
+			},
+			RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: manualRoleName},
+			Subjects: []rbacv1.Subject{{
+				Kind:      rbacv1.ServiceAccountKind,
+				Name:      serviceAccountName,
+				Namespace: cp.Namespace,
+			}},
+		}
+		if err := k8sClient.Create(ctx, manualRoleBinding); err != nil {
+			t.Fatalf("create unmanaged role binding with matching labels: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(context.Background(), manualRoleBinding)
+		})
+
+		unstructuredCP := &unstructured.Unstructured{}
+		unstructuredCP.SetAPIVersion(coderv1alpha1.GroupVersion.String())
+		unstructuredCP.SetKind("CoderControlPlane")
+		if err := k8sClient.Get(ctx, namespacedName, unstructuredCP); err != nil {
+			t.Fatalf("get unstructured control plane for RBAC disable update: %v", err)
+		}
+		if err := unstructured.SetNestedField(unstructuredCP.Object, false, "spec", "rbac", "workspacePerms"); err != nil {
+			t.Fatalf("set spec.rbac.workspacePerms=false: %v", err)
+		}
+		if err := k8sClient.Update(ctx, unstructuredCP); err != nil {
+			t.Fatalf("update control plane to disable workspace RBAC: %v", err)
+		}
+
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+			t.Fatalf("reconcile control plane after disabling workspace RBAC: %v", err)
+		}
+
+		manualRole = &rbacv1.Role{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: manualRoleName, Namespace: workspaceNamespace}, manualRole); err != nil {
+			t.Fatalf("expected unmanaged role with matching labels to be preserved, got: %v", err)
+		}
+		manualRoleBinding = &rbacv1.RoleBinding{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: manualRoleBindingName, Namespace: workspaceNamespace}, manualRoleBinding); err != nil {
+			t.Fatalf("expected unmanaged role binding with matching labels to be preserved, got: %v", err)
 		}
 	})
 
