@@ -4,6 +4,7 @@
 #   1. A CoderControlPlane resource must exist in the same namespace.
 #   2. The referenced CoderControlPlane status must report operator access ready:
 #      status.operatorAccessReady=true and status.operatorTokenSecretRef set.
+#
 apiVersion: coder.com/v1alpha1
 kind: CoderProvisioner
 metadata:

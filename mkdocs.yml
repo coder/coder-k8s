@@ -34,7 +34,8 @@ extra_javascript:
 nav:
   - Home: index.md
   - Tutorials:
-      - Getting started: tutorials/getting-started.md
+      - Deploy a Coder Control Plane: tutorials/getting-started.md
+      - Deploy an External Provisioner: tutorials/deploy-coderprovisioner.md
       - Deploy operator stack with Argo CD: tutorials/deploy-with-argocd.md
   - How-to guides:
       - Deploy controller: how-to/deploy-controller.md

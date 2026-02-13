@@ -1,7 +1,7 @@
-# Aggregated API examples
+# CoderTemplate API examples
 
 This directory contains example `CoderTemplate` resources for exercising the
-aggregated API server (`aggregation.coder.com/v1alpha1`).
+`CoderTemplate` API (`aggregation.coder.com/v1alpha1`).
 
 ## Smoke template export
 
@@ -12,7 +12,7 @@ aggregated API server (`aggregation.coder.com/v1alpha1`).
 Apply it with:
 
 ```bash
-kubectl apply -f examples/aggregated/codertemplate-smoke-scratch.yaml
+kubectl apply -f examples/coder-templates/codertemplate-smoke-scratch.yaml
 ```
 
 If you are updating an already-existing object with `kubectl replace`, include

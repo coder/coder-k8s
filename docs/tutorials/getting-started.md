@@ -1,92 +1,108 @@
-# Getting started (local development)
+# Deploy a Coder Control Plane
 
-This tutorial walks through running the `coder-k8s` **controller** locally against a Kubernetes cluster, then creating your first `CoderControlPlane` resource.
+This tutorial deploys the `coder-k8s` operator and brings up one managed Coder instance from a `CoderControlPlane` resource.
+
+Estimated time: **10–15 minutes**.
 
 ## Prerequisites
 
-- Go 1.25+ (`go.mod` currently declares Go 1.25.7)
-- A Kubernetes cluster (OrbStack, KIND, or any conformant cluster)
+- A Kubernetes cluster
 - `kubectl` configured to your target context
+- Permissions to create namespaces, CRDs, RBAC resources, and Deployments
 
-If you use the Nix devshell:
+## 1) Install the operator
 
-```bash
-nix develop
-```
-
-Optional: create a disposable KIND cluster with project defaults:
+Create the operator namespace and apply CRDs/RBAC/deployment from GitHub:
 
 ```bash
-make kind-dev-up
-```
-
-## 1) Generate and install CRDs
-
-Generate manifests:
-
-```bash
-make manifests
-```
-
-Install CRDs into your cluster:
-
-```bash
-kubectl apply -f config/crd/bases/
-```
-
-Create the sample namespace used by shipped manifests:
-
-```bash
+kubectl create namespace coder-system
 kubectl create namespace coder
+kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/crd/bases/coder.com_codercontrolplanes.yaml"
+kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/crd/bases/coder.com_coderprovisioners.yaml"
+kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/crd/bases/coder.com_coderworkspaceproxies.yaml"
+kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/rbac/serviceaccount.yaml"
+kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/rbac/role.yaml"
+kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/rbac/clusterrolebinding.yaml"
+kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/rbac/authentication-reader-binding.yaml"
+kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/rbac/auth-delegator-binding.yaml"
+kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/deploy/deployment.yaml"
 ```
 
-## 2) Run the controller locally
+!!! tip
+    For reproducible installs, replace `/main/` with a release tag (for example `/v0.1.0/`).
 
-Start controller mode (terminal A):
+Wait for the operator pod:
 
 ```bash
-GOFLAGS=-mod=vendor go run . --app=controller
+kubectl rollout status deployment/coder-k8s -n coder-system
+kubectl get pods -n coder-system
 ```
 
-Leave this terminal running so you can watch reconciliation logs.
+## 2) Create a `CoderControlPlane` instance
 
-## 3) Create a sample `CoderControlPlane`
-
-In a second terminal (terminal B):
+Apply the sample control plane resource:
 
 ```bash
-kubectl apply -f config/samples/coder_v1alpha1_codercontrolplane.yaml
+kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/samples/coder_v1alpha1_codercontrolplane.yaml"
 ```
 
-## 4) Verify reconciliation
+## 3) Verify reconciliation
 
-Check resource status:
+Check the CR status:
 
 ```bash
-kubectl get codercontrolplanes -A
-kubectl describe codercontrolplane codercontrolplane-sample -n coder
+kubectl get codercontrolplane codercontrolplane-sample -n coder
+kubectl get codercontrolplane codercontrolplane-sample -n coder -o jsonpath='{.status.phase}{"\n"}{.status.url}{"\n"}'
 ```
 
-The controller creates a Deployment + Service named after the control plane (`codercontrolplane-sample`) in the same namespace.
+Verify the managed Coder Deployment and Service are present and ready:
 
 ```bash
-kubectl get deploy,svc -n coder
+kubectl rollout status deployment/codercontrolplane-sample -n coder
+kubectl get deployment codercontrolplane-sample -n coder
+kubectl get service codercontrolplane-sample -n coder
+```
+
+Expected result:
+
+- `status.phase` becomes `Ready`
+- `status.url` is populated (for example `http://codercontrolplane-sample.coder.svc.cluster.local:80`)
+- A Coder Deployment and Service named `codercontrolplane-sample` exist in `coder`
+
+## 4) Access the Coder instance (optional)
+
+Port-forward the Service locally:
+
+```bash
+kubectl port-forward svc/codercontrolplane-sample -n coder 3000:80
+```
+
+Then open:
+
+```text
+http://127.0.0.1:3000
 ```
 
 ## 5) Clean up (optional)
 
 ```bash
-kubectl delete codercontrolplane codercontrolplane-sample -n coder
-```
-
-If you used `kind-dev-up`, you can remove the cluster with:
-
-```bash
-make kind-dev-down
+kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/samples/coder_v1alpha1_codercontrolplane.yaml"
+kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/deploy/deployment.yaml"
+kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/rbac/auth-delegator-binding.yaml"
+kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/rbac/authentication-reader-binding.yaml"
+kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/rbac/clusterrolebinding.yaml"
+kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/rbac/role.yaml"
+kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/rbac/serviceaccount.yaml"
+kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/crd/bases/coder.com_coderworkspaceproxies.yaml"
+kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/crd/bases/coder.com_coderprovisioners.yaml"
+kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/crd/bases/coder.com_codercontrolplanes.yaml"
+kubectl delete namespace coder --ignore-not-found
+kubectl delete namespace coder-system --ignore-not-found
 ```
 
 ## Next steps
 
-- Deploy in-cluster: [How-to → Deploy controller](../how-to/deploy-controller.md)
-- Understand internals: [Explanation → Architecture](../explanation/architecture.md)
-- Explore aggregated APIs: [How-to → Deploy aggregated API server](../how-to/deploy-aggregated-apiserver.md)
+- Run an external provisioner daemon: [Deploy an External Provisioner](deploy-coderprovisioner.md)
+- GitOps path: [Deploy operator stack with Argo CD](deploy-with-argocd.md)
+- Split deployment model: [Deploy aggregated API server](../how-to/deploy-aggregated-apiserver.md)
+- MCP operations: [Run MCP server](../how-to/mcp-server.md)
