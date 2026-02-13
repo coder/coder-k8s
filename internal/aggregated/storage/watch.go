@@ -45,10 +45,6 @@ func validateUnsupportedWatchListOptions(opts *metainternalversion.ListOptions) 
 		return nil
 	}
 
-	if isDefaultedLegacyWatchListOptions(opts) {
-		return nil
-	}
-
 	if opts.SendInitialEvents != nil && *opts.SendInitialEvents {
 		return fmt.Errorf("sendInitialEvents=true is not supported for this watch endpoint")
 	}
@@ -60,20 +56,6 @@ func validateUnsupportedWatchListOptions(opts *metainternalversion.ListOptions) 
 	}
 
 	return nil
-}
-
-func isDefaultedLegacyWatchListOptions(opts *metainternalversion.ListOptions) bool {
-	if opts == nil {
-		return false
-	}
-	if opts.SendInitialEvents == nil || !*opts.SendInitialEvents {
-		return false
-	}
-	if opts.ResourceVersionMatch != metav1.ResourceVersionMatchNotOlderThan {
-		return false
-	}
-
-	return opts.ResourceVersion == "" || opts.ResourceVersion == "0"
 }
 
 // filterForListOptions builds a watch.FilterFunc that applies namespace, label, and field selector filtering.

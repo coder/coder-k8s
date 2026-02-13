@@ -339,7 +339,7 @@ func TestTemplateWatchRejectsUnsupportedWatchListOptions(t *testing.T) {
 	})
 }
 
-func TestWatchAllowsDefaultedLegacyWatchListOptions(t *testing.T) {
+func TestWatchRejectsDefaultedLegacyWatchListOptions(t *testing.T) {
 	t.Parallel()
 
 	server, _ := newMockCoderServer(t)
@@ -352,30 +352,28 @@ func TestWatchAllowsDefaultedLegacyWatchListOptions(t *testing.T) {
 
 	ctx := namespacedContext("control-plane")
 	sendInitialEvents := true
-	legacyWatchOptions := &metainternalversion.ListOptions{
+
+	legacyOptionsWithEmptyRV := &metainternalversion.ListOptions{
 		Watch:                true,
 		ResourceVersion:      "",
 		SendInitialEvents:    &sendInitialEvents,
 		ResourceVersionMatch: metav1.ResourceVersionMatchNotOlderThan,
 	}
+	workspaceWatcher, err := workspaceStorage.Watch(ctx, legacyOptionsWithEmptyRV)
+	assertBadRequestWatchOptionsError(t, workspaceWatcher, err, "sendInitialEvents")
+	templateWatcher, err := templateStorage.Watch(ctx, legacyOptionsWithEmptyRV)
+	assertBadRequestWatchOptionsError(t, templateWatcher, err, "sendInitialEvents")
 
-	workspaceWatcher, err := workspaceStorage.Watch(ctx, legacyWatchOptions)
-	if err != nil {
-		t.Fatalf("expected workspace watch to accept defaulted legacy watch options: %v", err)
+	legacyOptionsWithZeroRV := &metainternalversion.ListOptions{
+		Watch:                true,
+		ResourceVersion:      "0",
+		SendInitialEvents:    &sendInitialEvents,
+		ResourceVersionMatch: metav1.ResourceVersionMatchNotOlderThan,
 	}
-	if workspaceWatcher == nil {
-		t.Fatal("assertion failed: workspace watcher must not be nil")
-	}
-	workspaceWatcher.Stop()
-
-	templateWatcher, err := templateStorage.Watch(ctx, legacyWatchOptions)
-	if err != nil {
-		t.Fatalf("expected template watch to accept defaulted legacy watch options: %v", err)
-	}
-	if templateWatcher == nil {
-		t.Fatal("assertion failed: template watcher must not be nil")
-	}
-	templateWatcher.Stop()
+	workspaceWatcher, err = workspaceStorage.Watch(ctx, legacyOptionsWithZeroRV)
+	assertBadRequestWatchOptionsError(t, workspaceWatcher, err, "sendInitialEvents")
+	templateWatcher, err = templateStorage.Watch(ctx, legacyOptionsWithZeroRV)
+	assertBadRequestWatchOptionsError(t, templateWatcher, err, "sendInitialEvents")
 }
 
 func TestValidateUnsupportedWatchListOptions(t *testing.T) {
@@ -389,6 +387,11 @@ func TestValidateUnsupportedWatchListOptions(t *testing.T) {
 		t.Fatalf("expected empty list options to be accepted, got %v", err)
 	}
 
+	sendInitialEventsDisabled := false
+	if err := validateUnsupportedWatchListOptions(&metainternalversion.ListOptions{SendInitialEvents: &sendInitialEventsDisabled}); err != nil {
+		t.Fatalf("expected sendInitialEvents=false to be accepted, got %v", err)
+	}
+
 	sendInitialEvents := true
 	legacyOptionsWithEmptyRV := &metainternalversion.ListOptions{
 		Watch:                true,
@@ -396,8 +399,12 @@ func TestValidateUnsupportedWatchListOptions(t *testing.T) {
 		SendInitialEvents:    &sendInitialEvents,
 		ResourceVersionMatch: metav1.ResourceVersionMatchNotOlderThan,
 	}
-	if err := validateUnsupportedWatchListOptions(legacyOptionsWithEmptyRV); err != nil {
-		t.Fatalf("expected defaulted legacy watch-list options with empty RV to be accepted, got %v", err)
+	err := validateUnsupportedWatchListOptions(legacyOptionsWithEmptyRV)
+	if err == nil {
+		t.Fatal("expected defaulted legacy watch-list options with empty RV to be rejected")
+	}
+	if !strings.Contains(err.Error(), "sendInitialEvents") {
+		t.Fatalf("expected defaulted legacy watch-list rejection to reference sendInitialEvents, got %v", err)
 	}
 
 	legacyOptionsWithZeroRV := &metainternalversion.ListOptions{
@@ -406,13 +413,17 @@ func TestValidateUnsupportedWatchListOptions(t *testing.T) {
 		SendInitialEvents:    &sendInitialEvents,
 		ResourceVersionMatch: metav1.ResourceVersionMatchNotOlderThan,
 	}
-	if err := validateUnsupportedWatchListOptions(legacyOptionsWithZeroRV); err != nil {
-		t.Fatalf("expected defaulted legacy watch-list options with RV=0 to be accepted, got %v", err)
+	err = validateUnsupportedWatchListOptions(legacyOptionsWithZeroRV)
+	if err == nil {
+		t.Fatal("expected defaulted legacy watch-list options with RV=0 to be rejected")
+	}
+	if !strings.Contains(err.Error(), "sendInitialEvents") {
+		t.Fatalf("expected defaulted legacy watch-list RV=0 rejection to reference sendInitialEvents, got %v", err)
 	}
 
-	err := validateUnsupportedWatchListOptions(&metainternalversion.ListOptions{SendInitialEvents: &sendInitialEvents})
+	err = validateUnsupportedWatchListOptions(&metainternalversion.ListOptions{SendInitialEvents: &sendInitialEvents})
 	if err == nil {
-		t.Fatal("expected sendInitialEvents=true without matching legacy defaults to be rejected")
+		t.Fatal("expected sendInitialEvents=true to be rejected")
 	}
 	if !strings.Contains(err.Error(), "sendInitialEvents") {
 		t.Fatalf("expected sendInitialEvents error, got %v", err)
