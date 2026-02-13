@@ -3564,18 +3564,22 @@ func TestReconcile_TLSWithServicePort443(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, service); err != nil {
 		t.Fatalf("get service: %v", err)
 	}
-	if len(service.Spec.Ports) != 1 {
-		t.Fatalf("expected exactly one service port when service.port=443 and TLS is enabled, got %+v", service.Spec.Ports)
+	if len(service.Spec.Ports) != 2 {
+		t.Fatalf("expected two service ports when service.port=443 and TLS is enabled, got %+v", service.Spec.Ports)
 	}
-	port := service.Spec.Ports[0]
-	if port.Name != "https" {
-		t.Fatalf("expected single service port to be named https, got %q", port.Name)
+	if !serviceHasPort(service.Spec.Ports, "https", 443) {
+		t.Fatalf("expected TLS-enabled service to expose https port 443, got %+v", service.Spec.Ports)
 	}
-	if port.Port != 443 {
-		t.Fatalf("expected single service port number 443, got %d", port.Port)
+	if !serviceHasPort(service.Spec.Ports, "http", 80) {
+		t.Fatalf("expected TLS-enabled service on port 443 to also expose http port 80, got %+v", service.Spec.Ports)
 	}
-	if port.TargetPort != intstr.FromInt(8443) {
-		t.Fatalf("expected single service port target 8443, got %+v", port.TargetPort)
+	for _, port := range service.Spec.Ports {
+		if port.Name == "https" && port.TargetPort != intstr.FromInt(8443) {
+			t.Fatalf("expected https service port target 8443, got %+v", port.TargetPort)
+		}
+		if port.Name == "http" && port.TargetPort != intstr.FromInt(8080) {
+			t.Fatalf("expected http service port target 8080, got %+v", port.TargetPort)
+		}
 	}
 }
 
@@ -3987,6 +3991,68 @@ func TestReconcile_HTTPRouteExposure(t *testing.T) {
 	}
 	if backendRef.Port == nil || int32(*backendRef.Port) != 80 {
 		t.Fatalf("expected backend port 80, got %#v", backendRef.Port)
+	}
+}
+
+func TestReconcile_HTTPRouteExposure_TLSServicePort443UsesHTTPBackend(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+	ensureHTTPRouteCRDInstalled(t)
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-httproute-tls-443-backend-http", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-httproute:latest",
+			Service: coderv1alpha1.ServiceSpec{
+				Port: 443,
+			},
+			TLS: coderv1alpha1.TLSSpec{
+				SecretNames: []string{"test-httproute-tls-secret"},
+			},
+			Expose: &coderv1alpha1.ExposeSpec{
+				Gateway: &coderv1alpha1.GatewayExposeSpec{
+					Host: "tls-443.gateway.example.test",
+					ParentRefs: []coderv1alpha1.GatewayParentRef{{
+						Name: "coder-gateway",
+					}},
+				},
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create control plane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	namespacedName := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+		t.Fatalf("reconcile control plane: %v", err)
+	}
+
+	service := &corev1.Service{}
+	if err := k8sClient.Get(ctx, namespacedName, service); err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	if !serviceHasPort(service.Spec.Ports, "https", 443) {
+		t.Fatalf("expected TLS-enabled service to expose https port 443, got %#v", service.Spec.Ports)
+	}
+	if !serviceHasPort(service.Spec.Ports, "http", 80) {
+		t.Fatalf("expected TLS-enabled service on port 443 to also expose http port 80 for gateway backends, got %#v", service.Spec.Ports)
+	}
+
+	httpRoute := &gatewayv1.HTTPRoute{}
+	if err := k8sClient.Get(ctx, namespacedName, httpRoute); err != nil {
+		t.Fatalf("get httproute: %v", err)
+	}
+	if len(httpRoute.Spec.Rules) != 1 || len(httpRoute.Spec.Rules[0].BackendRefs) != 1 {
+		t.Fatalf("expected one backendRef, got %#v", httpRoute.Spec.Rules)
+	}
+	backendRef := httpRoute.Spec.Rules[0].BackendRefs[0].BackendObjectReference
+	if backendRef.Port == nil || int32(*backendRef.Port) != 80 {
+		t.Fatalf("expected HTTPRoute backend port 80 when service.port=443 with TLS enabled, got %#v", backendRef.Port)
 	}
 }
 

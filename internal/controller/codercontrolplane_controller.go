@@ -395,6 +395,23 @@ func controlPlaneTLSEnabled(cp *coderv1alpha1.CoderControlPlane) bool {
 	return len(cp.Spec.TLS.SecretNames) > 0
 }
 
+func httpRouteBackendServicePort(coderControlPlane *coderv1alpha1.CoderControlPlane) (int32, error) {
+	if coderControlPlane == nil {
+		return 0, fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+
+	servicePort := coderControlPlane.Spec.Service.Port
+	if servicePort == 0 {
+		servicePort = defaultControlPlanePort
+	}
+
+	if controlPlaneTLSEnabled(coderControlPlane) && servicePort == 443 {
+		return defaultControlPlanePort, nil
+	}
+
+	return servicePort, nil
+}
+
 func requiresWorkspaceRBACDriftRequeue(cp *coderv1alpha1.CoderControlPlane) bool {
 	if cp == nil || !workspacePermsEnabled(cp.Spec.RBAC.WorkspacePerms) {
 		return false
@@ -1117,6 +1134,14 @@ func (r *CoderControlPlaneReconciler) reconcileService(ctx context.Context, code
 		}
 
 		servicePorts := []corev1.ServicePort{primaryServicePort}
+		if tlsEnabled && servicePort == 443 {
+			servicePorts = append(servicePorts, corev1.ServicePort{
+				Name:       "http",
+				Port:       defaultControlPlanePort,
+				Protocol:   corev1.ProtocolTCP,
+				TargetPort: intstr.FromInt(int(controlPlaneTargetPort)),
+			})
+		}
 		if tlsEnabled && servicePort != 443 {
 			servicePorts = append(servicePorts, corev1.ServicePort{
 				Name:       "https",
@@ -1350,9 +1375,9 @@ func (r *CoderControlPlaneReconciler) reconcileHTTPRoute(ctx context.Context, co
 			hostnames = append(hostnames, gatewayv1.Hostname(wildcardHost))
 		}
 
-		servicePort := coderControlPlane.Spec.Service.Port
-		if servicePort == 0 {
-			servicePort = defaultControlPlanePort
+		servicePort, err := httpRouteBackendServicePort(coderControlPlane)
+		if err != nil {
+			return err
 		}
 		backendPort := gatewayv1.PortNumber(servicePort)
 		serviceKind := gatewayv1.Kind("Service")
