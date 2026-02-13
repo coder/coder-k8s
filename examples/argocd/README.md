@@ -1,9 +1,11 @@
 # Argo CD single-apply example (CloudNativePG + coder-k8s)
 
-This example bootstraps the full stack from one `ApplicationSet`:
+This example bootstraps the full stack from one `ApplicationSet`.
 
-1. CloudNativePG operator
-2. `coder-k8s` operator stack (CRDs + RBAC + deployment)
+The generated Argo CD `Application` uses multiple sources to deploy:
+
+1. CloudNativePG operator (Helm chart)
+2. `coder-k8s` operator stack (`config/crd/bases`, `config/rbac`, `deploy`)
 3. CloudNativePG PostgreSQL `Cluster`
 4. `CoderControlPlane`
 
@@ -12,7 +14,7 @@ This example bootstraps the full stack from one `ApplicationSet`:
 - A Kubernetes cluster
 - `kubectl` configured for that cluster
 - Argo CD installed (including the ApplicationSet controller)
-- Argo CD v2.6+ (required for Application `sources` in `apps/01-coder-k8s-operator.yaml`)
+- Argo CD v2.6+ (required for `spec.sources` in the generated Application)
 
 ## Apply one manifest
 
@@ -23,14 +25,18 @@ kubectl apply -f examples/argocd/applicationset.yaml
 That creates:
 
 - `ApplicationSet` `coder-k8s-stack`
-- parent `Application` `coder-k8s-stack`
-- child Applications in `examples/argocd/apps/`
+- generated `Application` `coder-k8s-stack`
 
-### Ordering behavior
+## Ordering behavior
 
-`apps/00-cnpg-operator.yaml` and `apps/01-coder-k8s-operator.yaml` are synced in wave `0`, and `apps/02-coder-cloudnativepg.yaml` in wave `1`.
+This setup avoids app-of-apps ordering ambiguity by using a single generated `Application` with multiple sources.
 
-The CloudNativePG example manifests (`examples/cloudnativepg/`) also include resource-level sync waves so PostgreSQL is applied before `CoderControlPlane`.
+Resource-level sync waves provide dependency ordering for workload resources:
+
+- `examples/argocd/resources/00-coder-system-namespace.yaml` uses `wave -1`
+- `examples/cloudnativepg/00-namespace.yaml` uses `wave 0`
+- `examples/cloudnativepg/cnpg-cluster.yaml` uses `wave 1`
+- `examples/cloudnativepg/codercontrolplane.yaml` uses `wave 2`
 
 ## Watch rollout
 
@@ -50,10 +56,10 @@ Open <http://localhost:3000/setup> and complete the setup flow.
 
 ## Customization
 
-- This example tracks `https://github.com/coder/coder-k8s.git` at `main` for child apps.
-  Update `repoURL` and `targetRevision` in `examples/argocd/apps/*.yaml` if you want to pin to a tag or use a fork.
-- `apps/00-cnpg-operator.yaml` uses `targetRevision: "*"` for the CloudNativePG chart.
-  Pin this to a specific chart version for reproducibility.
+- This example tracks `https://github.com/coder/coder-k8s.git` at `main`.
+  Update `repoURL` and `targetRevision` in `examples/argocd/applicationset.yaml` if you want to pin to a tag or use a fork.
+- The CloudNativePG chart version is configurable with `cloudnativepgChartVersion`.
+  Pin it to an explicit chart version for reproducible environments.
 
 ## Cleanup
 
@@ -61,4 +67,4 @@ Open <http://localhost:3000/setup> and complete the setup flow.
 kubectl -n argocd delete applicationset coder-k8s-stack
 ```
 
-Depending on your storage class reclaim policy, PVCs from PostgreSQL may remain after cleanup.
+The generated `Application` includes `resources-finalizer.argocd.argoproj.io` so deleting the `ApplicationSet` cascades cleanup of managed resources. Depending on your storage class reclaim policy, PVCs from PostgreSQL may remain after cleanup.
