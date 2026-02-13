@@ -731,6 +731,10 @@ func buildProbe(spec coderv1alpha1.ProbeSpec, path, portName string) *corev1.Pro
 			},
 		},
 		InitialDelaySeconds: spec.InitialDelaySeconds,
+		PeriodSeconds:       10,
+		TimeoutSeconds:      1,
+		SuccessThreshold:    1,
+		FailureThreshold:    3,
 	}
 	if spec.PeriodSeconds != nil {
 		probe.PeriodSeconds = *spec.PeriodSeconds
@@ -754,6 +758,16 @@ func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, c
 	}
 
 	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: coderControlPlane.Name, Namespace: coderControlPlane.Namespace}}
+
+	injectClusterAccessURL := coderControlPlane.Spec.EnvUseClusterAccessURL == nil || *coderControlPlane.Spec.EnvUseClusterAccessURL
+	accessURLConfiguredViaEnvFrom := false
+	if injectClusterAccessURL {
+		var err error
+		accessURLConfiguredViaEnvFrom, err = envFromMayDefineEnvVar(coderControlPlane.Spec.EnvFrom, "CODER_ACCESS_URL")
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deployment, func() error {
 		labels := controlPlaneLabels(coderControlPlane.Name)
@@ -795,12 +809,12 @@ func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, c
 		}
 
 		tlsEnabled := controlPlaneTLSEnabled(coderControlPlane)
-		if coderControlPlane.Spec.EnvUseClusterAccessURL == nil || *coderControlPlane.Spec.EnvUseClusterAccessURL {
+		if injectClusterAccessURL {
 			configuredAccessURL, err := findEnvVar(coderControlPlane.Spec.ExtraEnv, "CODER_ACCESS_URL")
 			if err != nil {
 				return err
 			}
-			if configuredAccessURL == nil {
+			if configuredAccessURL == nil && !accessURLConfiguredViaEnvFrom {
 				scheme := "http"
 				accessURLPort := coderControlPlane.Spec.Service.Port
 				if accessURLPort == 0 {
@@ -2037,6 +2051,40 @@ func (r *CoderControlPlaneReconciler) resolvePostgresURLFromExtraEnv(
 	}
 
 	return r.readSecretValue(ctx, coderControlPlane.Namespace, secretRef.Name, secretRef.Key)
+}
+
+func envFromMayDefineEnvVar(envFromSources []corev1.EnvFromSource, envVarName string) (bool, error) {
+	if strings.TrimSpace(envVarName) == "" {
+		return false, fmt.Errorf("assertion failed: environment variable name must not be empty")
+	}
+
+	for i := range envFromSources {
+		envFromSource := envFromSources[i]
+		if envFromSource.ConfigMapRef != nil && envFromSource.SecretRef != nil {
+			return false, fmt.Errorf("assertion failed: envFrom[%d] must not set both configMapRef and secretRef", i)
+		}
+
+		prefix := strings.TrimSpace(envFromSource.Prefix)
+		if prefix != "" && !strings.HasPrefix(envVarName, prefix) {
+			continue
+		}
+
+		if envFromSource.ConfigMapRef != nil {
+			if strings.TrimSpace(envFromSource.ConfigMapRef.Name) == "" {
+				return false, fmt.Errorf("assertion failed: envFrom[%d].configMapRef.name must not be empty", i)
+			}
+			return true, nil
+		}
+
+		if envFromSource.SecretRef != nil {
+			if strings.TrimSpace(envFromSource.SecretRef.Name) == "" {
+				return false, fmt.Errorf("assertion failed: envFrom[%d].secretRef.name must not be empty", i)
+			}
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 func findEnvVar(envVars []corev1.EnvVar, name string) (*corev1.EnvVar, error) {

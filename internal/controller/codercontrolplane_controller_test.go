@@ -2823,6 +2823,53 @@ func TestReconcile_DeploymentAlignment(t *testing.T) {
 		}
 	})
 
+	t.Run("EnvFromAccessURLTakesPrecedence", func(t *testing.T) {
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-access-url", Namespace: "default"},
+			Data: map[string]string{
+				"CODER_ACCESS_URL": "https://envfrom.example.test",
+			},
+		}
+		if err := k8sClient.Create(ctx, configMap); err != nil {
+			t.Fatalf("create configmap: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, configMap)
+		})
+
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-access-url", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-deployment-alignment:latest",
+				EnvFrom: []corev1.EnvFromSource{{
+					ConfigMapRef: &corev1.ConfigMapEnvSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: configMap.Name},
+					},
+				}},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		deployment := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+			t.Fatalf("get deployment: %v", err)
+		}
+		container := deployment.Spec.Template.Spec.Containers[0]
+		if countEnvVar(container.Env, "CODER_ACCESS_URL") != 0 {
+			t.Fatalf("expected operator to skip default CODER_ACCESS_URL when envFrom is configured, got %v", container.Env)
+		}
+	})
+
 	t.Run("ResourcesAndSecurityContextsApplied", func(t *testing.T) {
 		runAsUser := int64(1001)
 		allowPrivilegeEscalation := false
@@ -2920,6 +2967,18 @@ func TestReconcile_ProbeConfiguration(t *testing.T) {
 		}
 		if container.ReadinessProbe.HTTPGet.Port != intstr.FromString("http") {
 			t.Fatalf("expected readiness probe port name %q, got %#v", "http", container.ReadinessProbe.HTTPGet.Port)
+		}
+		if container.ReadinessProbe.PeriodSeconds != 10 {
+			t.Fatalf("expected readiness probe default periodSeconds=10, got %d", container.ReadinessProbe.PeriodSeconds)
+		}
+		if container.ReadinessProbe.TimeoutSeconds != 1 {
+			t.Fatalf("expected readiness probe default timeoutSeconds=1, got %d", container.ReadinessProbe.TimeoutSeconds)
+		}
+		if container.ReadinessProbe.SuccessThreshold != 1 {
+			t.Fatalf("expected readiness probe default successThreshold=1, got %d", container.ReadinessProbe.SuccessThreshold)
+		}
+		if container.ReadinessProbe.FailureThreshold != 3 {
+			t.Fatalf("expected readiness probe default failureThreshold=3, got %d", container.ReadinessProbe.FailureThreshold)
 		}
 	})
 
