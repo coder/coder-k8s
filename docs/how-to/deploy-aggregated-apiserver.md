@@ -90,6 +90,25 @@ kubectl get codertemplates.aggregation.coder.com -A
 kubectl logs -n coder-system deploy/coder-k8s
 ```
 
+## Server-Side Apply (SSA) behavior
+
+`coder-k8s` now includes a compatibility fallback for SSA create-on-update requests
+(for example, `kubectl apply --server-side` when the target resource does not exist yet).
+
+- For missing `coderworkspaces` / `codertemplates`, the aggregated API server's `Update`
+  path can delegate to `Create` when `forceAllowCreate=true`.
+- This is intentionally **best-effort**: Coder resources do not currently provide a
+  first-class metadata store for Kubernetes `metadata.managedFields`, so SSA field-owner
+  conflict semantics are not durable.
+
+Planned follow-up options (in order of preference):
+
+1. **Preferred:** add first-class metadata support on template/workspace resources in
+   Coder + `codersdk`, and round-trip Kubernetes-managed metadata there.
+2. Persist Kubernetes-only metadata in a shadow Kubernetes resource (ConfigMap/CRD)
+   managed by the aggregated API server.
+3. Keep the compatibility fallback and continue documenting the limitations.
+
 ## Template build wait tuning
 
 When updating `CoderTemplate.spec.files`, the aggregated API server now waits for
