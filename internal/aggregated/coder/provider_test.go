@@ -209,6 +209,58 @@ func TestStaticClientProviderDefaultNamespaceAssertions(t *testing.T) {
 	}
 }
 
+func TestStaticClientProviderEligibleNamespaces(t *testing.T) {
+	t.Parallel()
+
+	provider := &StaticClientProvider{Namespace: "control-plane"}
+	namespaces, err := provider.EligibleNamespaces(context.Background())
+	if err != nil {
+		t.Fatalf("resolve eligible namespaces: %v", err)
+	}
+	if got, want := len(namespaces), 1; got != want {
+		t.Fatalf("expected %d namespace, got %d", want, got)
+	}
+	if got, want := namespaces[0], "control-plane"; got != want {
+		t.Fatalf("expected namespace %q, got %q", want, got)
+	}
+}
+
+func TestStaticClientProviderEligibleNamespacesNoNamespace(t *testing.T) {
+	t.Parallel()
+
+	provider := &StaticClientProvider{}
+	namespaces, err := provider.EligibleNamespaces(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if namespaces != nil {
+		t.Fatalf("expected nil namespaces on error, got %v", namespaces)
+	}
+	if !apierrors.IsServiceUnavailable(err) {
+		t.Fatalf("expected ServiceUnavailable, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "static provider has no default namespace") {
+		t.Fatalf("expected missing namespace message, got %v", err)
+	}
+}
+
+func TestStaticClientProviderEligibleNamespacesNilReceiver(t *testing.T) {
+	t.Parallel()
+
+	var provider *StaticClientProvider
+	namespaces, err := provider.EligibleNamespaces(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if namespaces != nil {
+		t.Fatalf("expected nil namespaces on error, got %v", namespaces)
+	}
+	wantErrContains := "assertion failed: static client provider must not be nil"
+	if !strings.Contains(err.Error(), wantErrContains) {
+		t.Fatalf("expected error containing %q, got %q", wantErrContains, err.Error())
+	}
+}
+
 func TestNewStaticClientProvider(t *testing.T) {
 	t.Parallel()
 

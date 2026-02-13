@@ -9,4 +9,6 @@
 //     while Kubernetes object names allow dots (DNS-1123 subdomains).
 //   - A single admin session token is used for all API calls (no per-request impersonation in v1).
 //   - Storage resolves the backing codersdk.Client via a ClientProvider interface.
+//   - All-namespaces LIST aggregates results across eligible CoderControlPlane namespaces
+//     when the provider implements NamespaceLister.
 package storage

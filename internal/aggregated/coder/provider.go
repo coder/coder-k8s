@@ -22,6 +22,12 @@ type NamespaceResolver interface {
 	DefaultNamespace(ctx context.Context) (string, error)
 }
 
+// NamespaceLister can enumerate namespaces served by a ClientProvider.
+// Used to implement all-namespaces LIST by fanning out across instances.
+type NamespaceLister interface {
+	EligibleNamespaces(ctx context.Context) ([]string, error)
+}
+
 // StaticClientProvider returns one static client, optionally restricted to one namespace.
 type StaticClientProvider struct {
 	Client    *codersdk.Client
@@ -31,6 +37,7 @@ type StaticClientProvider struct {
 var (
 	_ ClientProvider    = (*StaticClientProvider)(nil)
 	_ NamespaceResolver = (*StaticClientProvider)(nil)
+	_ NamespaceLister   = (*StaticClientProvider)(nil)
 )
 
 // ClientForNamespace returns the static client.
@@ -75,6 +82,18 @@ func (p *StaticClientProvider) DefaultNamespace(_ context.Context) (string, erro
 	}
 
 	return p.Namespace, nil
+}
+
+// EligibleNamespaces returns namespaces served by the static provider.
+func (p *StaticClientProvider) EligibleNamespaces(_ context.Context) ([]string, error) {
+	if p == nil {
+		return nil, fmt.Errorf("assertion failed: static client provider must not be nil")
+	}
+	if p.Namespace == "" {
+		return nil, apierrors.NewServiceUnavailable("static provider has no default namespace")
+	}
+
+	return []string{p.Namespace}, nil
 }
 
 // NewStaticClientProvider creates a StaticClientProvider from cfg and optional namespace restriction.
