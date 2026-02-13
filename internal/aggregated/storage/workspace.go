@@ -632,7 +632,23 @@ func (s *WorkspaceStorage) enqueueWatchEvent(action watch.EventType, obj runtime
 		panic("assertion failed: workspace watch event object must not be nil")
 	}
 
-	s.watchEvents <- watch.Event{Type: action, Object: obj}
+	event := watch.Event{Type: action, Object: obj}
+	select {
+	case s.watchEvents <- event:
+		return
+	default:
+	}
+
+	// Keep mutation request handlers non-blocking under watch backpressure by
+	// dropping the oldest queued event and retaining the most recent state.
+	select {
+	case <-s.watchEvents:
+	default:
+	}
+	select {
+	case s.watchEvents <- event:
+	default:
+	}
 }
 
 // ConvertToTable converts a workspace object or list into kubectl table output.
