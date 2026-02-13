@@ -67,6 +67,7 @@ const (
 	licenseConditionReasonNotSupported  = "NotSupported"
 	licenseConditionReasonError         = "Error"
 
+	gatewayExposureRequeueInterval    = 2 * time.Minute
 	licenseUploadRequestTimeout       = 30 * time.Second
 	entitlementsStatusRefreshInterval = 2 * time.Minute
 )
@@ -246,7 +247,8 @@ func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.reconcileExposure(ctx, coderControlPlane); err != nil {
+	gatewayExposureNeedsRequeue, err := r.reconcileExposure(ctx, coderControlPlane)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -272,7 +274,12 @@ func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 
-	return mergeResults(operatorResult, licenseResult, entitlementsResult), nil
+	result := mergeResults(operatorResult, licenseResult, entitlementsResult)
+	if gatewayExposureNeedsRequeue {
+		result = mergeResults(result, ctrl.Result{RequeueAfter: gatewayExposureRequeueInterval})
+	}
+
+	return result, nil
 }
 
 func resolveServiceAccountName(cp *coderv1alpha1.CoderControlPlane) string {
@@ -834,44 +841,45 @@ func (r *CoderControlPlaneReconciler) reconcileService(ctx context.Context, code
 	return service, nil
 }
 
-func (r *CoderControlPlaneReconciler) reconcileExposure(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) error {
+func (r *CoderControlPlaneReconciler) reconcileExposure(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) (bool, error) {
 	if coderControlPlane == nil {
-		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+		return false, fmt.Errorf("assertion failed: coder control plane must not be nil")
 	}
 
 	exposeSpec := coderControlPlane.Spec.Expose
 	if exposeSpec == nil || (exposeSpec.Ingress == nil && exposeSpec.Gateway == nil) {
 		if err := r.cleanupOwnedIngress(ctx, coderControlPlane); err != nil {
-			return fmt.Errorf("cleanup managed ingress: %w", err)
+			return false, fmt.Errorf("cleanup managed ingress: %w", err)
 		}
 		if err := r.cleanupOwnedHTTPRoute(ctx, coderControlPlane); err != nil {
-			return fmt.Errorf("cleanup managed httproute: %w", err)
+			return false, fmt.Errorf("cleanup managed httproute: %w", err)
 		}
-		return nil
+		return false, nil
 	}
 
 	if exposeSpec.Ingress != nil && exposeSpec.Gateway != nil {
-		return fmt.Errorf("assertion failed: only one of ingress or gateway exposure may be configured")
+		return false, fmt.Errorf("assertion failed: only one of ingress or gateway exposure may be configured")
 	}
 
 	if exposeSpec.Ingress != nil {
 		if err := r.reconcileIngress(ctx, coderControlPlane); err != nil {
-			return err
+			return false, err
 		}
 		if err := r.cleanupOwnedHTTPRoute(ctx, coderControlPlane); err != nil {
-			return fmt.Errorf("cleanup managed httproute: %w", err)
+			return false, fmt.Errorf("cleanup managed httproute: %w", err)
 		}
-		return nil
+		return false, nil
 	}
 
-	if err := r.reconcileHTTPRoute(ctx, coderControlPlane); err != nil {
-		return err
+	httpRouteReconciled, err := r.reconcileHTTPRoute(ctx, coderControlPlane)
+	if err != nil {
+		return false, err
 	}
 	if err := r.cleanupOwnedIngress(ctx, coderControlPlane); err != nil {
-		return fmt.Errorf("cleanup managed ingress: %w", err)
+		return false, fmt.Errorf("cleanup managed ingress: %w", err)
 	}
 
-	return nil
+	return httpRouteReconciled, nil
 }
 
 func (r *CoderControlPlaneReconciler) reconcileIngress(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) error {
@@ -985,18 +993,18 @@ func (r *CoderControlPlaneReconciler) reconcileIngress(ctx context.Context, code
 	return nil
 }
 
-func (r *CoderControlPlaneReconciler) reconcileHTTPRoute(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) error {
+func (r *CoderControlPlaneReconciler) reconcileHTTPRoute(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) (bool, error) {
 	if coderControlPlane == nil {
-		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+		return false, fmt.Errorf("assertion failed: coder control plane must not be nil")
 	}
 	if coderControlPlane.Spec.Expose == nil || coderControlPlane.Spec.Expose.Gateway == nil {
-		return fmt.Errorf("assertion failed: gateway exposure spec must not be nil")
+		return false, fmt.Errorf("assertion failed: gateway exposure spec must not be nil")
 	}
 
 	gatewayExpose := coderControlPlane.Spec.Expose.Gateway
 	primaryHost := strings.TrimSpace(gatewayExpose.Host)
 	if primaryHost == "" {
-		return fmt.Errorf("assertion failed: gateway host must not be empty")
+		return false, fmt.Errorf("assertion failed: gateway host must not be empty")
 	}
 
 	httpRoute := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: coderControlPlane.Name, Namespace: coderControlPlane.Namespace}}
@@ -1089,12 +1097,12 @@ func (r *CoderControlPlaneReconciler) reconcileHTTPRoute(ctx context.Context, co
 			ctrl.LoggerFrom(ctx).WithName("controller").WithName("codercontrolplane").Info(
 				"Gateway API CRDs not available, skipping HTTPRoute reconciliation",
 			)
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("reconcile control plane httproute: %w", err)
+		return false, fmt.Errorf("reconcile control plane httproute: %w", err)
 	}
 
-	return nil
+	return true, nil
 }
 
 func (r *CoderControlPlaneReconciler) cleanupOwnedIngress(ctx context.Context, coderControlPlane *coderv1alpha1.CoderControlPlane) error {

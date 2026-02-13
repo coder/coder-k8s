@@ -3100,8 +3100,12 @@ func TestReconcile_HTTPRouteExposure(t *testing.T) {
 
 	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
 	namespacedName := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}
-	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName}); err != nil {
+	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
+	if err != nil {
 		t.Fatalf("reconcile control plane: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("expected gateway exposure to request periodic drift requeue, got %+v", result)
 	}
 
 	httpRoute := &gatewayv1.HTTPRoute{}
