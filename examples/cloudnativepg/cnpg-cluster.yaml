@@ -3,6 +3,9 @@ kind: Cluster
 metadata:
   name: coder-db
   namespace: coder
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   instances: 1
   storage:

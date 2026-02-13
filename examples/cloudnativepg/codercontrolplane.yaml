@@ -3,6 +3,9 @@ kind: CoderControlPlane
 metadata:
   name: coder
   namespace: coder
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   replicas: 1
   service:

@@ -1,0 +1,60 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: coder-k8s-stack
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: coder-k8s-example
+spec:
+  goTemplate: true
+  goTemplateOptions:
+    - missingkey=error
+  generators:
+    - list:
+        elements:
+          - name: coder-k8s-stack
+            destinationServer: https://kubernetes.default.svc
+            destinationNamespace: cnpg-system
+            repoURL: https://github.com/coder/coder-k8s.git
+            targetRevision: main
+            cloudnativepgChartVersion: "*"
+  template:
+    metadata:
+      name: "{{ .name }}"
+      namespace: argocd
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+      labels:
+        app.kubernetes.io/part-of: coder-k8s-example
+    spec:
+      project: default
+      sources:
+        - repoURL: https://cloudnative-pg.github.io/charts
+          chart: cloudnative-pg
+          targetRevision: "{{ .cloudnativepgChartVersion }}"
+          helm:
+            releaseName: cnpg
+        - repoURL: "{{ .repoURL }}"
+          targetRevision: "{{ .targetRevision }}"
+          path: examples/argocd/resources
+        - repoURL: "{{ .repoURL }}"
+          targetRevision: "{{ .targetRevision }}"
+          path: config/crd/bases
+        - repoURL: "{{ .repoURL }}"
+          targetRevision: "{{ .targetRevision }}"
+          path: config/rbac
+        - repoURL: "{{ .repoURL }}"
+          targetRevision: "{{ .targetRevision }}"
+          path: deploy
+        - repoURL: "{{ .repoURL }}"
+          targetRevision: "{{ .targetRevision }}"
+          path: examples/cloudnativepg
+      destination:
+        server: "{{ .destinationServer }}"
+        namespace: "{{ .destinationNamespace }}"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
