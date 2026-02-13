@@ -366,8 +366,7 @@ func (s *TemplateStorage) Create(
 			return nil, fmt.Errorf("assertion failed: converted template must not be nil")
 		}
 
-		//nolint:errcheck // Best-effort watch event broadcast.
-		_ = s.broadcaster.Action(watch.Added, result.DeepCopy())
+		broadcastEventAsync(s.broadcaster, watch.Added, result.DeepCopy())
 
 		return result, nil
 	}
@@ -387,8 +386,7 @@ func (s *TemplateStorage) Create(
 		return nil, fmt.Errorf("assertion failed: converted template must not be nil")
 	}
 
-	//nolint:errcheck // Best-effort watch event broadcast.
-	_ = s.broadcaster.Action(watch.Added, result.DeepCopy())
+	broadcastEventAsync(s.broadcaster, watch.Added, result.DeepCopy())
 
 	return result, nil
 }
@@ -635,8 +633,7 @@ func (s *TemplateStorage) Update(
 		return nil, false, fmt.Errorf("assertion failed: refreshed template must not be nil")
 	}
 
-	//nolint:errcheck // Best-effort watch event broadcast.
-	_ = s.broadcaster.Action(watch.Modified, result.DeepCopy())
+	broadcastEventAsync(s.broadcaster, watch.Modified, result.DeepCopy())
 
 	return result, false, nil
 }
@@ -702,8 +699,7 @@ func (s *TemplateStorage) Delete(
 	}
 
 	// Emit a Deleted event with the last-known template state.
-	//nolint:errcheck // Best-effort watch event broadcast.
-	_ = s.broadcaster.Action(watch.Deleted, templateObj.DeepCopy())
+	broadcastEventAsync(s.broadcaster, watch.Deleted, templateObj.DeepCopy())
 
 	return &metav1.Status{Status: metav1.StatusSuccess}, true, nil
 }

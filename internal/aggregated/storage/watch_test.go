@@ -308,7 +308,24 @@ func TestWorkspaceWatchRejectsUnsupportedWatchListOptions(t *testing.T) {
 
 	t.Run("resourceVersion", func(t *testing.T) {
 		watcher, err := workspaceStorage.Watch(ctx, &metainternalversion.ListOptions{ResourceVersion: "123"})
-		assertBadRequestWatchOptionsError(t, watcher, err, "resourceVersion")
+		if err != nil {
+			t.Fatalf("expected resourceVersion watch to be accepted, got %v", err)
+		}
+		if watcher == nil {
+			t.Fatal("assertion failed: watcher must not be nil")
+		}
+		watcher.Stop()
+	})
+
+	t.Run("legacyResourceVersionZero", func(t *testing.T) {
+		watcher, err := workspaceStorage.Watch(ctx, &metainternalversion.ListOptions{ResourceVersion: "0"})
+		if err != nil {
+			t.Fatalf("expected resourceVersion=0 watch to be accepted, got %v", err)
+		}
+		if watcher == nil {
+			t.Fatal("assertion failed: watcher must not be nil")
+		}
+		watcher.Stop()
 	})
 
 	t.Run("resourceVersionMatch", func(t *testing.T) {
@@ -338,7 +355,24 @@ func TestTemplateWatchRejectsUnsupportedWatchListOptions(t *testing.T) {
 
 	t.Run("resourceVersion", func(t *testing.T) {
 		watcher, err := templateStorage.Watch(ctx, &metainternalversion.ListOptions{ResourceVersion: "123"})
-		assertBadRequestWatchOptionsError(t, watcher, err, "resourceVersion")
+		if err != nil {
+			t.Fatalf("expected resourceVersion watch to be accepted, got %v", err)
+		}
+		if watcher == nil {
+			t.Fatal("assertion failed: watcher must not be nil")
+		}
+		watcher.Stop()
+	})
+
+	t.Run("legacyResourceVersionZero", func(t *testing.T) {
+		watcher, err := templateStorage.Watch(ctx, &metainternalversion.ListOptions{ResourceVersion: "0"})
+		if err != nil {
+			t.Fatalf("expected resourceVersion=0 watch to be accepted, got %v", err)
+		}
+		if watcher == nil {
+			t.Fatal("assertion failed: watcher must not be nil")
+		}
+		watcher.Stop()
 	})
 
 	t.Run("resourceVersionMatch", func(t *testing.T) {
@@ -381,9 +415,9 @@ func TestWatchRejectsDefaultedLegacyWatchListOptions(t *testing.T) {
 		ResourceVersionMatch: metav1.ResourceVersionMatchNotOlderThan,
 	}
 	workspaceWatcher, err = workspaceStorage.Watch(ctx, legacyOptionsWithZeroRV)
-	assertBadRequestWatchOptionsError(t, workspaceWatcher, err, "resourceVersion")
+	assertBadRequestWatchOptionsError(t, workspaceWatcher, err, "sendInitialEvents")
 	templateWatcher, err = templateStorage.Watch(ctx, legacyOptionsWithZeroRV)
-	assertBadRequestWatchOptionsError(t, templateWatcher, err, "resourceVersion")
+	assertBadRequestWatchOptionsError(t, templateWatcher, err, "sendInitialEvents")
 }
 
 func TestValidateUnsupportedWatchListOptions(t *testing.T) {
@@ -427,8 +461,8 @@ func TestValidateUnsupportedWatchListOptions(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected defaulted legacy watch-list options with RV=0 to be rejected")
 	}
-	if !strings.Contains(err.Error(), "resourceVersion") {
-		t.Fatalf("expected defaulted legacy watch-list RV=0 rejection to reference resourceVersion, got %v", err)
+	if !strings.Contains(err.Error(), "sendInitialEvents") {
+		t.Fatalf("expected defaulted legacy watch-list RV=0 rejection to reference sendInitialEvents, got %v", err)
 	}
 
 	err = validateUnsupportedWatchListOptions(&metainternalversion.ListOptions{SendInitialEvents: &sendInitialEvents})
@@ -437,6 +471,11 @@ func TestValidateUnsupportedWatchListOptions(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "sendInitialEvents") {
 		t.Fatalf("expected sendInitialEvents error, got %v", err)
+	}
+
+	err = validateUnsupportedWatchListOptions(&metainternalversion.ListOptions{ResourceVersion: "123"})
+	if err != nil {
+		t.Fatalf("expected resourceVersion to be accepted, got %v", err)
 	}
 
 	err = validateUnsupportedWatchListOptions(&metainternalversion.ListOptions{
@@ -458,8 +497,8 @@ func TestValidateUnsupportedWatchListOptions(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected non-legacy watch-list options to be rejected")
 	}
-	if !strings.Contains(err.Error(), "resourceVersion") {
-		t.Fatalf("expected non-legacy watch-list rejection to reference resourceVersion, got %v", err)
+	if !strings.Contains(err.Error(), "sendInitialEvents") {
+		t.Fatalf("expected non-legacy watch-list rejection to reference sendInitialEvents, got %v", err)
 	}
 }
 

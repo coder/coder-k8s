@@ -368,8 +368,7 @@ func (s *WorkspaceStorage) Create(
 		return nil, fmt.Errorf("assertion failed: converted workspace must not be nil")
 	}
 
-	//nolint:errcheck // Best-effort watch event broadcast.
-	_ = s.broadcaster.Action(watch.Added, result.DeepCopy())
+	broadcastEventAsync(s.broadcaster, watch.Added, result.DeepCopy())
 
 	return result, nil
 }
@@ -519,8 +518,7 @@ func (s *WorkspaceStorage) Update(
 		return nil, false, fmt.Errorf("assertion failed: converted workspace must not be nil")
 	}
 
-	//nolint:errcheck // Best-effort watch event broadcast.
-	_ = s.broadcaster.Action(watch.Modified, result.DeepCopy())
+	broadcastEventAsync(s.broadcaster, watch.Modified, result.DeepCopy())
 
 	return result, false, nil
 }
@@ -595,8 +593,7 @@ func (s *WorkspaceStorage) Delete(
 
 	// Workspace deletion is asynchronous in Coder. Emit a Modified event
 	// to signal that deletion was requested, rather than a Deleted event.
-	//nolint:errcheck // Best-effort watch event broadcast.
-	_ = s.broadcaster.Action(watch.Modified, workspaceObj.DeepCopy())
+	broadcastEventAsync(s.broadcaster, watch.Modified, workspaceObj.DeepCopy())
 
 	// Deletion is asynchronous in Coder: we only enqueue a delete build transition here.
 	// Report deleted=false so Kubernetes callers know the resource is not gone yet.
