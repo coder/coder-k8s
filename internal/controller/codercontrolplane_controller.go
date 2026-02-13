@@ -60,8 +60,10 @@ const (
 	workspaceRoleNameSuffix         = "-workspace-perms"
 	kubernetesObjectNameMaxLength   = 253
 
-	// #nosec G101 -- this is a field index key, not a credential.
-	licenseSecretNameFieldIndex = ".spec.licenseSecretRef.name"
+	// #nosec G101 -- these are field index keys, not credentials.
+	licenseSecretNameFieldIndex    = ".spec.licenseSecretRef.name"
+	envFromConfigMapNameFieldIndex = ".spec.envFrom.configMapRef.name"
+	envFromSecretNameFieldIndex    = ".spec.envFrom.secretRef.name" // #nosec G101 -- this is a field index key, not a credential.
 
 	licenseConditionReasonApplied       = "Applied"
 	licenseConditionReasonPending       = "Pending"
@@ -199,7 +201,7 @@ type CoderControlPlaneReconciler struct {
 // +kubebuilder:rbac:groups=coder.com,resources=codercontrolplanes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=coder.com,resources=codercontrolplanes/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
@@ -1057,13 +1059,13 @@ func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, c
 			if certSecretNameCounts[secret.Name] > 1 {
 				mountFileBase = fmt.Sprintf("%s-%s", secret.Name, secret.Key)
 			}
-			mountFileCount := certMountFileCount[mountFileBase]
-			certMountFileCount[mountFileBase] = mountFileCount + 1
-
 			mountFileName := mountFileBase
 			if !strings.HasSuffix(mountFileName, ".crt") {
 				mountFileName += ".crt"
 			}
+
+			mountFileCount := certMountFileCount[mountFileName]
+			certMountFileCount[mountFileName] = mountFileCount + 1
 			if mountFileCount > 0 {
 				mountFileName = strings.TrimSuffix(mountFileName, ".crt")
 				mountFileName = fmt.Sprintf("%s-%d.crt", mountFileName, mountFileCount+1)
@@ -2568,6 +2570,147 @@ func indexByLicenseSecretName(obj client.Object) []string {
 	return []string{licenseSecretName}
 }
 
+func indexByEnvFromConfigMapName(obj client.Object) []string {
+	coderControlPlane, ok := obj.(*coderv1alpha1.CoderControlPlane)
+	if !ok {
+		return nil
+	}
+
+	configMapNames := map[string]struct{}{}
+	for i := range coderControlPlane.Spec.EnvFrom {
+		configMapRef := coderControlPlane.Spec.EnvFrom[i].ConfigMapRef
+		if configMapRef == nil {
+			continue
+		}
+		configMapName := strings.TrimSpace(configMapRef.Name)
+		if configMapName == "" {
+			continue
+		}
+		configMapNames[configMapName] = struct{}{}
+	}
+
+	indexedNames := make([]string, 0, len(configMapNames))
+	for configMapName := range configMapNames {
+		indexedNames = append(indexedNames, configMapName)
+	}
+
+	return indexedNames
+}
+
+func indexByEnvFromSecretName(obj client.Object) []string {
+	coderControlPlane, ok := obj.(*coderv1alpha1.CoderControlPlane)
+	if !ok {
+		return nil
+	}
+
+	secretNames := map[string]struct{}{}
+	for i := range coderControlPlane.Spec.EnvFrom {
+		secretRef := coderControlPlane.Spec.EnvFrom[i].SecretRef
+		if secretRef == nil {
+			continue
+		}
+		secretName := strings.TrimSpace(secretRef.Name)
+		if secretName == "" {
+			continue
+		}
+		secretNames[secretName] = struct{}{}
+	}
+
+	indexedNames := make([]string, 0, len(secretNames))
+	for secretName := range secretNames {
+		indexedNames = append(indexedNames, secretName)
+	}
+
+	return indexedNames
+}
+
+func (r *CoderControlPlaneReconciler) reconcileRequestsForEnvFromConfigMap(
+	ctx context.Context,
+	obj client.Object,
+) []reconcile.Request {
+	configMap, ok := obj.(*corev1.ConfigMap)
+	if !ok {
+		return nil
+	}
+
+	return r.reconcileRequestsForIndexedControlPlanes(ctx, configMap.Namespace, envFromConfigMapNameFieldIndex, configMap.Name)
+}
+
+func (r *CoderControlPlaneReconciler) reconcileRequestsForEnvFromSecret(
+	ctx context.Context,
+	obj client.Object,
+) []reconcile.Request {
+	secret, ok := obj.(*corev1.Secret)
+	if !ok {
+		return nil
+	}
+
+	return r.reconcileRequestsForIndexedControlPlanes(ctx, secret.Namespace, envFromSecretNameFieldIndex, secret.Name)
+}
+
+func mergeReconcileRequests(requestGroups ...[]reconcile.Request) []reconcile.Request {
+	if len(requestGroups) == 0 {
+		return nil
+	}
+
+	seen := map[string]struct{}{}
+	merged := make([]reconcile.Request, 0)
+	for i := range requestGroups {
+		for j := range requestGroups[i] {
+			request := requestGroups[i][j]
+			if strings.TrimSpace(request.Name) == "" || strings.TrimSpace(request.Namespace) == "" {
+				continue
+			}
+			key := namespacedResourceKey(request.Namespace, request.Name)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			merged = append(merged, request)
+		}
+	}
+
+	return merged
+}
+
+func (r *CoderControlPlaneReconciler) reconcileRequestsForIndexedControlPlanes(
+	ctx context.Context,
+	namespace string,
+	indexField string,
+	indexValue string,
+) []reconcile.Request {
+	namespace = strings.TrimSpace(namespace)
+	indexField = strings.TrimSpace(indexField)
+	indexValue = strings.TrimSpace(indexValue)
+	if namespace == "" || indexField == "" || indexValue == "" {
+		return nil
+	}
+
+	var coderControlPlanes coderv1alpha1.CoderControlPlaneList
+	if err := r.List(
+		ctx,
+		&coderControlPlanes,
+		client.InNamespace(namespace),
+		client.MatchingFields{indexField: indexValue},
+	); err != nil {
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(coderControlPlanes.Items))
+	for i := range coderControlPlanes.Items {
+		coderControlPlane := coderControlPlanes.Items[i]
+		if strings.TrimSpace(coderControlPlane.Name) == "" || strings.TrimSpace(coderControlPlane.Namespace) == "" {
+			continue
+		}
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
+			Name:      coderControlPlane.Name,
+			Namespace: coderControlPlane.Namespace,
+		}})
+	}
+
+	return requests
+}
+
 func (r *CoderControlPlaneReconciler) reconcileRequestsForLicenseSecret(
 	ctx context.Context,
 	obj client.Object,
@@ -2580,28 +2723,15 @@ func (r *CoderControlPlaneReconciler) reconcileRequestsForLicenseSecret(
 		return nil
 	}
 
-	var coderControlPlanes coderv1alpha1.CoderControlPlaneList
-	if err := r.List(
+	licenseSecretRequests := r.reconcileRequestsForIndexedControlPlanes(
 		ctx,
-		&coderControlPlanes,
-		client.InNamespace(secret.Namespace),
-		client.MatchingFields{licenseSecretNameFieldIndex: secret.Name},
-	); err != nil {
-		return nil
-	}
+		secret.Namespace,
+		licenseSecretNameFieldIndex,
+		secret.Name,
+	)
+	envFromSecretRequests := r.reconcileRequestsForEnvFromSecret(ctx, secret)
 
-	requests := make([]reconcile.Request, 0, len(coderControlPlanes.Items))
-	for _, coderControlPlane := range coderControlPlanes.Items {
-		if strings.TrimSpace(coderControlPlane.Name) == "" || strings.TrimSpace(coderControlPlane.Namespace) == "" {
-			continue
-		}
-		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
-			Name:      coderControlPlane.Name,
-			Namespace: coderControlPlane.Namespace,
-		}})
-	}
-
-	return requests
+	return mergeReconcileRequests(licenseSecretRequests, envFromSecretRequests)
 }
 
 func isDuplicateLicenseUploadError(err error) bool {
@@ -2775,6 +2905,22 @@ func (r *CoderControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	); err != nil {
 		return fmt.Errorf("index coder control planes by license secret name: %w", err)
 	}
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&coderv1alpha1.CoderControlPlane{},
+		envFromConfigMapNameFieldIndex,
+		indexByEnvFromConfigMapName,
+	); err != nil {
+		return fmt.Errorf("index coder control planes by envFrom ConfigMap name: %w", err)
+	}
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&coderv1alpha1.CoderControlPlane{},
+		envFromSecretNameFieldIndex,
+		indexByEnvFromSecretName,
+	); err != nil {
+		return fmt.Errorf("index coder control planes by envFrom Secret name: %w", err)
+	}
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&coderv1alpha1.CoderControlPlane{}).
@@ -2788,6 +2934,10 @@ func (r *CoderControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.reconcileRequestsForLicenseSecret),
+		).
+		Watches(
+			&corev1.ConfigMap{},
+			handler.EnqueueRequestsFromMapFunc(r.reconcileRequestsForEnvFromConfigMap),
 		).
 		Named("codercontrolplane").
 		Complete(r)

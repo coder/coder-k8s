@@ -3715,6 +3715,58 @@ func TestReconcile_CertSecretsWithSharedSecretNameReuseVolume(t *testing.T) {
 	}
 }
 
+func TestReconcile_CertSecretMountFileNormalizationAvoidsPathCollisions(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cert-normalized-mount-collision", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "test-certs-mount-collision:latest",
+			Certs: coderv1alpha1.CertsSpec{
+				Secrets: []coderv1alpha1.CertSecretSelector{
+					{Name: "foo", Key: "ca.crt"},
+					{Name: "foo.crt", Key: "ca.crt"},
+				},
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, cp); err != nil {
+		t.Fatalf("create control plane: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, cp)
+	})
+
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+		t.Fatalf("reconcile control plane: %v", err)
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	container := deployment.Spec.Template.Spec.Containers[0]
+
+	mountPaths := map[string]struct{}{}
+	for _, mount := range container.VolumeMounts {
+		if !strings.HasPrefix(mount.MountPath, "/etc/ssl/certs/foo") {
+			continue
+		}
+		mountPaths[mount.MountPath] = struct{}{}
+	}
+	if len(mountPaths) != 2 {
+		t.Fatalf("expected two unique normalized cert mount paths, got %d: %#v", len(mountPaths), mountPaths)
+	}
+	if _, ok := mountPaths["/etc/ssl/certs/foo.crt"]; !ok {
+		t.Fatalf("expected normalized mount path %q, got %#v", "/etc/ssl/certs/foo.crt", mountPaths)
+	}
+	if _, ok := mountPaths["/etc/ssl/certs/foo-2.crt"]; !ok {
+		t.Fatalf("expected deduplicated mount path %q, got %#v", "/etc/ssl/certs/foo-2.crt", mountPaths)
+	}
+}
+
 func TestReconcile_PassThroughConfiguration(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
