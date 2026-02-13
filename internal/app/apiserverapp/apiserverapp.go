@@ -349,6 +349,20 @@ func getOpenAPIDefinitions(_ openapicommon.ReferenceCallback) map[string]openapi
 	dateTimeSchema := spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"string"}, Format: "date-time"}}
 	int64Schema := spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"integer"}, Format: "int64"}}
 	stringSchema := spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"string"}}}
+	filesSchema := spec.Schema{
+		VendorExtensible: spec.VendorExtensible{
+			Extensions: spec.Extensions{
+				"x-kubernetes-map-type": "atomic",
+			},
+		},
+		SchemaProps: spec.SchemaProps{
+			Type: []string{"object"},
+			AdditionalProperties: &spec.SchemaOrBool{
+				Allows: true,
+				Schema: &stringSchema,
+			},
+		},
+	}
 
 	workspaceSchema := spec.Schema{
 		SchemaProps: spec.SchemaProps{
@@ -399,6 +413,7 @@ func getOpenAPIDefinitions(_ openapicommon.ReferenceCallback) map[string]openapi
 							"displayName":  stringSchema,
 							"description":  stringSchema,
 							"icon":         stringSchema,
+							"files":        filesSchema,
 							"running":      boolSchema,
 						},
 					},

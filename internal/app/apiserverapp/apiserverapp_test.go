@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	genericoptions "k8s.io/apiserver/pkg/server/options"
+	openapiutil "k8s.io/kube-openapi/pkg/util"
 
 	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
 	coderhelper "github.com/coder/coder-k8s/internal/aggregated/coder"
@@ -36,6 +37,42 @@ func TestNewSchemeRegistersAggregationKinds(t *testing.T) {
 		if !scheme.Recognizes(gvk) {
 			t.Fatalf("expected scheme to recognize %s", gvk.String())
 		}
+	}
+}
+
+func TestOpenAPIDefinitionsIncludeTemplateFiles(t *testing.T) {
+	t.Helper()
+
+	defs := getOpenAPIDefinitions(nil)
+	templateDefinitionName := openapiutil.GetCanonicalTypeName(&aggregationv1alpha1.CoderTemplate{})
+
+	def, ok := defs[templateDefinitionName]
+	if !ok {
+		t.Fatalf("expected OpenAPI definition for %s", templateDefinitionName)
+	}
+
+	templateSpecSchema, ok := def.Schema.Properties["spec"]
+	if !ok {
+		t.Fatal("expected template schema to include spec")
+	}
+
+	filesSchema, ok := templateSpecSchema.Properties["files"]
+	if !ok {
+		t.Fatal("expected template schema to include spec.files")
+	}
+
+	if got := filesSchema.Type; len(got) != 1 || got[0] != "object" {
+		t.Fatalf("expected spec.files type [object], got %v", got)
+	}
+	if filesSchema.AdditionalProperties == nil || filesSchema.AdditionalProperties.Schema == nil {
+		t.Fatal("expected spec.files additionalProperties schema")
+	}
+	if got := filesSchema.AdditionalProperties.Schema.Type; len(got) != 1 || got[0] != "string" {
+		t.Fatalf("expected spec.files additionalProperties type [string], got %v", got)
+	}
+
+	if got, ok := filesSchema.Extensions["x-kubernetes-map-type"]; !ok || got != "atomic" {
+		t.Fatalf("expected spec.files x-kubernetes-map-type atomic, got %v", got)
 	}
 }
 
