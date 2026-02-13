@@ -48,11 +48,13 @@ type ServiceAccountSpec struct {
 // RBACSpec configures namespace-scoped RBAC for workspace provisioning.
 type RBACSpec struct {
 	// WorkspacePerms enables Role/RoleBinding creation for workspace resources.
+	// When omitted, the default is true.
 	// +kubebuilder:default=true
-	WorkspacePerms bool `json:"workspacePerms,omitempty"`
+	WorkspacePerms *bool `json:"workspacePerms,omitempty"`
 	// EnableDeployments grants apps/deployments permissions (only when WorkspacePerms is true).
+	// When omitted, the default is true.
 	// +kubebuilder:default=true
-	EnableDeployments bool `json:"enableDeployments,omitempty"`
+	EnableDeployments *bool `json:"enableDeployments,omitempty"`
 	// ExtraRules are appended to the managed Role rules.
 	ExtraRules []rbacv1.PolicyRule `json:"extraRules,omitempty"`
 	// WorkspaceNamespaces lists additional namespaces for Role/RoleBinding creation.

@@ -156,8 +156,8 @@ RBACSpec configures namespace-scoped RBAC for workspace provisioning.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `workspacePerms` | boolean | WorkspacePerms enables Role/RoleBinding creation for workspace resources. |
-| `enableDeployments` | boolean | EnableDeployments grants apps/deployments permissions (only when WorkspacePerms is true). |
+| `workspacePerms` | boolean | WorkspacePerms enables Role/RoleBinding creation for workspace resources. When omitted, the default is true. |
+| `enableDeployments` | boolean | EnableDeployments grants apps/deployments permissions (only when WorkspacePerms is true). When omitted, the default is true. |
 | `extraRules` | [PolicyRule](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#policyrule-v1-rbac) array | ExtraRules are appended to the managed Role rules. |
 | `workspaceNamespaces` | string array | WorkspaceNamespaces lists additional namespaces for Role/RoleBinding creation. |
 

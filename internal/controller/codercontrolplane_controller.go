@@ -294,6 +294,22 @@ func resolveServiceAccountName(cp *coderv1alpha1.CoderControlPlane) string {
 	return cp.Name
 }
 
+func boolOrDefault(explicit *bool, defaultValue bool) bool {
+	if explicit == nil {
+		return defaultValue
+	}
+
+	return *explicit
+}
+
+func workspacePermsEnabled(explicit *bool) bool {
+	return boolOrDefault(explicit, true)
+}
+
+func workspaceDeploymentsEnabled(explicit *bool) bool {
+	return boolOrDefault(explicit, true)
+}
+
 func controlPlaneTLSEnabled(cp *coderv1alpha1.CoderControlPlane) bool {
 	if cp == nil {
 		return false
@@ -302,7 +318,7 @@ func controlPlaneTLSEnabled(cp *coderv1alpha1.CoderControlPlane) bool {
 }
 
 func requiresWorkspaceRBACDriftRequeue(cp *coderv1alpha1.CoderControlPlane) bool {
-	if cp == nil || !cp.Spec.RBAC.WorkspacePerms {
+	if cp == nil || !workspacePermsEnabled(cp.Spec.RBAC.WorkspacePerms) {
 		return false
 	}
 
@@ -559,7 +575,7 @@ func (r *CoderControlPlaneReconciler) reconcileWorkspaceRBAC(ctx context.Context
 	roleName := fmt.Sprintf("%s-workspace-perms", serviceAccountName)
 	roleBindingName := serviceAccountName
 
-	if !coderControlPlane.Spec.RBAC.WorkspacePerms {
+	if !workspacePermsEnabled(coderControlPlane.Spec.RBAC.WorkspacePerms) {
 		return r.cleanupManagedWorkspaceRBAC(ctx, coderControlPlane, nil, nil)
 	}
 
@@ -575,7 +591,7 @@ func (r *CoderControlPlaneReconciler) reconcileWorkspaceRBAC(ctx context.Context
 			Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"},
 		},
 	}
-	if coderControlPlane.Spec.RBAC.EnableDeployments {
+	if workspaceDeploymentsEnabled(coderControlPlane.Spec.RBAC.EnableDeployments) {
 		rules = append(rules, rbacv1.PolicyRule{
 			APIGroups: []string{"apps"},
 			Resources: []string{"deployments"},
@@ -722,11 +738,7 @@ func (r *CoderControlPlaneReconciler) cleanupManagedWorkspaceRBAC(
 }
 
 func probeEnabled(explicit *bool, defaultEnabled bool) bool {
-	if explicit == nil {
-		return defaultEnabled
-	}
-
-	return *explicit
+	return boolOrDefault(explicit, defaultEnabled)
 }
 
 func buildProbe(spec coderv1alpha1.ProbeSpec, path, portName string) *corev1.Probe {

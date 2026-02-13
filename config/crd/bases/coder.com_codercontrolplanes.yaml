@@ -1601,8 +1601,9 @@ spec:
                 properties:
                   enableDeployments:
                     default: true
-                    description: EnableDeployments grants apps/deployments permissions
-                      (only when WorkspacePerms is true).
+                    description: |-
+                      EnableDeployments grants apps/deployments permissions (only when WorkspacePerms is true).
+                      When omitted, the default is true.
                     type: boolean
                   extraRules:
                     description: ExtraRules are appended to the managed Role rules.
@@ -1663,8 +1664,9 @@ spec:
                     type: array
                   workspacePerms:
                     default: true
-                    description: WorkspacePerms enables Role/RoleBinding creation
-                      for workspace resources.
+                    description: |-
+                      WorkspacePerms enables Role/RoleBinding creation for workspace resources.
+                      When omitted, the default is true.
                     type: boolean
                 type: object
               readinessProbe:

@@ -2320,8 +2320,8 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 					Name: "test-workspace-rbac-default-sa",
 				},
 				RBAC: coderv1alpha1.RBACSpec{
-					WorkspacePerms:    true,
-					EnableDeployments: true,
+					WorkspacePerms:    ptrTo(true),
+					EnableDeployments: ptrTo(true),
 				},
 			},
 		}
@@ -2370,15 +2370,24 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 	})
 
 	t.Run("DeploymentsRuleDisabled", func(t *testing.T) {
-		cp := createCoderControlPlaneUnstructured(ctx, t, "test-workspace-rbac-no-deployments", "default", map[string]any{
-			"image": "test-workspace-rbac:latest",
-			"serviceAccount": map[string]any{
-				"name": "test-workspace-rbac-no-deployments-sa",
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-workspace-rbac-no-deployments", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-workspace-rbac:latest",
+				ServiceAccount: coderv1alpha1.ServiceAccountSpec{
+					Name: "test-workspace-rbac-no-deployments-sa",
+				},
+				RBAC: coderv1alpha1.RBACSpec{
+					WorkspacePerms:    ptrTo(true),
+					EnableDeployments: ptrTo(false),
+				},
 			},
-			"rbac": map[string]any{
-				"workspacePerms":    true,
-				"enableDeployments": false,
-			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
 		})
 
 		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
@@ -2397,11 +2406,20 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 	})
 
 	t.Run("RBACDisabled", func(t *testing.T) {
-		cp := createCoderControlPlaneUnstructured(ctx, t, "test-workspace-rbac-disabled", "default", map[string]any{
-			"image": "test-workspace-rbac:latest",
-			"rbac": map[string]any{
-				"workspacePerms": false,
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-workspace-rbac-disabled", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-workspace-rbac:latest",
+				RBAC: coderv1alpha1.RBACSpec{
+					WorkspacePerms: ptrTo(false),
+				},
 			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
 		})
 
 		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
@@ -2667,8 +2685,8 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 					Name: "test-workspace-rbac-extra-rules-sa",
 				},
 				RBAC: coderv1alpha1.RBACSpec{
-					WorkspacePerms:    true,
-					EnableDeployments: true,
+					WorkspacePerms:    ptrTo(true),
+					EnableDeployments: ptrTo(true),
 					ExtraRules:        []rbacv1.PolicyRule{extraRule},
 				},
 			},
