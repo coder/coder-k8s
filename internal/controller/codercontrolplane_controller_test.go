@@ -3031,6 +3031,81 @@ func TestReconcile_DeploymentAlignment(t *testing.T) {
 		}
 	})
 
+	t.Run("EnvFromBinaryDataDoesNotSuppressDefault", func(t *testing.T) {
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-binary", Namespace: "default"},
+			BinaryData: map[string][]byte{
+				"CODER_ACCESS_URL": []byte("https://binary-data.example.test"),
+			},
+		}
+		if err := k8sClient.Create(ctx, configMap); err != nil {
+			t.Fatalf("create configmap: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, configMap)
+		})
+
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-binary", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-deployment-alignment:latest",
+				EnvFrom: []corev1.EnvFromSource{{
+					ConfigMapRef: &corev1.ConfigMapEnvSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: configMap.Name},
+					},
+				}},
+			},
+		}
+		if err := k8sClient.Create(ctx, cp); err != nil {
+			t.Fatalf("create control plane: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = k8sClient.Delete(ctx, cp)
+		})
+
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}); err != nil {
+			t.Fatalf("reconcile control plane: %v", err)
+		}
+
+		deployment := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, deployment); err != nil {
+			t.Fatalf("get deployment: %v", err)
+		}
+		container := deployment.Spec.Template.Spec.Containers[0]
+		expectedAccessURL := "http://" + cp.Name + "." + cp.Namespace + ".svc.cluster.local"
+		if got := mustFindEnvVar(t, container.Env, "CODER_ACCESS_URL").Value; got != expectedAccessURL {
+			t.Fatalf("expected default CODER_ACCESS_URL %q, got %q", expectedAccessURL, got)
+		}
+	})
+
+	t.Run("EnvFromWithConfigMapAndSecretRefsIsRejectedAtAdmission", func(t *testing.T) {
+		cp := &coderv1alpha1.CoderControlPlane{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-both-refs", Namespace: "default"},
+			Spec: coderv1alpha1.CoderControlPlaneSpec{
+				Image: "test-deployment-alignment:latest",
+				EnvFrom: []corev1.EnvFromSource{{
+					ConfigMapRef: &corev1.ConfigMapEnvSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "both-refs-configmap"},
+					},
+					SecretRef: &corev1.SecretEnvSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "both-refs-secret"},
+					},
+				}},
+			},
+		}
+		err := k8sClient.Create(ctx, cp)
+		if err == nil {
+			t.Fatal("expected create to fail when envFrom entry sets both configMapRef and secretRef")
+		}
+		if !apierrors.IsInvalid(err) {
+			t.Fatalf("expected invalid error for envFrom entry with both refs, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "envFrom") {
+			t.Fatalf("expected envFrom validation error, got: %v", err)
+		}
+	})
+
 	t.Run("ResourcesAndSecurityContextsApplied", func(t *testing.T) {
 		runAsUser := int64(1001)
 		allowPrivilegeEscalation := false

@@ -1022,6 +1022,10 @@ spec:
                       x-kubernetes-map-type: atomic
                   type: object
                 type: array
+                x-kubernetes-validations:
+                - message: each envFrom entry may specify at most one of configMapRef
+                    or secretRef
+                  rule: self.all(e, !(has(e.configMapRef) && has(e.secretRef)))
               envUseClusterAccessURL:
                 default: true
                 description: EnvUseClusterAccessURL injects a default CODER_ACCESS_URL

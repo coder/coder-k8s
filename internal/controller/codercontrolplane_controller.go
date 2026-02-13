@@ -2102,10 +2102,6 @@ func (r *CoderControlPlaneReconciler) envFromDefinesEnvVar(
 
 	for i := range envFromSources {
 		envFromSource := envFromSources[i]
-		if envFromSource.ConfigMapRef != nil && envFromSource.SecretRef != nil {
-			return false, fmt.Errorf("assertion failed: envFrom[%d] must not set both configMapRef and secretRef", i)
-		}
-
 		lookupKey, includeSource, err := envFromLookupKeyForEnvVar(envFromSource.Prefix, envVarName)
 		if err != nil {
 			return false, err
@@ -2123,18 +2119,12 @@ func (r *CoderControlPlaneReconciler) envFromDefinesEnvVar(
 			configMap := &corev1.ConfigMap{}
 			err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: configMapName}, configMap)
 			if err != nil {
-				if apierrors.IsNotFound(err) {
-					continue
+				if !apierrors.IsNotFound(err) {
+					return false, fmt.Errorf("get envFrom[%d] configmap %s/%s: %w", i, namespace, configMapName, err)
 				}
-				return false, fmt.Errorf("get envFrom[%d] configmap %s/%s: %w", i, namespace, configMapName, err)
-			}
-			if _, ok := configMap.Data[lookupKey]; ok {
+			} else if _, ok := configMap.Data[lookupKey]; ok {
 				return true, nil
 			}
-			if _, ok := configMap.BinaryData[lookupKey]; ok {
-				return true, nil
-			}
-			continue
 		}
 
 		if envFromSource.SecretRef != nil {
@@ -2146,12 +2136,10 @@ func (r *CoderControlPlaneReconciler) envFromDefinesEnvVar(
 			secret := &corev1.Secret{}
 			err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: secretName}, secret)
 			if err != nil {
-				if apierrors.IsNotFound(err) {
-					continue
+				if !apierrors.IsNotFound(err) {
+					return false, fmt.Errorf("get envFrom[%d] secret %s/%s: %w", i, namespace, secretName, err)
 				}
-				return false, fmt.Errorf("get envFrom[%d] secret %s/%s: %w", i, namespace, secretName, err)
-			}
-			if _, ok := secret.Data[lookupKey]; ok {
+			} else if _, ok := secret.Data[lookupKey]; ok {
 				return true, nil
 			}
 		}

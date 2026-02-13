@@ -90,6 +90,7 @@ type CoderControlPlaneSpec struct {
 	// +optional
 	Expose *ExposeSpec `json:"expose,omitempty"`
 
+	// +kubebuilder:validation:XValidation:rule="self.all(e, !(has(e.configMapRef) && has(e.secretRef)))",message="each envFrom entry may specify at most one of configMapRef or secretRef"
 	// EnvFrom injects environment variables from ConfigMaps/Secrets.
 	EnvFrom []corev1.EnvFromSource `json:"envFrom,omitempty"`
 	// Volumes are additional volumes to add to the pod.
