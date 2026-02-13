@@ -2156,7 +2156,6 @@ func TestReconcile_ServiceAccount(t *testing.T) {
 			t.Fatalf("expected service account controller reference to be removed when disableCreate=true, got %#v", ownerReference)
 		}
 	})
-
 }
 
 func TestReconcile_WorkspaceRBAC(t *testing.T) {
