@@ -7,7 +7,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 )
 
@@ -57,21 +56,6 @@ func validateUnsupportedWatchListOptions(opts *metainternalversion.ListOptions) 
 	}
 
 	return nil
-}
-
-// broadcastEventAsync emits a watch event in a goroutine so mutation request
-// handlers are not blocked by slow watchers.
-func broadcastEventAsync(broadcaster *watch.Broadcaster, action watch.EventType, obj runtime.Object) {
-	if broadcaster == nil {
-		panic("assertion failed: watch broadcaster must not be nil")
-	}
-	if obj == nil {
-		panic("assertion failed: watch event object must not be nil")
-	}
-
-	go func() {
-		_ = broadcaster.Action(action, obj)
-	}()
 }
 
 // filterForListOptions builds a watch.FilterFunc that applies namespace, label, and field selector filtering.

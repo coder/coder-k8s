@@ -38,6 +38,8 @@ type WorkspaceStorage struct {
 	provider       coder.ClientProvider
 	tableConvertor rest.TableConvertor
 	broadcaster    *watch.Broadcaster
+	watchEvents    chan watch.Event
+	watchEventsWG  sync.WaitGroup
 	destroyOnce    sync.Once
 }
 
@@ -47,11 +49,16 @@ func NewWorkspaceStorage(provider coder.ClientProvider) *WorkspaceStorage {
 		panic("assertion failed: workspace client provider must not be nil")
 	}
 
-	return &WorkspaceStorage{
+	storage := &WorkspaceStorage{
 		provider:       provider,
 		tableConvertor: rest.NewDefaultTableConvertor(aggregationv1alpha1.Resource("coderworkspaces")),
 		broadcaster:    watch.NewBroadcaster(watchBroadcasterQueueLen, watch.WaitIfChannelFull),
+		watchEvents:    make(chan watch.Event, watchBroadcasterQueueLen),
 	}
+	storage.watchEventsWG.Add(1)
+	go storage.dispatchWatchEvents()
+
+	return storage
 }
 
 // New returns an empty CoderWorkspace object.
@@ -66,6 +73,12 @@ func (s *WorkspaceStorage) Destroy() {
 	}
 
 	s.destroyOnce.Do(func() {
+		if s.watchEvents == nil {
+			panic("assertion failed: workspace watch event queue must not be nil")
+		}
+		close(s.watchEvents)
+		s.watchEventsWG.Wait()
+
 		if s.broadcaster != nil {
 			s.broadcaster.Shutdown()
 		}
@@ -368,7 +381,7 @@ func (s *WorkspaceStorage) Create(
 		return nil, fmt.Errorf("assertion failed: converted workspace must not be nil")
 	}
 
-	broadcastEventAsync(s.broadcaster, watch.Added, result.DeepCopy())
+	s.enqueueWatchEvent(watch.Added, result.DeepCopy())
 
 	return result, nil
 }
@@ -518,7 +531,7 @@ func (s *WorkspaceStorage) Update(
 		return nil, false, fmt.Errorf("assertion failed: converted workspace must not be nil")
 	}
 
-	broadcastEventAsync(s.broadcaster, watch.Modified, result.DeepCopy())
+	s.enqueueWatchEvent(watch.Modified, result.DeepCopy())
 
 	return result, false, nil
 }
@@ -593,11 +606,33 @@ func (s *WorkspaceStorage) Delete(
 
 	// Workspace deletion is asynchronous in Coder. Emit a Modified event
 	// to signal that deletion was requested, rather than a Deleted event.
-	broadcastEventAsync(s.broadcaster, watch.Modified, workspaceObj.DeepCopy())
+	s.enqueueWatchEvent(watch.Modified, workspaceObj.DeepCopy())
 
 	// Deletion is asynchronous in Coder: we only enqueue a delete build transition here.
 	// Report deleted=false so Kubernetes callers know the resource is not gone yet.
 	return &metav1.Status{Status: metav1.StatusSuccess}, false, nil
+}
+
+func (s *WorkspaceStorage) dispatchWatchEvents() {
+	defer s.watchEventsWG.Done()
+
+	for event := range s.watchEvents {
+		_ = s.broadcaster.Action(event.Type, event.Object)
+	}
+}
+
+func (s *WorkspaceStorage) enqueueWatchEvent(action watch.EventType, obj runtime.Object) {
+	if s == nil {
+		panic("assertion failed: workspace storage must not be nil")
+	}
+	if s.watchEvents == nil {
+		panic("assertion failed: workspace watch event queue must not be nil")
+	}
+	if obj == nil {
+		panic("assertion failed: workspace watch event object must not be nil")
+	}
+
+	s.watchEvents <- watch.Event{Type: action, Object: obj}
 }
 
 // ConvertToTable converts a workspace object or list into kubectl table output.

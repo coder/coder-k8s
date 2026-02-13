@@ -64,6 +64,8 @@ type TemplateStorage struct {
 	provider       coder.ClientProvider
 	tableConvertor rest.TableConvertor
 	broadcaster    *watch.Broadcaster
+	watchEvents    chan watch.Event
+	watchEventsWG  sync.WaitGroup
 	destroyOnce    sync.Once
 }
 
@@ -73,11 +75,16 @@ func NewTemplateStorage(provider coder.ClientProvider) *TemplateStorage {
 		panic("assertion failed: template client provider must not be nil")
 	}
 
-	return &TemplateStorage{
+	storage := &TemplateStorage{
 		provider:       provider,
 		tableConvertor: rest.NewDefaultTableConvertor(aggregationv1alpha1.Resource("codertemplates")),
 		broadcaster:    watch.NewBroadcaster(watchBroadcasterQueueLen, watch.WaitIfChannelFull),
+		watchEvents:    make(chan watch.Event, watchBroadcasterQueueLen),
 	}
+	storage.watchEventsWG.Add(1)
+	go storage.dispatchWatchEvents()
+
+	return storage
 }
 
 // New returns an empty CoderTemplate object.
@@ -92,6 +99,12 @@ func (s *TemplateStorage) Destroy() {
 	}
 
 	s.destroyOnce.Do(func() {
+		if s.watchEvents == nil {
+			panic("assertion failed: template watch event queue must not be nil")
+		}
+		close(s.watchEvents)
+		s.watchEventsWG.Wait()
+
 		if s.broadcaster != nil {
 			s.broadcaster.Shutdown()
 		}
@@ -366,7 +379,7 @@ func (s *TemplateStorage) Create(
 			return nil, fmt.Errorf("assertion failed: converted template must not be nil")
 		}
 
-		broadcastEventAsync(s.broadcaster, watch.Added, result.DeepCopy())
+		s.enqueueWatchEvent(watch.Added, result.DeepCopy())
 
 		return result, nil
 	}
@@ -386,7 +399,7 @@ func (s *TemplateStorage) Create(
 		return nil, fmt.Errorf("assertion failed: converted template must not be nil")
 	}
 
-	broadcastEventAsync(s.broadcaster, watch.Added, result.DeepCopy())
+	s.enqueueWatchEvent(watch.Added, result.DeepCopy())
 
 	return result, nil
 }
@@ -633,7 +646,7 @@ func (s *TemplateStorage) Update(
 		return nil, false, fmt.Errorf("assertion failed: refreshed template must not be nil")
 	}
 
-	broadcastEventAsync(s.broadcaster, watch.Modified, result.DeepCopy())
+	s.enqueueWatchEvent(watch.Modified, result.DeepCopy())
 
 	return result, false, nil
 }
@@ -699,9 +712,31 @@ func (s *TemplateStorage) Delete(
 	}
 
 	// Emit a Deleted event with the last-known template state.
-	broadcastEventAsync(s.broadcaster, watch.Deleted, templateObj.DeepCopy())
+	s.enqueueWatchEvent(watch.Deleted, templateObj.DeepCopy())
 
 	return &metav1.Status{Status: metav1.StatusSuccess}, true, nil
+}
+
+func (s *TemplateStorage) dispatchWatchEvents() {
+	defer s.watchEventsWG.Done()
+
+	for event := range s.watchEvents {
+		_ = s.broadcaster.Action(event.Type, event.Object)
+	}
+}
+
+func (s *TemplateStorage) enqueueWatchEvent(action watch.EventType, obj runtime.Object) {
+	if s == nil {
+		panic("assertion failed: template storage must not be nil")
+	}
+	if s.watchEvents == nil {
+		panic("assertion failed: template watch event queue must not be nil")
+	}
+	if obj == nil {
+		panic("assertion failed: template watch event object must not be nil")
+	}
+
+	s.watchEvents <- watch.Event{Type: action, Object: obj}
 }
 
 // ConvertToTable converts a template object or list into kubectl table output.
