@@ -128,7 +128,9 @@ type GatewayExposeSpec struct {
 	// WildcardHost is an optional wildcard hostname.
 	WildcardHost string `json:"wildcardHost,omitempty"`
 	// ParentRefs are Gateways that the HTTPRoute attaches to.
-	ParentRefs []GatewayParentRef `json:"parentRefs,omitempty"`
+	// At least one parentRef is required when gateway exposure is configured.
+	// +kubebuilder:validation:MinItems=1
+	ParentRefs []GatewayParentRef `json:"parentRefs"`
 }
 
 // GatewayParentRef identifies a Gateway for HTTPRoute attachment.

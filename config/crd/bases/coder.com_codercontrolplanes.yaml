@@ -1039,8 +1039,9 @@ spec:
                         description: Host is the primary hostname for the HTTPRoute.
                         type: string
                       parentRefs:
-                        description: ParentRefs are Gateways that the HTTPRoute attaches
-                          to.
+                        description: |-
+                          ParentRefs are Gateways that the HTTPRoute attaches to.
+                          At least one parentRef is required when gateway exposure is configured.
                         items:
                           description: GatewayParentRef identifies a Gateway for HTTPRoute
                             attachment.
@@ -1058,12 +1059,14 @@ spec:
                           required:
                           - name
                           type: object
+                        minItems: 1
                         type: array
                       wildcardHost:
                         description: WildcardHost is an optional wildcard hostname.
                         type: string
                     required:
                     - host
+                    - parentRefs
                     type: object
                   ingress:
                     description: Ingress configures a networking.k8s.io/v1 Ingress.

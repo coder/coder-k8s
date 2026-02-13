@@ -3649,27 +3649,15 @@ func TestReconcile_HTTPRouteExposure_RequiresParentRefs(t *testing.T) {
 			},
 		},
 	}
-	if err := k8sClient.Create(ctx, cp); err != nil {
-		t.Fatalf("create control plane: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = k8sClient.Delete(ctx, cp)
-	})
-
-	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
-	namespacedName := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}
-	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: namespacedName})
+	err := k8sClient.Create(ctx, cp)
 	if err == nil {
-		t.Fatal("expected reconcile to fail when gateway parentRefs are missing")
+		t.Fatal("expected create to fail when gateway parentRefs are missing")
 	}
-	if !strings.Contains(err.Error(), "gateway parentRefs must not be empty") {
-		t.Fatalf("expected missing parentRefs assertion error, got: %v", err)
+	if !apierrors.IsInvalid(err) {
+		t.Fatalf("expected invalid error for missing gateway parentRefs, got: %v", err)
 	}
-
-	httpRoute := &gatewayv1.HTTPRoute{}
-	err = k8sClient.Get(ctx, namespacedName, httpRoute)
-	if !apierrors.IsNotFound(err) {
-		t.Fatalf("expected httproute to be absent when parentRefs are missing, got: %v", err)
+	if !strings.Contains(err.Error(), "parentRefs") {
+		t.Fatalf("expected missing parentRefs validation error, got: %v", err)
 	}
 }
 
@@ -3708,8 +3696,8 @@ func TestReconcile_HTTPRouteExposure_CRDMissingIsGraceful(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected reconcile to gracefully ignore missing Gateway CRDs, got error: %v", err)
 	}
-	if result.RequeueAfter > 0 {
-		t.Fatalf("expected missing Gateway CRDs to avoid requeue, got %+v", result)
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("expected missing Gateway CRDs to request periodic requeue, got %+v", result)
 	}
 	if clientWithNoMatch.HTTPRouteGetCalls() == 0 {
 		t.Fatal("expected gateway exposure reconciliation to attempt HTTPRoute get")

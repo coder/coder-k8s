@@ -1310,9 +1310,9 @@ func (r *CoderControlPlaneReconciler) reconcileHTTPRoute(ctx context.Context, co
 	if err != nil {
 		if meta.IsNoMatchError(err) {
 			ctrl.LoggerFrom(ctx).WithName("controller").WithName("codercontrolplane").Info(
-				"Gateway API CRDs not available, skipping HTTPRoute reconciliation",
+				"Gateway API CRDs not available, retrying HTTPRoute reconciliation",
 			)
-			return false, nil
+			return true, nil
 		}
 		return false, fmt.Errorf("reconcile control plane httproute: %w", err)
 	}

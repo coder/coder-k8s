@@ -95,7 +95,7 @@ GatewayExposeSpec defines Gateway API (HTTPRoute) exposure configuration.
 | --- | --- | --- |
 | `host` | string | Host is the primary hostname for the HTTPRoute. |
 | `wildcardHost` | string | WildcardHost is an optional wildcard hostname. |
-| `parentRefs` | [GatewayParentRef](#gatewayparentref) array | ParentRefs are Gateways that the HTTPRoute attaches to. |
+| `parentRefs` | [GatewayParentRef](#gatewayparentref) array | ParentRefs are Gateways that the HTTPRoute attaches to. At least one parentRef is required when gateway exposure is configured. |
 
 ### GatewayParentRef
 
