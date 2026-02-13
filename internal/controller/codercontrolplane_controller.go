@@ -784,7 +784,7 @@ func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, c
 	accessURLConfiguredViaEnvFrom := false
 	if injectClusterAccessURL {
 		var err error
-		accessURLConfiguredViaEnvFrom, err = envFromMayDefineEnvVar(coderControlPlane.Spec.EnvFrom, "CODER_ACCESS_URL")
+		accessURLConfiguredViaEnvFrom, err = r.envFromDefinesEnvVar(ctx, coderControlPlane.Namespace, coderControlPlane.Spec.EnvFrom, "CODER_ACCESS_URL")
 		if err != nil {
 			return nil, err
 		}
@@ -2078,9 +2078,25 @@ func (r *CoderControlPlaneReconciler) resolvePostgresURLFromExtraEnv(
 	return r.readSecretValue(ctx, coderControlPlane.Namespace, secretRef.Name, secretRef.Key)
 }
 
-func envFromMayDefineEnvVar(envFromSources []corev1.EnvFromSource, envVarName string) (bool, error) {
+func (r *CoderControlPlaneReconciler) envFromDefinesEnvVar(
+	ctx context.Context,
+	namespace string,
+	envFromSources []corev1.EnvFromSource,
+	envVarName string,
+) (bool, error) {
+	if strings.TrimSpace(namespace) == "" {
+		return false, fmt.Errorf("assertion failed: namespace must not be empty")
+	}
 	if strings.TrimSpace(envVarName) == "" {
 		return false, fmt.Errorf("assertion failed: environment variable name must not be empty")
+	}
+
+	var reader client.Reader = r.Client
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	if reader == nil {
+		return false, fmt.Errorf("assertion failed: reader must not be nil")
 	}
 
 	for i := range envFromSources {
@@ -2089,27 +2105,75 @@ func envFromMayDefineEnvVar(envFromSources []corev1.EnvFromSource, envVarName st
 			return false, fmt.Errorf("assertion failed: envFrom[%d] must not set both configMapRef and secretRef", i)
 		}
 
-		prefix := strings.TrimSpace(envFromSource.Prefix)
-		if prefix != "" && !strings.HasPrefix(envVarName, prefix) {
+		lookupKey, includeSource, err := envFromLookupKeyForEnvVar(i, envFromSource.Prefix, envVarName)
+		if err != nil {
+			return false, err
+		}
+		if !includeSource {
 			continue
 		}
 
 		if envFromSource.ConfigMapRef != nil {
-			if strings.TrimSpace(envFromSource.ConfigMapRef.Name) == "" {
+			configMapName := strings.TrimSpace(envFromSource.ConfigMapRef.Name)
+			if configMapName == "" {
 				return false, fmt.Errorf("assertion failed: envFrom[%d].configMapRef.name must not be empty", i)
 			}
-			return true, nil
+
+			configMap := &corev1.ConfigMap{}
+			err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: configMapName}, configMap)
+			if err != nil {
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return false, fmt.Errorf("get envFrom[%d] configmap %s/%s: %w", i, namespace, configMapName, err)
+			}
+			if _, ok := configMap.Data[lookupKey]; ok {
+				return true, nil
+			}
+			if _, ok := configMap.BinaryData[lookupKey]; ok {
+				return true, nil
+			}
+			continue
 		}
 
 		if envFromSource.SecretRef != nil {
-			if strings.TrimSpace(envFromSource.SecretRef.Name) == "" {
+			secretName := strings.TrimSpace(envFromSource.SecretRef.Name)
+			if secretName == "" {
 				return false, fmt.Errorf("assertion failed: envFrom[%d].secretRef.name must not be empty", i)
 			}
-			return true, nil
+
+			secret := &corev1.Secret{}
+			err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: secretName}, secret)
+			if err != nil {
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return false, fmt.Errorf("get envFrom[%d] secret %s/%s: %w", i, namespace, secretName, err)
+			}
+			if _, ok := secret.Data[lookupKey]; ok {
+				return true, nil
+			}
 		}
 	}
 
 	return false, nil
+}
+
+func envFromLookupKeyForEnvVar(index int, prefix, envVarName string) (string, bool, error) {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return envVarName, true, nil
+	}
+	if !strings.HasPrefix(envVarName, prefix) {
+		return "", false, nil
+	}
+
+	lookupKey := strings.TrimPrefix(envVarName, prefix)
+	if strings.TrimSpace(lookupKey) == "" {
+		return "", false, fmt.Errorf("assertion failed: envFrom[%d] prefix %q must not consume the entire environment variable name %q", index, prefix, envVarName)
+	}
+
+	return lookupKey, true, nil
 }
 
 func findEnvVar(envVars []corev1.EnvVar, name string) (*corev1.EnvVar, error) {
