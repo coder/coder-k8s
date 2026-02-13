@@ -45,6 +45,9 @@ func validateUnsupportedWatchListOptions(opts *metainternalversion.ListOptions) 
 		return nil
 	}
 
+	if opts.ResourceVersion != "" {
+		return fmt.Errorf("resourceVersion %q is not supported for this watch endpoint", opts.ResourceVersion)
+	}
 	if opts.SendInitialEvents != nil && *opts.SendInitialEvents {
 		return fmt.Errorf("sendInitialEvents=true is not supported for this watch endpoint")
 	}

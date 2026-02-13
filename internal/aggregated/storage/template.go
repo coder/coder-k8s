@@ -76,7 +76,7 @@ func NewTemplateStorage(provider coder.ClientProvider) *TemplateStorage {
 	return &TemplateStorage{
 		provider:       provider,
 		tableConvertor: rest.NewDefaultTableConvertor(aggregationv1alpha1.Resource("codertemplates")),
-		broadcaster:    watch.NewBroadcaster(watchBroadcasterQueueLen, watch.DropIfChannelFull),
+		broadcaster:    watch.NewBroadcaster(watchBroadcasterQueueLen, watch.WaitIfChannelFull),
 	}
 }
 

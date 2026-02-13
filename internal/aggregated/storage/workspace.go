@@ -50,7 +50,7 @@ func NewWorkspaceStorage(provider coder.ClientProvider) *WorkspaceStorage {
 	return &WorkspaceStorage{
 		provider:       provider,
 		tableConvertor: rest.NewDefaultTableConvertor(aggregationv1alpha1.Resource("coderworkspaces")),
-		broadcaster:    watch.NewBroadcaster(watchBroadcasterQueueLen, watch.DropIfChannelFull),
+		broadcaster:    watch.NewBroadcaster(watchBroadcasterQueueLen, watch.WaitIfChannelFull),
 	}
 }
 
