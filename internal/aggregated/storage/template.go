@@ -78,7 +78,7 @@ func NewTemplateStorage(provider coder.ClientProvider) *TemplateStorage {
 	storage := &TemplateStorage{
 		provider:       provider,
 		tableConvertor: rest.NewDefaultTableConvertor(aggregationv1alpha1.Resource("codertemplates")),
-		broadcaster:    watch.NewBroadcaster(watchBroadcasterQueueLen, watch.WaitIfChannelFull),
+		broadcaster:    watch.NewBroadcaster(watchBroadcasterQueueLen, watch.DropIfChannelFull),
 		watchEvents:    make(chan watch.Event, watchBroadcasterQueueLen),
 	}
 	storage.watchEventsWG.Add(1)
