@@ -398,6 +398,117 @@ func TestTemplateStorageUpdateWaitsForTemplateVersionBuildBeforePromotion(t *tes
 	}
 }
 
+func TestTemplateStorageUpdateReturnsBadRequestWhenTemplateVersionBuildFails(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	createObj := &aggregationv1alpha1.CoderTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme.failed-build-template"},
+		Spec: aggregationv1alpha1.CoderTemplateSpec{
+			Organization: "acme",
+			Files:        map[string]string{"main.tf": "resource \"null_resource\" \"initial\" {}"},
+		},
+	}
+	createdObj, err := templateStorage.Create(ctx, createObj, rest.ValidateAllObjectFunc, nil)
+	if err != nil {
+		t.Fatalf("expected template create to succeed: %v", err)
+	}
+	createdTemplate := createdObj.(*aggregationv1alpha1.CoderTemplate)
+
+	state.setNextCreatedTemplateVersionStatus(codersdk.ProvisionerJobFailed)
+
+	desiredTemplate := createdTemplate.DeepCopy()
+	desiredTemplate.Spec.Files = map[string]string{"main.tf": "resource \"null_resource\" \"updated\" {}"}
+
+	updatedObj, created, updateErr := templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if updateErr == nil {
+		t.Fatal("expected update to fail when template version build fails")
+	}
+	if updatedObj != nil {
+		t.Fatalf("expected nil updated object on failure, got %T", updatedObj)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+	if !apierrors.IsBadRequest(updateErr) {
+		t.Fatalf("expected BadRequest for failed build, got %v", updateErr)
+	}
+	assertTopLevelStatusError(t, updateErr)
+	if !strings.Contains(updateErr.Error(), "build ended with status") {
+		t.Fatalf("expected failed-build error message, got %v", updateErr)
+	}
+}
+
+func TestTemplateStorageUpdateReturnsBadRequestWhenTemplateVersionBuildWaitTimesOut(t *testing.T) {
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+
+	templateStorage := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	createObj := &aggregationv1alpha1.CoderTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme.timeout-build-template"},
+		Spec: aggregationv1alpha1.CoderTemplateSpec{
+			Organization: "acme",
+			Files:        map[string]string{"main.tf": "resource \"null_resource\" \"initial\" {}"},
+		},
+	}
+	createdObj, err := templateStorage.Create(ctx, createObj, rest.ValidateAllObjectFunc, nil)
+	if err != nil {
+		t.Fatalf("expected template create to succeed: %v", err)
+	}
+	createdTemplate := createdObj.(*aggregationv1alpha1.CoderTemplate)
+
+	t.Setenv(templateVersionBuildWaitTimeoutEnv, "120ms")
+	t.Setenv(templateVersionBuildBackoffAfterEnv, "0s")
+	t.Setenv(templateVersionBuildInitialPollIntervalEnv, "10ms")
+	t.Setenv(templateVersionBuildMaxPollIntervalEnv, "20ms")
+
+	state.setNextCreatedTemplateVersionStatus(codersdk.ProvisionerJobPending)
+
+	desiredTemplate := createdTemplate.DeepCopy()
+	desiredTemplate.Spec.Files = map[string]string{"main.tf": "resource \"null_resource\" \"updated\" {}"}
+
+	updatedObj, created, updateErr := templateStorage.Update(
+		ctx,
+		desiredTemplate.Name,
+		testUpdatedObjectInfo{obj: desiredTemplate},
+		nil,
+		rest.ValidateAllObjectUpdateFunc,
+		false,
+		nil,
+	)
+	if updateErr == nil {
+		t.Fatal("expected update to fail when template version build wait times out")
+	}
+	if updatedObj != nil {
+		t.Fatalf("expected nil updated object on timeout, got %T", updatedObj)
+	}
+	if created {
+		t.Fatal("expected update created=false")
+	}
+	if !apierrors.IsBadRequest(updateErr) {
+		t.Fatalf("expected BadRequest for build wait timeout, got %v", updateErr)
+	}
+	assertTopLevelStatusError(t, updateErr)
+	if !strings.Contains(updateErr.Error(), "did not succeed within") {
+		t.Fatalf("expected timeout error message, got %v", updateErr)
+	}
+}
+
 func TestLoadTemplateVersionBuildWaitConfigFromEnvDefaults(t *testing.T) {
 	t.Setenv(templateVersionBuildWaitTimeoutEnv, "")
 	t.Setenv(templateVersionBuildBackoffAfterEnv, "")
@@ -3080,6 +3191,18 @@ func (s *mockCoderServerState) setFailActiveVersionPromotion(fail bool) {
 	defer s.mu.Unlock()
 
 	s.failActiveVersionPromotion = fail
+}
+
+func (s *mockCoderServerState) setNextCreatedTemplateVersionStatus(status codersdk.ProvisionerJobStatus) {
+	if status == "" {
+		panic("assertion failed: template version status must not be empty")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.nextTemplateVersionInitialStatus = status
+	s.nextTemplateVersionPendingPolls = 0
 }
 
 func (s *mockCoderServerState) setNextCreatedTemplateVersionPendingForPolls(polls int) {

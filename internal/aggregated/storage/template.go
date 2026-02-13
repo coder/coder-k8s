@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -497,7 +498,7 @@ func (s *TemplateStorage) Update(
 			}
 
 			if waitErr := waitForTemplateVersionBuild(ctx, sdk, newVersion.ID); waitErr != nil {
-				return nil, false, fmt.Errorf("wait for template version %q build: %w", newVersion.ID.String(), waitErr)
+				return nil, false, mapTemplateVersionBuildWaitError(waitErr, name)
 			}
 
 			if err := sdk.UpdateActiveTemplateVersion(ctx, templateID, codersdk.UpdateActiveTemplateVersion{ID: newVersion.ID}); err != nil {
@@ -596,6 +597,102 @@ func (s *TemplateStorage) ConvertToTable(ctx context.Context, object, tableOptio
 	return s.tableConvertor.ConvertToTable(ctx, object, tableOptions)
 }
 
+type templateVersionBuildTerminalError struct {
+	versionID uuid.UUID
+	status    codersdk.ProvisionerJobStatus
+	detail    string
+}
+
+func (e *templateVersionBuildTerminalError) Error() string {
+	if e == nil {
+		panic("assertion failed: template version build terminal error must not be nil")
+	}
+	if e.versionID == uuid.Nil {
+		panic("assertion failed: template version build terminal error must include version ID")
+	}
+	if e.status == "" {
+		panic("assertion failed: template version build terminal error must include status")
+	}
+
+	detail := e.detail
+	if detail == "" {
+		detail = "template version build did not succeed"
+	}
+
+	return fmt.Sprintf(
+		"template version %q build ended with status %q: %s",
+		e.versionID.String(),
+		e.status,
+		detail,
+	)
+}
+
+type templateVersionBuildWaitTimeoutError struct {
+	versionID   uuid.UUID
+	waitTimeout time.Duration
+	lastStatus  codersdk.ProvisionerJobStatus
+	lastError   string
+	cause       error
+}
+
+func (e *templateVersionBuildWaitTimeoutError) Error() string {
+	if e == nil {
+		panic("assertion failed: template version build timeout error must not be nil")
+	}
+	if e.versionID == uuid.Nil {
+		panic("assertion failed: template version build timeout error must include version ID")
+	}
+	if e.waitTimeout <= 0 {
+		panic("assertion failed: template version build timeout error must include positive timeout")
+	}
+	if e.lastStatus == "" {
+		panic("assertion failed: template version build timeout error must include last status")
+	}
+	if e.cause == nil {
+		panic("assertion failed: template version build timeout error must include cause")
+	}
+
+	if e.lastError == "" {
+		return fmt.Sprintf(
+			"template version %q did not succeed within %s (last status: %q): %v",
+			e.versionID.String(),
+			e.waitTimeout,
+			e.lastStatus,
+			e.cause,
+		)
+	}
+
+	return fmt.Sprintf(
+		"template version %q did not succeed within %s (last status: %q, last error: %s): %v",
+		e.versionID.String(),
+		e.waitTimeout,
+		e.lastStatus,
+		e.lastError,
+		e.cause,
+	)
+}
+
+func mapTemplateVersionBuildWaitError(waitErr error, templateName string) error {
+	if waitErr == nil {
+		return fmt.Errorf("assertion failed: wait error must not be nil")
+	}
+	if templateName == "" {
+		return fmt.Errorf("assertion failed: template name must not be empty")
+	}
+
+	var terminalErr *templateVersionBuildTerminalError
+	if errors.As(waitErr, &terminalErr) {
+		return apierrors.NewBadRequest(terminalErr.Error())
+	}
+
+	var timeoutErr *templateVersionBuildWaitTimeoutError
+	if errors.As(waitErr, &timeoutErr) {
+		return apierrors.NewBadRequest(timeoutErr.Error())
+	}
+
+	return coder.MapCoderError(waitErr, aggregationv1alpha1.Resource("codertemplates"), templateName)
+}
+
 func waitForTemplateVersionBuild(ctx context.Context, sdk *codersdk.Client, versionID uuid.UUID) error {
 	if ctx == nil {
 		return fmt.Errorf("assertion failed: context must not be nil")
@@ -624,12 +721,13 @@ func waitForTemplateVersionBuild(ctx context.Context, sdk *codersdk.Client, vers
 		version, err := sdk.TemplateVersion(waitCtx, versionID)
 		if err != nil {
 			if waitCtx.Err() != nil {
-				return fmt.Errorf(
-					"template version %q build wait canceled after status %q: %w",
-					versionID.String(),
-					lastStatus,
-					waitCtx.Err(),
-				)
+				return &templateVersionBuildWaitTimeoutError{
+					versionID:   versionID,
+					waitTimeout: waitConfig.waitTimeout,
+					lastStatus:  lastStatus,
+					lastError:   lastError,
+					cause:       waitCtx.Err(),
+				}
 			}
 			return fmt.Errorf("fetch template version %q: %w", versionID.String(), err)
 		}
@@ -648,12 +746,11 @@ func waitForTemplateVersionBuild(ctx context.Context, sdk *codersdk.Client, vers
 			if lastError == "" {
 				lastError = "template version build did not succeed"
 			}
-			return fmt.Errorf(
-				"template version %q build ended with status %q: %s",
-				versionID.String(),
-				status,
-				lastError,
-			)
+			return &templateVersionBuildTerminalError{
+				versionID: versionID,
+				status:    status,
+				detail:    lastError,
+			}
 		case codersdk.ProvisionerJobPending, codersdk.ProvisionerJobRunning, codersdk.ProvisionerJobCanceling, codersdk.ProvisionerJobUnknown:
 			// Keep polling below.
 		default:
@@ -674,23 +771,16 @@ func waitForTemplateVersionBuild(ctx context.Context, sdk *codersdk.Client, vers
 
 		select {
 		case <-waitCtx.Done():
-			if lastError == "" {
-				return fmt.Errorf(
-					"template version %q did not succeed within %s (last status: %q): %w",
-					versionID.String(),
-					waitConfig.waitTimeout,
-					lastStatus,
-					waitCtx.Err(),
-				)
+			if waitCtx.Err() == nil {
+				return fmt.Errorf("assertion failed: wait context finished without an error")
 			}
-			return fmt.Errorf(
-				"template version %q did not succeed within %s (last status: %q, last error: %s): %w",
-				versionID.String(),
-				waitConfig.waitTimeout,
-				lastStatus,
-				lastError,
-				waitCtx.Err(),
-			)
+			return &templateVersionBuildWaitTimeoutError{
+				versionID:   versionID,
+				waitTimeout: waitConfig.waitTimeout,
+				lastStatus:  lastStatus,
+				lastError:   lastError,
+				cause:       waitCtx.Err(),
+			}
 		case <-time.After(pollInterval):
 		}
 	}
