@@ -43,3 +43,11 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trivy image scan (release)
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          scan-type: image
+          image-ref: ghcr.io/coder/coder-k8s:${{ github.event.release.tag_name }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
