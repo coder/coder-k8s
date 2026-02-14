@@ -1,3 +1,5 @@
+version: 2
+
 project_name: coder-k8s
 
 before:
@@ -19,31 +21,39 @@ builds:
 
 archives:
   - id: default
-    format: tar.gz
+    formats: [tar.gz]
     files:
-      - none*
+      - LICENSE
+      - README.md
 
-dockers:
+dockers_v2:
   - id: coder-k8s-image
-    image_templates:
-      - "ghcr.io/coder/coder-k8s:{{ .Version }}"
-      - "ghcr.io/coder/coder-k8s:latest"
     dockerfile: Dockerfile.goreleaser
-    use: buildx
-    build_flag_templates:
-      - "--pull"
-      - "--platform=linux/amd64"
-      - "--label=org.opencontainers.image.created={{ .Date }}"
-      - "--label=org.opencontainers.image.source=https://github.com/coder/coder-k8s"
-      - "--label=org.opencontainers.image.url=https://coder.github.io/coder-k8s/"
-      - "--label=org.opencontainers.image.documentation=https://coder.github.io/coder-k8s/"
-      - "--label=org.opencontainers.image.title=coder-k8s"
-      - "--label=org.opencontainers.image.description=Kubernetes operator for Coder"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.vendor=Coder"
-      - "--label=org.opencontainers.image.licenses=Apache-2.0"
-      - "--label=org.opencontainers.image.authors=Coder"
+    ids:
+      - coder-k8s
+    images:
+      - ghcr.io/coder/coder-k8s
+    tags:
+      - "{{ .Version }}"
+      - latest
+    platforms:
+      - linux/amd64
+    sbom: false
+    labels:
+      org.opencontainers.image.created: "{{ .Date }}"
+      org.opencontainers.image.source: https://github.com/coder/coder-k8s
+      org.opencontainers.image.url: https://coder.github.io/coder-k8s/
+      org.opencontainers.image.documentation: https://coder.github.io/coder-k8s/
+      org.opencontainers.image.title: coder-k8s
+      org.opencontainers.image.description: Kubernetes operator for Coder
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.vendor: Coder
+      org.opencontainers.image.licenses: Apache-2.0
+      org.opencontainers.image.authors: Coder
+    flags:
+      - "--pull=true"
+      - "--provenance=false"
 
 changelog:
   use: github

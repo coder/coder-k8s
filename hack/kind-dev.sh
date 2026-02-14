@@ -109,7 +109,22 @@ build_binary() {
 		fi
 	fi
 
-	GOFLAGS=-mod=vendor CGO_ENABLED=0 GOOS=linux GOARCH="${resolved_goarch}" go build -o coder-k8s ./
+	local resolved_goarm=""
+	local target_platform="linux/${resolved_goarch}"
+	if [[ "${resolved_goarch}" == "arm" ]]; then
+		resolved_goarm="${GOARM:-}"
+		if [[ -z "${resolved_goarm}" ]]; then
+			resolved_goarm="$(go env GOARM)"
+			if [[ -z "${resolved_goarm}" ]]; then
+				echo "assertion failed: go env GOARM returned an empty value for GOARCH=arm" >&2
+				exit 1
+			fi
+		fi
+		target_platform="linux/arm/v${resolved_goarm}"
+	fi
+
+	mkdir -p "${target_platform}"
+	GOFLAGS=-mod=vendor CGO_ENABLED=0 GOOS=linux GOARCH="${resolved_goarch}" GOARM="${resolved_goarm}" go build -o "${target_platform}/coder-k8s" ./
 }
 
 build_and_load_image() {
