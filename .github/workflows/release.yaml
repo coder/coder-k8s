@@ -43,3 +43,20 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute release image tag
+        id: release_image_tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          IMAGE_TAG="${RELEASE_TAG#v}"
+          test -n "$IMAGE_TAG"
+          echo "value=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy image scan (release)
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          scan-type: image
+          image-ref: ghcr.io/coder/coder-k8s:${{ steps.release_image_tag.outputs.value }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
