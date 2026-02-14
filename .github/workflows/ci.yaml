@@ -68,6 +68,7 @@ jobs:
               - 'go.mod'
               - 'go.sum'
               - 'vendor/**'
+              - '.goreleaser.yaml'
               - 'Dockerfile*'
               - 'Dockerfile.goreleaser'
             terraform:
@@ -477,6 +478,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Setup Go
@@ -484,16 +486,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-
-      - name: Build linux/amd64 binary for image
-        env:
-          GOFLAGS: -mod=vendor
-          CGO_ENABLED: "0"
-          GOOS: linux
-          GOARCH: amd64
-        run: |
-          mkdir -p linux/amd64
-          go build -o linux/amd64/coder-k8s ./
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
@@ -505,29 +497,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute OCI label values
-        id: oci
-        run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push :main
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
+      - name: Run GoReleaser (:main)
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6.4.0
         with:
-          context: .
-          file: Dockerfile.goreleaser
-          push: true
-          tags: ghcr.io/coder/coder-k8s:main
-          labels: |
-            org.opencontainers.image.created=${{ steps.oci.outputs.created }}
-            org.opencontainers.image.source=https://github.com/coder/coder-k8s
-            org.opencontainers.image.url=https://coder.github.io/coder-k8s/
-            org.opencontainers.image.documentation=https://coder.github.io/coder-k8s/
-            org.opencontainers.image.title=coder-k8s
-            org.opencontainers.image.description=Kubernetes operator for Coder
-            org.opencontainers.image.version=main
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.vendor=Coder
-            org.opencontainers.image.licenses=Apache-2.0
-            org.opencontainers.image.authors=Coder
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean --skip=announce
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: v0.0.0-main
+          GORELEASER_CHANNEL: main
 
       - name: Trivy image scan (:main)
         uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
