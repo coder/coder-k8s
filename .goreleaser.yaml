@@ -38,7 +38,7 @@ dockers_v2:
       - latest
     platforms:
       - linux/amd64
-    sbom: false
+    sbom: true
     labels:
       org.opencontainers.image.created: "{{ .Date }}"
       org.opencontainers.image.source: https://github.com/coder/coder-k8s

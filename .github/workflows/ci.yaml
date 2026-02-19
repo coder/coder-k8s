@@ -113,6 +113,29 @@ jobs:
       - name: Run govulncheck
         run: go tool govulncheck ./...
 
+  scan-fs:
+    name: Trivy filesystem scan
+    needs: changes
+    if: github.event_name == 'merge_group' || ((needs.changes.outputs.go == 'true' || needs.changes.outputs.workflows == 'true') && (github.event_name != 'push' || github.actor != 'github-merge-queue[bot]'))
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          scan-type: fs
+          scan-ref: .
+          skip-dirs: vendor
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+
   test:
     needs: changes
     if: github.event_name == 'merge_group' || (needs.changes.outputs.go == 'true' && (github.event_name != 'push' || github.actor != 'github-merge-queue[bot]'))
@@ -290,6 +313,45 @@ jobs:
           echo "=== CNPG controller logs ==="
           kubectl -n cnpg-system logs deploy/cnpg-controller-manager --tail=200 || true
 
+  image-scan:
+    name: Trivy image scan
+    needs: changes
+    if: github.event_name == 'merge_group' || (needs.changes.outputs.publish == 'true' && (github.event_name != 'push' || github.actor != 'github-merge-queue[bot]'))
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build linux/amd64 binary for image
+        env:
+          GOFLAGS: -mod=vendor
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          mkdir -p linux/amd64
+          go build -o linux/amd64/coder-k8s ./
+
+      - name: Build local image
+        run: docker build -f Dockerfile.goreleaser -t coder-k8s:scan .
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          scan-type: image
+          image-ref: coder-k8s:scan
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+
   terraform:
     name: Terraform (fmt/validate/tflint/trivy)
     needs: changes
@@ -393,7 +455,7 @@ jobs:
 
   publish-main:
     name: Publish GHCR :main
-    needs: [changes, test, lint, lint-actions, e2e-kind, terraform]
+    needs: [changes, test, lint, scan-fs, lint-actions, e2e-kind, image-scan, terraform]
     if: |
       always() &&
       github.event_name == 'push' &&
@@ -401,8 +463,10 @@ jobs:
       needs.changes.outputs.publish == 'true' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       (needs.lint.result == 'success' || needs.lint.result == 'skipped') &&
+      (needs.scan-fs.result == 'success' || needs.scan-fs.result == 'skipped') &&
       (needs.lint-actions.result == 'success' || needs.lint-actions.result == 'skipped') &&
       (needs.e2e-kind.result == 'success' || needs.e2e-kind.result == 'skipped') &&
+      (needs.image-scan.result == 'success' || needs.image-scan.result == 'skipped') &&
       (needs.terraform.result == 'success' || needs.terraform.result == 'skipped')
     runs-on: depot-ubuntu-24.04-8
     timeout-minutes: 30
@@ -464,3 +528,11 @@ jobs:
             org.opencontainers.image.vendor=Coder
             org.opencontainers.image.licenses=Apache-2.0
             org.opencontainers.image.authors=Coder
+
+      - name: Trivy image scan (:main)
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          scan-type: image
+          image-ref: ghcr.io/coder/coder-k8s:main
+          severity: HIGH,CRITICAL
+          exit-code: '1'
