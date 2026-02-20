@@ -26,8 +26,41 @@ archives:
       - LICENSE
       - README.md
 
+release:
+  disable: '{{ eq .Env.GORELEASER_CHANNEL "main" }}'
+
 dockers_v2:
-  - id: coder-k8s-image
+  - id: coder-k8s-image-main
+    disable: '{{ ne .Env.GORELEASER_CHANNEL "main" }}'
+    dockerfile: Dockerfile.goreleaser
+    ids:
+      - coder-k8s
+    images:
+      - ghcr.io/coder/coder-k8s
+    tags:
+      - main
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    sbom: true
+    labels:
+      org.opencontainers.image.created: "{{ .Date }}"
+      org.opencontainers.image.source: https://github.com/coder/coder-k8s
+      org.opencontainers.image.url: https://coder.github.io/coder-k8s/
+      org.opencontainers.image.documentation: https://coder.github.io/coder-k8s/
+      org.opencontainers.image.title: coder-k8s
+      org.opencontainers.image.description: Kubernetes operator for Coder
+      org.opencontainers.image.version: main
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.vendor: Coder
+      org.opencontainers.image.licenses: Apache-2.0
+      org.opencontainers.image.authors: Coder
+    flags:
+      - "--pull=true"
+      - "--provenance=false"
+
+  - id: coder-k8s-image-release
+    disable: '{{ eq .Env.GORELEASER_CHANNEL "main" }}'
     dockerfile: Dockerfile.goreleaser
     ids:
       - coder-k8s
@@ -38,6 +71,7 @@ dockers_v2:
       - latest
     platforms:
       - linux/amd64
+      - linux/arm64
     sbom: true
     labels:
       org.opencontainers.image.created: "{{ .Date }}"
