@@ -3,8 +3,10 @@ VENDOR_STAMP := vendor/modules.txt
 MODULE_FILES := go.mod $(wildcard go.sum)
 ENVTEST_K8S_VERSION ?= 1.35.x
 ENVTEST_ASSETS_DIR := $(shell pwd)/bin/envtest
+INSTALLER_MANIFEST := dist/install.yaml
+INSTALLER_RESOURCES := $(wildcard config/crd/bases/*.yaml) $(wildcard config/rbac/*.yaml)
 
-.PHONY: vendor test test-integration setup-envtest build lint vuln verify-vendor codegen manifests docs-reference docs-reference-check docs-serve docs-build docs-check update-coder-docs-skill kind-dev-up kind-dev-ctx kind-dev-load-image kind-dev-status kind-dev-k9s kind-dev-down
+.PHONY: vendor test test-integration setup-envtest build lint vuln verify-vendor codegen manifests build-installer docs-reference docs-reference-check docs-serve docs-build docs-check update-coder-docs-skill kind-dev-up kind-dev-ctx kind-dev-load-image kind-dev-status kind-dev-k9s kind-dev-down
 
 $(VENDOR_STAMP): $(MODULE_FILES)
 	go mod tidy
@@ -41,6 +43,12 @@ verify-vendor:
 
 manifests: $(VENDOR_STAMP)
 	bash ./hack/update-manifests.sh
+
+$(INSTALLER_MANIFEST): $(VENDOR_STAMP) config/default/kustomization.yaml config/default/namespace-coder-system.yaml config/default/namespace-coder.yaml deploy/deployment.yaml hack/update-manifests.sh $(INSTALLER_RESOURCES) manifests
+	@mkdir -p $(dir $@)
+	GOFLAGS=$(GOFLAGS) go tool kustomize build --load-restrictor=LoadRestrictionsNone config/default > $@
+
+build-installer: $(INSTALLER_MANIFEST)
 
 codegen: $(VENDOR_STAMP)
 	bash ./hack/update-codegen.sh

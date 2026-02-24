@@ -12,20 +12,10 @@ Estimated time: **10–15 minutes**.
 
 ## 1) Install the operator
 
-Create the operator namespace and apply CRDs/RBAC/deployment from GitHub:
+Apply the bundled installer manifest from GitHub (namespaces, CRDs, RBAC, and operator deployment):
 
 ```bash
-kubectl create namespace coder-system
-kubectl create namespace coder
-kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/crd/bases/coder.com_codercontrolplanes.yaml"
-kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/crd/bases/coder.com_coderprovisioners.yaml"
-kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/crd/bases/coder.com_coderworkspaceproxies.yaml"
-kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/rbac/serviceaccount.yaml"
-kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/rbac/role.yaml"
-kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/rbac/clusterrolebinding.yaml"
-kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/rbac/authentication-reader-binding.yaml"
-kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/rbac/auth-delegator-binding.yaml"
-kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/deploy/deployment.yaml"
+kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/dist/install.yaml"
 ```
 
 !!! tip
@@ -86,18 +76,8 @@ http://127.0.0.1:3000
 ## 5) Clean up (optional)
 
 ```bash
-kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/samples/coder_v1alpha1_codercontrolplane.yaml"
-kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/deploy/deployment.yaml"
-kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/rbac/auth-delegator-binding.yaml"
-kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/rbac/authentication-reader-binding.yaml"
-kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/rbac/clusterrolebinding.yaml"
-kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/rbac/role.yaml"
-kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/rbac/serviceaccount.yaml"
-kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/crd/bases/coder.com_coderworkspaceproxies.yaml"
-kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/crd/bases/coder.com_coderprovisioners.yaml"
-kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/crd/bases/coder.com_codercontrolplanes.yaml"
-kubectl delete namespace coder --ignore-not-found
-kubectl delete namespace coder-system --ignore-not-found
+kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/samples/coder_v1alpha1_codercontrolplane.yaml" --ignore-not-found
+kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/dist/install.yaml" --ignore-not-found
 ```
 
 ## Next steps
