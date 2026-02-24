@@ -80,10 +80,15 @@ jobs:
               - 'config/crd/bases/**'
               - 'config/rbac/**'
               - 'config/default/**'
+              - 'config/quickstart/**'
               - 'deploy/deployment.yaml'
+              - 'deploy/apiserver-service.yaml'
+              - 'deploy/apiserver-apiservice.yaml'
               - 'hack/update-manifests.sh'
               - 'Makefile'
               - 'dist/install.yaml'
+              - 'dist/minimal-installer.yaml'
+              - 'dist/quickstart-installer.yaml'
 
   lint:
     needs: changes
@@ -149,6 +154,8 @@ jobs:
           make build-installer
           git diff --exit-code -- \
             dist/install.yaml \
+            dist/minimal-installer.yaml \
+            dist/quickstart-installer.yaml \
             config/crd/bases/ \
             config/rbac/
 

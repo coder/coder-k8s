@@ -1,0 +1,16 @@
+apiVersion: aggregation.coder.com/v1alpha1
+kind: CoderTemplate
+metadata:
+  name: default.quickstart-template
+  namespace: coder
+spec:
+  organization: default
+  displayName: "Quickstart Template"
+  description: "Template applied by coder-k8s quickstart installer"
+  files:
+    main.tf: |
+      terraform {
+        required_version = ">= 1.0"
+      }
+
+      resource "null_resource" "quickstart" {}

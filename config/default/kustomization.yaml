@@ -2,7 +2,8 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - namespace-coder-system.yaml
-  - namespace-coder.yaml
   - ../crd/bases
   - ../rbac
   - ../../deploy/deployment.yaml
+  - ../../deploy/apiserver-service.yaml
+  - ../../deploy/apiserver-apiservice.yaml

@@ -10,12 +10,12 @@ Estimated time: **10–15 minutes**.
 - `kubectl` configured to your target context
 - Permissions to create namespaces, CRDs, RBAC resources, and Deployments
 
-## 1) Install the operator
+## 1) Install the operator (minimal installer)
 
-Apply the bundled installer manifest from GitHub (namespaces, CRDs, RBAC, and operator deployment):
+Apply the minimal installer manifest from GitHub (operator namespace, CRDs, RBAC, deployment, and aggregated API registration):
 
 ```bash
-kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/dist/install.yaml"
+kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/dist/minimal-installer.yaml"
 ```
 
 !!! tip
@@ -30,9 +30,10 @@ kubectl get pods -n coder-system
 
 ## 2) Create a `CoderControlPlane` instance
 
-Apply the sample control plane resource:
+Create the control plane namespace and apply the sample resource:
 
 ```bash
+kubectl create namespace coder --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/samples/coder_v1alpha1_codercontrolplane.yaml"
 ```
 
@@ -73,11 +74,30 @@ Then open:
 http://127.0.0.1:3000
 ```
 
-## 5) Clean up (optional)
+## 5) Seed quickstart template + workspace (optional)
+
+After the aggregated API is available and your sample control plane is ready, apply the quickstart installer:
 
 ```bash
+kubectl wait --for=condition=Available apiservice/v1alpha1.aggregation.coder.com --timeout=180s
+kubectl apply -f "https://raw.githubusercontent.com/coder/coder-k8s/main/dist/quickstart-installer.yaml"
+```
+
+If the first apply races aggregated API startup, wait a few seconds and re-run the same command.
+
+Verify the quickstart resources:
+
+```bash
+kubectl -n coder get codertemplates.aggregation.coder.com default.quickstart-template
+kubectl -n coder get coderworkspaces.aggregation.coder.com default.me.quickstart-workspace
+```
+
+## 6) Clean up (optional)
+
+```bash
+kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/dist/quickstart-installer.yaml" --ignore-not-found
 kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/config/samples/coder_v1alpha1_codercontrolplane.yaml" --ignore-not-found
-kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/dist/install.yaml" --ignore-not-found
+kubectl delete -f "https://raw.githubusercontent.com/coder/coder-k8s/main/dist/minimal-installer.yaml" --ignore-not-found
 ```
 
 ## Next steps
