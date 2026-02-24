@@ -149,8 +149,8 @@ jobs:
           make build-installer
           git diff --exit-code -- \
             dist/install.yaml \
-            config/crd/bases/kustomization.yaml \
-            config/rbac/kustomization.yaml
+            config/crd/bases/ \
+            config/rbac/
 
   scan-fs:
     name: Trivy filesystem scan
