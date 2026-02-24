@@ -23,6 +23,7 @@ jobs:
       workflows: ${{ steps.merge_group_defaults.outputs.workflows || steps.filter.outputs.workflows }}
       publish: ${{ steps.merge_group_defaults.outputs.publish || steps.filter.outputs.publish }}
       terraform: ${{ steps.merge_group_defaults.outputs.terraform || steps.filter.outputs.terraform }}
+      installer: ${{ steps.merge_group_defaults.outputs.installer || steps.filter.outputs.installer }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -40,6 +41,7 @@ jobs:
             echo "workflows=true"
             echo "publish=false"
             echo "terraform=true"
+            echo "installer=true"
           } >> "$GITHUB_OUTPUT"
 
       - name: Detect changed paths
@@ -74,6 +76,20 @@ jobs:
             terraform:
               - 'terraform/**'
               - '.github/workflows/ci.yaml'
+            installer:
+              - 'api/**/*.go'
+              - 'config/crd/bases/**'
+              - 'config/rbac/**'
+              - 'config/default/**'
+              - 'config/quickstart/**'
+              - 'deploy/deployment.yaml'
+              - 'deploy/apiserver-service.yaml'
+              - 'deploy/apiserver-apiservice.yaml'
+              - 'hack/update-manifests.sh'
+              - 'Makefile'
+              - 'dist/install.yaml'
+              - 'dist/minimal-installer.yaml'
+              - 'dist/quickstart-installer.yaml'
 
   lint:
     needs: changes
@@ -113,6 +129,48 @@ jobs:
 
       - name: Run govulncheck
         run: go tool govulncheck ./...
+
+  installer-manifest:
+    name: Verify installer manifest is up to date
+    needs: changes
+    if: github.event_name == 'merge_group' || ((needs.changes.outputs.go == 'true' || needs.changes.outputs.installer == 'true') && (github.event_name != 'push' || github.actor != 'github-merge-queue[bot]'))
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GOFLAGS: -mod=vendor
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify installer manifests are up to date
+        run: |
+          make build-installer
+          git diff --exit-code -- \
+            dist/install.yaml \
+            dist/minimal-installer.yaml \
+            dist/quickstart-installer.yaml \
+            config/crd/bases/ \
+            config/rbac/
+
+          UNTRACKED_GENERATED="$(git ls-files --others --exclude-standard -- \
+            dist/install.yaml \
+            dist/minimal-installer.yaml \
+            dist/quickstart-installer.yaml \
+            config/crd/bases/ \
+            config/rbac/)"
+          if [[ -n "${UNTRACKED_GENERATED}" ]]; then
+            echo "assertion failed: generated installer artifacts must be tracked" >&2
+            printf '%s\n' "${UNTRACKED_GENERATED}" >&2
+            exit 1
+          fi
 
   scan-fs:
     name: Trivy filesystem scan
@@ -456,7 +514,7 @@ jobs:
 
   publish-main:
     name: Publish GHCR :main
-    needs: [changes, test, lint, scan-fs, lint-actions, e2e-kind, image-scan, terraform]
+    needs: [changes, test, lint, installer-manifest, scan-fs, lint-actions, e2e-kind, image-scan, terraform]
     if: |
       always() &&
       github.event_name == 'push' &&
@@ -464,6 +522,7 @@ jobs:
       needs.changes.outputs.publish == 'true' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       (needs.lint.result == 'success' || needs.lint.result == 'skipped') &&
+      (needs.installer-manifest.result == 'success' || needs.installer-manifest.result == 'skipped') &&
       (needs.scan-fs.result == 'success' || needs.scan-fs.result == 'skipped') &&
       (needs.lint-actions.result == 'success' || needs.lint-actions.result == 'skipped') &&
       (needs.e2e-kind.result == 'success' || needs.e2e-kind.result == 'skipped') &&

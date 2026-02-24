@@ -1,0 +1,9 @@
+apiVersion: aggregation.coder.com/v1alpha1
+kind: CoderWorkspace
+metadata:
+  name: default.me.quickstart-workspace
+  namespace: coder
+spec:
+  organization: default
+  templateName: quickstart-template
+  running: false

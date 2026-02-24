@@ -3,8 +3,14 @@ VENDOR_STAMP := vendor/modules.txt
 MODULE_FILES := go.mod $(wildcard go.sum)
 ENVTEST_K8S_VERSION ?= 1.35.x
 ENVTEST_ASSETS_DIR := $(shell pwd)/bin/envtest
+MINIMAL_INSTALLER_MANIFEST := dist/minimal-installer.yaml
+QUICKSTART_INSTALLER_MANIFEST := dist/quickstart-installer.yaml
+INSTALLER_MANIFEST := dist/install.yaml
+INSTALLER_RESOURCES := $(wildcard config/crd/bases/*.yaml) $(wildcard config/rbac/*.yaml)
+MINIMAL_INSTALLER_SOURCES := config/default/kustomization.yaml config/default/namespace-coder-system.yaml deploy/deployment.yaml deploy/apiserver-service.yaml deploy/apiserver-apiservice.yaml
+QUICKSTART_INSTALLER_SOURCES := $(wildcard config/quickstart/*.yaml)
 
-.PHONY: vendor test test-integration setup-envtest build lint vuln verify-vendor codegen manifests docs-reference docs-reference-check docs-serve docs-build docs-check update-coder-docs-skill kind-dev-up kind-dev-ctx kind-dev-load-image kind-dev-status kind-dev-k9s kind-dev-down
+.PHONY: vendor test test-integration setup-envtest build lint vuln verify-vendor codegen manifests build-installer docs-reference docs-reference-check docs-serve docs-build docs-check update-coder-docs-skill kind-dev-up kind-dev-ctx kind-dev-load-image kind-dev-status kind-dev-k9s kind-dev-down
 
 $(VENDOR_STAMP): $(MODULE_FILES)
 	go mod tidy
@@ -41,6 +47,19 @@ verify-vendor:
 
 manifests: $(VENDOR_STAMP)
 	bash ./hack/update-manifests.sh
+
+$(MINIMAL_INSTALLER_MANIFEST): $(VENDOR_STAMP) hack/update-manifests.sh $(INSTALLER_RESOURCES) $(MINIMAL_INSTALLER_SOURCES) manifests
+	@mkdir -p $(dir $@)
+	GOFLAGS=$(GOFLAGS) go tool kustomize build --load-restrictor=LoadRestrictionsNone config/default > $@
+
+$(QUICKSTART_INSTALLER_MANIFEST): $(VENDOR_STAMP) $(QUICKSTART_INSTALLER_SOURCES)
+	@mkdir -p $(dir $@)
+	GOFLAGS=$(GOFLAGS) go tool kustomize build --load-restrictor=LoadRestrictionsNone config/quickstart > $@
+
+$(INSTALLER_MANIFEST): $(MINIMAL_INSTALLER_MANIFEST)
+	cp $(MINIMAL_INSTALLER_MANIFEST) $(INSTALLER_MANIFEST)
+
+build-installer: $(MINIMAL_INSTALLER_MANIFEST) $(QUICKSTART_INSTALLER_MANIFEST) $(INSTALLER_MANIFEST)
 
 codegen: $(VENDOR_STAMP)
 	bash ./hack/update-codegen.sh
