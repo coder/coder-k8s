@@ -159,6 +159,18 @@ jobs:
             config/crd/bases/ \
             config/rbac/
 
+          UNTRACKED_GENERATED="$(git ls-files --others --exclude-standard -- \
+            dist/install.yaml \
+            dist/minimal-installer.yaml \
+            dist/quickstart-installer.yaml \
+            config/crd/bases/ \
+            config/rbac/)"
+          if [[ -n "${UNTRACKED_GENERATED}" ]]; then
+            echo "assertion failed: generated installer artifacts must be tracked" >&2
+            printf '%s\n' "${UNTRACKED_GENERATED}" >&2
+            exit 1
+          fi
+
   scan-fs:
     name: Trivy filesystem scan
     needs: changes
