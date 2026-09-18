@@ -497,6 +497,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Prepare local main tag
+        id: prepare-main-tag
+        # GoReleaser validates that its current tag points at HEAD. Never push this tag.
+        run: git tag --force v0.0.0-main HEAD
+
       - name: Run GoReleaser (:main)
         uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6.4.0
         with:
