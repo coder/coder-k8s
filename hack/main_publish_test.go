@@ -27,14 +27,18 @@ func TestChangelogChannels(t *testing.T) {
 	if config.Changelog.Use != "github" {
 		t.Fatal("tagged releases must retain GitHub changelogs")
 	}
-	tmpl, err := template.New("disable").Parse(config.Changelog.Disable)
+	tmpl, err := template.New("disable").Option("missingkey=error").Parse(config.Changelog.Disable)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, channel := range []string{"main", "", "release"} {
+	for _, channel := range []string{"main", "", "release", "unset"} {
 		t.Run("channel="+channel, func(t *testing.T) {
 			var result strings.Builder
-			data := struct{ Env map[string]string }{Env: map[string]string{"GORELEASER_CHANNEL": channel}}
+			env := map[string]string{}
+			if channel != "unset" {
+				env["GORELEASER_CHANNEL"] = channel
+			}
+			data := struct{ Env map[string]string }{Env: env}
 			if err := tmpl.Execute(&result, data); err != nil {
 				t.Fatal(err)
 			}
