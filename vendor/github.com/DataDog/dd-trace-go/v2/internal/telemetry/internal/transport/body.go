@@ -18,6 +18,7 @@ type Application struct {
 	TracerVersion   string `json:"tracer_version"`
 	LanguageName    string `json:"language_name"`
 	LanguageVersion string `json:"language_version"`
+	ProcessTags     string `json:"process_tags,omitempty"`
 }
 
 // Host is identifying information about the host on which the app
@@ -142,7 +143,7 @@ func unmarshalPayload(bytes json.RawMessage, requestType RequestType) (Payload, 
 	}
 
 	if err := json.Unmarshal(bytes, payload); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal payload: %v", err)
+		return nil, fmt.Errorf("failed to unmarshal payload: %s", err.Error())
 	}
 
 	return payload, nil

@@ -163,10 +163,110 @@ while true; do
   fi
 done
 
-# Filter regular comments from bot that aren't minimized, excluding:
+# Filter regular comments from bot that aren't minimized, excluding the known
+# shapes that carry no review finding:
 # - "Didn't find any major issues" (no issues found)
 # - "usage limits have been reached" (rate limit error, not a real review)
-REGULAR_COMMENTS=$(echo "$ALL_COMMENTS" | jq "[.[] | select(.author.login == \"${BOT_LOGIN_GRAPHQL}\" and .isMinimized == false and (.body | test(\"Didn't find any major issues|usage limits have been reached\") | not))]")
+# - the "Codex Review Summary" status table the Codex app keeps editing in
+#   place (marker on line 1, optional metadata marker, fixed header, one or
+#   more Running/Completed rows, fixed "About Codex" footer)
+# - the explicit clean security verdict ("No security issues were found")
+# Recognition is structural and line-anchored: the summary and security shapes
+# must match line for line, so a marker alone, a quoted marker, or a summary
+# with any appended or inserted text stays blocking. Passing this filter means
+# "no finding recorded here", not that a review approved the PR.
+NON_FINDING_JQ=$(cat <<'EOF'
+def body_lines: split("\n") | until(length == 0 or .[-1] != ""; .[:-1]);
+
+def summary_marker: "<!-- codex-pull-request-review-summary -->";
+
+def is_summary_metadata_marker:
+  (capture("^<!-- codex-security-review:v1 (?<json>\\{.*\\}) -->$")
+    | .json | try (fromjson | type == "object") catch false) // false;
+
+def summary_head: [
+  "## Codex Review Summary",
+  "",
+  "This comment shows the latest Codex review activity on this pull request.",
+  "",
+  "| Review | Status | Commit | Review trigger |",
+  "| --- | --- | --- | --- |"
+];
+
+def summary_row_regex:
+  "^\\| [^| ]{1,4} \\*\\*(Code|Security) Review\\*\\* \\| [^| ]{1,4} \\*\\*(Running\\*\\* since|Completed\\*\\*) "
+  + "<relative-time datetime=\"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z\">"
+  + "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z</relative-time> "
+  + "\\| `[0-9a-f]{7,40}` \\| [A-Za-z][A-Za-z ]{0,39} \\|$";
+
+def summary_about: [
+  "<details> <summary>ℹ️ About Codex in GitHub</summary>",
+  "<br/>",
+  "",
+  "[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you",
+  "- Open a pull request for review",
+  "- Mark a draft as ready",
+  "- Comment \"@codex review\" or \"@codex security review\".",
+  "",
+  "Codex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 once all reviews finish with no findings.",
+  "",
+  "</details>"
+];
+
+# Count of leading elements satisfying f.
+def leading_count(f): (map(f) | index(false)) // length;
+
+def is_codex_review_summary:
+  body_lines as $l
+  | ($l | length) > 8
+    and $l[0] == summary_marker
+    and ($l[1] == "" or ($l[1] | is_summary_metadata_marker))
+    and $l[2:8] == summary_head
+    and ($l[8:] as $rest
+      | ($rest | leading_count(test(summary_row_regex))) as $rows
+      | $rows >= 1
+        and ($rest[$rows:] as $tail
+          | ($tail | leading_count(. == "")) as $blanks
+          | $blanks >= 1 and $tail[$blanks:] == summary_about));
+
+def security_about: [
+  "<details> <summary>ℹ️ About Codex security reviews in GitHub</summary>",
+  "<br/>",
+  "",
+  "This is an experimental Codex feature. Security reviews are triggered when:",
+  "- You comment \"@codex security review\"",
+  "- A regular code review gets triggered (for example, \"@codex review\" or when a PR is opened), and you’re opted in so security review runs alongside code review",
+  "",
+  "Once complete, Codex will leave suggestions, or a comment if no findings are found.",
+  "",
+  "",
+  "</details>"
+];
+
+def is_codex_security_clean:
+  body_lines as $l
+  | ($l | length) == 21
+    and $l[0] == "### 🛡️ Codex Security Review"
+    and $l[1] == ""
+    and $l[2] == "Security review completed. No security issues were found in this pull request."
+    and $l[3] == ""
+    and ($l[4] | test("^\\*\\*Reviewed commit:\\*\\* `[0-9a-f]{7,40}`$"))
+    and $l[5] == ""
+    and ($l[6] | test("^\\[View security finding report\\]\\(https://chatgpt\\.com/codex/cloud/tasks/[A-Za-z0-9_-]+\\)$"))
+    and $l[7] == ""
+    and $l[8] == "_Only the user who started this review can view the report in Codex._"
+    and $l[9] == ""
+    and $l[10:] == security_about;
+
+def is_known_non_finding:
+  test("Didn't find any major issues|usage limits have been reached")
+  or is_codex_review_summary
+  or is_codex_security_clean;
+
+[.[] | select(.author.login == $bot and .isMinimized == false and (.body | is_known_non_finding | not))]
+EOF
+)
+REGULAR_COMMENTS=$(echo "$ALL_COMMENTS" | jq --arg bot "$BOT_LOGIN_GRAPHQL" "$NON_FINDING_JQ")
 REGULAR_COUNT=$(echo "$REGULAR_COMMENTS" | jq 'length')
 
 # Filter unresolved review threads from bot

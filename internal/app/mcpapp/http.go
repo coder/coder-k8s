@@ -22,6 +22,18 @@ const (
 
 var setupLog = ctrl.Log.WithName("setup")
 
+// newMCPHTTPHandler keeps the production transport options shared with security tests.
+func newMCPHTTPHandler(server *mcp.Server) *mcp.StreamableHTTPHandler {
+	if server == nil {
+		panic("assertion failed: MCP server must not be nil")
+	}
+	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+		return server
+	}, &mcp.StreamableHTTPOptions{
+		SessionTimeout: streamableHTTPSessionTimeout,
+	})
+}
+
 // RunHTTP starts the MCP server using streamable HTTP transport.
 func RunHTTP(ctx context.Context) error {
 	if ctx == nil {
@@ -53,11 +65,7 @@ func RunHTTPWithClients(ctx context.Context, k8sClient client.Client, clientset 
 		return fmt.Errorf("assertion failed: MCP server is nil after successful construction")
 	}
 
-	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
-		return server
-	}, &mcp.StreamableHTTPOptions{
-		SessionTimeout: streamableHTTPSessionTimeout,
-	})
+	mcpHandler := newMCPHTTPHandler(server)
 	if mcpHandler == nil {
 		return fmt.Errorf("assertion failed: MCP HTTP handler is nil after successful construction")
 	}

@@ -33,6 +33,9 @@ const (
 
 	RequiredTemplateVariablesErrorCode = "REQUIRED_TEMPLATE_VARIABLES"
 	requiredTemplateVariablesErrorText = "required template variables"
+
+	InsufficientQuotaErrorCode = "INSUFFICIENT_QUOTA"
+	insufficientQuotaErrorText = "insufficient quota"
 )
 
 var errorCodes = map[string]string{
@@ -612,13 +615,10 @@ func (r *Runner) runTemplateImport(ctx context.Context) (*proto.CompletedJob, *p
 				RichParameters:             startProvision.Parameters,
 				ExternalAuthProvidersNames: externalAuthProviderNames,
 				ExternalAuthProviders:      startProvision.ExternalAuthProviders,
-				// TODO: These are defined as different, but can they be?
-				//   Terraform downloads modules regardless of `count`, so this should be the same
-				StartModules: initResp.Modules,
-				StopModules:  initResp.Modules,
-				Presets:      startProvision.Presets,
-				Plan:         startProvision.Plan,
-				ModuleFiles:  initResp.ModuleFiles,
+				StartModules:               initResp.Modules,
+				Presets:                    startProvision.Presets,
+				Plan:                       startProvision.Plan,
+				ModuleFiles:                initResp.ModuleFiles,
 				// ModuleFileHash will be populated if the file is uploaded async
 				ModuleFilesHash:   []byte{},
 				HasAiTasks:        startProvision.HasAITasks,
@@ -873,7 +873,10 @@ func (r *Runner) commitQuota(ctx context.Context, cost int32) *proto.FailedJob {
 			Output:    "This build would exceed your quota. Failing.",
 			Stage:     stage,
 		})
-		return r.failedWorkspaceBuildf("insufficient quota")
+		return r.failedWorkspaceBuildfCode(
+			InsufficientQuotaErrorCode,
+			insufficientQuotaErrorText,
+		)
 	}
 	return nil
 }
@@ -1108,6 +1111,20 @@ func resourceNames(rs []*sdkproto.Resource) []string {
 
 func (r *Runner) failedWorkspaceBuildf(format string, args ...interface{}) *proto.FailedJob {
 	failedJob := r.failedJobf(format, args...)
+	failedJob.Type = &proto.FailedJob_WorkspaceBuild_{}
+	return failedJob
+}
+
+func (r *Runner) failedWorkspaceBuildfCode(
+	code string,
+	format string,
+	args ...interface{},
+) *proto.FailedJob {
+	failedJob := &proto.FailedJob{
+		JobId:     r.job.JobId,
+		Error:     fmt.Sprintf(format, args...),
+		ErrorCode: code,
+	}
 	failedJob.Type = &proto.FailedJob_WorkspaceBuild_{}
 	return failedJob
 }

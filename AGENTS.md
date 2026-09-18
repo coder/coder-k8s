@@ -5,7 +5,7 @@ You are an experienced, pragmatic software engineering AI agent. Do not over-eng
 `coder-k8s` is a Go-based Kubernetes control-plane project with two app modes: a controller-runtime operator for `CoderControlPlane` (`coder.com/v1alpha1`) and an aggregated API server for `CoderWorkspace`/`CoderTemplate` (`aggregation.coder.com/v1alpha1`).
 
 **Tech stack**
-- Go `1.25.7` (`go.mod`)
+- Go `1.26.8` (`go.mod`)
 - Kubernetes libraries: `controller-runtime`, `client-go`, `apimachinery`, `apiserver`, `code-generator`
 - Vendored dependencies committed under `vendor/`
 - Tooling: `make`, `golangci-lint`/`gofumpt`, Bash scripts in `hack/` and `scripts/`, GitHub Actions, GoReleaser, optional Nix dev shell (`flake.nix`)

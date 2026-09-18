@@ -55,7 +55,17 @@ type Option struct {
 	YAML string `json:"yaml,omitempty"`
 
 	// Default is parsed into Value if set.
+	// Must be `""` if `DefaultFn` != nil
 	Default string `json:"default,omitempty"`
+	// DefaultFn is called to compute the default value dynamically.
+	// It is evaluated during SetDefaults(), after env/flag/yaml parsing,
+	// but BEFORE static Default values are applied. This means if your
+	// DefaultFn depends on another option, that option must get its value
+	// from env, flag, or yaml - not from a static Default or DefaultFn.
+	//
+	// The result populates the Default field (for JSON marshalling) and
+	// is applied to Value if no higher-priority source set it.
+	DefaultFn func() string `json:"-"`
 	// Value includes the types listed in values.go.
 	Value pflag.Value `json:"value,omitempty"`
 
@@ -282,15 +292,7 @@ func (optSet *OptionSet) ParseEnv(vs []EnvVar) error {
 			// because the agent lacked the environment variables to authenticate with Git.
 			envVal, ok = envs[`HOMEBREW_`+opt.Env]
 		}
-		// Currently, empty values are treated as if the environment variable is
-		// unset. This behavior is technically not correct as there is now no
-		// way for a user to change a Default value to an empty string from
-		// the environment. Unfortunately, we have old configuration files
-		// that rely on the faulty behavior.
-		//
-		// TODO: We should remove this hack in May 2023, when deployments
-		// have had months to migrate to the new behavior.
-		if !ok || envVal == "" {
+		if !ok {
 			continue
 		}
 
@@ -314,6 +316,34 @@ func (optSet *OptionSet) SetDefaults() error {
 
 	var merr *multierror.Error
 
+	// All default values are queued up and applied at the same time.
+	// This ensures a deterministic output regardless of the order of the options.
+	//
+	// If the value is assigned immediately, the outcome of 1 DefaultFn can
+	// affect the outcome of another DefaultFn, which can lead to non-deterministic
+	// behavior depending on the order of the options.
+	queuedDefaultValues := make(map[int]string)
+	for i, opt := range *optSet {
+		// Use DefaultFn to set the 'Default' field.
+		if opt.DefaultFn != nil {
+			if opt.Default != "" {
+				merr = multierror.Append(
+					merr,
+					xerrors.Errorf(
+						"option %q: cannot set both Default and DefaultFn",
+						opt.Name,
+					),
+				)
+				continue
+			}
+			queuedDefaultValues[i] = opt.DefaultFn()
+		}
+	}
+
+	for i, v := range queuedDefaultValues {
+		(*optSet)[i].Default = v
+	}
+
 	// It's common to have multiple options with the same value to
 	// handle deprecation. We group the options by value so that we
 	// don't let other options overwrite user input.
@@ -330,6 +360,7 @@ func (optSet *OptionSet) SetDefaults() error {
 			)
 			continue
 		}
+
 		groupByValue[opt.Value] = append(groupByValue[opt.Value], opt)
 	}
 

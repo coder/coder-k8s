@@ -131,6 +131,7 @@ jobs:
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
         with:
+          version: v0.74.0
           scan-type: fs
           scan-ref: .
           skip-dirs: vendor
@@ -348,6 +349,7 @@ jobs:
       - name: Trivy image scan
         uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
         with:
+          version: v0.74.0
           scan-type: image
           image-ref: coder-k8s:scan
           severity: HIGH,CRITICAL
@@ -398,6 +400,7 @@ jobs:
       - name: Trivy config scan (Terraform)
         uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
         with:
+          version: v0.74.0
           scan-type: config
           scan-ref: terraform/
           trivyignores: terraform/.trivyignore
@@ -448,6 +451,9 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Run helper regression tests
+        run: make test-scripts
 
       - name: Check unresolved Codex comments
         env:
@@ -511,6 +517,7 @@ jobs:
       - name: Trivy image scan (:main)
         uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
         with:
+          version: v0.74.0
           scan-type: image
           image-ref: ghcr.io/coder/coder-k8s:main
           severity: HIGH,CRITICAL
