@@ -90,4 +90,6 @@ dockers_v2:
       - "--provenance=false"
 
 changelog:
+  # The main channel's synthetic tag exists only in the CI checkout.
+  disable: '{{ eq .Env.GORELEASER_CHANNEL "main" }}'
   use: github
