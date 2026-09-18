@@ -104,7 +104,7 @@ func (o *Obfuscator) Obfuscate(input string, lexerOpts ...lexerOption) string {
 		}
 	}
 
-	return strings.TrimSpace(obfuscatedSQL.String())
+	return strings.Clone(strings.TrimSpace(obfuscatedSQL.String()))
 }
 
 func (o *Obfuscator) ObfuscateTokenValue(token *Token, lastValueToken *LastValueToken, lexerOpts ...lexerOption) {
@@ -149,7 +149,7 @@ func (o *Obfuscator) ObfuscateTokenValue(token *Token, lastValueToken *LastValue
 			token.Value = StringPlaceholder
 		}
 	case IDENT, QUOTED_IDENT:
-		if o.config.ReplaceDigits && len(token.digits) > 0 {
+		if o.config.ReplaceDigits && token.hasDigits {
 			token.Value = replaceDigits(token, NumberPlaceholder)
 		}
 	}

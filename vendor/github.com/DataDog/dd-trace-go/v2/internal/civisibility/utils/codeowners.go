@@ -99,11 +99,11 @@ func parseCodeOwners(filePath string) (*CodeOwners, error) {
 	cow, err := NewCodeOwners(filePath)
 	if err == nil {
 		if logger.DebugEnabled() {
-			logger.Debug("civisibility: codeowner file '%v' was loaded successfully.", filePath)
+			logger.Debug("civisibility: codeowner file '%s' was loaded successfully.", filePath)
 		}
 		return cow, nil
 	}
-	logger.Debug("Error parsing codeowners: %s", err)
+	logger.Debug("Error parsing codeowners: %s", err.Error())
 	return nil, err
 }
 
@@ -150,8 +150,8 @@ func NewCodeOwners(filePath string) (*CodeOwners, error) {
 
 		finalLine := line
 		var ownersList []string
-		terms := strings.Fields(line)
-		for _, term := range terms {
+		terms := strings.FieldsSeq(line)
+		for term := range terms {
 			if len(term) == 0 {
 				continue
 			}
@@ -316,7 +316,7 @@ func (co *CodeOwners) Match(value string) (*Entry, bool) {
 
 // GetOwnersString returns a formatted string of the owners list in an Entry.
 // It returns an empty string if there are no owners.
-func (e Entry) GetOwnersString() string {
+func (e *Entry) GetOwnersString() string {
 	if e.Owners == nil || len(e.Owners) == 0 {
 		return ""
 	}

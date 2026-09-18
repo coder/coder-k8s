@@ -10,6 +10,7 @@ import (
 	"time"
 
 	pb "github.com/DataDog/datadog-agent/pkg/proto/pbgo/trace"
+	"github.com/DataDog/datadog-agent/pkg/proto/pbgo/trace/idx"
 	"github.com/DataDog/datadog-agent/pkg/trace/config"
 	"github.com/DataDog/datadog-go/v5/statsd"
 )
@@ -41,17 +42,29 @@ type ScoreSampler struct {
 
 // NewNoPrioritySampler returns an initialized Sampler dedicated to traces with
 // no priority set.
-func NewNoPrioritySampler(conf *config.AgentConfig, statsd statsd.ClientInterface) *NoPrioritySampler {
-	s := newSampler(conf.ExtraSampleRate, conf.TargetTPS, []string{"sampler:no_priority"}, statsd)
+func NewNoPrioritySampler(conf *config.AgentConfig) *NoPrioritySampler {
+	s := newSampler(conf.ExtraSampleRate, conf.TargetTPS)
 	return &NoPrioritySampler{ScoreSampler{Sampler: s, samplingRateKey: noPriorityRateKey}}
+}
+
+var _ AdditionalMetricsReporter = (*NoPrioritySampler)(nil)
+
+func (s *NoPrioritySampler) report(statsd statsd.ClientInterface) {
+	s.Sampler.report(statsd, NameNoPriority)
 }
 
 // NewErrorsSampler returns an initialized Sampler dedicate to errors. It behaves
 // just like the normal ScoreEngine except for its GetType method (useful
 // for reporting).
-func NewErrorsSampler(conf *config.AgentConfig, statsd statsd.ClientInterface) *ErrorsSampler {
-	s := newSampler(conf.ExtraSampleRate, conf.ErrorTPS, []string{"sampler:error"}, statsd)
+func NewErrorsSampler(conf *config.AgentConfig) *ErrorsSampler {
+	s := newSampler(conf.ExtraSampleRate, conf.ErrorTPS)
 	return &ErrorsSampler{ScoreSampler{Sampler: s, samplingRateKey: errorsRateKey, disabled: conf.ErrorTPS == 0}}
+}
+
+var _ AdditionalMetricsReporter = (*ErrorsSampler)(nil)
+
+func (s *ErrorsSampler) report(statsd statsd.ClientInterface) {
+	s.Sampler.report(statsd, NameError)
 }
 
 // Sample counts an incoming trace and tells if it is a sample which has to be kept
@@ -72,7 +85,27 @@ func (s *ScoreSampler) Sample(now time.Time, trace pb.Trace, root *pb.Span, env 
 	rate := s.getSignatureSampleRate(signature)
 
 	sampled := s.applySampleRate(root, rate)
-	s.metrics.record(sampled, newMetricsKey(root.Service, env, nil))
+	return sampled
+}
+
+// SampleV1 counts an incoming trace and tells if it is a sample which has to be kept
+func (s *ScoreSampler) SampleV1(now time.Time, chunk *idx.InternalTraceChunk, root *idx.InternalSpan, env string) bool {
+	if s.disabled {
+		return false
+	}
+
+	// Extra safety, just in case one trace is empty
+	if len(chunk.Spans) == 0 {
+		return false
+	}
+	signature := computeSignatureWithRootAndEnvV1(chunk, root, env)
+	signature = s.shrink(signature)
+	// Update sampler state by counting this trace
+	s.countWeightedSig(now, signature, weightRootV1(root))
+
+	rate := s.getSignatureSampleRate(signature)
+
+	sampled := s.applySampleRateV1(root, chunk.LegacyTraceID(), rate)
 	return sampled
 }
 
@@ -93,6 +126,17 @@ func (s *ScoreSampler) applySampleRate(root *pb.Span, rate float64) bool {
 	sampled := SampleByRate(traceID, newRate)
 	if sampled {
 		setMetric(root, s.samplingRateKey, rate)
+	}
+	return sampled
+}
+
+// We use the legacy traceID here for backwards compatibility with any older version of the agent
+func (s *ScoreSampler) applySampleRateV1(root *idx.InternalSpan, traceID uint64, rate float64) bool {
+	initialRate := GetGlobalRateV1(root)
+	newRate := initialRate * rate
+	sampled := SampleByRate(traceID, newRate)
+	if sampled {
+		root.SetFloat64Attribute(s.samplingRateKey, rate)
 	}
 	return sampled
 }

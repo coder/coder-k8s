@@ -31,7 +31,9 @@ var (
 	TravisCiTestSessionType       TestSessionType = []string{"provider:travisci"}
 	BuddyCiTestSessionType        TestSessionType = []string{"provider:buddyci"}
 	AwsCodePipelineSessionType    TestSessionType = []string{"provider:aws"}
-	UnsupportedTestSessionType    TestSessionType = []string{"provider:unsupported"}
+	// BazelTestSessionType tags test-session telemetry emitted when Bazel mode is the only detected CI context.
+	BazelTestSessionType       TestSessionType = []string{"provider:bazel"}
+	UnsupportedTestSessionType TestSessionType = []string{"provider:unsupported"}
 
 	IsAutoInstrumentationTestSessionType TestSessionType = []string{"auto_injected:true"}
 )
@@ -94,17 +96,28 @@ var (
 type CommandType string
 
 const (
-	NotSpecifiedCommandsType    CommandType = ""
-	GetRepositoryCommandsType   CommandType = "command:get_repository"
-	GetBranchCommandsType       CommandType = "command:get_branch"
-	GetRemoteCommandsType       CommandType = "command:get_remote"
-	GetHeadCommandsType         CommandType = "command:get_head"
-	CheckShallowCommandsType    CommandType = "command:check_shallow"
-	UnshallowCommandsType       CommandType = "command:unshallow"
-	GetLocalCommitsCommandsType CommandType = "command:get_local_commits"
-	GetObjectsCommandsType      CommandType = "command:get_objects"
-	PackObjectsCommandsType     CommandType = "command:pack_objects"
-	Diff                        CommandType = "command:diff"
+	NotSpecifiedCommandsType              CommandType = ""
+	GetRepositoryCommandsType             CommandType = "command:get_repository"
+	GetBranchCommandsType                 CommandType = "command:get_branch"
+	GetRemoteCommandsType                 CommandType = "command:get_remote"
+	GetRemoteUpstreamTrackingCommandsType CommandType = "command:get_remote_upstream_tracking"
+	GetHeadCommandsType                   CommandType = "command:get_head"
+	CheckShallowCommandsType              CommandType = "command:check_shallow"
+	UnshallowCommandsType                 CommandType = "command:unshallow"
+	GetLocalCommitsCommandsType           CommandType = "command:get_local_commits"
+	GetObjectsCommandsType                CommandType = "command:get_objects"
+	PackObjectsCommandsType               CommandType = "command:pack_objects"
+	DiffCommandType                       CommandType = "command:diff"
+	ShowRefCommandType                    CommandType = "command:show_ref"
+	LsRemoteHeadsCommandType              CommandType = "command:ls_remote_heads"
+	FetchCommandType                      CommandType = "command:fetch"
+	ForEachRefCommandType                 CommandType = "command:for_each_ref"
+	MergeBaseCommandType                  CommandType = "command:merge_base"
+	RevListCommandType                    CommandType = "command:rev_list"
+	SymbolicRefCommandType                CommandType = "command:symbolic_ref"
+	GetWorkingDirectoryCommandType        CommandType = "command:get_working_directory"
+	GetGitCommitInfoCommandType           CommandType = "command:get_git_info"
+	GitAddPermissionCommandType           CommandType = "command:git_add_permission"
 )
 
 // CommandExitCodeType is a type for command exit codes
