@@ -4,7 +4,7 @@ MODULE_FILES := go.mod $(wildcard go.sum)
 ENVTEST_K8S_VERSION ?= 1.35.x
 ENVTEST_ASSETS_DIR := $(shell pwd)/bin/envtest
 
-.PHONY: vendor test test-integration setup-envtest build lint vuln verify-vendor codegen manifests docs-reference docs-reference-check docs-serve docs-build docs-check update-coder-docs-skill kind-dev-up kind-dev-ctx kind-dev-load-image kind-dev-status kind-dev-k9s kind-dev-down
+.PHONY: vendor test test-integration test-scripts setup-envtest build lint vuln verify-vendor codegen manifests docs-reference docs-reference-check docs-serve docs-build docs-check update-coder-docs-skill kind-dev-up kind-dev-ctx kind-dev-load-image kind-dev-status kind-dev-k9s kind-dev-down
 
 $(VENDOR_STAMP): $(MODULE_FILES)
 	go mod tidy
@@ -22,6 +22,9 @@ test: $(VENDOR_STAMP) setup-envtest
 test-integration: $(VENDOR_STAMP) setup-envtest
 	KUBEBUILDER_ASSETS="$$(GOFLAGS=-mod=vendor go run ./vendor/sigs.k8s.io/controller-runtime/tools/setup-envtest use $(ENVTEST_K8S_VERSION) --bin-dir $(ENVTEST_ASSETS_DIR) -p path)" \
 	GOFLAGS=$(GOFLAGS) go test ./internal/controller/... -count=1 -v
+
+test-scripts:
+	bash ./scripts/check_codex_comments_test.sh
 
 build: $(VENDOR_STAMP)
 	GOFLAGS=$(GOFLAGS) go build ./...

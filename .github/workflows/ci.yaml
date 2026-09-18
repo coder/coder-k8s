@@ -452,6 +452,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Run helper regression tests
+        run: make test-scripts
+
       - name: Check unresolved Codex comments
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
