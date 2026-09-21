@@ -12,17 +12,24 @@ package httpsec
 
 import (
 	"context"
+	"sync"
+
 	// Blank import needed to use embed for the default blocked response payloads
 	_ "embed"
 	"net/http"
 	"sync/atomic"
 
+	"github.com/DataDog/go-libddwaf/v4"
+
+	"github.com/DataDog/dd-trace-go/v2/appsec/events"
 	"github.com/DataDog/dd-trace-go/v2/instrumentation/appsec/dyngo"
 	"github.com/DataDog/dd-trace-go/v2/instrumentation/appsec/emitter/waf/actions"
 	"github.com/DataDog/dd-trace-go/v2/instrumentation/appsec/emitter/waf/addresses"
 	"github.com/DataDog/dd-trace-go/v2/instrumentation/appsec/trace"
 	"github.com/DataDog/dd-trace-go/v2/internal/appsec/emitter/waf"
+	"github.com/DataDog/dd-trace-go/v2/internal/log"
 	"github.com/DataDog/dd-trace-go/v2/internal/telemetry"
+	telemetrylog "github.com/DataDog/dd-trace-go/v2/internal/telemetry/log"
 )
 
 // HandlerOperation type representing an HTTP operation. It must be created with
@@ -41,6 +48,20 @@ type (
 		method string
 		// route is the HTTP route for the current handler operation (or the URL if no route is available).
 		route string
+
+		// downstreamRequestBodyAnalysis is the number of times a call to a downstream request body monitoring function was made.
+		downstreamRequestBodyAnalysis atomic.Int32
+
+		// downstreamRequestOverrides holds behavioral overrides for future downstream requests, related
+		// to a redirect chain.
+		downstreamRequestOverrides   map[string]DownstreamRequestOverride
+		downstreamRequestOverridesMu sync.Mutex
+	}
+
+	DownstreamRequestOverride struct {
+		DownstreamURL       string
+		AnalyzeBody         bool
+		OriginalRequestBody libddwaf.Encodable
 	}
 
 	// HandlerOperationArgs is the HTTP handler operation arguments.
@@ -48,7 +69,7 @@ type (
 		Framework    string // Optional: name of the framework or library being used
 		Method       string
 		RequestURI   string
-		RequestRoute string // the HTTP route for the current handler operation, if available
+		RequestRoute string
 		Host         string
 		RemoteAddr   string
 		Headers      map[string][]string
@@ -62,6 +83,9 @@ type (
 		Headers    map[string][]string
 		StatusCode int
 	}
+
+	// EarlyBlock is used to trigger an early block before the handler is executed.
+	EarlyBlock struct{}
 )
 
 func (HandlerOperationArgs) IsArgOf(*HandlerOperation)   {}
@@ -81,16 +105,21 @@ func StartOperation(ctx context.Context, args HandlerOperationArgs, span trace.T
 		method:           args.Method,
 		route:            args.RequestRoute,
 	}
-	if op.route == "" {
-		// If there is no route, use the request URI instead
-		telemetry.Count(telemetry.NamespaceAppSec, "api_security.missing_route", []string{"framework:" + args.Framework}).Submit(1)
-		op.route = args.RequestURI
-	}
 
 	// We need to use an atomic pointer to store the action because the action may be created asynchronously in the future
 	var action atomic.Pointer[actions.BlockHTTP]
 	dyngo.OnData(op, func(a *actions.BlockHTTP) {
 		action.Store(a)
+	})
+
+	dyngo.OnData(op, func(evt DownstreamRequestOverride) {
+		op.downstreamRequestOverridesMu.Lock()
+		defer op.downstreamRequestOverridesMu.Unlock()
+
+		if op.downstreamRequestOverrides == nil {
+			op.downstreamRequestOverrides = make(map[string]DownstreamRequestOverride, 1)
+		}
+		op.downstreamRequestOverrides[evt.DownstreamURL] = evt
 	})
 
 	return op, &action, dyngo.StartAndRegisterOperation(ctx, op, args)
@@ -111,6 +140,35 @@ func (op *HandlerOperation) Route() string {
 	return op.route
 }
 
+// DownstreamRequestBodyAnalysis returns the number of times a call to a downstream request body monitoring function was made.
+func (op *HandlerOperation) DownstreamRequestBodyAnalysis() int {
+	return int(op.downstreamRequestBodyAnalysis.Load())
+}
+
+// HasDownstreamRequestOverride checks if a downstream request override exists for the given URL,
+// meaning it is part of a redirect chain.
+func (op *HandlerOperation) HasDownstreamRequestOverride(url string) bool {
+	op.downstreamRequestOverridesMu.Lock()
+	defer op.downstreamRequestOverridesMu.Unlock()
+	_, ok := op.downstreamRequestOverrides[url]
+	return ok
+}
+
+// ConsumeDownstreamRequestOverride consumes and removes a downstream request override for the given
+// URL, returning the override data.
+func (op *HandlerOperation) ConsumeDownstreamRequestOverride(url string) (DownstreamRequestOverride, bool) {
+	op.downstreamRequestOverridesMu.Lock()
+	defer op.downstreamRequestOverridesMu.Unlock()
+	override, ok := op.downstreamRequestOverrides[url]
+	delete(op.downstreamRequestOverrides, url)
+	return override, ok
+}
+
+// IncrementDownstreamRequestBodyAnalysis increments the number of times a call to a downstream request body monitoring function was made.
+func (op *HandlerOperation) IncrementDownstreamRequestBodyAnalysis() {
+	op.downstreamRequestBodyAnalysis.Add(1)
+}
+
 // Finish the HTTP handler operation and its children operations and write everything to the service entry span.
 func (op *HandlerOperation) Finish(res HandlerOperationRes) {
 	dyngo.FinishOperation(op, res)
@@ -119,20 +177,38 @@ func (op *HandlerOperation) Finish(res HandlerOperationRes) {
 	}
 }
 
-const monitorBodyErrorLog = `
+const (
+	monitorParsedBodyErrorLog = `
 "appsec: parsed http body monitoring ignored: could not find the http handler instrumentation metadata in the request context:
 	the request handler is not being monitored by a middleware function or the provided context is not the expected request context
 `
+	monitorResponseBodyErrorLog = `
+"appsec: http response body monitoring ignored: could not find the http handler instrumentation metadata in the request context:
+	the request handler is not being monitored by a middleware function or the provided context is not the expected request context
+`
+)
 
 // MonitorParsedBody starts and finishes the SDK body operation.
 // This function should not be called when AppSec is disabled in order to
-// get preciser error logs.
+// get more accurate error logs.
 func MonitorParsedBody(ctx context.Context, body any) error {
 	return waf.RunSimple(ctx,
 		addresses.NewAddressesBuilder().
 			WithRequestBody(body).
 			Build(),
-		monitorBodyErrorLog,
+		monitorParsedBodyErrorLog,
+	)
+}
+
+// MonitorResponseBody gets the response body through the in-app WAF.
+// This function should not be called when AppSec is disabled in order to get
+// more accurate error logs.
+func MonitorResponseBody(ctx context.Context, body any) error {
+	return waf.RunSimple(ctx,
+		addresses.NewAddressesBuilder().
+			WithResponseBody(body).
+			Build(),
+		monitorResponseBodyErrorLog,
 	)
 }
 
@@ -149,6 +225,37 @@ func makeCookies(parsed []*http.Cookie) map[string][]string {
 	return cookies
 }
 
+// RouteMatched can be called if BeforeHandle is started too early in the http request lifecycle like
+// before the router has matched the request to a route. This can happen when the HTTP handler is wrapped
+// using http.NewServeMux instead of http.WrapHandler. In this case the route is empty and so are the path parameters.
+// In this case the route and path parameters will be filled in later by calling RouteMatched with the actual route.
+// If RouteMatched returns an error, the request should be considered blocked and the error should be reported.
+func RouteMatched(ctx context.Context, route string, routeParams map[string]string) error {
+	op, ok := dyngo.FindOperation[HandlerOperation](ctx)
+	if !ok {
+		log.Debug("appsec: RouteMatched called without an active HandlerOperation in the context, ignoring")
+		telemetrylog.With(telemetry.WithTags([]string{"product:appsec"})).
+			Warn("appsec: RouteMatched called without an active HandlerOperation in the context, ignoring")
+		return nil
+	}
+
+	// Overwrite the previous route that was created using a quantization algorithm
+	op.route = route
+
+	var err error
+	dyngo.OnData(op, func(e *events.BlockingSecurityEvent) {
+		err = e
+	})
+
+	// Call the WAF with this new data
+	op.Run(op, addresses.NewAddressesBuilder().
+		WithPathParams(routeParams).
+		Build(),
+	)
+
+	return err
+}
+
 // BeforeHandle contains the appsec functionality that should be executed before a http.Handler runs.
 // It returns the modified http.ResponseWriter and http.Request, an additional afterHandle function
 // that should be executed after the Handler runs, and a handled bool that instructs if the request has been handled
@@ -157,7 +264,6 @@ func BeforeHandle(
 	w http.ResponseWriter,
 	r *http.Request,
 	span trace.TagSetter,
-	pathParams map[string]string,
 	opts *Config,
 ) (http.ResponseWriter, *http.Request, func(), bool) {
 	if opts == nil {
@@ -166,21 +272,18 @@ func BeforeHandle(
 	if opts.ResponseHeaderCopier == nil {
 		opts.ResponseHeaderCopier = defaultWrapHandlerConfig.ResponseHeaderCopier
 	}
-	if opts.RouteForRequest == nil {
-		opts.RouteForRequest = defaultWrapHandlerConfig.RouteForRequest
-	}
 
 	op, blockAtomic, ctx := StartOperation(r.Context(), HandlerOperationArgs{
 		Framework:    opts.Framework,
 		Method:       r.Method,
 		RequestURI:   r.RequestURI,
-		RequestRoute: opts.RouteForRequest(r),
+		RequestRoute: opts.Route,
 		Host:         r.Host,
 		RemoteAddr:   r.RemoteAddr,
 		Headers:      r.Header,
 		Cookies:      makeCookies(r.Cookies()),
 		QueryParams:  r.URL.Query(),
-		PathParams:   pathParams,
+		PathParams:   opts.RouteParams,
 	}, span)
 	tr := r.WithContext(ctx)
 
@@ -214,6 +317,16 @@ func BeforeHandle(
 		blockPtr.Handler = nil
 		handled = true
 	}
+
+	// We register a handler for cases that would require us to write the blocking response before any more code
+	// from a specific framework (like Gin) is executed that would write another (wrong) response here.
+	dyngo.OnData(op, func(e EarlyBlock) {
+		if blockPtr := blockAtomic.Load(); blockPtr != nil && blockPtr.Handler != nil {
+			blockPtr.Handler.ServeHTTP(w, tr)
+			blockPtr.Handler = nil
+		}
+	})
+
 	return w, tr, afterHandle, handled
 }
 
@@ -224,9 +337,9 @@ func BeforeHandle(
 // context since it uses a queue of handlers and it's the only way to make
 // sure other queued handlers don't get executed.
 // TODO: this patch must be removed/improved when we rework our actions/operations system
-func WrapHandler(handler http.Handler, span trace.TagSetter, pathParams map[string]string, opts *Config) http.Handler {
+func WrapHandler(handler http.Handler, span trace.TagSetter, opts *Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tw, tr, afterHandle, handled := BeforeHandle(w, r, span, pathParams, opts)
+		tw, tr, afterHandle, handled := BeforeHandle(w, r, span, opts)
 		defer afterHandle()
 		if handled {
 			return

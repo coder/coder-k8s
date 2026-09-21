@@ -13,6 +13,7 @@ const (
 	ServerRequestQueryAddr             = "server.request.query"
 	ServerRequestPathParamsAddr        = "server.request.path_params"
 	ServerRequestBodyAddr              = "server.request.body"
+	ServerResponseBodyAddr             = "server.response.body"
 	ServerResponseStatusAddr           = "server.response.status"
 	ServerResponseHeadersNoCookiesAddr = "server.response.headers.no_cookies"
 
@@ -25,7 +26,14 @@ const (
 	UserLoginSuccessAddr = "server.business_logic.users.login.success"
 	UserLoginFailureAddr = "server.business_logic.users.login.failure"
 
-	ServerIoNetURLAddr    = "server.io.net.url"
+	ServerIONetRequestHeadersAddr  = "server.io.net.request.headers"
+	ServerIONetRequestMethodAddr   = "server.io.net.request.method"
+	ServerIONetRequestBodyAddr     = "server.io.net.request.body"
+	ServerIONetResponseStatusAddr  = "server.io.net.response.status"
+	ServerIONetResponseHeadersAddr = "server.io.net.response.headers"
+	ServerIONetResponseBodyAddr    = "server.io.net.response.body"
+
+	ServerIONetURLAddr    = "server.io.net.url"
 	ServerIOFSFileAddr    = "server.io.fs.file"
 	ServerDBStatementAddr = "server.db.statement"
 	ServerDBTypeAddr      = "server.db.system"

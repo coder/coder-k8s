@@ -6,47 +6,29 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/DataDog/dd-trace-go/v2/internal"
+	"github.com/DataDog/dd-trace-go/v2/internal/bazel"
 	"github.com/DataDog/dd-trace-go/v2/internal/globalconfig"
 	"github.com/DataDog/dd-trace-go/v2/internal/hostname"
 	"github.com/DataDog/dd-trace-go/v2/internal/log"
 	"github.com/DataDog/dd-trace-go/v2/internal/osinfo"
+	"github.com/DataDog/dd-trace-go/v2/internal/processtags"
 	"github.com/DataDog/dd-trace-go/v2/internal/telemetry/internal/transport"
 	"github.com/DataDog/dd-trace-go/v2/internal/version"
 )
-
-// We copy the transport to avoid using the default one, as it might be
-// augmented with tracing and we don't want these calls to be recorded.
-// See https://golang.org/pkg/net/http/#DefaultTransport .
-//
-//orchestrion:ignore
-var defaultHTTPClient = &http.Client{
-	Transport: &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-	},
-	Timeout: 5 * time.Second,
-}
 
 func newBody(config TracerConfig, debugMode bool) *transport.Body {
 	osHostname, err := os.Hostname()
@@ -69,6 +51,7 @@ func newBody(config TracerConfig, debugMode bool) *transport.Body {
 			TracerVersion:   version.Tag,
 			LanguageName:    "go",
 			LanguageVersion: runtime.Version(),
+			ProcessTags:     processtags.GlobalTags().String(),
 		},
 		Host: transport.Host{
 			Hostname:      osHostname,
@@ -97,6 +80,8 @@ type EndpointRequestResult struct {
 	Error error
 	// PayloadByteSize is the number of bytes that were sent to the endpoint, zero if the payload was not sent.
 	PayloadByteSize int
+	// RequestAttempted reports whether the writer actually attempted to send this payload to an HTTP endpoint.
+	RequestAttempted bool
 	// CallDuration is the duration of the call to the endpoint if the call was successful
 	CallDuration time.Duration
 	// StatusCode is the status code of the response from the endpoint even if the call failed but only with an actual HTTP error
@@ -124,12 +109,12 @@ type WriterConfig struct {
 }
 
 func NewWriter(config WriterConfig) (Writer, error) {
-	if len(config.Endpoints) == 0 {
+	if len(config.Endpoints) == 0 && !bazel.IsPayloadFilesModeEnabled() {
 		return nil, fmt.Errorf("telemetry/writer: no endpoints provided")
 	}
 
 	if config.HTTPClient == nil {
-		config.HTTPClient = defaultHTTPClient
+		config.HTTPClient = internal.DefaultHTTPClient(5*time.Second, true)
 	}
 
 	// Don't allow the client to have a timeout higher than 5 seconds
@@ -138,7 +123,6 @@ func NewWriter(config WriterConfig) (Writer, error) {
 		copyClient := *config.HTTPClient
 		config.HTTPClient = &copyClient
 		config.HTTPClient.Timeout = 5 * time.Second
-		log.Debug("telemetry/writer: client timeout was higher than 5 seconds, clamping it to 5 seconds")
 	}
 
 	body := newBody(config.TracerConfig, config.Debug)
@@ -164,7 +148,10 @@ func preBakeRequest(body *transport.Body, endpoint *http.Request) *http.Request 
 		clonedEndpoint.Header = make(http.Header, 11)
 	}
 
-	for key, val := range map[string]string{
+	sessionID := globalconfig.RuntimeID()
+	rootSessionID := globalconfig.RootSessionID()
+
+	headers := map[string]string{
 		"Content-Type":               "application/json",
 		"DD-Telemetry-API-Version":   body.APIVersion,
 		"DD-Client-Library-Language": body.Application.LanguageName,
@@ -176,9 +163,16 @@ func preBakeRequest(body *transport.Body, endpoint *http.Request) *http.Request 
 		"DD-Agent-Install-Time":      globalconfig.InstrumentationInstallTime(),
 		"Datadog-Container-ID":       internal.ContainerID(),
 		"Datadog-Entity-ID":          internal.EntityID(),
+		"DD-Session-ID":              sessionID,
 		// TODO: add support for Cloud provider/resource-type/resource-id headers in another PR and package
 		// Described here: https://github.com/DataDog/instrumentation-telemetry-api-docs/blob/cf17b41a30fbf31d54e2cfbfc983875d58b02fe1/GeneratedDocumentation/ApiDocs/v2/overview.md#setting-the-serverless-telemetry-headers
-	} {
+	}
+
+	if rootSessionID != sessionID {
+		headers["DD-Root-Session-ID"] = rootSessionID
+	}
+
+	for key, val := range headers {
 		if val == "" {
 			continue
 		}
@@ -202,6 +196,32 @@ func (w *writer) setPayloadToBody(payload transport.Payload) {
 	w.body.Payload = payload
 }
 
+// encodePayloadForBazelFile encodes the current telemetry body into JSON bytes for Bazel payload-file mode.
+func (w *writer) encodePayloadForBazelFile() (body []byte, err error) {
+	defer func() {
+		if panicValue := recover(); panicValue != nil {
+			log.Error("telemetry/writer: panic while encoding payload!")
+			if panicErr, ok := panicValue.(error); ok {
+				log.Error("telemetry/writer: panic while encoding payload: %v", panicErr.Error())
+				err = panicErr
+			} else {
+				err = fmt.Errorf("telemetry/writer: panic while encoding payload: %v", panicValue)
+			}
+			body = nil
+		}
+	}()
+
+	w.bodyMu.Lock()
+	defer w.bodyMu.Unlock()
+
+	var buf bytes.Buffer
+	if err = json.NewEncoder(&buf).Encode(w.body); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
 // newRequest creates a new http.Request with the given payload and the necessary headers.
 func (w *writer) newRequest(endpoint *http.Request, requestType transport.RequestType) *http.Request {
 	request := endpoint.Clone(context.Background())
@@ -214,9 +234,12 @@ func (w *writer) newRequest(endpoint *http.Request, requestType transport.Reques
 		defer func() {
 			// This should normally never happen but since we are encoding arbitrary data in client configuration values payload we need to be careful.
 			if panicValue := recover(); panicValue != nil {
-				log.Error("telemetry/writer: panic while encoding payload: %v", panicValue)
+				log.Error("telemetry/writer: panic while encoding payload!")
 				if err == nil {
-					panicErr, _ := panicValue.(error)   // check if we can use the panic value as an error
+					panicErr, ok := panicValue.(error) // check if we can use the panic value as an error
+					if ok {
+						log.Error("telemetry/writer: panic while encoding payload: %v", panicErr.Error())
+					}
 					pipeWriter.CloseWithError(panicErr) // CloseWithError with nil as parameter is like Close()
 				}
 			}
@@ -237,12 +260,12 @@ func (w *writer) newRequest(endpoint *http.Request, requestType transport.Reques
 // SumReaderCloser is a ReadCloser that wraps another ReadCloser and counts the number of bytes read.
 type SumReaderCloser struct {
 	io.ReadCloser
-	n int
+	n atomic.Uint64
 }
 
 func (s *SumReaderCloser) Read(p []byte) (n int, err error) {
 	n, err = s.ReadCloser.Read(p)
-	s.n += n
+	s.n.Add(uint64(n))
 	return
 }
 
@@ -253,7 +276,7 @@ type WriterStatusCodeError struct {
 }
 
 func (w *WriterStatusCodeError) Error() string {
-	return fmt.Sprintf("unexpected status code: %q (received body: %q)", w.Status, w.Body)
+	return fmt.Sprintf("unexpected status code: %q (received body: %d bytes)", w.Status, len(w.Body))
 }
 
 func (w *writer) Flush(payload transport.Payload) ([]EndpointRequestResult, error) {
@@ -262,6 +285,21 @@ func (w *writer) Flush(payload transport.Payload) ([]EndpointRequestResult, erro
 
 	w.setPayloadToBody(payload)
 	requestType := payload.RequestType()
+
+	if bazel.IsPayloadFilesModeEnabled() {
+		body, err := w.encodePayloadForBazelFile()
+		if err != nil {
+			return []EndpointRequestResult{{Error: err}}, err
+		}
+
+		if err := bazel.WritePayloadFile(bazel.PayloadKindTelemetry, body); err != nil {
+			return []EndpointRequestResult{{Error: err}}, err
+		}
+
+		return []EndpointRequestResult{{
+			PayloadByteSize: len(body),
+		}}, nil
+	}
 
 	var results []EndpointRequestResult
 	for _, endpoint := range w.endpoints {
@@ -274,7 +312,7 @@ func (w *writer) Flush(payload transport.Payload) ([]EndpointRequestResult, erro
 		request.Body = sumReaderCloser
 		response, err := w.httpClient.Do(request)
 		if err != nil {
-			results = append(results, EndpointRequestResult{Error: err})
+			results = append(results, EndpointRequestResult{Error: err, RequestAttempted: true})
 			continue
 		}
 
@@ -286,14 +324,15 @@ func (w *writer) Flush(payload transport.Payload) ([]EndpointRequestResult, erro
 			results = append(results, EndpointRequestResult{Error: &WriterStatusCodeError{
 				Status: response.Status,
 				Body:   string(respBodyBytes),
-			}, StatusCode: response.StatusCode})
+			}, RequestAttempted: true, StatusCode: response.StatusCode})
 			continue
 		}
 
 		results = append(results, EndpointRequestResult{
-			PayloadByteSize: sumReaderCloser.n,
-			CallDuration:    time.Since(now),
-			StatusCode:      response.StatusCode,
+			PayloadByteSize:  int(sumReaderCloser.n.Load()),
+			RequestAttempted: true,
+			CallDuration:     time.Since(now),
+			StatusCode:       response.StatusCode,
 		})
 
 		// We succeeded, no need to try the other endpoints

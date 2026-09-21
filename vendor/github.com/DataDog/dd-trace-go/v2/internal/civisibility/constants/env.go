@@ -52,4 +52,13 @@ const (
 
 	// CIVisibilityImpactedTestsDetectionEnabled indicates if the impacted tests detection feature is enabled.
 	CIVisibilityImpactedTestsDetectionEnabled = "DD_CIVISIBILITY_IMPACTED_TESTS_DETECTION_ENABLED"
+
+	// CIVisibilityInternalParallelEarlyFlakeDetectionEnabled indicates if the internal parallel early flake detection feature is enabled.
+	CIVisibilityInternalParallelEarlyFlakeDetectionEnabled = "DD_CIVISIBILITY_INTERNAL_PARALLEL_EARLY_FLAKE_DETECTION_ENABLED"
+
+	// CIVisibilitySubtestFeaturesEnabled indicates if subtest-specific management and retry features are enabled.
+	CIVisibilitySubtestFeaturesEnabled = "DD_CIVISIBILITY_SUBTEST_FEATURES_ENABLED"
+
+	// CIVisibilityUseNoopTracer indicates if the ci visibility mode must set a noop tracer (avoid change current test behaviors over the noop tracer implementation)
+	CIVisibilityUseNoopTracer = "DD_CIVISIBILITY_USE_NOOP_TRACER"
 )

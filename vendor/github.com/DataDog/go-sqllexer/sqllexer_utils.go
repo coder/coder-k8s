@@ -93,6 +93,7 @@ var keywords = []string{
 	"DISTINCT",
 	"ELSE",
 	"END",
+	"ESCAPE",
 	"EXISTS",
 	"FOREIGN",
 	"FROM",
@@ -179,10 +180,30 @@ var (
 	}
 )
 
+// trieNode represents a node in the keyword trie.
+type trieNode struct {
+	children         [27]*trieNode // 0-25 for A-Z, 26 for underscore
+	isEnd            bool
+	tokenType        TokenType
+	isTableIndicator bool
+}
+
+// trieIndex returns the array index for a character (0-25 for A-Z, 26 for underscore).
+// Returns -1 for invalid characters.
+func trieIndex(ch rune) int {
+	if ch >= 'A' && ch <= 'Z' {
+		return int(ch - 'A')
+	}
+	if ch == '_' {
+		return 26
+	}
+	return -1
+}
+
 // buildCombinedTrie combines all types of SQL keywords into a single trie
 // This trie is used for efficient case-insensitive keyword matching during lexing
 func buildCombinedTrie() *trieNode {
-	root := &trieNode{children: make(map[rune]*trieNode)}
+	root := &trieNode{}
 
 	// Add all types of keywords
 	addToTrie(root, commands, COMMAND, false)
@@ -203,11 +224,16 @@ func addToTrie(root *trieNode, words []string, tokenType TokenType, isTableIndic
 		node := root
 		// Convert to uppercase for case-insensitive matching
 		for _, ch := range strings.ToUpper(word) {
-			if next, exists := node.children[ch]; exists {
+			idx := trieIndex(ch)
+			if idx < 0 {
+				// Skip characters that aren't valid trie indices
+				continue
+			}
+			if next := node.children[idx]; next != nil {
 				node = next
 			} else {
-				next = &trieNode{children: make(map[rune]*trieNode)}
-				node.children[ch] = next
+				next := &trieNode{}
+				node.children[idx] = next
 				node = next
 			}
 		}
@@ -225,55 +251,34 @@ func replaceDigits(token *Token, placeholder string) string {
 	var replacedToken strings.Builder
 	replacedToken.Grow(len(token.Value))
 
-	start := 0
-
-	// loop over token.digits indexes, write start:token.digits[i] to builder
-	// write placeholder to builder if no consecutive digits
-	// write start:token.End to builder
-	for i := 0; i < len(token.digits); i++ {
-		if token.digits[i] > len(token.Value) {
-			break
+	var lastWasDigit bool
+	for _, r := range token.Value {
+		if isDigit(r) {
+			if !lastWasDigit {
+				replacedToken.WriteString(placeholder)
+				lastWasDigit = true
+			}
+		} else {
+			replacedToken.WriteRune(r)
+			lastWasDigit = false
 		}
-		if token.digits[i]-start >= 1 {
-			replacedToken.WriteString(token.Value[start:token.digits[i]])
-		}
-		if i == 0 || token.digits[i] != token.digits[i-1]+1 {
-			replacedToken.WriteString(placeholder)
-		}
-		start = token.digits[i] + 1
 	}
 
-	// write start:token.End to builder
-	if start < len(token.Value) {
-		replacedToken.WriteString(token.Value[start:len(token.Value)])
-	}
-	token.digits = nil
 	return replacedToken.String()
 }
 
 func trimQuotes(token *Token) string {
 	var trimmedToken strings.Builder
-	trimmedToken.Grow(len(token.Value) - len(token.quotes))
+	trimmedToken.Grow(len(token.Value))
 
-	start := 0
-
-	// loop over token.quotes indexes, write start:token.quotes[i] to builder
-	// write start:token.End to builder
-	for i := 0; i < len(token.quotes); i++ {
-		if token.quotes[i] > len(token.Value) {
-			break
+	for _, r := range token.Value {
+		if isDoubleQuote(r) || r == '[' || r == ']' || r == '`' {
+			// trimmedToken.WriteString(placeholder)
+		} else {
+			trimmedToken.WriteRune(r)
 		}
-		if token.quotes[i]-start >= 1 {
-			trimmedToken.WriteString(token.Value[start:token.quotes[i]])
-		}
-		start = token.quotes[i] + 1
 	}
-
-	// write start:token.End to builder
-	if start < len(token.Value) {
-		trimmedToken.WriteString(token.Value[start:len(token.Value)])
-	}
-	token.quotes = nil
+	token.hasQuotes = false
 	return trimmedToken.String()
 }
 
@@ -359,7 +364,7 @@ func isEOF(ch rune) bool {
 
 // isIdentifier checks if a rune is an identifier
 func isIdentifier(ch rune) bool {
-	return ch == '.' || ch == '?' || ch == '$' || ch == '#' || ch == '/' || ch == '@' || ch == '!' || isLetter(ch) || isDigit(ch)
+	return ch == '"' || ch == '.' || ch == '?' || ch == '$' || ch == '#' || ch == '/' || ch == '@' || ch == '!' || isLetter(ch) || isDigit(ch)
 }
 
 // isValueToken checks if a token is a value token

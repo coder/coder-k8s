@@ -30,7 +30,7 @@ type span struct {
 	mu         sync.RWMutex `msg:"-"` // all fields are protected by this RWMutex
 	DD         *tracer.Span
 	finished   bool
-	attributes map[string]interface{}
+	attributes map[string]any
 	spanKind   oteltrace.SpanKind
 	finishOpts []tracer.FinishOption
 	statusInfo
@@ -138,7 +138,7 @@ func (s *span) extractTraceData(c *oteltrace.SpanContextConfig) {
 	}
 	state, err := oteltrace.ParseTraceState(headers["tracestate"])
 	if err != nil {
-		log.Debug("Couldn't parse tracestate: %v", err)
+		log.Debug("Couldn't parse tracestate: %s", err.Error())
 		return
 	}
 	c.TraceState = state
@@ -149,7 +149,7 @@ func (s *span) extractTraceData(c *oteltrace.SpanContextConfig) {
 		// where flags represents the propagated flags in the format of 2 hex-encoded digits at the end of the traceparent.
 		otelFlagLen := 2
 		if f, err := strconv.ParseUint(parent[len(parent)-otelFlagLen:], 16, 8); err != nil {
-			log.Debug("Couldn't parse traceparent: %v", err)
+			log.Debug("Couldn't parse traceparent: %s", err.Error())
 		} else {
 			c.TraceFlags = oteltrace.TraceFlags(f)
 		}
@@ -192,7 +192,7 @@ func (s *span) AddEvent(name string, opts ...oteltrace.EventOption) {
 		return
 	}
 	c := oteltrace.NewEventConfig(opts...)
-	attrs := make(map[string]interface{})
+	attrs := make(map[string]any)
 	for _, a := range c.Attributes() {
 		attrs[string(a.Key)] = a.Value.AsInterface()
 	}
@@ -230,7 +230,7 @@ func (s *span) SetAttributes(kv ...attribute.KeyValue) {
 
 // toReservedAttributes recognizes a set of span attributes that have a special meaning.
 // These tags should supersede other values.
-func toReservedAttributes(k string, v attribute.Value) (string, interface{}) {
+func toReservedAttributes(k string, v attribute.Value) (string, any) {
 	switch k {
 	case "operation.name":
 		if ops := strings.ToLower(v.AsString()); ops != "" {

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/DataDog/dd-trace-go/v2/instrumentation/appsec/dyngo"
@@ -93,10 +94,14 @@ func (m *ManagedFile) Name() string {
 }
 
 var (
-	mu             sync.RWMutex // guards below fields
-	levelThreshold              = LevelWarn
+	levelThreshold atomic.Int32 // stores Level as int32; accessed atomically to avoid lock contention in hot paths
+	mu             sync.RWMutex // guards logger instance
 	logger         Logger       = &defaultLogger{l: log.New(os.Stderr, "", log.LstdFlags)}
 )
+
+func init() {
+	levelThreshold.Store(int32(LevelWarn))
+}
 
 // UseLogger sets l as the active logger and returns a function to restore the
 // previous logger. The return value is mostly useful when testing.
@@ -124,7 +129,7 @@ func OpenFileAtPath(dirPath string) (*ManagedFile, error) {
 	filepath := dirPath + "/" + LoggerFile
 	f, err := os.OpenFile(filepath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
-		return nil, fmt.Errorf("using default logger to stderr due to error creating or opening log file: %v", err)
+		return nil, fmt.Errorf("using default logger to stderr due to error creating or opening log file: %s", err.Error())
 	}
 	UseLogger(&defaultLogger{l: log.New(f, "", log.LstdFlags)})
 	return &ManagedFile{
@@ -134,35 +139,26 @@ func OpenFileAtPath(dirPath string) (*ManagedFile, error) {
 
 // SetLevel sets the given lvl as log threshold for logging.
 func SetLevel(lvl Level) {
-	mu.Lock()
-	defer mu.Unlock()
-	levelThreshold = lvl
+	levelThreshold.Store(int32(lvl))
 }
 
 func DefaultLevel() Level {
-	mu.RLock()
-	defer mu.RUnlock()
-	return levelThreshold
+	return GetLevel()
 }
 
 // GetLevel returns the currrent log level.
 func GetLevel() Level {
-	mu.Lock()
-	defer mu.Unlock()
-	return levelThreshold
+	return Level(levelThreshold.Load())
 }
 
 // DebugEnabled returns true if debug log messages are enabled. This can be used in extremely
 // hot code paths to avoid allocating the ...interface{} argument.
 func DebugEnabled() bool {
-	mu.RLock()
-	lvl := levelThreshold
-	mu.RUnlock()
-	return lvl == LevelDebug
+	return GetLevel() == LevelDebug
 }
 
 // Debug prints the given message if the level is LevelDebug.
-func Debug(fmt string, a ...interface{}) {
+func Debug(fmt string, a ...any) {
 	if !DebugEnabled() {
 		return
 	}
@@ -170,12 +166,12 @@ func Debug(fmt string, a ...interface{}) {
 }
 
 // Warn prints a warning message.
-func Warn(fmt string, a ...interface{}) {
+func Warn(fmt string, a ...any) {
 	printMsg(LevelWarn, fmt, a...)
 }
 
 // Info prints an informational message.
-func Info(fmt string, a ...interface{}) {
+func Info(fmt string, a ...any) {
 	printMsg(LevelInfo, fmt, a...)
 }
 
@@ -187,6 +183,7 @@ var (
 )
 
 func init() {
+	// This cannot use env.Get because it would cause a cyclic import
 	if v := os.Getenv("DD_LOGGING_RATE"); v != "" {
 		setLoggingRate(v)
 	}
@@ -199,7 +196,7 @@ func init() {
 
 func setLoggingRate(v string) {
 	if sec, err := strconv.ParseInt(v, 10, 64); err != nil {
-		Warn("Invalid value for DD_LOGGING_RATE: %v", err)
+		Warn("Invalid value for DD_LOGGING_RATE: %s", err.Error())
 	} else {
 		if sec < 0 {
 			Warn("Invalid value for DD_LOGGING_RATE: negative value")
@@ -218,7 +215,7 @@ type errorReport struct {
 
 // Error reports an error. Errors get aggregated and logged periodically. The
 // default is once per minute or once every DD_LOGGING_RATE number of seconds.
-func Error(format string, a ...interface{}) {
+func Error(format string, a ...any) {
 	key := format // format should 99.9% of the time be constant
 	if reachedLimit(key) {
 		// avoid too much lock contention on spammy errors
@@ -283,7 +280,7 @@ func flushLocked() {
 	erron = false
 }
 
-func printMsg(lvl Level, format string, a ...interface{}) {
+func printMsg(lvl Level, format string, a ...any) {
 	var b strings.Builder
 	b.Grow(len(prefixMsg) + 1 + len(lvl.String()) + 2 + len(format))
 	b.WriteString(prefixMsg)

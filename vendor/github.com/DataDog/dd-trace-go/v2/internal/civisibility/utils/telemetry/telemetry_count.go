@@ -6,8 +6,8 @@
 package telemetry
 
 import (
-	utils "github.com/DataDog/dd-trace-go/v2/internal"
 	"github.com/DataDog/dd-trace-go/v2/internal/civisibility/constants"
+	"github.com/DataDog/dd-trace-go/v2/internal/env"
 	"github.com/DataDog/dd-trace-go/v2/internal/telemetry"
 )
 
@@ -40,9 +40,8 @@ func GetErrorTypeFromStatusCode(statusCode int) ErrorType {
 			return StatusCode5xxErrorType
 		} else if statusCode >= 400 && statusCode < 500 {
 			return StatusCode4xxErrorType
-		} else {
-			return StatusCodeErrorType
 		}
+		return StatusCodeErrorType
 	}
 }
 
@@ -76,6 +75,8 @@ func getProviderTestSessionTypeFromProviderString(provider string) TestSessionTy
 		return BuddyCiTestSessionType
 	case "awscodepipeline":
 		return AwsCodePipelineSessionType
+	case "bazel":
+		return BazelTestSessionType
 	default:
 		return UnsupportedTestSessionType
 	}
@@ -84,7 +85,7 @@ func getProviderTestSessionTypeFromProviderString(provider string) TestSessionTy
 func TestSession(providerName string) {
 	var tags []string
 	tags = append(tags, getProviderTestSessionTypeFromProviderString(providerName)...)
-	if utils.BoolEnv(constants.CIVisibilityAutoInstrumentationProviderEnvironmentVariable, false) {
+	if env.Get(constants.CIVisibilityAutoInstrumentationProviderEnvironmentVariable) != "" {
 		tags = append(tags, IsAutoInstrumentationTestSessionType...)
 	}
 	telemetry.Count(telemetry.NamespaceCIVisibility, "test_session", removeEmptyStrings(tags)).Submit(1.0)

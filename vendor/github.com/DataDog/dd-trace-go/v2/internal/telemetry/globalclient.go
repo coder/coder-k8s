@@ -104,12 +104,18 @@ func StopApp() {
 	}
 }
 
-var telemetryClientDisabled = !globalinternal.BoolEnv("DD_INSTRUMENTATION_TELEMETRY_ENABLED", true)
+var (
+	telemetryClientEnabled bool
+	telemetryEnabledOnce   sync.Once
+)
 
 // Disabled returns whether instrumentation telemetry is disabled
 // according to the DD_INSTRUMENTATION_TELEMETRY_ENABLED env var
 func Disabled() bool {
-	return telemetryClientDisabled
+	telemetryEnabledOnce.Do(func() {
+		telemetryClientEnabled = globalinternal.BoolEnv("DD_INSTRUMENTATION_TELEMETRY_ENABLED", true)
+	})
+	return telemetryClientEnabled == false
 }
 
 // Count creates a new metric handle for the given parameters that can be used to submit values.
@@ -142,9 +148,9 @@ func Distribution(namespace Namespace, name string, tags []string) MetricHandle 
 	return globalClientNewMetric(namespace, transport.DistMetric, name, tags)
 }
 
-func Log(level LogLevel, text string, options ...LogOption) {
+func Log(record Record, options ...LogOption) {
 	globalClientCall(func(client Client) {
-		client.Log(level, text, options...)
+		client.Log(record, options...)
 	})
 }
 
@@ -190,6 +196,15 @@ func RegisterAppConfigs(kvs ...Configuration) {
 	})
 }
 
+// RegisterAppEndpoint reports a new REST endpoint exposed by the application.
+// This can be called multiple times and endpoints will be accumulated
+// additively by the backend.
+func RegisterAppEndpoint(opName string, resName string, attrs AppEndpointAttributes) {
+	globalClientCall(func(client Client) {
+		client.RegisterAppEndpoint(opName, resName, attrs)
+	})
+}
+
 // MarkIntegrationAsLoaded marks an integration as loaded in the telemetry. If telemetry is disabled
 // or the client has not started yet it will record the action and replay it once the client is started.
 func MarkIntegrationAsLoaded(integration Integration) {
@@ -228,9 +243,7 @@ func globalClientCall(fun func(client Client)) {
 	if client == nil || *client == nil {
 		if !globalClientRecorder.Record(fun) {
 			globalClientLogLossOnce.Do(func() {
-				msg := "telemetry: global client recorder queue is full, dropping telemetry data, please start the telemetry client earlier to avoid data loss"
-				log.Debug("%s\n", msg)
-				Log(LogError, msg, WithStacktrace())
+				log.Debug("telemetry: global client recorder queue is full, dropping telemetry data, please start the telemetry client earlier to avoid data loss")
 			})
 		}
 		return
