@@ -106,14 +106,27 @@ the canonical form, and it happens before any Coder mutation (no upload, templat
 workspace, or build is created). A literal organization or user that is really named `default`
 or `me` stays valid.
 
-The final segment is checked the same way: Coder resolves template and workspace names
-case-insensitively, so a request such as `acme.Starter-Template` finds the template named
-`starter-template`. The aggregated API server rejects it with a `400 BadRequest` naming the
-canonical form (`acme.starter-template`) before returning the object, evaluating delete
-preconditions, or mutating anything. Names that are genuinely mixed-case in Coder stay valid
-when requested exactly; only a differently cased request is rejected. Kubernetes authorization
-uses the requested URL name, so a `resourceNames` grant for the canonical name does not cover
-other casings, and a grant for another casing reaches the aggregated server only to be rejected.
+The final segment is checked the same way for lookups of existing objects: Coder resolves
+template and workspace names case-insensitively, so a `GET`, update, patch, delete, or
+create-on-update of `acme.Starter-Template` finds the template named `starter-template`. The
+aggregated API server rejects such a request with a `400 BadRequest` before returning the object,
+evaluating delete preconditions, or mutating the backend. When the organization or owner segment
+is also an alias, a workspace rejection names the fully canonical form taken from the fetched
+workspace (`acme.alice.dev-workspace` for `default.me.Dev-Workspace`); a template rejection is
+issued before the template lookup, so it corrects only the organization segment and states that
+the template segment is not checked yet — retry with the canonical organization and, if needed,
+the canonical template name. Names that are genuinely mixed-case in Coder stay valid when
+requested exactly; only a differently cased request is rejected.
+
+This no-mutation guarantee covers lookups of existing objects only. A direct create of a new
+`CoderTemplate` whose name differs only in casing from an existing template is a genuine
+creation attempt: with `spec.files` set, the source archive is uploaded and a template version is
+created before Coder reports the name collision, so the failed request can leave those artifacts
+behind. Create requests are not preflighted against existing names.
+
+Kubernetes authorization uses the requested URL name, so a `resourceNames` grant for the
+canonical name does not cover other casings, and a grant for another casing reaches the
+aggregated server only to be rejected.
 
 Cross-organization requests stay opaque: a workspace that exists in another organization is
 reported as `NotFound` without disclosing its canonical names, and a request naming an

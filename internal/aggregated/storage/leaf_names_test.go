@@ -2,8 +2,10 @@ package storage
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apiserver/pkg/registry/rest"
@@ -183,4 +185,81 @@ func newLeafObject(fixture leafFixture, name string) runtime.Object {
 		return newIdentityTemplate(name, "acme")
 	}
 	return newIdentityWorkspace(name, "acme")
+}
+
+// TestLeafNameCombinedAliasHints: when prefix segments and the leaf are aliases at the same time, the
+// workspace rejection must advertise the fully canonical name taken from the fetched object (a retry
+// with the hint succeeds), while the template rejection, which happens before the template lookup,
+// must describe only the organization correction and say that the leaf is not checked yet.
+func TestLeafNameCombinedAliasHints(t *testing.T) {
+	t.Parallel()
+
+	server, state := newAliasResolvingCoderServer(t)
+	state.setCaseInsensitiveLeafLookups(true)
+	state.seedWorkspace("alice", "other-workspace", otherOrganization)
+	templates := NewTemplateStorage(newTestClientProvider(t, server.URL))
+	workspaces := NewWorkspaceStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	assertFullHint := func(verb string, err error, canonical, rejectedHint string) {
+		t.Helper()
+		assertAliasBadRequest(t, verb, err, canonical)
+		if strings.Contains(err.Error(), `"`+rejectedHint+`"`) {
+			t.Fatalf("%s: hint must not advertise the unchecked leaf %q, got %q", verb, rejectedHint, err.Error())
+		}
+	}
+	_, err := workspaces.Get(ctx, "default.me.Dev-Workspace", nil)
+	assertFullHint("get default.me.Dev-Workspace", err, "acme.alice.dev-workspace", "acme.alice.Dev-Workspace")
+	_, _, err = workspaces.Update(ctx, "default.me.Dev-Workspace", noopUpdate(), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc, false, nil)
+	assertFullHint("update default.me.Dev-Workspace", err, "acme.alice.dev-workspace", "acme.alice.Dev-Workspace")
+	_, _, err = workspaces.Delete(ctx, "default.me.Dev-Workspace", rest.ValidateAllObjectFunc, nil)
+	assertFullHint("delete default.me.Dev-Workspace", err, "acme.alice.dev-workspace", "acme.alice.Dev-Workspace")
+	if _, err := workspaces.Get(ctx, "acme.alice.dev-workspace", nil); err != nil {
+		t.Fatalf("retry with the advertised canonical name must succeed: %v", err)
+	}
+
+	// mixed-case canonical leaf: the hint carries the fetched mixed-case name, not a lower-cased guess
+	if _, err := workspaces.Create(ctx, newIdentityWorkspace("acme.alice.Mixed-Case", "acme"), rest.ValidateAllObjectFunc, nil); err != nil {
+		t.Fatalf("create mixed-case workspace: %v", err)
+	}
+	_, err = workspaces.Get(ctx, "default.me.mixed-case", nil)
+	assertFullHint("get default.me.mixed-case", err, "acme.alice.Mixed-Case", "acme.alice.mixed-case")
+
+	// membership opacity still comes first: a cross-organization workspace behind combined aliases stays NotFound
+	_, err = workspaces.Get(ctx, "default.alice.Other-Workspace", nil)
+	assertOpaqueNotFound(t, "get default.alice.Other-Workspace", err, "other-workspace", otherOrganization.Name)
+
+	// templates: the organization check runs before the template lookup, so the message may only claim the
+	// organization correction and must say the template segment is not checked yet
+	for _, tc := range []struct {
+		verb string
+		err  error
+	}{
+		{"get", func() error { _, err := templates.Get(ctx, "default.Starter-Template", nil); return err }()},
+		{"delete", func() error {
+			_, _, err := templates.Delete(ctx, "default.Starter-Template", rest.ValidateAllObjectFunc, nil)
+			return err
+		}()},
+		{"create", func() error {
+			_, err := templates.Create(ctx, newIdentityTemplate("default.New-Template", "default"), rest.ValidateAllObjectFunc, nil)
+			return err
+		}()},
+	} {
+		if !apierrors.IsBadRequest(tc.err) || !strings.Contains(tc.err.Error(), "template segment is not checked") || !strings.Contains(tc.err.Error(), `organization "acme"`) {
+			t.Fatalf("%s: template prefix rejection must describe the organization correction and the unchecked template segment, got %v", tc.verb, tc.err)
+		}
+		if strings.Contains(tc.err.Error(), "use the canonical name") {
+			t.Fatalf("%s: template prefix rejection must not claim a whole canonical name, got %v", tc.verb, tc.err)
+		}
+	}
+	// workspace create with alias prefixes: the leaf is the requested creation name, not a verified canonical one
+	_, err = workspaces.Create(ctx, newIdentityWorkspace("default.me.New-Workspace", "default"), rest.ValidateAllObjectFunc, nil)
+	if !apierrors.IsBadRequest(err) || !strings.Contains(err.Error(), "workspace segment is not checked") || !strings.Contains(err.Error(), `"acme.alice.New-Workspace"`) {
+		t.Fatalf("create default.me.New-Workspace: prefix rejection must give the corrected example and say the leaf is not checked, got %v", err)
+	}
+
+	// rejected requests never mutate the backend (the single accepted mutation is the mixed-case workspace create)
+	if mutations := state.mutations(); len(mutations) != 1 {
+		t.Fatalf("expected exactly one backend mutation (mixed-case workspace create), got %v", mutations)
+	}
 }

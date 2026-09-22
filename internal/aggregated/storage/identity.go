@@ -23,7 +23,8 @@ import (
 // differently named organization or user, and the rejection happens before any backend mutation.
 
 // requireCanonicalTemplateName rejects a template request whose organization segment resolved to a
-// differently named organization.
+// differently named organization. It runs before the template lookup, so the message corrects only
+// the organization segment and says that the template segment has not been checked yet.
 func requireCanonicalTemplateName(name, orgName, templateName string, org codersdk.Organization) error {
 	if org.Name == "" {
 		return fmt.Errorf("assertion failed: resolved organization for template %q must have a name", name)
@@ -33,7 +34,7 @@ func requireCanonicalTemplateName(name, orgName, templateName string, org coders
 	}
 
 	return apierrors.NewBadRequest(fmt.Sprintf(
-		"template name %q: organization segment %q resolves to organization %q; use the canonical name %q",
+		"template name %q: organization segment %q resolves to organization %q; use the canonical organization name, for example %q (the template segment is not checked until the organization segment is canonical)",
 		name, orgName, org.Name, coder.BuildTemplateName(org.Name, templateName),
 	))
 }
@@ -56,8 +57,10 @@ func requireCanonicalTemplateLeaf(name, orgName, templateName string, template c
 }
 
 // requireCanonicalWorkspaceName rejects a workspace request whose organization or owner segment
-// resolved to a differently named organization or user.
-func requireCanonicalWorkspaceName(name, orgName, userName, workspaceName, canonicalOrg, canonicalUser string) error {
+// resolved to a differently named organization or user. hintWorkspace is the leaf placed in the
+// canonical hint: the fetched workspace's own name when leafVerified is true, otherwise the requested
+// leaf, in which case the message says the workspace segment has not been checked.
+func requireCanonicalWorkspaceName(name, orgName, userName, hintWorkspace, canonicalOrg, canonicalUser string, leafVerified bool) error {
 	if canonicalOrg == "" || canonicalUser == "" {
 		return fmt.Errorf("assertion failed: resolved organization and owner for workspace %q must have names", name)
 	}
@@ -73,9 +76,14 @@ func requireCanonicalWorkspaceName(name, orgName, userName, workspaceName, canon
 		return nil
 	}
 
+	canonical := coder.BuildWorkspaceName(canonicalOrg, canonicalUser, hintWorkspace)
+	if leafVerified {
+		return apierrors.NewBadRequest(fmt.Sprintf("workspace name %q: %s; use the canonical name %q", name, strings.Join(aliases, ", "), canonical))
+	}
+
 	return apierrors.NewBadRequest(fmt.Sprintf(
-		"workspace name %q: %s; use the canonical name %q",
-		name, strings.Join(aliases, ", "), coder.BuildWorkspaceName(canonicalOrg, canonicalUser, workspaceName),
+		"workspace name %q: %s; use the canonical organization and owner names, for example %q (the workspace segment is not checked on create)",
+		name, strings.Join(aliases, ", "), canonical,
 	))
 }
 
@@ -106,15 +114,17 @@ func requireFetchedWorkspaceIdentity(
 		}
 	}
 
-	if err := requireCanonicalWorkspaceName(name, orgName, userName, workspaceName, workspace.OrganizationName, workspace.OwnerName); err != nil {
+	// Membership is settled above, so the fetched name may now shape the hint: every alias segment is
+	// corrected at once and the advertised canonical name is accepted on retry.
+	if workspace.Name == "" {
+		return fmt.Errorf("assertion failed: fetched workspace for %q must have a name", name)
+	}
+	if err := requireCanonicalWorkspaceName(name, orgName, userName, workspace.Name, workspace.OrganizationName, workspace.OwnerName, true); err != nil {
 		return err
 	}
 
 	// Coder resolves workspace names case-insensitively as well; the fetched workspace's own name
 	// must equal the requested final segment.
-	if workspace.Name == "" {
-		return fmt.Errorf("assertion failed: fetched workspace for %q must have a name", name)
-	}
 	if workspace.Name != workspaceName {
 		return apierrors.NewBadRequest(fmt.Sprintf(
 			"workspace name %q: workspace segment %q resolves to workspace %q; use the canonical name %q",
