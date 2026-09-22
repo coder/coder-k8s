@@ -122,7 +122,7 @@ This no-mutation guarantee covers lookups of existing objects only. A direct cre
 `CoderTemplate` whose name differs only in casing from an existing template is a genuine
 creation attempt: with `spec.files` set, the source archive is uploaded and a template version is
 created before Coder reports the name collision, so the failed request can leave those artifacts
-behind. Create requests are not preflighted against existing names.
+behind. Create requests are not checked against existing names first.
 
 Kubernetes authorization uses the requested URL name, so a `resourceNames` grant for the
 canonical name does not cover other casings, and a grant for another casing reaches the
