@@ -426,9 +426,6 @@ func (s *WorkspaceStorage) Create(
 		})
 		if stopErr == nil {
 			createdWorkspace.LatestBuild = stopBuild
-			if !stopBuild.UpdatedAt.IsZero() {
-				createdWorkspace.UpdatedAt = stopBuild.UpdatedAt
-			}
 		}
 		// The workspace creation already succeeded. Returning a stop transition error here
 		// would cause client retries to fail with AlreadyExists, while the desired stop
@@ -631,9 +628,6 @@ func (s *WorkspaceStorage) Update(
 	}
 
 	currentWorkspace.LatestBuild = build
-	if !build.UpdatedAt.IsZero() {
-		currentWorkspace.UpdatedAt = build.UpdatedAt
-	}
 
 	result := convert.WorkspaceToK8s(namespace, currentWorkspace)
 	if result == nil {
@@ -713,9 +707,6 @@ func (s *WorkspaceStorage) Delete(
 	// Update the workspace snapshot with the delete-transition build so
 	// the watch event reflects the latest build state, not the pre-delete snapshot.
 	workspace.LatestBuild = deleteBuild
-	if !deleteBuild.UpdatedAt.IsZero() {
-		workspace.UpdatedAt = deleteBuild.UpdatedAt
-	}
 
 	workspaceObj := convert.WorkspaceToK8s(namespace, workspace)
 	if workspaceObj == nil {

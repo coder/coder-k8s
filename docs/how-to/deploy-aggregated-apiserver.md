@@ -173,13 +173,41 @@ unchanged by this check.
 - `uid` is the Coder template or workspace ID exposed as `metadata.uid`; after a match the
   deletion targets that same ID. It guards against deleting a different object that now carries
   the same name, not against changes to the same object.
-- `resourceVersion` is the exposed value derived from the backend `updated_at`
-  (`metadata.resourceVersion`). A mismatch is reported only when the exposed value differs from
-  the supplied one; the comparison is a snapshot, not a compare-and-swap, so a backend change
-  between the fetch and the delete is not detected. Template metadata updates change the exposed
-  value. For workspaces, builds, TTL, autostart and rename changes did not change the exposed
-  value on Coder 2.37.2, so a matching workspace `resourceVersion` does not guard against those
-  same-object changes (tracked in issue #109).
+- `resourceVersion`, when supplied, is compared with the value the server computes for the
+  object fetched for that request. A mismatch is reported only when the two values differ; the
+  comparison is a snapshot, not a compare-and-swap, so a backend change between the fetch and the
+  delete is not detected. Template `resourceVersion` is still derived from the backend
+  `updated_at`, which template metadata updates change. Workspace `resourceVersion` is the
+  representation fingerprint described below, so builds, rename, TTL and autostart changes are
+  detected even though those operations did not advance the workspace `updated_at` on Coder
+  2.37.2.
+
+## Workspace resourceVersion
+
+`CoderWorkspace.metadata.resourceVersion` is an opaque fingerprint: the full hex SHA-256 of the
+object the converter produces from the Coder workspace, serialized with `resourceVersion` unset.
+The fingerprint covers the converter's metadata, spec and status fields, including
+`status.lastUsedAt` and `status.autoShutdown`; two identical converted representations carry the
+same token. Consequences:
+
+- It is not a monotonic revision or a history cursor. Returning to an identical representation
+  (for example TTL A → B → A) returns the same token again, and a change that was reverted before
+  the fetch is not detected. Do not parse, order or compare tokens other than for equality.
+- Activity is part of the representation. A workspace whose `status.lastUsedAt` or build status
+  moved between a read and an update or delete produces a `409 Conflict` even without a user
+  edit; re-read and retry with the fresh token.
+- `GET`, `LIST`, mutation responses and local watch events use the same conversion, so a mutation
+  response and the following `GET` agree only while the backend representation stays the same
+  (a progressing build can legitimately change it in between).
+- `UPDATE` (always) and `DELETE` (when `preconditions.resourceVersion` is supplied) compare the
+  token with the freshly fetched object and return `409 Conflict` before any Coder mutation when
+  they differ. A supplied `DELETE` `preconditions.uid` still guards recreation identity: a
+  same-named workspace created later has a different `uid`.
+- Tokens from releases that exposed the numeric `updated_at` value no longer match; clients must
+  re-read before retrying an update or delete after the upgrade.
+- Watch behavior is unchanged: events are emitted only for writes made through this server,
+  `resourceVersion` on watch requests is ignored, and `resourceVersionMatch` is rejected. There is
+  no replay and no notification for out-of-band Coder changes.
 
 Workspace deletion stays asynchronous (a delete build is requested).
 
