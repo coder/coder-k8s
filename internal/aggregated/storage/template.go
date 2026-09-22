@@ -752,7 +752,7 @@ func (s *TemplateStorage) Delete(
 	ctx context.Context,
 	name string,
 	deleteValidation rest.ValidateObjectFunc,
-	_ *metav1.DeleteOptions,
+	options *metav1.DeleteOptions,
 ) (runtime.Object, bool, error) {
 	if s == nil {
 		return nil, false, fmt.Errorf("assertion failed: template storage must not be nil")
@@ -795,19 +795,23 @@ func (s *TemplateStorage) Delete(
 		return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
 	}
 
+	templateObj := convert.TemplateToK8s(namespace, template)
+	if templateObj == nil {
+		return nil, false, fmt.Errorf("assertion failed: converted template must not be nil")
+	}
+
+	// Preconditions and admission see the fetched snapshot; the mutation below targets that same template ID.
+	if err := checkDeletePreconditions(options, templateObj, aggregationv1alpha1.Resource("codertemplates"), name); err != nil {
+		return nil, false, err
+	}
 	if deleteValidation != nil {
-		if validationErr := deleteValidation(ctx, convert.TemplateToK8s(namespace, template)); validationErr != nil {
+		if validationErr := deleteValidation(ctx, templateObj); validationErr != nil {
 			return nil, false, validationErr
 		}
 	}
 
 	if err := sdk.DeleteTemplate(ctx, template.ID); err != nil {
 		return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
-	}
-
-	templateObj := convert.TemplateToK8s(namespace, template)
-	if templateObj == nil {
-		return nil, false, fmt.Errorf("assertion failed: converted template must not be nil")
 	}
 
 	// Emit a Deleted event with the last-known template state.
