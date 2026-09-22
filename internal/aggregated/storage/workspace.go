@@ -650,7 +650,7 @@ func (s *WorkspaceStorage) Delete(
 	ctx context.Context,
 	name string,
 	deleteValidation rest.ValidateObjectFunc,
-	_ *metav1.DeleteOptions,
+	options *metav1.DeleteOptions,
 ) (runtime.Object, bool, error) {
 	if s == nil {
 		return nil, false, fmt.Errorf("assertion failed: workspace storage must not be nil")
@@ -688,8 +688,17 @@ func (s *WorkspaceStorage) Delete(
 		return nil, false, err
 	}
 
+	currentObj := convert.WorkspaceToK8s(namespace, workspace)
+	if currentObj == nil {
+		return nil, false, fmt.Errorf("assertion failed: converted workspace must not be nil")
+	}
+
+	// Preconditions and admission see the fetched snapshot; the delete build below targets that same workspace ID.
+	if err := checkDeletePreconditions(options, currentObj, aggregationv1alpha1.Resource("coderworkspaces"), name); err != nil {
+		return nil, false, err
+	}
 	if deleteValidation != nil {
-		if validationErr := deleteValidation(ctx, convert.WorkspaceToK8s(namespace, workspace)); validationErr != nil {
+		if validationErr := deleteValidation(ctx, currentObj); validationErr != nil {
 			return nil, false, validationErr
 		}
 	}
