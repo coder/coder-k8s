@@ -1,10 +1,10 @@
 apiVersion: aggregation.coder.com/v1alpha1
 kind: CoderTemplate
 metadata:
-  name: default.e2e-template
+  name: coder.e2e-template
   namespace: coder
 spec:
-  organization: default
+  organization: coder
   displayName: "E2E Template"
   description: "Created by coder-k8s merge-queue e2e"
   files:

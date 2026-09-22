@@ -132,8 +132,8 @@ func (s *WorkspaceStorage) Get(ctx context.Context, name string, _ *metav1.GetOp
 	if err != nil {
 		return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), name)
 	}
-	if workspace.OrganizationName != orgName {
-		return nil, apierrors.NewNotFound(aggregationv1alpha1.Resource("coderworkspaces"), name)
+	if err := requireFetchedWorkspaceIdentity(ctx, sdk, name, orgName, userName, workspaceName, workspace); err != nil {
+		return nil, err
 	}
 
 	return convert.WorkspaceToK8s(namespace, workspace), nil
@@ -359,6 +359,16 @@ func (s *WorkspaceStorage) Create(
 		return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), workspaceObj.Name)
 	}
 
+	// Owner preflight: resolve the owner segment before any mutation so alias owners (for
+	// example "me") are rejected instead of creating a workspace under a different name.
+	owner, err := sdk.User(ctx, userName)
+	if err != nil {
+		return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), workspaceObj.Name)
+	}
+	if err := requireCanonicalWorkspaceName(workspaceObj.Name, orgName, userName, workspaceName, org.Name, owner.Username); err != nil {
+		return nil, err
+	}
+
 	template, err := sdk.TemplateByName(ctx, org.ID, workspaceObj.Spec.TemplateName)
 	if err != nil {
 		return nil, coder.MapCoderError(
@@ -521,6 +531,14 @@ func (s *WorkspaceStorage) Update(
 			)
 		}
 
+		// Keep create-on-update indistinguishable from the existing-workspace path: an existing
+		// workspace in an organization that denies membership verification is an opaque NotFound
+		// there, so a missing one must not surface the denial as Forbidden through Create. Direct
+		// Create requests keep their ordinary mapped errors.
+		if _, orgErr := sdk.OrganizationByName(ctx, orgName); orgErr != nil {
+			return nil, false, mapMembershipVerificationError(orgErr, name)
+		}
+
 		createdObj, createErr := s.Create(ctx, createWorkspace, createValidation, nil)
 		if createErr != nil {
 			return nil, false, createErr
@@ -528,8 +546,8 @@ func (s *WorkspaceStorage) Update(
 
 		return createdObj, true, nil
 	}
-	if currentWorkspace.OrganizationName != orgName {
-		return nil, false, apierrors.NewNotFound(aggregationv1alpha1.Resource("coderworkspaces"), name)
+	if err := requireFetchedWorkspaceIdentity(ctx, sdk, name, orgName, userName, workspaceName, currentWorkspace); err != nil {
+		return nil, false, err
 	}
 
 	currentK8sObj := convert.WorkspaceToK8s(namespace, currentWorkspace)
@@ -666,8 +684,8 @@ func (s *WorkspaceStorage) Delete(
 	if err != nil {
 		return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), name)
 	}
-	if workspace.OrganizationName != orgName {
-		return nil, false, apierrors.NewNotFound(aggregationv1alpha1.Resource("coderworkspaces"), name)
+	if err := requireFetchedWorkspaceIdentity(ctx, sdk, name, orgName, userName, workspaceName, workspace); err != nil {
+		return nil, false, err
 	}
 
 	if deleteValidation != nil {

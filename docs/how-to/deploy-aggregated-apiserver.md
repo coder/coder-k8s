@@ -90,6 +90,53 @@ kubectl get codertemplates.aggregation.coder.com -A
 kubectl logs -n coder-system deploy/coder-k8s
 ```
 
+## Object names: canonical organization and owner names
+
+Aggregated objects are addressed by dotted names built from Coder's **canonical** names:
+
+- `CoderTemplate`: `<organization>.<template>`
+- `CoderWorkspace`: `<organization>.<owner>.<workspace>`
+
+Coder itself accepts aliases such as the `default` organization, the `me` user, or raw IDs,
+but the aggregated API server rejects a request whose organization or owner segment resolves
+to a differently named organization or user. Aliases would otherwise return an object under a
+different `metadata.name`, which breaks `kubectl apply` (name precondition failures on repeated
+applies, `AlreadyExists` after a `NotFound` GET). The rejection is a `400 BadRequest` that names
+the canonical form, and it happens before any Coder mutation (no upload, template version,
+workspace, or build is created). A literal organization or user that is really named `default`
+or `me` stays valid.
+
+Cross-organization requests stay opaque: a workspace that exists in another organization is
+reported as `NotFound` without disclosing its canonical names, and a request naming an
+organization the caller is not allowed to read is also reported as `NotFound`, so it cannot
+be used to probe whether such a workspace exists.
+
+Discover the canonical names before creating objects (this works before any template or
+workspace exists). Use the operator token that the controller stores for the control plane,
+or any Coder session token with access to the organization:
+
+```bash
+kubectl -n coder port-forward svc/coder 3000:80 &
+TOKEN_SECRET=$(kubectl -n coder get codercontrolplane coder -o jsonpath='{.status.operatorTokenSecretRef.name}')
+TOKEN=$(kubectl -n coder get secret "$TOKEN_SECRET" -o jsonpath='{.data.token}' | base64 -d)
+
+# canonical organization name behind the "default" alias
+curl -sS -H "Coder-Session-Token: $TOKEN" http://127.0.0.1:3000/api/v2/organizations/default | jq -r .name
+# canonical username behind the "me" alias (the token's user)
+curl -sS -H "Coder-Session-Token: $TOKEN" http://127.0.0.1:3000/api/v2/users/me | jq -r .username
+```
+
+Existing objects already list their canonical names:
+
+```bash
+kubectl get codertemplates.aggregation.coder.com -A
+kubectl get coderworkspaces.aggregation.coder.com -A
+```
+
+Migration: manifests that used alias segments (for example `default.my-template` or
+`default.me.my-workspace`) must be renamed to the canonical form reported by the error message,
+and `spec.organization` must carry the same canonical organization name.
+
 ## Server-Side Apply (SSA) behavior
 
 `coder-k8s` now includes a compatibility fallback for SSA create-on-update requests
