@@ -531,6 +531,14 @@ func (s *WorkspaceStorage) Update(
 			)
 		}
 
+		// Keep create-on-update indistinguishable from the existing-workspace path: an existing
+		// workspace in an organization that denies membership verification is an opaque NotFound
+		// there, so a missing one must not surface the denial as Forbidden through Create. Direct
+		// Create requests keep their ordinary mapped errors.
+		if _, orgErr := sdk.OrganizationByName(ctx, orgName); orgErr != nil {
+			return nil, false, mapMembershipVerificationError(orgErr, name)
+		}
+
 		createdObj, createErr := s.Create(ctx, createWorkspace, createValidation, nil)
 		if createErr != nil {
 			return nil, false, createErr

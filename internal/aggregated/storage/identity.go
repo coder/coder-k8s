@@ -2,7 +2,9 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/google/uuid"
@@ -79,7 +81,7 @@ func requireFetchedWorkspaceIdentity(
 	if workspace.OrganizationName != orgName {
 		org, err := sdk.OrganizationByName(ctx, orgName)
 		if err != nil {
-			return coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), name)
+			return mapMembershipVerificationError(err, name)
 		}
 		if org.ID != workspace.OrganizationID {
 			return apierrors.NewNotFound(aggregationv1alpha1.Resource("coderworkspaces"), name)
@@ -87,4 +89,22 @@ func requireFetchedWorkspaceIdentity(
 	}
 
 	return requireCanonicalWorkspaceName(name, orgName, userName, workspaceName, workspace.OrganizationName, workspace.OwnerName)
+}
+
+// mapMembershipVerificationError maps an error from the requested-organization lookup that verifies
+// membership for a workspace request. A denied lookup (403) becomes the same opaque NotFound as a
+// genuine cross-organization mismatch: a workspace whose name is probed under an organization the
+// caller cannot read must look the same whether it exists or not. Every other error (401, 404, 5xx)
+// keeps its ordinary mapping; direct Create requests never use this mapping.
+func mapMembershipVerificationError(err error, name string) error {
+	if err == nil {
+		return fmt.Errorf("assertion failed: membership verification error must not be nil")
+	}
+
+	var coderErr *codersdk.Error
+	if errors.As(err, &coderErr) && coderErr.StatusCode() == http.StatusForbidden {
+		return apierrors.NewNotFound(aggregationv1alpha1.Resource("coderworkspaces"), name)
+	}
+
+	return coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), name)
 }

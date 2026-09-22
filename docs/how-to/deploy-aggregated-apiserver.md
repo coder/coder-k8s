@@ -107,7 +107,9 @@ workspace, or build is created). A literal organization or user that is really n
 or `me` stays valid.
 
 Cross-organization requests stay opaque: a workspace that exists in another organization is
-reported as `NotFound` without disclosing its canonical names.
+reported as `NotFound` without disclosing its canonical names, and a request naming an
+organization the caller is not allowed to read is also reported as `NotFound`, so it cannot
+be used to probe whether such a workspace exists.
 
 Discover the canonical names before creating objects (this works before any template or
 workspace exists). Use the operator token that the controller stores for the control plane,

@@ -36,8 +36,9 @@ var otherOrganization = codersdk.Organization{
 
 // newAliasResolvingCoderServer fronts the package mock with Coder's server-side alias behavior:
 // /organizations/default resolves to the mock organization ("acme") and /users/me to the mock user
-// ("alice"); responses keep canonical names. It also serves a second organization ("other") and
-// returns 403 for the "forbidden-org" organization and the "forbidden-user" user.
+// ("alice"); responses keep canonical names. It also serves a second organization ("other"),
+// returns 403 for the "forbidden-org" organization and the "forbidden-user" user, and 503 for the
+// "outage-org" organization.
 func newAliasResolvingCoderServer(t *testing.T) (*httptest.Server, *mockCoderServerState) {
 	t.Helper()
 
@@ -68,6 +69,8 @@ func newAliasResolvingCoderServer(t *testing.T) (*httptest.Server, *mockCoderSer
 			writeCoderError(w, http.StatusForbidden, "forbidden organization")
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/users/forbidden-user":
 			writeCoderError(w, http.StatusForbidden, "forbidden user")
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/organizations/outage-org":
+			writeCoderError(w, http.StatusServiceUnavailable, "organization lookup unavailable")
 		default:
 			proxy.ServeHTTP(w, r)
 		}
@@ -462,6 +465,49 @@ func TestWorkspaceStorageCrossOrganizationMismatchStaysOpaque(t *testing.T) {
 		assertOpaqueNotFound(t, "delete "+tc.requested, err, tc.mustNotDisclose...)
 	}
 
+	assertNoMutations(t, state)
+}
+
+// TestWorkspaceStorageDeniedOrganizationVerificationStaysOpaque: when the requested organization denies
+// the membership lookup (403), an existing workspace in another organization and a missing workspace must
+// be indistinguishable (opaque NotFound) across Get/Update/Delete and create-on-update. Direct Create keeps
+// the mapped Forbidden of its organization lookup; outages during verification keep their normal mapping.
+func TestWorkspaceStorageDeniedOrganizationVerificationStaysOpaque(t *testing.T) {
+	t.Parallel()
+
+	server, state := newAliasResolvingCoderServer(t)
+	workspaces := NewWorkspaceStorage(newTestClientProvider(t, server.URL))
+	ctx := namespacedContext("control-plane")
+
+	mustNotDisclose := []string{`"acme"`, "canonical", "forbidden organization"}
+	for _, requested := range []string{"forbidden-org.alice.dev-workspace", "forbidden-org.alice.missing-workspace"} {
+		_, err := workspaces.Get(ctx, requested, nil)
+		assertOpaqueNotFound(t, "get "+requested, err, mustNotDisclose...)
+
+		_, _, err = workspaces.Update(ctx, requested, noopUpdate(), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc, false, nil)
+		assertOpaqueNotFound(t, "update "+requested, err, mustNotDisclose...)
+
+		_, _, err = workspaces.Delete(ctx, requested, rest.ValidateAllObjectFunc, nil)
+		assertOpaqueNotFound(t, "delete "+requested, err, mustNotDisclose...)
+
+		_, _, err = workspaces.Update(
+			ctx,
+			requested,
+			testUpdatedObjectInfo{obj: newIdentityWorkspace(requested, "forbidden-org")},
+			rest.ValidateAllObjectFunc,
+			rest.ValidateAllObjectUpdateFunc,
+			true,
+			nil,
+		)
+		assertOpaqueNotFound(t, "create-on-update "+requested, err, mustNotDisclose...)
+	}
+
+	if _, err := workspaces.Create(ctx, newIdentityWorkspace("forbidden-org.alice.new-workspace", "forbidden-org"), rest.ValidateAllObjectFunc, nil); !apierrors.IsForbidden(err) {
+		t.Fatalf("direct create must keep the mapped Forbidden of the organization lookup, got %v", err)
+	}
+	if _, err := workspaces.Get(ctx, "outage-org.alice.dev-workspace", nil); !apierrors.IsInternalError(err) {
+		t.Fatalf("an organization lookup outage during membership verification must keep its normal mapping, got %v", err)
+	}
 	assertNoMutations(t, state)
 }
 
