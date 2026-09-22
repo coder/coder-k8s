@@ -365,7 +365,7 @@ func (s *WorkspaceStorage) Create(
 	if err != nil {
 		return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), workspaceObj.Name)
 	}
-	if err := requireCanonicalWorkspaceName(workspaceObj.Name, orgName, userName, workspaceName, org.Name, owner.Username); err != nil {
+	if err := requireCanonicalWorkspaceName(workspaceObj.Name, orgName, userName, workspaceName, org.Name, owner.Username, false); err != nil {
 		return nil, err
 	}
 

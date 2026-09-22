@@ -2734,6 +2734,7 @@ type mockCoderServerState struct {
 	failBuildTransitions              map[codersdk.WorkspaceTransition]int
 	templateMetaPatchCall             int
 	failActiveVersionPromotion        bool
+	caseInsensitiveLeafLookups        bool // models coderd resolving template/workspace names case-insensitively
 	templateVersionPollsBeforeSuccess map[uuid.UUID]int
 	nextTemplateVersionInitialStatus  codersdk.ProvisionerJobStatus
 	nextTemplateVersionPendingPolls   int
@@ -3021,6 +3022,14 @@ func (s *mockCoderServerState) handleGetTemplateByName(w http.ResponseWriter, or
 		return
 	}
 	templateID, ok := orgTemplates[templateName]
+	if !ok && s.caseInsensitiveLeafLookups {
+		for storedName, id := range orgTemplates {
+			if strings.EqualFold(storedName, templateName) {
+				templateID, ok = id, true
+				break
+			}
+		}
+	}
 	if !ok {
 		writeCoderError(w, http.StatusNotFound, "template not found")
 		return
@@ -3367,6 +3376,14 @@ func (s *mockCoderServerState) handleGetWorkspace(w http.ResponseWriter, owner, 
 		return
 	}
 	workspaceID, ok := userWorkspaces[workspaceName]
+	if !ok && s.caseInsensitiveLeafLookups {
+		for storedName, id := range userWorkspaces {
+			if strings.EqualFold(storedName, workspaceName) {
+				workspaceID, ok = id, true
+				break
+			}
+		}
+	}
 	if !ok {
 		writeCoderError(w, http.StatusNotFound, "workspace not found")
 		return
@@ -3602,6 +3619,15 @@ func (s *mockCoderServerState) templateMetaUpdateCount() int {
 	defer s.mu.Unlock()
 
 	return s.templateMetaPatchCall
+}
+
+// setCaseInsensitiveLeafLookups makes by-name template and workspace lookups resolve alternate casing to the
+// stored object, as coderd does; the response still carries the stored (canonical) name.
+func (s *mockCoderServerState) setCaseInsensitiveLeafLookups(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.caseInsensitiveLeafLookups = enabled
 }
 
 func (s *mockCoderServerState) setFailActiveVersionPromotion(fail bool) {

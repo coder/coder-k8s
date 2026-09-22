@@ -166,6 +166,9 @@ func (s *TemplateStorage) Get(ctx context.Context, name string, _ *metav1.GetOpt
 	if err != nil {
 		return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
 	}
+	if err := requireCanonicalTemplateLeaf(name, orgName, templateName, template); err != nil {
+		return nil, err
+	}
 
 	obj := convert.TemplateToK8s(namespace, template)
 
@@ -793,6 +796,9 @@ func (s *TemplateStorage) Delete(
 	template, err := sdk.TemplateByName(ctx, org.ID, templateName)
 	if err != nil {
 		return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
+	}
+	if err := requireCanonicalTemplateLeaf(name, orgName, templateName, template); err != nil {
+		return nil, false, err
 	}
 
 	templateObj := convert.TemplateToK8s(namespace, template)
