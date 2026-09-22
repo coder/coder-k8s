@@ -291,7 +291,7 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           kubectl -n coder get codertemplates
-          kubectl -n coder get codertemplate default.e2e-template -o yaml
+          kubectl -n coder get codertemplate coder.e2e-template -o yaml
 
       # ---- Failure diagnostics ----
       - name: Dump cluster state on failure

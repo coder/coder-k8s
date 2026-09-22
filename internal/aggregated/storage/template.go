@@ -158,6 +158,9 @@ func (s *TemplateStorage) Get(ctx context.Context, name string, _ *metav1.GetOpt
 	if err != nil {
 		return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
 	}
+	if err := requireCanonicalTemplateName(name, orgName, templateName, org); err != nil {
+		return nil, err
+	}
 
 	template, err := sdk.TemplateByName(ctx, org.ID, templateName)
 	if err != nil {
@@ -390,6 +393,9 @@ func (s *TemplateStorage) Create(
 	org, err := sdk.OrganizationByName(ctx, orgName)
 	if err != nil {
 		return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
+	}
+	if err := requireCanonicalTemplateName(templateObj.Name, orgName, templateName, org); err != nil {
+		return nil, err
 	}
 
 	if templateObj.Spec.Files != nil {
@@ -779,6 +785,9 @@ func (s *TemplateStorage) Delete(
 	org, err := sdk.OrganizationByName(ctx, orgName)
 	if err != nil {
 		return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
+	}
+	if err := requireCanonicalTemplateName(name, orgName, templateName, org); err != nil {
+		return nil, false, err
 	}
 
 	template, err := sdk.TemplateByName(ctx, org.ID, templateName)

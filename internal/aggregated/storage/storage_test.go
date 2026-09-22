@@ -2718,6 +2718,10 @@ type mockCoderServerState struct {
 	mu sync.Mutex
 
 	organization codersdk.Organization
+	usersByName  map[string]codersdk.User
+	// mutationRequests records "METHOD /path" for every non-GET request so tests can
+	// assert that rejected requests never reached a backend mutation.
+	mutationRequests []string
 
 	templatesByID        map[uuid.UUID]codersdk.Template
 	templateIDsByOrg     map[string]map[string]uuid.UUID
@@ -2819,6 +2823,9 @@ func newMockCoderServer(t *testing.T) (*httptest.Server, *mockCoderServerState) 
 
 	state := &mockCoderServerState{
 		organization: organization,
+		usersByName: map[string]codersdk.User{
+			"alice": {ReducedUser: codersdk.ReducedUser{MinimalUser: codersdk.MinimalUser{ID: uuid.New(), Username: "alice"}}},
+		},
 		templatesByID: map[uuid.UUID]codersdk.Template{
 			template.ID: template,
 		},
@@ -2859,9 +2866,16 @@ func (s *mockCoderServerState) handleRequest(t *testing.T, w http.ResponseWriter
 
 	segments := splitPath(r.URL.Path)
 
+	if r.Method != http.MethodGet {
+		s.recordMutation(r)
+	}
+
 	switch {
 	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "organizations") && len(segments) == 4:
 		s.handleGetOrganization(w, segments[3])
+		return
+	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "users") && len(segments) == 4:
+		s.handleGetUser(w, segments[3])
 		return
 	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templates") && len(segments) == 3:
 		s.handleListTemplates(w)
@@ -2924,6 +2938,35 @@ func (s *mockCoderServerState) handleGetOrganization(w http.ResponseWriter, orgS
 	}
 
 	writeJSON(w, http.StatusOK, s.organization)
+}
+
+func (s *mockCoderServerState) handleGetUser(w http.ResponseWriter, userSegment string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, user := range s.usersByName {
+		if userSegment == user.Username || userSegment == user.ID.String() {
+			writeJSON(w, http.StatusOK, user)
+			return
+		}
+	}
+
+	writeCoderError(w, http.StatusNotFound, "user not found")
+}
+
+func (s *mockCoderServerState) recordMutation(r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.mutationRequests = append(s.mutationRequests, r.Method+" "+r.URL.Path)
+}
+
+// mutations returns every non-GET request the mock has received so far.
+func (s *mockCoderServerState) mutations() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return append([]string(nil), s.mutationRequests...)
 }
 
 func (s *mockCoderServerState) handleListTemplates(w http.ResponseWriter) {
