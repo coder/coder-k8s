@@ -139,23 +139,24 @@ and `spec.organization` must carry the same canonical organization name.
 
 ## Delete preconditions
 
-`DELETE` requests may carry `preconditions.uid` and/or `preconditions.resourceVersion` (an
-explicit `DeleteOptions` body, or a client that sets them; `kubectl delete -f` does not send
-them even when the manifest includes `metadata.uid`). Both resources compare them with the
-object fetched for that request and answer `409 Conflict` on a mismatch without touching Coder:
+`DELETE` requests may carry `preconditions.uid` and/or `preconditions.resourceVersion` in an
+explicit `DeleteOptions` body (`kubectl delete -f` does not send them, even when the manifest
+includes `metadata.uid`). Both resources compare each supplied value with the object fetched for
+that request and answer `409 Conflict` on a mismatch without touching Coder; matching values
+proceed as an ordinary delete. Absent preconditions skip the check; an explicitly supplied empty
+`uid` or `resourceVersion` is compared like any other value. Other `DeleteOptions` handling is
+unchanged by this check.
 
 - `uid` is the Coder template or workspace ID exposed as `metadata.uid`; after a match the
-  deletion targets that same ID.
-- `resourceVersion` is the exposed snapshot derived from the backend `updated_at`
-  (`metadata.resourceVersion`); it is compared with the value fetched in the same request. The
-  comparison is not an atomic storage transaction and Coder offers no compare-and-swap, so a
-  backend change between the fetch and the delete is not detected, and a change that happened
-  before the request surfaces as `Conflict` — refetch and retry with the new value. Template
-  metadata updates change `updated_at`; for workspaces Coder currently sets it only on creation
-  (builds, TTL, autostart and rename changes leave it unchanged), so a workspace
-  `resourceVersion` cannot detect those changes — pin workspaces with `uid`.
-- An explicitly supplied empty `uid` or `resourceVersion` is compared like any other value; only
-  absent preconditions skip the check. Other `DeleteOptions` fields are not interpreted.
+  deletion targets that same ID. It guards against deleting a different object that now carries
+  the same name, not against changes to the same object.
+- `resourceVersion` is the exposed value derived from the backend `updated_at`
+  (`metadata.resourceVersion`). A mismatch is reported only when the exposed value differs from
+  the supplied one; the comparison is a snapshot, not a compare-and-swap, so a backend change
+  between the fetch and the delete is not detected. Template metadata updates change the exposed
+  value. For workspaces, builds, TTL, autostart and rename changes did not change the exposed
+  value on Coder 2.37.2, so a matching workspace `resourceVersion` does not guard against those
+  same-object changes (tracked in issue #109).
 
 Workspace deletion stays asynchronous (a delete build is requested).
 

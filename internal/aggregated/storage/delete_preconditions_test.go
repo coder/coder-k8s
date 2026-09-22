@@ -200,9 +200,33 @@ func TestDeletePreconditionsRunBeforeAdmissionAndMutation(t *testing.T) {
 			t.Parallel()
 
 			state, current, del, intact := fixture.setup(t)
-			_, err := del(reject, preconditions(uidPtr(string(current.GetUID())), stringPtr(current.GetResourceVersion())))
-			if !errors.Is(err, rejected) {
-				t.Fatalf("matching preconditions must still run admission, got %v", err)
+
+			// A failed precondition is answered before admission runs and before any mutation.
+			admissionCalls := 0
+			counting := func(ctx context.Context, obj runtime.Object) error {
+				admissionCalls++
+				return reject(ctx, obj)
+			}
+			for name, options := range map[string]*metav1.DeleteOptions{
+				"wrong uid":  preconditions(uidPtr("00000000-0000-0000-0000-00000000dead"), nil),
+				"stale rv":   preconditions(nil, stringPtr("1")),
+				"both wrong": preconditions(uidPtr("00000000-0000-0000-0000-00000000dead"), stringPtr("1")),
+			} {
+				deleted, err := del(counting, options)
+				if !apierrors.IsConflict(err) || deleted {
+					t.Fatalf("%s: expected Conflict before admission, got deleted=%v err=%v", name, deleted, err)
+				}
+				if admissionCalls != 0 {
+					t.Fatalf("%s: admission must not run on a failed precondition, ran %d times", name, admissionCalls)
+				}
+				if mutations := state.mutations(); len(mutations) != 0 || !intact() {
+					t.Fatalf("%s: failed precondition must not mutate the backend; mutations=%v", name, mutations)
+				}
+			}
+
+			_, err := del(counting, preconditions(uidPtr(string(current.GetUID())), stringPtr(current.GetResourceVersion())))
+			if !errors.Is(err, rejected) || admissionCalls != 1 {
+				t.Fatalf("matching preconditions must still run admission exactly once, got calls=%d err=%v", admissionCalls, err)
 			}
 			if mutations := state.mutations(); len(mutations) != 0 || !intact() {
 				t.Fatalf("admission rejection must not mutate the backend; mutations=%v", mutations)
