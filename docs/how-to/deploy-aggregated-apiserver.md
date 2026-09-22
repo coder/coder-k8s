@@ -139,10 +139,10 @@ and `spec.organization` must carry the same canonical organization name.
 
 ## Delete preconditions
 
-`DELETE` requests may carry `preconditions.uid` and/or `preconditions.resourceVersion`
-(for example from `kubectl delete` of a manifest that includes `metadata.uid`, or an explicit
-`DeleteOptions` body). Both resources compare them with the object fetched for that request and
-answer `409 Conflict` on a mismatch without touching Coder:
+`DELETE` requests may carry `preconditions.uid` and/or `preconditions.resourceVersion` (an
+explicit `DeleteOptions` body, or a client that sets them; `kubectl delete -f` does not send
+them even when the manifest includes `metadata.uid`). Both resources compare them with the
+object fetched for that request and answer `409 Conflict` on a mismatch without touching Coder:
 
 - `uid` is the Coder template or workspace ID exposed as `metadata.uid`; after a match the
   deletion targets that same ID.
@@ -150,7 +150,10 @@ answer `409 Conflict` on a mismatch without touching Coder:
   (`metadata.resourceVersion`); it is compared with the value fetched in the same request. The
   comparison is not an atomic storage transaction and Coder offers no compare-and-swap, so a
   backend change between the fetch and the delete is not detected, and a change that happened
-  before the request surfaces as `Conflict` — refetch and retry with the new value.
+  before the request surfaces as `Conflict` — refetch and retry with the new value. Template
+  metadata updates change `updated_at`; for workspaces Coder currently sets it only on creation
+  (builds, TTL, autostart and rename changes leave it unchanged), so a workspace
+  `resourceVersion` cannot detect those changes — pin workspaces with `uid`.
 - An explicitly supplied empty `uid` or `resourceVersion` is compared like any other value; only
   absent preconditions skip the check. Other `DeleteOptions` fields are not interpreted.
 
