@@ -15,9 +15,10 @@ import (
 	"github.com/coder/coder/v2/codersdk"
 )
 
-// Coder resolves aliases such as the "default" organization, the "me" user, and raw IDs on the
-// server side, but the aggregated API must return every object under exactly the requested
-// metadata.name. Request names therefore have to use the canonical organization and owner names.
+// Coder resolves aliases such as the "default" organization, the "me" user, raw IDs, and
+// alternate-cased template and workspace names on the server side, but the aggregated API must
+// return every object under exactly the requested metadata.name. Request names therefore have to
+// use the canonical organization, owner, template, and workspace names.
 // Name parsing stays syntactic; a segment is rejected only when authoritative resolution returns a
 // differently named organization or user, and the rejection happens before any backend mutation.
 
@@ -34,6 +35,23 @@ func requireCanonicalTemplateName(name, orgName, templateName string, org coders
 	return apierrors.NewBadRequest(fmt.Sprintf(
 		"template name %q: organization segment %q resolves to organization %q; use the canonical name %q",
 		name, orgName, org.Name, coder.BuildTemplateName(org.Name, templateName),
+	))
+}
+
+// requireCanonicalTemplateLeaf rejects a fetched template whose own name differs from the requested
+// final segment. Coder resolves template names case-insensitively, so an alternate-cased request
+// finds the canonical template; it must not be returned or mutated under the requested name.
+func requireCanonicalTemplateLeaf(name, orgName, templateName string, template codersdk.Template) error {
+	if template.Name == "" {
+		return fmt.Errorf("assertion failed: fetched template for %q must have a name", name)
+	}
+	if template.Name == templateName {
+		return nil
+	}
+
+	return apierrors.NewBadRequest(fmt.Sprintf(
+		"template name %q: template segment %q resolves to template %q; use the canonical name %q",
+		name, templateName, template.Name, coder.BuildTemplateName(orgName, template.Name),
 	))
 }
 
@@ -88,7 +106,23 @@ func requireFetchedWorkspaceIdentity(
 		}
 	}
 
-	return requireCanonicalWorkspaceName(name, orgName, userName, workspaceName, workspace.OrganizationName, workspace.OwnerName)
+	if err := requireCanonicalWorkspaceName(name, orgName, userName, workspaceName, workspace.OrganizationName, workspace.OwnerName); err != nil {
+		return err
+	}
+
+	// Coder resolves workspace names case-insensitively as well; the fetched workspace's own name
+	// must equal the requested final segment.
+	if workspace.Name == "" {
+		return fmt.Errorf("assertion failed: fetched workspace for %q must have a name", name)
+	}
+	if workspace.Name != workspaceName {
+		return apierrors.NewBadRequest(fmt.Sprintf(
+			"workspace name %q: workspace segment %q resolves to workspace %q; use the canonical name %q",
+			name, workspaceName, workspace.Name, coder.BuildWorkspaceName(workspace.OrganizationName, workspace.OwnerName, workspace.Name),
+		))
+	}
+
+	return nil
 }
 
 // mapMembershipVerificationError maps an error from the requested-organization lookup that verifies
