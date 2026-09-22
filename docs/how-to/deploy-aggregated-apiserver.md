@@ -205,9 +205,14 @@ same token. Consequences:
   same-named workspace created later has a different `uid`.
 - Tokens from releases that exposed the numeric `updated_at` value no longer match; clients must
   re-read before retrying an update or delete after the upgrade.
-- Watch behavior is unchanged: events are emitted only for writes made through this server,
-  `resourceVersion` on watch requests is ignored, and `resourceVersionMatch` is rejected. There is
-  no replay and no notification for out-of-band Coder changes.
+- Watch behavior is unchanged: events are emitted only for writes made through this server; there
+  is no replay and no notification for out-of-band Coder changes. Supply the current opaque token
+  as `resourceVersion` and omit `sendInitialEvents` and `resourceVersionMatch`; once the options
+  are accepted the token is ignored (it is not a replay cursor). Under the API server's WatchList
+  defaulting, a watch that omits `resourceVersion` or sets it to `0` implicitly asks for initial
+  events, which this server does not support (`400 Bad Request`); `resourceVersionMatch` is
+  rejected, and `sendInitialEvents=false` without a matching option is rejected upstream
+  (`422 Invalid`).
 
 Workspace deletion stays asynchronous (a delete build is requested).
 
