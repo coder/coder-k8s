@@ -41,6 +41,7 @@ cleanup() {
   printf '%s\n' "=== RECEIPT ($RESULT) ===" "source_sha=$SOURCE_SHA" "run_id=${GITHUB_RUN_ID:-unset}" \
     "run_attempt=${GITHUB_RUN_ATTEMPT:-unset}" "coder_version=${CODER_VERSION:-unknown}" "built_image_id=$BUILT_IMAGE_ID" \
     "serving_image_id=${SERVING_IMAGE_ID:-unknown}" "pod=${POD_NAME:-unknown}" "uid0=${UID0:-unset}" "uid1=${UID1:-unset}" \
+    "rv_pre_rename=${OLD_RV:-unset}" "rv_post_rename=${NEW_RV:-unset}" \
     "${CASES[@]}" | tee "$WORK/receipt.txt"
 }
 trap cleanup EXIT
@@ -190,6 +191,8 @@ kill "$WATCH_PID" 2>/dev/null || true
 wait_until "stop build $BUILD" build_done "$NAME" "$BUILD" stopped
 
 step "out-of-band Coder rename keeps UID; old name is 404"
+PRE=$(ws_get "$NAME") # genuine pre-rename object of the stopped workspace
+OLD_RV=$(jq -er '.metadata.resourceVersion' <<<"$PRE") || fail "pre-rename object lacks resourceVersion"
 coder_api PATCH "/api/v2/workspaces/$UID0" "$(jq -nc --arg n "$RENAMED" '{name:$n}')" >/dev/null
 NEW_NAME=$ORG.$OWNER.$RENAMED
 renamed() { local rc=0; ws_get "$NEW_NAME" >"$WORK/renamed.json" || rc=$?; ((rc == 0)); }
@@ -198,6 +201,31 @@ wait_until "renamed workspace $NEW_NAME" renamed
 [[ $(jq -r '.metadata.name' "$WORK/renamed.json") == "$NEW_NAME" ]] || fail "renamed object has a non-canonical name"
 RC=0 && ws_get "$NAME" >/dev/null || RC=$?
 ((RC == 4)) || fail "old name $NAME is still served after rename (rc=$RC)"
+
+step "#109 rename changes the token; stale UPDATE and DELETE return 409 and change nothing"
+POST=$(jq -cS . "$WORK/renamed.json")
+NEW_RV=$(jq -er '.metadata.resourceVersion' <<<"$POST") || fail "renamed object lacks resourceVersion"
+[[ $(jq -r .metadata.name <<<"$PRE") != "$(jq -r .metadata.name <<<"$POST")" ]] || fail "canonical name did not change"
+[[ $NEW_RV != "$OLD_RV" ]] || fail "rename did not change resourceVersion (still $OLD_RV)"
+latest_build() { coder_api GET "/api/v2/workspaces/$UID0" | jq -er '.latest_build.id'; }
+build_count() { coder_api GET "/api/v2/workspaces/$UID0/builds?limit=100" | jq -er 'length'; }
+LATEST=$(latest_build) || fail "cannot read backend latest build of $UID0"
+COUNT=$(build_count) || fail "cannot list backend builds of $UID0"
+[[ $LATEST == "$BUILD" ]] || fail "backend latest build $LATEST is not the stop build $BUILD"
+jq --arg rv "$OLD_RV" '.metadata.resourceVersion = $rv' <<<"$POST" >"$WORK/stale-update.json"
+expect_error Conflict k replace --raw "$API/$NEW_NAME" -f "$WORK/stale-update.json"
+expect_error Conflict ws_delete "$NEW_NAME" "$UID0" "$OLD_RV"
+[[ $(latest_build) == "$LATEST" ]] || fail "backend latest build changed after stale requests"
+[[ $(build_count) == "$COUNT" ]] || fail "backend build count changed after stale requests (was $COUNT)"
+[[ $(ws_get "$NEW_NAME" | jq -cS .) == "$POST" ]] || fail "object changed after stale requests"
+
+step "#109 GET and LIST agree on the renamed object and its token"
+GOT=$(ws_get "$NEW_NAME")
+k get --raw "$API" >"$WORK/list.json"
+ITEM=$(jq -c --arg uid "$UID0" '[.items[] | select(.metadata.uid == $uid)]' "$WORK/list.json")
+jq -e --arg n "$NEW_NAME" 'length == 1 and .[0].metadata.name == $n' <<<"$ITEM" >/dev/null || fail "renamed $NEW_NAME missing from LIST"
+[[ $(jq -r '.[0].metadata.resourceVersion' <<<"$ITEM") == "$(jq -r .metadata.resourceVersion <<<"$GOT")" ]] ||
+  fail "LIST token differs from GET token for $NEW_NAME"
 
 step "wrong-UID delete returns 409 and leaves object and latest build intact"
 WRONG_UID=00000000-0000-4000-8000-000000000000
