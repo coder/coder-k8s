@@ -25,7 +25,7 @@ while (($#)); do
     --raw) raw=$2; shift 2 ;;
     -f) file=$2; shift 2 ;;
     -n | -o | -l) shift 2 ;;
-    -v=*) shift ;;
+    -v=* | --request-timeout=*) shift ;;
     *) pos+=("$1"); shift ;;
   esac
 done
@@ -43,6 +43,7 @@ case "${pos[0]}:${pos[1]:-}" in
       echo "$raw" >"$S/watch_url"; echo $$ >"$S/watch.pid"
       off=$(wc -c <"$S/events")
       [[ $SCENARIO == watch-unregistered ]] || echo "I0923 round_trippers.go:553] GET https://127.0.0.1:6443$raw 200 OK in 2 milliseconds" >&2
+      [[ $SCENARIO != watch-exits ]] || exit 0
       exec timeout 60 tail -c "+$((off + 1))" -f "$S/events"
     fi
     f=$(wsfile "$raw"); [[ -f $f ]] || err NotFound "coderworkspaces \"${raw##*/}\" not found"; cat "$f" ;;
@@ -65,10 +66,14 @@ case "${pos[0]}:${pos[1]:-}" in
   delete:)
     f=$(wsfile "$raw"); [[ -f $f ]] || err NotFound missing
     if [[ $SCENARIO != delete-ignores-preconditions ]]; then
-      [[ $(jq -r .preconditions.uid "$file") == "$(jq -r .metadata.uid "$f")" ]] || err Conflict "Precondition failed: UID"
+      if [[ $(jq -r .preconditions.uid "$file") != "$(jq -r .metadata.uid "$f")" ]]; then
+        [[ $SCENARIO != recreate-build-drift || $(jq -r .metadata.uid "$f") == uid-1 ]] || { jq '.status.latestBuildStatus = "stopping"' "$f" >"$f.tmp"; mv "$f.tmp" "$f"; }
+        err Conflict "Precondition failed: UID"
+      fi
       rv=$(jq -r '.preconditions.resourceVersion // empty' "$file")
       [[ -z $rv || $rv == "$(jq -r .metadata.resourceVersion "$f")" ]] || err Conflict "Precondition failed: ResourceVersion"
     fi
+    echo "${DELETE_JOB_STATUS:-succeeded}" >"$S/deleted-$(jq -r .metadata.uid "$f")"
     rm "$f"; echo '{"kind":"Status","status":"Success"}' ;;
   *) echo "stub kubectl: unexpected call: ${pos[*]}" >&2; exit 97 ;;
 esac
@@ -91,9 +96,12 @@ while (($#)); do
 done
 path=/${url#http://*/}
 case "$method $path" in
-  "GET /api/v2/buildinfo") echo '{"version":"v2.35.8"}' ;;
+  "GET /api/v2/buildinfo") printf '{"version":"%s"}\n' "${CODER_VERSION_REPORTED:-v2.37.2+eb69e27}" ;;
   "GET /api/v2/organizations/coder/templates/e2e-template") echo '{"active_version_id":"tv-1"}' ;;
   "GET /api/v2/templateversions/tv-1") printf '{"job":{"status":"%s"}}\n' "${TEMPLATE_JOB_STATUS:-succeeded}" ;;
+  "GET /api/v2/workspaces/"*"?include_deleted=true")
+    uid=${path##*/} && uid=${uid%%\?*} && [[ -f $S/deleted-$uid ]] || exit 22
+    printf '{"latest_build":{"transition":"delete","job":{"status":"%s"}}}\n' "$(<"$S/deleted-$uid")" ;;
   "PATCH /api/v2/workspaces/"*)
     [[ $SCENARIO != rename-rejected ]] || { echo "curl: (22) The requested URL returned error: 400" >&2; exit 22; }
     for f in "$S"/ws/*.json; do
@@ -113,6 +121,12 @@ echo "docker $*" >>"$STUB_STATE/calls.log"
 [[ $1 == exec && $3 == crictl && $4 == inspecti ]] || { echo "stub docker: unexpected $*" >&2; exit 97; }
 printf '{"status":{"id":"%s"}}\n' "$SERVING_ID"
 STUB
+cat >"$STUBS/jq" <<'STUB'
+#!/usr/bin/env bash
+# Real jq, except that render-fail-* scenarios break exactly one request-body render.
+case "$SCENARIO:$*" in render-fail-delete:*DeleteOptions* | render-fail-create:*CoderWorkspace*) exit 5 ;; esac
+exec "$REAL_JQ" "$@"
+STUB
 chmod +x "$STUBS"/*
 
 # run_scenario <name> [VAR=value...]: runs the driver against the stubs; sets T, S, RC, SECS.
@@ -129,13 +143,15 @@ run_scenario() {
       conditions: [{type: "Ready", status: "True"}], containerStatuses: [{imageID: "docker.io/library/import-new@sha256:new"}]}}]}' >"$S/pods.json"
   jq -n --arg ip "$endpoint_ip" '{items: [{endpoints: [{addresses: [$ip], conditions: {ready: true}}]}]}' >"$S/endpoints.json"
   RC=0
-  env PATH="$STUBS:$PATH" STUB_STATE="$S" SCENARIO="$name" SERVING_ID="$BUILT" BUILT_IMAGE_ID="$BUILT" \
+  env PATH="$STUBS:$PATH" REAL_JQ="$(command -v jq)" STUB_STATE="$S" SCENARIO="$name" SERVING_ID="$BUILT" BUILT_IMAGE_ID="$BUILT" \
+    E2E_EXPECT_CODER_VERSION=v2.37.2 E2E_SOURCE_SHA=0123abc GITHUB_RUN_ID=42 GITHUB_RUN_ATTEMPT=1 \
     E2E_WORKDIR="$T/work" E2E_POLL_SECONDS=0.1 E2E_TIMEOUT_SECONDS=3 E2E_EVENT_TIMEOUT_SECONDS=2 GITHUB_ACTIONS=false \
     "$@" timeout 60 bash "$DRIVER" >"$T/out" 2>&1 || RC=$?
   SECS=$((SECONDS - start))
 }
 
-mutations() { grep -E '^kubectl (create|replace|delete) --raw|^curl .*-X PATCH' "$S/calls.log" | awk '/^kubectl/ {print $1 " " $2; next} {print "curl PATCH"}' | paste -sd, -; }
+mutations() { grep -E '^kubectl .*(create|replace|delete) --raw|^curl .*-X PATCH' "$S/calls.log" |
+  awk '/^kubectl/ {for (i = 2; i <= NF; i++) if ($i ~ /^(create|replace|delete)$/) {print "kubectl " $i; next}} /^curl/ {print "curl PATCH"}' | paste -sd, -; }
 check() { # <description> <command...>
   local desc=$1
   shift
@@ -157,18 +173,33 @@ rv=$(jq -r .metadata.resourceVersion "$S/last_update.json")
 check "watch URL uses the current token and only watch/resourceVersion/timeoutSeconds" \
   eval '[[ $(<"$S/watch_url") =~ ^/apis/aggregation\.coder\.com/v1alpha1/namespaces/coder/coderworkspaces\?watch=1\&resourceVersion=${rv}\&timeoutSeconds=[0-9]+$ ]]'
 check "watch URL omits sendInitialEvents and resourceVersionMatch" eval '! grep -qE "sendInitialEvents|resourceVersionMatch" "$S/watch_url"'
-check "update was sent only after watch registration" eval '[[ $(grep -n "watch=1" "$S/calls.log" | cut -d: -f1) -lt $(grep -n "^kubectl replace" "$S/calls.log" | cut -d: -f1) ]]'
+check "update was sent only after watch registration" eval '[[ $(grep -n "watch=1" "$S/calls.log" | cut -d: -f1) -lt $(grep -n "replace --raw" "$S/calls.log" | cut -d: -f1) ]]'
 check "mutation order: create, update, rename, 409 delete, delete, recreate, 409 delete" \
   no_mutations_after "kubectl create,kubectl replace,curl PATCH,kubectl delete,kubectl delete,kubectl create,kubectl delete"
 check "terminating pod ignored; serving pod image resolved on node" eval 'grep -q "crictl inspecti -o json docker.io/library/import-new@sha256:new" "$S/calls.log"'
 check "image identity recorded" eval 'grep -qx "built=$BUILT" "$T/work/image-identity.txt" && grep -qx "serving=$BUILT" "$T/work/image-identity.txt"'
 check "operator token never printed" eval '! out_has secret-token-value'
 check "background port-forward and watch stopped" bg_stopped
+check "every non-streaming kubectl request carries --request-timeout=30s" \
+  eval '! grep "^kubectl" "$S/calls.log" | grep -v -e "watch=1" -e port-forward | grep -qv -- "--request-timeout=30s "'
+check "recreate only after the delete job succeeded" eval '[[ $(grep -n include_deleted "$S/calls.log" | tail -1 | cut -d: -f1) -lt $(grep -n "^kubectl --request-timeout=30s create" "$S/calls.log" | tail -1 | cut -d: -f1) ]]'
+check "receipt: source, run, version, identity, UIDs, 9 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
+  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 9 ]]'
 
 echo "TEST image-mismatch: serving image differs from built image"
 run_scenario image-mismatch SERVING_ID="$OTHER"; summary
 check "fails with identity mismatch" failed_with "image identity mismatch"
 check "no mutation and no port-forward" eval 'no_mutations_after "" && ! grep -q port-forward "$S/calls.log"'
+
+echo "TEST version-mismatch: Coder serves v2.37.20, a prefix of the pin without '+'"
+run_scenario version-mismatch CODER_VERSION_REPORTED=v2.37.20; summary
+check "fails on version before any mutation; receipt marks the failing case" \
+  eval 'failed_with "Coder version mismatch" && no_mutations_after "" && grep -q "Coder API access.* = FAILED" "$T/work/receipt.txt"'
+
+echo "TEST render-fail-create: create body render fails"
+run_scenario render-fail-create; summary
+check "fails at create with zero kubectl create calls" eval '[[ $RC -ne 0 ]] && bg_stopped && no_mutations_after "" &&
+  grep -q "create workspace through the aggregated API = FAILED" "$T/work/receipt.txt"'
 
 echo "TEST endpoint-mismatch: aggregated API service points at the terminating pod"
 ENDPOINT_IP=10.244.0.4 run_scenario endpoint-mismatch; summary
@@ -199,6 +230,22 @@ echo "TEST delete-ignores-preconditions: wrong-UID delete succeeds"
 run_scenario delete-ignores-preconditions; summary
 check "fails on missing 409; no live delete or recreate" \
   eval 'failed_with "expected (Conflict) but request succeeded" && no_mutations_after "kubectl create,kubectl replace,curl PATCH,kubectl delete"'
+
+echo "TEST render-fail-delete: DeleteOptions render fails inside expect_error (errexit off)"
+run_scenario render-fail-delete; summary
+check "fails with zero kubectl delete calls and no recreate" eval 'failed_with "expected (Conflict)" && no_mutations_after "kubectl create,kubectl replace,curl PATCH"'
+
+echo "TEST delete-job-failed: workspace is 404 but its delete job failed"
+run_scenario delete-job-failed DELETE_JOB_STATUS=failed; summary
+check "fails on delete job status; no recreate" eval 'failed_with "delete job of uid-1 ended in status failed" && no_mutations_after "kubectl create,kubectl replace,curl PATCH,kubectl delete,kubectl delete"'
+
+echo "TEST watch-exits: watch registers then exits before the update"
+run_scenario watch-exits; summary
+check "fails before the update" eval 'failed_with "watch process exited before the update" && no_mutations_after "kubectl create"'
+
+echo "TEST recreate-build-drift: prior-UID delete returns 409 but the recreated build changes"
+run_scenario recreate-build-drift; summary
+check "fails on recreated latest build status" eval 'failed_with "recreated object changed after prior-UID delete"'
 
 echo "TEST missing-built-id: BUILT_IMAGE_ID is not a sha256 ID"
 run_scenario missing-built-id BUILT_IMAGE_ID=e2e; summary

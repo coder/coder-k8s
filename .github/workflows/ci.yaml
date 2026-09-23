@@ -207,7 +207,10 @@ jobs:
       # Full E2E runs in the merge queue, on push to main, and on pull requests that touch
       # aggregated-API/E2E paths (pre-queue route, #113). It uses no secrets and publishes nothing.
       E2E_FULL: ${{ github.event_name != 'pull_request' || needs.changes.outputs.e2e == 'true' }}
-      CODER_E2E_IMAGE: ghcr.io/coder/coder:v2.35.8 # keep in sync with github.com/coder/coder/v2 in go.mod
+      # Chosen E2E backend fixture, independent of the vendored codersdk version; the lifecycle driver
+      # fails before any mutation unless Coder reports E2E_EXPECT_CODER_VERSION.
+      CODER_E2E_IMAGE: ghcr.io/coder/coder:v2.37.2@sha256:6ea19b670111ff133fa214e2cb974e7b4e32fc4c65738ac5a918703d12d70f77
+      E2E_EXPECT_CODER_VERSION: v2.37.2
     steps:
       # ---- PR fast-path: skip heavy E2E on pull requests without E2E-relevant changes ----
       - name: Skip full E2E on pull requests
@@ -223,6 +226,14 @@ jobs:
           # Pull requests test the exact PR head, not the synthetic merge commit; other events keep the default ref.
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
           persist-credentials: false
+
+      - name: Record source SHA
+        id: source
+        if: env.E2E_FULL == 'true'
+        run: |
+          source_sha="$(git rev-parse HEAD)"
+          echo "Source SHA: ${source_sha}"
+          echo "sha=${source_sha}" >> "$GITHUB_OUTPUT"
 
       - name: Offline workspace lifecycle driver tests
         if: env.E2E_FULL == 'true'
@@ -336,6 +347,7 @@ jobs:
         if: env.E2E_FULL == 'true'
         env:
           BUILT_IMAGE_ID: ${{ steps.build_image.outputs.image_id }}
+          E2E_SOURCE_SHA: ${{ steps.source.outputs.sha }}
           E2E_WORKDIR: ${{ runner.temp }}/workspace-lifecycle
         run: bash ./hack/e2e-workspace-lifecycle.sh
 
