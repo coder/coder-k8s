@@ -110,9 +110,15 @@ POD=$(jq -c '[.items[] | select(.metadata.deletionTimestamp == null)][0]' "$WORK
 POD_IMAGE_REF=$(jq -er '.status.containerStatuses[0].imageID' <<<"$POD") || fail "serving pod has no imageID"
 POD_IP=$(jq -er '.status.podIP' <<<"$POD") || fail "serving pod has no podIP"
 POD_NAME=$(jq -r '.metadata.name' <<<"$POD")
-# The pod's imageID may be a registry/import digest; resolve it to the image config ID on the node.
-SERVING_IMAGE_ID=$(docker exec "$KIND_NODE" crictl inspecti -o json "$POD_IMAGE_REF" | jq -er '.status.id') ||
-  fail "cannot resolve serving image $POD_IMAGE_REF on node $KIND_NODE"
+POD_IMAGE=$(jq -er '.spec.containers[0].image' <<<"$POD") || fail "serving pod has no image"
+[[ $POD_IMAGE_REF == *@sha256:* ]] || fail "serving pod imageID is not a digest reference: $POD_IMAGE_REF"
+# kind load imports images as import-<date>@sha256:<digest>, which crictl cannot inspect. Inspect the pod's
+# image tag on the node instead and require the pod's digest to be one of that image's repo digests.
+docker exec "$KIND_NODE" crictl inspecti -o json "$POD_IMAGE" >"$WORK/node-image.json" ||
+  fail "cannot inspect serving image $POD_IMAGE on node $KIND_NODE"
+SERVING_IMAGE_ID=$(jq -er '.status.id' "$WORK/node-image.json") || fail "node image $POD_IMAGE has no id"
+jq -e --arg d "${POD_IMAGE_REF##*@}" '[.status.repoDigests[]? | sub("^.*@"; "")] | any(. == $d)' "$WORK/node-image.json" >/dev/null ||
+  fail "serving pod digest ${POD_IMAGE_REF##*@} is not a digest of $POD_IMAGE on node $KIND_NODE"
 log "built=$BUILT_IMAGE_ID serving=$SERVING_IMAGE_ID podImageRef=$POD_IMAGE_REF pod=$POD_NAME podIP=$POD_IP"
 printf 'built=%s\nserving=%s\npod_image_ref=%s\n' "$BUILT_IMAGE_ID" "$SERVING_IMAGE_ID" "$POD_IMAGE_REF" >"$WORK/image-identity.txt"
 [[ $SERVING_IMAGE_ID == "$BUILT_IMAGE_ID" ]] || fail "image identity mismatch: built=$BUILT_IMAGE_ID serving=$SERVING_IMAGE_ID"

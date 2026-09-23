@@ -8,6 +8,8 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 DRIVER=$ROOT/hack/e2e-workspace-lifecycle.sh
 BUILT=sha256:$(printf 'a%.0s' {1..64})
 OTHER=sha256:$(printf 'b%.0s' {1..64})
+OLD_DIGEST=sha256:$(printf 'c%.0s' {1..64})
+NEW_DIGEST=sha256:$(printf 'd%.0s' {1..64})
 BASE=$(mktemp -d)
 trap 'rm -rf "$BASE"' EXIT
 STUBS=$BASE/bin
@@ -119,7 +121,12 @@ cat >"$STUBS/docker" <<'STUB'
 set -euo pipefail
 echo "docker $*" >>"$STUB_STATE/calls.log"
 [[ $1 == exec && $3 == crictl && $4 == inspecti ]] || { echo "stub docker: unexpected $*" >&2; exit 97; }
-printf '{"status":{"id":"%s"}}\n' "$SERVING_ID"
+# Like kind: the pod's import-<date>@sha256 reference is not inspectable; the image tag is.
+case ${7:-} in
+  ghcr.io/coder/coder-k8s:e2e) jq -n --arg id "$SERVING_ID" --arg d "$REPO_DIGEST" \
+    '{status: {id: $id, repoTags: ["ghcr.io/coder/coder-k8s:e2e"], repoDigests: [$d]}}' ;;
+  *) echo "level=fatal msg=\"no such image \\\"${7:-}\\\" present\"" >&2; exit 1 ;;
+esac
 STUB
 cat >"$STUBS/jq" <<'STUB'
 #!/usr/bin/env bash
@@ -137,13 +144,15 @@ run_scenario() {
   mkdir -p "$S/ws"
   : >"$S/calls.log" && : >"$S/events" && echo 0 >"$S/counter"
   jq -n '{items: [
-    {metadata: {name: "coder-k8s-old", deletionTimestamp: "2026-09-23T00:00:00Z"}, status: {podIP: "10.244.0.4",
-      conditions: [{type: "Ready", status: "True"}], containerStatuses: [{imageID: "docker.io/library/import-old@sha256:0ld"}]}},
-    {metadata: {name: "coder-k8s-new"}, status: {podIP: "10.244.0.5",
-      conditions: [{type: "Ready", status: "True"}], containerStatuses: [{imageID: "docker.io/library/import-new@sha256:new"}]}}]}' >"$S/pods.json"
+    {metadata: {name: "coder-k8s-old", deletionTimestamp: "2026-09-23T00:00:00Z"}, spec: {containers: [{image: "ghcr.io/coder/coder-k8s:e2e"}]},
+      status: {podIP: "10.244.0.4", conditions: [{type: "Ready", status: "True"}], containerStatuses: [{imageID: "docker.io/library/import-2026-09-22@\($old)"}]}},
+    {metadata: {name: "coder-k8s-new"}, spec: {containers: [{image: "ghcr.io/coder/coder-k8s:e2e"}]},
+      status: {podIP: "10.244.0.5", conditions: [{type: "Ready", status: "True"}], containerStatuses: [{imageID: "docker.io/library/import-2026-09-23@\($new)"}]}}]}' \
+    --arg old "$OLD_DIGEST" --arg new "$NEW_DIGEST" >"$S/pods.json"
   jq -n --arg ip "$endpoint_ip" '{items: [{endpoints: [{addresses: [$ip], conditions: {ready: true}}]}]}' >"$S/endpoints.json"
   RC=0
   env PATH="$STUBS:$PATH" REAL_JQ="$(command -v jq)" STUB_STATE="$S" SCENARIO="$name" SERVING_ID="$BUILT" BUILT_IMAGE_ID="$BUILT" \
+    REPO_DIGEST="docker.io/library/import-2026-09-23@$NEW_DIGEST" \
     E2E_EXPECT_CODER_VERSION=v2.37.2 E2E_SOURCE_SHA=0123abc GITHUB_RUN_ID=42 GITHUB_RUN_ATTEMPT=1 \
     E2E_WORKDIR="$T/work" E2E_POLL_SECONDS=0.1 E2E_TIMEOUT_SECONDS=3 E2E_EVENT_TIMEOUT_SECONDS=2 GITHUB_ACTIONS=false \
     "$@" timeout 60 bash "$DRIVER" >"$T/out" 2>&1 || RC=$?
@@ -176,7 +185,8 @@ check "watch URL omits sendInitialEvents and resourceVersionMatch" eval '! grep 
 check "update was sent only after watch registration" eval '[[ $(grep -n "watch=1" "$S/calls.log" | cut -d: -f1) -lt $(grep -n "replace --raw" "$S/calls.log" | cut -d: -f1) ]]'
 check "mutation order: create, update, rename, 409 delete, delete, recreate, 409 delete" \
   no_mutations_after "kubectl create,kubectl replace,curl PATCH,kubectl delete,kubectl delete,kubectl create,kubectl delete"
-check "terminating pod ignored; serving pod image resolved on node" eval 'grep -q "crictl inspecti -o json docker.io/library/import-new@sha256:new" "$S/calls.log"'
+check "terminating pod ignored; serving pod image tag inspected on node" eval 'grep -q "crictl inspecti -o json ghcr.io/coder/coder-k8s:e2e" "$S/calls.log"'
+check "serving pod digest recorded" eval 'grep -qx "pod_image_ref=docker.io/library/import-2026-09-23@$NEW_DIGEST" "$T/work/image-identity.txt"'
 check "image identity recorded" eval 'grep -qx "built=$BUILT" "$T/work/image-identity.txt" && grep -qx "serving=$BUILT" "$T/work/image-identity.txt"'
 check "operator token never printed" eval '! out_has secret-token-value'
 check "background port-forward and watch stopped" bg_stopped
@@ -189,6 +199,11 @@ check "receipt: source, run, version, identity, UIDs, 9 passed cases" eval 'grep
 echo "TEST image-mismatch: serving image differs from built image"
 run_scenario image-mismatch SERVING_ID="$OTHER"; summary
 check "fails with identity mismatch" failed_with "image identity mismatch"
+check "no mutation and no port-forward" eval 'no_mutations_after "" && ! grep -q port-forward "$S/calls.log"'
+
+echo "TEST digest-mismatch: the node image tag does not carry the serving pod's digest"
+run_scenario digest-mismatch REPO_DIGEST="docker.io/library/import-2026-09-22@$OLD_DIGEST"; summary
+check "fails with digest mismatch" failed_with "is not a digest of"
 check "no mutation and no port-forward" eval 'no_mutations_after "" && ! grep -q port-forward "$S/calls.log"'
 
 echo "TEST version-mismatch: Coder serves v2.37.20, a prefix of the pin without '+'"
