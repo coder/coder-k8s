@@ -23,6 +23,7 @@ jobs:
       workflows: ${{ steps.merge_group_defaults.outputs.workflows || steps.filter.outputs.workflows }}
       publish: ${{ steps.merge_group_defaults.outputs.publish || steps.filter.outputs.publish }}
       terraform: ${{ steps.merge_group_defaults.outputs.terraform || steps.filter.outputs.terraform }}
+      e2e: ${{ steps.merge_group_defaults.outputs.e2e || steps.filter.outputs.e2e }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -40,6 +41,7 @@ jobs:
             echo "workflows=true"
             echo "publish=false"
             echo "terraform=true"
+            echo "e2e=true"
           } >> "$GITHUB_OUTPUT"
 
       - name: Detect changed paths
@@ -73,6 +75,16 @@ jobs:
               - 'Dockerfile.goreleaser'
             terraform:
               - 'terraform/**'
+              - '.github/workflows/ci.yaml'
+            # Pre-queue route for the full Kind E2E (#113; trigger choice is a maintainer-desk decision).
+            e2e:
+              - 'api/aggregation/**'
+              - 'internal/aggregated/**'
+              - 'internal/app/apiserverapp/**'
+              - 'config/e2e/**'
+              - 'deploy/**'
+              - 'examples/cloudnativepg/**'
+              - 'hack/e2e-workspace-lifecycle*.sh'
               - '.github/workflows/ci.yaml'
 
   lint:
@@ -182,38 +194,66 @@ jobs:
   e2e-kind:
     name: E2E (Kind + CNPG + Templates)
     needs: [changes, test]
-    if: needs.changes.outputs.go == 'true' && (github.event_name != 'push' || github.actor != 'github-merge-queue[bot]')
+    # test may be skipped when only E2E paths changed; it must never have failed or been cancelled.
+    if: |
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      (needs.changes.outputs.go == 'true' || needs.changes.outputs.e2e == 'true') &&
+      (github.event_name != 'push' || github.actor != 'github-merge-queue[bot]')
     runs-on: depot-ubuntu-24.04-8
-    timeout-minutes: 45
+    timeout-minutes: 60
+    env:
+      # Full E2E runs in the merge queue, on push to main, and on pull requests that touch
+      # aggregated-API/E2E paths (pre-queue route, #113). It uses no secrets and publishes nothing.
+      E2E_FULL: ${{ github.event_name != 'pull_request' || needs.changes.outputs.e2e == 'true' }}
+      # Chosen E2E backend fixture, independent of the vendored codersdk version; the lifecycle driver
+      # fails before any mutation unless Coder reports E2E_EXPECT_CODER_VERSION.
+      CODER_E2E_IMAGE: ghcr.io/coder/coder:v2.37.2@sha256:6ea19b670111ff133fa214e2cb974e7b4e32fc4c65738ac5a918703d12d70f77
+      E2E_EXPECT_CODER_VERSION: v2.37.2
     steps:
-      # ---- PR fast-path: skip heavy E2E on pull requests ----
+      # ---- PR fast-path: skip heavy E2E on pull requests without E2E-relevant changes ----
       - name: Skip full E2E on pull requests
-        if: github.event_name == 'pull_request'
+        if: env.E2E_FULL != 'true'
         run: |
-          echo "::notice::Skipping full E2E on ${GITHUB_EVENT_NAME}; runs in merge queue and on push to main."
+          echo "::notice::Skipping full E2E on ${GITHUB_EVENT_NAME}; no aggregated-API/E2E paths changed. Runs in merge queue and on push to main."
 
-      # ---- Full CNPG + Templates E2E (merge queue + push) ----
+      # ---- Full CNPG + Templates E2E (merge queue + push + E2E-relevant pull requests) ----
       - name: Checkout
-        if: github.event_name != 'pull_request'
+        if: env.E2E_FULL == 'true'
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          # Pull requests test the exact PR head, not the synthetic merge commit; other events keep the default ref.
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
           persist-credentials: false
 
+      - name: Record source SHA
+        id: source
+        if: env.E2E_FULL == 'true'
+        run: |
+          source_sha="$(git rev-parse HEAD)"
+          echo "Source SHA: ${source_sha}"
+          echo "sha=${source_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Offline workspace lifecycle driver tests
+        if: env.E2E_FULL == 'true'
+        run: bash ./hack/e2e-workspace-lifecycle_test.sh
+
       - name: Setup Go
-        if: github.event_name != 'pull_request'
+        if: env.E2E_FULL == 'true'
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Create Kind cluster
-        if: github.event_name != 'pull_request'
+        if: env.E2E_FULL == 'true'
         uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
         with:
           cluster_name: e2e
 
       - name: Build binary
-        if: github.event_name != 'pull_request'
+        if: env.E2E_FULL == 'true'
         env:
           GOFLAGS: -mod=vendor
           CGO_ENABLED: "0"
@@ -224,78 +264,96 @@ jobs:
           go build -o linux/amd64/coder-k8s ./
 
       - name: Build and load image
-        if: github.event_name != 'pull_request'
+        id: build_image
+        if: env.E2E_FULL == 'true'
         run: |
           docker build -f Dockerfile.goreleaser -t ghcr.io/coder/coder-k8s:e2e .
+          image_id="$(docker image inspect --format '{{.Id}}' ghcr.io/coder/coder-k8s:e2e)"
+          echo "Built image ID: ${image_id}"
+          echo "image_id=${image_id}" >> "$GITHUB_OUTPUT"
           kind load docker-image ghcr.io/coder/coder-k8s:e2e --name e2e
 
       - name: Apply namespace, CRDs, and RBAC
-        if: github.event_name != 'pull_request'
+        if: env.E2E_FULL == 'true'
         run: |
           kubectl apply -f config/e2e/namespace.yaml
           kubectl apply -f config/crd/bases/
           kubectl apply -f config/rbac/
 
       - name: Enable aggregated API server
-        if: github.event_name != 'pull_request'
+        if: env.E2E_FULL == 'true'
         run: |
           kubectl apply -f deploy/apiserver-service.yaml
           kubectl apply -f deploy/apiserver-apiservice.yaml
 
       - name: Deploy coder-k8s (controller + aggregated API server)
-        if: github.event_name != 'pull_request'
+        if: env.E2E_FULL == 'true'
         run: kubectl apply -f config/e2e/deployment.yaml
 
       - name: Wait for operator and APIService
-        if: github.event_name != 'pull_request'
+        if: env.E2E_FULL == 'true'
         run: |
           kubectl wait --for=condition=Available deploy/coder-k8s -n coder-system --timeout=120s
           kubectl wait --for=condition=Available apiservice/v1alpha1.aggregation.coder.com --timeout=180s
 
       - name: Install CloudNativePG operator
-        if: github.event_name != 'pull_request'
+        if: env.E2E_FULL == 'true'
         run: |
           kubectl apply --server-side -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/v1.25.0/releases/cnpg-1.25.0.yaml
           kubectl wait --for=condition=Available deploy/cnpg-controller-manager -n cnpg-system --timeout=180s
 
       - name: Provision PostgreSQL and CoderControlPlane
-        if: github.event_name != 'pull_request'
-        run: kubectl apply -f examples/cloudnativepg/
+        if: env.E2E_FULL == 'true'
+        run: |
+          kubectl apply -f examples/cloudnativepg/00-namespace.yaml -f examples/cloudnativepg/cnpg-cluster.yaml
+          # E2E backend fixture: pin the Coder image and allow the out-of-band rename used by the lifecycle driver.
+          kubectl create --dry-run=client -o json -f examples/cloudnativepg/codercontrolplane.yaml |
+            jq --arg image "$CODER_E2E_IMAGE" \
+              '.spec.image = $image | .spec.extraEnv += [{name: "CODER_ALLOW_WORKSPACE_RENAMES", value: "true"}]' |
+            kubectl apply -f -
 
       - name: Wait for PostgreSQL
-        if: github.event_name != 'pull_request'
+        if: env.E2E_FULL == 'true'
         run: kubectl -n coder wait --for=condition=Ready cluster/coder-db --timeout=600s
 
       - name: Wait for Coder deployment
-        if: github.event_name != 'pull_request'
+        if: env.E2E_FULL == 'true'
         run: kubectl -n coder rollout status deployment/coder --timeout=600s
 
       - name: Wait for CoderControlPlane readiness
-        if: github.event_name != 'pull_request'
+        if: env.E2E_FULL == 'true'
         run: |
           kubectl -n coder wait --for=jsonpath='{.status.phase}'=Ready codercontrolplane/coder --timeout=600s
           kubectl -n coder wait --for=jsonpath='{.status.operatorAccessReady}'=true codercontrolplane/coder --timeout=600s
 
       - name: Verify operator token secret
-        if: github.event_name != 'pull_request'
+        if: env.E2E_FULL == 'true'
         run: |
           TOKEN_SECRET=$(kubectl -n coder get codercontrolplane coder -o jsonpath='{.status.operatorTokenSecretRef.name}')
           test -n "$TOKEN_SECRET"
           kubectl -n coder get secret "$TOKEN_SECRET"
 
       - name: Create CoderTemplate via kubectl
-        if: github.event_name != 'pull_request'
+        if: env.E2E_FULL == 'true'
         run: kubectl apply -f config/e2e/codertemplate.yaml
 
       - name: Verify CoderTemplate exists
-        if: github.event_name != 'pull_request'
+        if: env.E2E_FULL == 'true'
         run: |
           kubectl -n coder get codertemplates
           kubectl -n coder get codertemplate coder.e2e-template -o yaml
 
+      - name: Workspace lifecycle (create, watch, rename, delete, recreate)
+        if: env.E2E_FULL == 'true'
+        env:
+          BUILT_IMAGE_ID: ${{ steps.build_image.outputs.image_id }}
+          E2E_SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          E2E_WORKDIR: ${{ runner.temp }}/workspace-lifecycle
+        run: bash ./hack/e2e-workspace-lifecycle.sh
+
       # ---- Failure diagnostics ----
       - name: Dump cluster state on failure
-        if: failure() && github.event_name != 'pull_request'
+        if: failure() && env.E2E_FULL == 'true'
         run: |
           echo "=== Pods (all namespaces) ==="
           kubectl get pods -A || true
@@ -314,6 +372,9 @@ jobs:
           echo ""
           echo "=== CNPG controller logs ==="
           kubectl -n cnpg-system logs deploy/cnpg-controller-manager --tail=200 || true
+          echo ""
+          echo "=== Workspace lifecycle driver files ==="
+          tail -n 50 "$RUNNER_TEMP"/workspace-lifecycle/*.err "$RUNNER_TEMP"/workspace-lifecycle/*.log || true
 
   image-scan:
     name: Trivy image scan
