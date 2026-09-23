@@ -421,6 +421,12 @@ func (s *TemplateStorage) Create(
 			return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
 		}
 
+		// Create the template only after its first version imports: until then Coder rejects workspace builds
+		// against it (#105). On failure the uploaded file and version remain, but no template is created.
+		if waitErr := waitForTemplateVersionBuild(ctx, sdk, templateVersion.ID); waitErr != nil {
+			return nil, mapTemplateVersionBuildWaitError(waitErr, templateObj.Name)
+		}
+
 		createdTemplate, err := sdk.CreateTemplate(ctx, org.ID, codersdk.CreateTemplateRequest{
 			Name:        templateName,
 			VersionID:   templateVersion.ID,

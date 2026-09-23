@@ -34,6 +34,14 @@ done
 err() { echo "Error from server ($1): $2" >&2; exit 1; }
 wsfile() { echo "$S/ws/${1##*/}.json"; }
 next() { local n; n=$(($(cat "$S/counter") + 1)); echo "$n" >"$S/counter"; echo "$n"; }
+ws_create() {
+  local n f st=running
+  n=$(next); f=$(wsfile "$(jq -r .metadata.name "$file")"); [[ ! -f $f ]] || err AlreadyExists exists
+  [[ $SCENARIO != build-failed ]] || st=failed
+  jq --arg n "$n" --arg st "$st" '.metadata += {uid: ("uid-" + $n), resourceVersion: $n} |
+    .status = {latestBuildID: ("build-" + $n), latestBuildStatus: $st}' "$file" >"$f"
+  echo "build-$n" >>"$S/builds-uid-$n"
+}
 side_effect() { # stale-side-effect-* scenarios: a rejected stale DELETE still changes one backend observable
   case $SCENARIO in
     stale-side-effect-count) echo build-extra >>"$S/builds-$(jq -r .metadata.uid "$1")" ;;
@@ -60,12 +68,20 @@ case "${pos[0]}:${pos[1]:-}" in
         if $sc == "list-token-differs" then .metadata.resourceVersion = "skewed" else . end)}' "$S"/ws/*.json
     fi
     f=$(wsfile "$raw"); [[ -f $f ]] || err NotFound "coderworkspaces \"${raw##*/}\" not found"; cat "$f" ;;
-  create:)
-    n=$(next); f=$(wsfile "$(jq -r .metadata.name "$file")"); [[ ! -f $f ]] || err AlreadyExists exists
-    st=running; [[ $SCENARIO != build-failed ]] || st=failed
-    jq --arg n "$n" --arg st "$st" '.metadata += {uid: ("uid-" + $n), resourceVersion: $n} |
-      .status = {latestBuildID: ("build-" + $n), latestBuildStatus: $st}' "$file" | tee "$f"
-    echo "build-$n" >>"$S/builds-uid-$n" ;;
+  create:) ws_create && cat "$(wsfile "$(jq -r .metadata.name "$file")")" ;;
+  apply:)
+    if [[ $file == *.yaml ]]; then # the CoderTemplate manifest; $S/template holds "id active-version version-count"
+      [[ $SCENARIO != template-apply-error ]] || err InternalError "an error on the server has prevented the request from succeeding"
+      [[ -f $S/template ]] || { echo "tpl-1 tv-1 1" >"$S/template"; echo "codertemplate/coder.e2e-template created"; exit 0; }
+      [[ $SCENARIO != reapply-new-version ]] || echo "tpl-1 tv-1 2" >"$S/template"
+      echo "codertemplate/coder.e2e-template configured"
+    else
+      f=$(wsfile "$(jq -r .metadata.name "$file")")
+      [[ -f $f ]] || { ws_create; echo "coderworkspace created"; exit 0; }
+      [[ $SCENARIO != reapply-error ]] || err Conflict "Operation cannot be fulfilled on coderworkspaces: precondition failed"
+      [[ $SCENARIO != reapply-new-build ]] || echo build-reapply >>"$S/builds-$(jq -r .metadata.uid "$f")"
+      echo "coderworkspace configured"
+    fi ;;
   replace:)
     f=$(wsfile "$raw"); [[ -f $f ]] || err NotFound missing; cp -n "$file" "$S/first_update.json"
     [[ $SCENARIO == stale-update-accepted || $(jq -r .metadata.resourceVersion "$file") == "$(jq -r .metadata.resourceVersion "$f")" ]] ||
@@ -112,7 +128,9 @@ done
 path=/${url#http://*/}
 case "$method $path" in
   "GET /api/v2/buildinfo") printf '{"version":"%s"}\n' "${CODER_VERSION_REPORTED:-v2.37.2+eb69e27}" ;;
-  "GET /api/v2/organizations/coder/templates/e2e-template") echo '{"active_version_id":"tv-1"}' ;;
+  "GET /api/v2/organizations/coder/templates/e2e-template")
+    [[ -f $S/template ]] || exit 22; read -r id av _ <"$S/template"; printf '{"id":"%s","active_version_id":"%s"}\n' "$id" "$av" ;;
+  "GET /api/v2/templates/tpl-1/versions?limit=100") read -r _ _ n <"$S/template"; jq -n --argjson n "$n" '[range($n) | {}]' ;;
   "GET /api/v2/templateversions/tv-1") printf '{"job":{"status":"%s"}}\n' "${TEMPLATE_JOB_STATUS:-succeeded}" ;;
   "GET /api/v2/workspaces/"*"?include_deleted=true")
     uid=${path##*/} && uid=${uid%%\?*} && [[ -f $S/deleted-$uid ]] || exit 22
@@ -177,8 +195,9 @@ run_scenario() {
   SECS=$((SECONDS - start))
 }
 
-mutations() { grep -E '^kubectl .*(create|replace|delete) --raw|^curl .*-X PATCH' "$S/calls.log" |
-  awk '/^kubectl/ {for (i = 2; i <= NF; i++) if ($i ~ /^(create|replace|delete)$/) {print "kubectl " $i; next}} /^curl/ {print "curl PATCH"}' | paste -sd, -; }
+mutations() { grep -E '^kubectl .*((create|replace|delete) --raw|apply -f)|^curl .*-X PATCH' "$S/calls.log" |
+  awk '/^kubectl/ {for (i = 2; i <= NF; i++) if ($i ~ /^(create|replace|delete|apply)$/) {print "kubectl " $i; next}} /^curl/ {print "curl PATCH"}' | paste -sd, -; }
+APPLIES="kubectl apply,kubectl apply,kubectl apply,kubectl apply" # template, workspace, identical template and workspace re-apply
 check() { # <description> <command...>
   local desc=$1
   shift
@@ -202,9 +221,12 @@ check "watch URL uses the current token and only watch/resourceVersion/timeoutSe
 check "watch URL omits sendInitialEvents and resourceVersionMatch" eval '! grep -qE "sendInitialEvents|resourceVersionMatch" "$S/watch_url"'
 check "update was sent only after watch registration" eval '[[ $(grep -n "watch=1" "$S/calls.log" | cut -d: -f1) -lt $(grep -n "replace --raw" "$S/calls.log" | head -1 | cut -d: -f1) ]]'
 check "mutation order: create, update, rename, stale 409 update+delete, wrong-UID 409, delete, recreate, 409 delete" \
-  no_mutations_after "kubectl create,kubectl replace,curl PATCH,kubectl replace,kubectl delete,kubectl delete,kubectl delete,kubectl create,kubectl delete"
+  no_mutations_after "$APPLIES,kubectl replace,curl PATCH,kubectl replace,kubectl delete,kubectl delete,kubectl delete,kubectl create,kubectl delete"
 check "stale requests carry the genuine pre-rename token; rename changed it" eval 'grep -qx "rv_pre_rename=2" "$T/work/receipt.txt" &&
   grep -qx "rv_post_rename=2-renamed" "$T/work/receipt.txt" && jq -e ".metadata.resourceVersion == \"2\"" "$T/work/stale-update.json" >/dev/null'
+check "template applied with the long request timeout, then re-applied before any lifecycle mutation" eval '[[ $(grep -c -- "--request-timeout=600s apply -f config/e2e/codertemplate.yaml" "$S/calls.log") -eq 2 ]]'
+check "receipt: template and workspace state, no apply failure" eval 'grep -qx "template=id=tpl-1 active=tv-1 versions=1" "$T/work/receipt.txt" &&
+  grep -qx "workspace=uid=uid-1 latest=build-1/build-1 builds=1 status=running" "$T/work/receipt.txt" && grep -qx "apply_failure=none" "$T/work/receipt.txt"'
 check "LIST requested after the stale checks" eval 'grep -q "get --raw /apis/aggregation.coder.com/v1alpha1/namespaces/coder/coderworkspaces$" "$S/calls.log"'
 check "terminating pod ignored; serving pod image tag inspected on node" eval 'grep -q "crictl inspecti -o json ghcr.io/coder/coder-k8s:e2e" "$S/calls.log"'
 check "serving pod digest recorded" eval 'grep -qx "pod_image_ref=docker.io/library/import-2026-09-23@$NEW_DIGEST" "$T/work/image-identity.txt"'
@@ -212,10 +234,10 @@ check "image identity recorded" eval 'grep -qx "built=$BUILT" "$T/work/image-ide
 check "operator token never printed" eval '! out_has secret-token-value'
 check "background port-forward and watch stopped" bg_stopped
 check "every non-streaming kubectl request carries --request-timeout=30s" \
-  eval '! grep "^kubectl" "$S/calls.log" | grep -v -e "watch=1" -e port-forward | grep -qv -- "--request-timeout=30s "'
+  eval '! grep "^kubectl" "$S/calls.log" | grep -v -e "watch=1" -e port-forward | grep -qvE -- "--request-timeout=[0-9]+s "'
 check "recreate only after the delete job succeeded" eval '[[ $(grep -n include_deleted "$S/calls.log" | tail -1 | cut -d: -f1) -lt $(grep -n "^kubectl --request-timeout=30s create" "$S/calls.log" | tail -1 | cut -d: -f1) ]]'
-check "receipt: source, run, version, identity, UIDs, 11 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
-  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 11 ]]'
+check "receipt: source, run, version, identity, UIDs, 12 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
+  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 12 ]]'
 
 echo "TEST image-mismatch: serving image differs from built image"
 run_scenario image-mismatch SERVING_ID="$OTHER"; summary
@@ -234,7 +256,7 @@ check "fails on version before any mutation; receipt marks the failing case" \
 
 echo "TEST render-fail-create: create body render fails"
 run_scenario render-fail-create; summary
-check "fails at create with zero kubectl create calls" eval '[[ $RC -ne 0 ]] && bg_stopped && no_mutations_after "" &&
+check "fails at create with zero workspace create/apply calls" eval '[[ $RC -ne 0 ]] && bg_stopped && no_mutations_after "kubectl apply" &&
   grep -q "create workspace through the aggregated API = FAILED" "$T/work/receipt.txt"'
 
 echo "TEST endpoint-mismatch: aggregated API service points at the terminating pod"
@@ -243,66 +265,88 @@ check "fails before any mutation" eval 'failed_with "endpoints do not match serv
 
 echo "TEST template-import-failed: setup failure"
 run_scenario template-import-failed TEMPLATE_JOB_STATUS=failed; summary
-check "fails on import status and never creates a workspace" eval 'failed_with "import ended in status failed" && no_mutations_after ""'
+check "fails on import status and never creates a workspace" eval 'failed_with "job status failed" && no_mutations_after "kubectl apply"'
 
 echo "TEST build-failed: create build fails"
 run_scenario build-failed; summary
-check "fails on build status; no update" eval 'failed_with "ended in status failed" && no_mutations_after "kubectl create"'
+check "fails on build status; no update" eval 'failed_with "ended in status failed" && no_mutations_after "kubectl apply,kubectl apply"'
 
 echo "TEST watch-unregistered: watch never reports 200 OK"
 run_scenario watch-unregistered; summary
-check "bounded failure before the update" eval 'failed_with "timed out after 3s waiting for: watch registration" && no_mutations_after "kubectl create" && ((SECS < 30))'
+check "bounded failure before the update" eval 'failed_with "timed out after 3s waiting for: watch registration" && no_mutations_after "$APPLIES" && ((SECS < 30))'
 
 echo "TEST event-token-mismatch: MODIFIED event token differs from update response"
 run_scenario event-token-mismatch; summary
 check "bounded event match fails; no rename or delete" \
-  eval 'failed_with "timed out after 2s waiting for: MODIFIED event" && no_mutations_after "kubectl create,kubectl replace" && ((SECS < 30))'
+  eval 'failed_with "timed out after 2s waiting for: MODIFIED event" && no_mutations_after "$APPLIES,kubectl replace" && ((SECS < 30))'
 
 echo "TEST rename-rejected: Coder rejects the out-of-band rename"
 run_scenario rename-rejected; summary
-check "fails at rename; no delete" eval '[[ $RC -ne 0 ]] && bg_stopped && no_mutations_after "kubectl create,kubectl replace,curl PATCH"'
+check "fails at rename; no delete" eval '[[ $RC -ne 0 ]] && bg_stopped && no_mutations_after "$APPLIES,kubectl replace,curl PATCH"'
 
 echo "TEST delete-ignores-preconditions: stale DELETE (old token, live UID) is accepted"
 run_scenario delete-ignores-preconditions; summary
 check "fails on missing 409; no later delete or recreate" \
-  eval 'failed_with "expected (Conflict) but request succeeded" && no_mutations_after "kubectl create,kubectl replace,curl PATCH,kubectl replace,kubectl delete"'
+  eval 'failed_with "expected (Conflict) but request succeeded" && no_mutations_after "$APPLIES,kubectl replace,curl PATCH,kubectl replace,kubectl delete"'
 
 echo "TEST wrong-uid-ignored: wrong-UID delete is accepted"
 run_scenario wrong-uid-ignored; summary
 check "fails on missing 409; no live delete or recreate" \
-  eval 'failed_with "expected (Conflict) but request succeeded" && no_mutations_after "kubectl create,kubectl replace,curl PATCH,kubectl replace,kubectl delete,kubectl delete"'
+  eval 'failed_with "expected (Conflict) but request succeeded" && no_mutations_after "$APPLIES,kubectl replace,curl PATCH,kubectl replace,kubectl delete,kubectl delete"'
 
 echo "TEST render-fail-delete: DeleteOptions render fails inside expect_error (errexit off)"
 run_scenario render-fail-delete; summary
-check "fails with zero kubectl delete calls and no recreate" eval 'failed_with "expected (Conflict)" && no_mutations_after "kubectl create,kubectl replace,curl PATCH,kubectl replace"'
+check "fails with zero kubectl delete calls and no recreate" eval 'failed_with "expected (Conflict)" && no_mutations_after "$APPLIES,kubectl replace,curl PATCH,kubectl replace"'
 
 echo "TEST delete-job-failed: workspace is 404 but its delete job failed"
 run_scenario delete-job-failed DELETE_JOB_STATUS=failed; summary
-check "fails on delete job status; no recreate" eval 'failed_with "delete job of uid-1 ended in status failed" && no_mutations_after "kubectl create,kubectl replace,curl PATCH,kubectl replace,kubectl delete,kubectl delete,kubectl delete"'
+check "fails on delete job status; no recreate" eval 'failed_with "delete job of uid-1 ended in status failed" && no_mutations_after "$APPLIES,kubectl replace,curl PATCH,kubectl replace,kubectl delete,kubectl delete,kubectl delete"'
 
 echo "TEST watch-exits: watch registers then exits before the update"
 run_scenario watch-exits; summary
-check "fails before the update" eval 'failed_with "watch process exited before the update" && no_mutations_after "kubectl create"'
+check "fails before the update" eval 'failed_with "watch process exited before the update" && no_mutations_after "$APPLIES"'
 
 echo "TEST recreate-build-drift: prior-UID delete returns 409 but the recreated build changes"
 run_scenario recreate-build-drift; summary
 check "fails on recreated latest build status" eval 'failed_with "recreated object changed after prior-UID delete"'
 
-STALE="kubectl create,kubectl replace,curl PATCH,kubectl replace,kubectl delete"
+STALE="$APPLIES,kubectl replace,curl PATCH,kubectl replace,kubectl delete"
 # name|expected message|mutations: each #109 negative must stop before the wrong-UID/live deletes and recreate.
 while IFS='|' read -r name msg muts; do
   echo "TEST $name (#109)"
   run_scenario "$name" </dev/null; summary
   check "fails with '$msg'; mutations stop at: $muts" eval 'failed_with "$msg" && no_mutations_after "$muts"'
 done <<CASES
-old-timestamp-rename|rename did not change resourceVersion|kubectl create,kubectl replace,curl PATCH
-stale-update-accepted|expected (Conflict) but request succeeded|kubectl create,kubectl replace,curl PATCH,kubectl replace
+old-timestamp-rename|rename did not change resourceVersion|$APPLIES,kubectl replace,curl PATCH
+stale-update-accepted|expected (Conflict) but request succeeded|$APPLIES,kubectl replace,curl PATCH,kubectl replace
 stale-side-effect-latest|backend latest build changed after stale requests|$STALE
 stale-side-effect-count|backend build count changed after stale requests|$STALE
 stale-side-effect-object|object changed after stale requests|$STALE
 list-missing|missing from LIST|$STALE
 list-token-differs|LIST token differs from GET token|$STALE
 CASES
+
+echo "TEST template-import-async (#105): old behavior, import still running right after apply"
+run_scenario template-import-async TEMPLATE_JOB_STATUS=running; summary
+check "readiness assertion fails before any workspace create" eval 'failed_with "template import not ready right after apply" && no_mutations_after "kubectl apply"'
+
+echo "TEST template-apply-error (#105): kubectl apply of the template fails"
+run_scenario template-apply-error; summary
+check "fails; receipt records the apply output; no later mutation" eval 'failed_with "InternalError" && no_mutations_after "kubectl apply" &&
+  grep -q "^apply_failure=apply config/e2e/codertemplate.yaml: Error from server (InternalError)" "$T/work/receipt.txt"'
+
+echo "TEST reapply-error (#105): identical workspace re-apply fails with a precondition error"
+run_scenario reapply-error; summary
+check "fails; receipt records the apply output; no lifecycle mutation" eval 'failed_with "precondition failed" && no_mutations_after "$APPLIES" &&
+  grep -q "^apply_failure=apply .*ws-e2e-lifecycle.json: Error from server (Conflict)" "$T/work/receipt.txt"'
+
+echo "TEST reapply-new-version (#105): identical template re-apply creates a template version"
+run_scenario reapply-new-version; summary
+check "fails on template state; no lifecycle mutation" eval 'failed_with "template changed after identical re-apply" && no_mutations_after "$APPLIES"'
+
+echo "TEST reapply-new-build (#105): identical workspace re-apply creates a build"
+run_scenario reapply-new-build; summary
+check "fails on workspace state; no lifecycle mutation" eval 'failed_with "workspace changed after identical re-apply" && no_mutations_after "$APPLIES"'
 
 echo "TEST missing-built-id: BUILT_IMAGE_ID is not a sha256 ID"
 run_scenario missing-built-id BUILT_IMAGE_ID=e2e; summary

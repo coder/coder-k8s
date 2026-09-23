@@ -237,8 +237,20 @@ Planned follow-up options (in order of preference):
 
 ## Template build wait tuning
 
-When updating `CoderTemplate.spec.files`, the aggregated API server now waits for
-Coder to finish building the new template version before promoting it active.
+For a `CoderTemplate` with `spec.files`, the aggregated API server waits for Coder to finish
+importing (building) the uploaded template version before it uses that version:
+
+- Create uploads the source, creates the version, waits for its import, and only then creates the
+  template. A successful request returns after the import succeeded, so workspaces can use the
+  template immediately.
+- Update with changed files waits the same way before promoting the new version active.
+- If the import fails, the wait times out, or the request is cancelled, Create creates no template
+  and Update promotes nothing. The uploaded file and template version remain in Coder; they are
+  not deleted or cancelled.
+- A retry uploads and imports again, so retries can leave additional template versions. There is
+  no exactly-once guarantee. If a client gives up before the server answers, re-read the template
+  before retrying.
+- Create without `spec.files` is unchanged and does not wait.
 
 The wait behavior is configurable via environment variables on the
 `coder-k8s` deployment:
