@@ -70,6 +70,7 @@ Run from repository root.
 - **Format (apply):** `GOFLAGS=-mod=vendor golangci-lint fmt`
 - **Format (check):** `GOFLAGS=-mod=vendor golangci-lint fmt --diff`
 - **Vulnerability scan:** `make vuln`
+- **Workspace lifecycle E2E driver tests (offline, stubbed tools):** `bash ./hack/e2e-workspace-lifecycle_test.sh` (also run by `make test-scripts`)
 - **Lint (workflows):** `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.10`
 - **Development run (controller mode):** `GOFLAGS=-mod=vendor go run . --app=controller` (requires Kubernetes config via your env, e.g. `KUBECONFIG`)
 - **Development run (aggregated API mode):** `GOFLAGS=-mod=vendor go run . --app=aggregated-apiserver`
