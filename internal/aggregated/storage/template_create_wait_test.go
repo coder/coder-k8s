@@ -152,7 +152,9 @@ func TestTemplateStorageCreateWithFilesWaitsForImportBeforeCreatingTemplate(t *t
 }
 
 func TestTemplateStorageCreateWithFilesImportFailureCreatesNoTemplate(t *testing.T) {
-	pending := func(state *mockCoderServerState) { state.setNextCreatedTemplateVersionStatus(codersdk.ProvisionerJobPending) }
+	pending := func(state *mockCoderServerState) {
+		state.setNextCreatedTemplateVersionStatus(codersdk.ProvisionerJobPending)
+	}
 	tests := []struct {
 		name        string
 		waitTimeout string
@@ -163,14 +165,18 @@ func TestTemplateStorageCreateWithFilesImportFailureCreatesNoTemplate(t *testing
 		wantMessage string
 	}{
 		{
-			name:        "failed import",
-			setup:       func(state *mockCoderServerState) { state.setNextCreatedTemplateVersionStatus(codersdk.ProvisionerJobFailed) },
+			name: "failed import",
+			setup: func(state *mockCoderServerState) {
+				state.setNextCreatedTemplateVersionStatus(codersdk.ProvisionerJobFailed)
+			},
 			wantErr:     apierrors.IsBadRequest,
 			wantMessage: "build ended with status",
 		},
 		{
-			name:        "canceled import",
-			setup:       func(state *mockCoderServerState) { state.setNextCreatedTemplateVersionStatus(codersdk.ProvisionerJobCanceled) },
+			name: "canceled import",
+			setup: func(state *mockCoderServerState) {
+				state.setNextCreatedTemplateVersionStatus(codersdk.ProvisionerJobCanceled)
+			},
 			wantErr:     apierrors.IsBadRequest,
 			wantMessage: "build ended with status",
 		},
