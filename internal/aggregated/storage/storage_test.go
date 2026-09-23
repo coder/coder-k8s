@@ -2735,6 +2735,7 @@ type mockCoderServerState struct {
 	templateMetaPatchCall             int
 	failActiveVersionPromotion        bool
 	caseInsensitiveLeafLookups        bool // models coderd resolving template/workspace names case-insensitively
+	frozenWorkspaceUpdatedAt          bool // models Coder 2.37.2: builds, rename, TTL and autostart do not bump workspaces.updated_at (#109)
 	templateVersionPollsBeforeSuccess map[uuid.UUID]int
 	nextTemplateVersionInitialStatus  codersdk.ProvisionerJobStatus
 	nextTemplateVersionPendingPolls   int
@@ -3530,7 +3531,9 @@ func (s *mockCoderServerState) handleCreateWorkspaceBuild(w http.ResponseWriter,
 	}
 
 	workspace.LatestBuild = build
-	workspace.UpdatedAt = now
+	if !s.frozenWorkspaceUpdatedAt {
+		workspace.UpdatedAt = now
+	}
 	s.workspacesByID[workspace.ID] = workspace
 	s.buildTransitions = append(s.buildTransitions, request.Transition)
 
@@ -3941,4 +3944,47 @@ func writeJSON(w http.ResponseWriter, statusCode int, payload any) {
 
 func writeCoderError(w http.ResponseWriter, statusCode int, message string) {
 	writeJSON(w, statusCode, codersdk.Response{Message: message})
+}
+
+func (s *mockCoderServerState) setFrozenWorkspaceUpdatedAt(frozen bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.frozenWorkspaceUpdatedAt = frozen
+}
+
+// mutateWorkspace applies an out-of-band backend change while keeping the workspace ID and
+// UpdatedAt untouched (Coder 2.37.2 model for #109).
+func (s *mockCoderServerState) mutateWorkspace(t *testing.T, owner, name string, mutate func(*codersdk.Workspace)) {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	id, ok := s.workspaceIDsByUser[owner][name]
+	if !ok {
+		t.Fatalf("mock: no workspace %s/%s", owner, name)
+	}
+	workspace := s.workspacesByID[id]
+	updatedAt := workspace.UpdatedAt
+	mutate(&workspace)
+	if workspace.ID != id || !workspace.UpdatedAt.Equal(updatedAt) {
+		t.Fatal("mock: out-of-band mutation must keep the workspace ID and UpdatedAt")
+	}
+	s.workspacesByID[id] = workspace
+}
+
+// renameWorkspace re-keys the name index for the same workspace ID; UpdatedAt stays untouched.
+func (s *mockCoderServerState) renameWorkspace(t *testing.T, owner, oldName, newName string) {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	id, ok := s.workspaceIDsByUser[owner][oldName]
+	if !ok {
+		t.Fatalf("mock: no workspace %s/%s", owner, oldName)
+	}
+	workspace := s.workspacesByID[id]
+	workspace.Name = newName
+	s.workspacesByID[id] = workspace
+	delete(s.workspaceIDsByUser[owner], oldName)
+	s.workspaceIDsByUser[owner][newName] = id
 }

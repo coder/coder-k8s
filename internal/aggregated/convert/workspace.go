@@ -1,8 +1,10 @@
 package convert
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
-	"strconv"
 
 	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
 	"github.com/coder/coder-k8s/internal/aggregated/coder"
@@ -13,6 +15,13 @@ import (
 )
 
 // WorkspaceToK8s converts a codersdk.Workspace to an aggregated API CoderWorkspace.
+//
+// metadata.resourceVersion is an opaque fingerprint of the returned representation: the full
+// SHA-256 of the converted object serialized with resourceVersion unset. Every emitted
+// metadata/spec/status field takes part, including lastUsedAt and autoShutdown, so a change that
+// this API exposes changes the token even when Coder's Workspace.UpdatedAt stays the same, and a
+// backend-only change that leaves the projection identical keeps the token. It is not monotonic
+// and not a history cursor: an identical projection yields the same token again.
 func WorkspaceToK8s(namespace string, w codersdk.Workspace) *aggregationv1alpha1.CoderWorkspace {
 	if namespace == "" {
 		panic("assertion failed: namespace must not be empty")
@@ -25,7 +34,7 @@ func WorkspaceToK8s(namespace string, w codersdk.Workspace) *aggregationv1alpha1
 	}
 	lastUsedAt := metav1.NewTime(w.LastUsedAt)
 
-	return &aggregationv1alpha1.CoderWorkspace{
+	obj := &aggregationv1alpha1.CoderWorkspace{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "CoderWorkspace",
 			APIVersion: aggregationv1alpha1.SchemeGroupVersion.String(),
@@ -34,7 +43,6 @@ func WorkspaceToK8s(namespace string, w codersdk.Workspace) *aggregationv1alpha1
 			Name:              coder.BuildWorkspaceName(w.OrganizationName, w.OwnerName, w.Name),
 			Namespace:         namespace,
 			UID:               types.UID(w.ID.String()),
-			ResourceVersion:   strconv.FormatInt(w.UpdatedAt.UnixNano(), 10),
 			CreationTimestamp: metav1.NewTime(w.CreatedAt),
 		},
 		Spec: aggregationv1alpha1.CoderWorkspaceSpec{
@@ -56,6 +64,17 @@ func WorkspaceToK8s(namespace string, w codersdk.Workspace) *aggregationv1alpha1
 			LastUsedAt:        &lastUsedAt,
 		},
 	}
+
+	// Serialization of the generated API type cannot fail for well-formed input, so an error is an
+	// impossible state.
+	serialized, err := json.Marshal(obj)
+	if err != nil {
+		panic(fmt.Sprintf("assertion failed: serialize workspace representation: %v", err))
+	}
+	sum := sha256.Sum256(serialized)
+	obj.ResourceVersion = hex.EncodeToString(sum[:])
+
+	return obj
 }
 
 func workspaceRunning(workspace codersdk.Workspace) bool {

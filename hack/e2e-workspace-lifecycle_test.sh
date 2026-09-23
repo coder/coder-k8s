@@ -34,6 +34,13 @@ done
 err() { echo "Error from server ($1): $2" >&2; exit 1; }
 wsfile() { echo "$S/ws/${1##*/}.json"; }
 next() { local n; n=$(($(cat "$S/counter") + 1)); echo "$n" >"$S/counter"; echo "$n"; }
+side_effect() { # stale-side-effect-* scenarios: a rejected stale DELETE still changes one backend observable
+  case $SCENARIO in
+    stale-side-effect-count) echo build-extra >>"$S/builds-$(jq -r .metadata.uid "$1")" ;;
+    stale-side-effect-latest) echo build-extra >"$S/latest-$(jq -r .metadata.uid "$1")" ;;
+    stale-side-effect-object) jq '.status.lastUsedAt = "2026-09-23T00:00:00Z"' "$1" >"$1.tmp" && mv "$1.tmp" "$1" ;;
+  esac
+}
 case "${pos[0]}:${pos[1]:-}" in
   get:pods) cat "$S/pods.json" ;;
   get:endpointslices) cat "$S/endpoints.json" ;;
@@ -48,16 +55,22 @@ case "${pos[0]}:${pos[1]:-}" in
       [[ $SCENARIO != watch-exits ]] || exit 0
       exec timeout 60 tail -c "+$((off + 1))" -f "$S/events"
     fi
+    if [[ $raw == */coderworkspaces ]]; then # LIST; list-* scenarios drop the item or skew its token
+      exec jq -s --arg sc "$SCENARIO" '{items: map(select($sc != "list-missing") |
+        if $sc == "list-token-differs" then .metadata.resourceVersion = "skewed" else . end)}' "$S"/ws/*.json
+    fi
     f=$(wsfile "$raw"); [[ -f $f ]] || err NotFound "coderworkspaces \"${raw##*/}\" not found"; cat "$f" ;;
   create:)
     n=$(next); f=$(wsfile "$(jq -r .metadata.name "$file")"); [[ ! -f $f ]] || err AlreadyExists exists
     st=running; [[ $SCENARIO != build-failed ]] || st=failed
     jq --arg n "$n" --arg st "$st" '.metadata += {uid: ("uid-" + $n), resourceVersion: $n} |
-      .status = {latestBuildID: ("build-" + $n), latestBuildStatus: $st}' "$file" | tee "$f" ;;
+      .status = {latestBuildID: ("build-" + $n), latestBuildStatus: $st}' "$file" | tee "$f"
+    echo "build-$n" >>"$S/builds-uid-$n" ;;
   replace:)
-    f=$(wsfile "$raw"); [[ -f $f ]] || err NotFound missing; cp "$file" "$S/last_update.json"
-    [[ $(jq -r .metadata.resourceVersion "$file") == "$(jq -r .metadata.resourceVersion "$f")" ]] || err Conflict "rv mismatch"
-    n=$(next)
+    f=$(wsfile "$raw"); [[ -f $f ]] || err NotFound missing; cp -n "$file" "$S/first_update.json"
+    [[ $SCENARIO == stale-update-accepted || $(jq -r .metadata.resourceVersion "$file") == "$(jq -r .metadata.resourceVersion "$f")" ]] ||
+      err Conflict "rv mismatch"
+    n=$(next) && echo "build-$n" >>"$S/builds-$(jq -r .metadata.uid "$f")"
     jq --arg n "$n" --argjson run "$(jq .spec.running "$file")" '.metadata.resourceVersion = $n | .spec.running = $run |
       .status = {latestBuildID: ("build-" + $n), latestBuildStatus: (if $run then "running" else "stopped" end)}' "$f" >"$f.tmp"
     mv "$f.tmp" "$f"
@@ -68,12 +81,12 @@ case "${pos[0]}:${pos[1]:-}" in
   delete:)
     f=$(wsfile "$raw"); [[ -f $f ]] || err NotFound missing
     if [[ $SCENARIO != delete-ignores-preconditions ]]; then
-      if [[ $(jq -r .preconditions.uid "$file") != "$(jq -r .metadata.uid "$f")" ]]; then
+      if [[ $SCENARIO != wrong-uid-ignored && $(jq -r .preconditions.uid "$file") != "$(jq -r .metadata.uid "$f")" ]]; then
         [[ $SCENARIO != recreate-build-drift || $(jq -r .metadata.uid "$f") == uid-1 ]] || { jq '.status.latestBuildStatus = "stopping"' "$f" >"$f.tmp"; mv "$f.tmp" "$f"; }
         err Conflict "Precondition failed: UID"
       fi
       rv=$(jq -r '.preconditions.resourceVersion // empty' "$file")
-      [[ -z $rv || $rv == "$(jq -r .metadata.resourceVersion "$f")" ]] || err Conflict "Precondition failed: ResourceVersion"
+      [[ -z $rv || $rv == "$(jq -r .metadata.resourceVersion "$f")" ]] || { side_effect "$f"; err Conflict "Precondition failed: ResourceVersion"; }
     fi
     echo "${DELETE_JOB_STATUS:-succeeded}" >"$S/deleted-$(jq -r .metadata.uid "$f")"
     rm "$f"; echo '{"kind":"Status","status":"Success"}' ;;
@@ -104,12 +117,17 @@ case "$method $path" in
   "GET /api/v2/workspaces/"*"?include_deleted=true")
     uid=${path##*/} && uid=${uid%%\?*} && [[ -f $S/deleted-$uid ]] || exit 22
     printf '{"latest_build":{"transition":"delete","job":{"status":"%s"}}}\n' "$(<"$S/deleted-$uid")" ;;
+  "GET /api/v2/workspaces/"*"/builds?limit=100") uid=${path#/api/v2/workspaces/} && jq -R '{id: .}' "$S/builds-${uid%%/*}" | jq -s . ;;
+  "GET /api/v2/workspaces/"*)
+    uid=${path##*/}; lb=$(cat "$S/latest-$uid" 2>/dev/null || jq -r --arg u "$uid" 'select(.metadata.uid == $u) | .status.latestBuildID' "$S"/ws/*.json)
+    printf '{"id":"%s","latest_build":{"id":"%s"}}\n' "$uid" "$lb" ;;
   "PATCH /api/v2/workspaces/"*)
     [[ $SCENARIO != rename-rejected ]] || { echo "curl: (22) The requested URL returned error: 400" >&2; exit 22; }
     for f in "$S"/ws/*.json; do
       [[ $(jq -r .metadata.uid "$f") == "${path##*/}" ]] || continue
       nn=$(jq -r --arg n "$(jq -r .name <<<"$data")" '.metadata.name | split(".")[0:2] + [$n] | join(".")' "$f")
-      jq --arg nn "$nn" '.metadata.name = $nn' "$f" >"$S/ws/$nn.json"; rm "$f"; exit 0
+      jq --arg nn "$nn" --arg sc "$SCENARIO" '.metadata.name = $nn | # the #109 fingerprint changes with the name
+        if $sc == "old-timestamp-rename" then . else .metadata.resourceVersion += "-renamed" end' "$f" >"$S/ws/$nn.json"; rm "$f"; exit 0
     done
     exit 22 ;;
   *) echo "stub curl: unexpected $method $path" >&2; exit 97 ;;
@@ -178,13 +196,16 @@ echo "TEST pass: full lifecycle against a well-behaved fake"
 run_scenario pass; summary
 check "driver exits 0 and prints PASS" eval '[[ $RC -eq 0 ]] && out_has "PASS: workspace lifecycle"'
 # shellcheck disable=SC2034 # rv is used by the eval'd check below
-rv=$(jq -r .metadata.resourceVersion "$S/last_update.json")
+rv=$(jq -r .metadata.resourceVersion "$S/first_update.json")
 check "watch URL uses the current token and only watch/resourceVersion/timeoutSeconds" \
   eval '[[ $(<"$S/watch_url") =~ ^/apis/aggregation\.coder\.com/v1alpha1/namespaces/coder/coderworkspaces\?watch=1\&resourceVersion=${rv}\&timeoutSeconds=[0-9]+$ ]]'
 check "watch URL omits sendInitialEvents and resourceVersionMatch" eval '! grep -qE "sendInitialEvents|resourceVersionMatch" "$S/watch_url"'
-check "update was sent only after watch registration" eval '[[ $(grep -n "watch=1" "$S/calls.log" | cut -d: -f1) -lt $(grep -n "replace --raw" "$S/calls.log" | cut -d: -f1) ]]'
-check "mutation order: create, update, rename, 409 delete, delete, recreate, 409 delete" \
-  no_mutations_after "kubectl create,kubectl replace,curl PATCH,kubectl delete,kubectl delete,kubectl create,kubectl delete"
+check "update was sent only after watch registration" eval '[[ $(grep -n "watch=1" "$S/calls.log" | cut -d: -f1) -lt $(grep -n "replace --raw" "$S/calls.log" | head -1 | cut -d: -f1) ]]'
+check "mutation order: create, update, rename, stale 409 update+delete, wrong-UID 409, delete, recreate, 409 delete" \
+  no_mutations_after "kubectl create,kubectl replace,curl PATCH,kubectl replace,kubectl delete,kubectl delete,kubectl delete,kubectl create,kubectl delete"
+check "stale requests carry the genuine pre-rename token; rename changed it" eval 'grep -qx "rv_pre_rename=2" "$T/work/receipt.txt" &&
+  grep -qx "rv_post_rename=2-renamed" "$T/work/receipt.txt" && jq -e ".metadata.resourceVersion == \"2\"" "$T/work/stale-update.json" >/dev/null'
+check "LIST requested after the stale checks" eval 'grep -q "get --raw /apis/aggregation.coder.com/v1alpha1/namespaces/coder/coderworkspaces$" "$S/calls.log"'
 check "terminating pod ignored; serving pod image tag inspected on node" eval 'grep -q "crictl inspecti -o json ghcr.io/coder/coder-k8s:e2e" "$S/calls.log"'
 check "serving pod digest recorded" eval 'grep -qx "pod_image_ref=docker.io/library/import-2026-09-23@$NEW_DIGEST" "$T/work/image-identity.txt"'
 check "image identity recorded" eval 'grep -qx "built=$BUILT" "$T/work/image-identity.txt" && grep -qx "serving=$BUILT" "$T/work/image-identity.txt"'
@@ -193,8 +214,8 @@ check "background port-forward and watch stopped" bg_stopped
 check "every non-streaming kubectl request carries --request-timeout=30s" \
   eval '! grep "^kubectl" "$S/calls.log" | grep -v -e "watch=1" -e port-forward | grep -qv -- "--request-timeout=30s "'
 check "recreate only after the delete job succeeded" eval '[[ $(grep -n include_deleted "$S/calls.log" | tail -1 | cut -d: -f1) -lt $(grep -n "^kubectl --request-timeout=30s create" "$S/calls.log" | tail -1 | cut -d: -f1) ]]'
-check "receipt: source, run, version, identity, UIDs, 9 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
-  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 9 ]]'
+check "receipt: source, run, version, identity, UIDs, 11 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
+  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 11 ]]'
 
 echo "TEST image-mismatch: serving image differs from built image"
 run_scenario image-mismatch SERVING_ID="$OTHER"; summary
@@ -241,18 +262,23 @@ echo "TEST rename-rejected: Coder rejects the out-of-band rename"
 run_scenario rename-rejected; summary
 check "fails at rename; no delete" eval '[[ $RC -ne 0 ]] && bg_stopped && no_mutations_after "kubectl create,kubectl replace,curl PATCH"'
 
-echo "TEST delete-ignores-preconditions: wrong-UID delete succeeds"
+echo "TEST delete-ignores-preconditions: stale DELETE (old token, live UID) is accepted"
 run_scenario delete-ignores-preconditions; summary
+check "fails on missing 409; no later delete or recreate" \
+  eval 'failed_with "expected (Conflict) but request succeeded" && no_mutations_after "kubectl create,kubectl replace,curl PATCH,kubectl replace,kubectl delete"'
+
+echo "TEST wrong-uid-ignored: wrong-UID delete is accepted"
+run_scenario wrong-uid-ignored; summary
 check "fails on missing 409; no live delete or recreate" \
-  eval 'failed_with "expected (Conflict) but request succeeded" && no_mutations_after "kubectl create,kubectl replace,curl PATCH,kubectl delete"'
+  eval 'failed_with "expected (Conflict) but request succeeded" && no_mutations_after "kubectl create,kubectl replace,curl PATCH,kubectl replace,kubectl delete,kubectl delete"'
 
 echo "TEST render-fail-delete: DeleteOptions render fails inside expect_error (errexit off)"
 run_scenario render-fail-delete; summary
-check "fails with zero kubectl delete calls and no recreate" eval 'failed_with "expected (Conflict)" && no_mutations_after "kubectl create,kubectl replace,curl PATCH"'
+check "fails with zero kubectl delete calls and no recreate" eval 'failed_with "expected (Conflict)" && no_mutations_after "kubectl create,kubectl replace,curl PATCH,kubectl replace"'
 
 echo "TEST delete-job-failed: workspace is 404 but its delete job failed"
 run_scenario delete-job-failed DELETE_JOB_STATUS=failed; summary
-check "fails on delete job status; no recreate" eval 'failed_with "delete job of uid-1 ended in status failed" && no_mutations_after "kubectl create,kubectl replace,curl PATCH,kubectl delete,kubectl delete"'
+check "fails on delete job status; no recreate" eval 'failed_with "delete job of uid-1 ended in status failed" && no_mutations_after "kubectl create,kubectl replace,curl PATCH,kubectl replace,kubectl delete,kubectl delete,kubectl delete"'
 
 echo "TEST watch-exits: watch registers then exits before the update"
 run_scenario watch-exits; summary
@@ -261,6 +287,22 @@ check "fails before the update" eval 'failed_with "watch process exited before t
 echo "TEST recreate-build-drift: prior-UID delete returns 409 but the recreated build changes"
 run_scenario recreate-build-drift; summary
 check "fails on recreated latest build status" eval 'failed_with "recreated object changed after prior-UID delete"'
+
+STALE="kubectl create,kubectl replace,curl PATCH,kubectl replace,kubectl delete"
+# name|expected message|mutations: each #109 negative must stop before the wrong-UID/live deletes and recreate.
+while IFS='|' read -r name msg muts; do
+  echo "TEST $name (#109)"
+  run_scenario "$name" </dev/null; summary
+  check "fails with '$msg'; mutations stop at: $muts" eval 'failed_with "$msg" && no_mutations_after "$muts"'
+done <<CASES
+old-timestamp-rename|rename did not change resourceVersion|kubectl create,kubectl replace,curl PATCH
+stale-update-accepted|expected (Conflict) but request succeeded|kubectl create,kubectl replace,curl PATCH,kubectl replace
+stale-side-effect-latest|backend latest build changed after stale requests|$STALE
+stale-side-effect-count|backend build count changed after stale requests|$STALE
+stale-side-effect-object|object changed after stale requests|$STALE
+list-missing|missing from LIST|$STALE
+list-token-differs|LIST token differs from GET token|$STALE
+CASES
 
 echo "TEST missing-built-id: BUILT_IMAGE_ID is not a sha256 ID"
 run_scenario missing-built-id BUILT_IMAGE_ID=e2e; summary
