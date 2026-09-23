@@ -1,6 +1,8 @@
 package apiserverapp
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -27,112 +29,10 @@ import (
 func TestIntegrationAggregatedAPIServerBootstrapAndList(t *testing.T) {
 	t.Parallel()
 
-	mockCoder := newIntegrationMockCoderServer("test-token")
-	defer mockCoder.Close()
-
-	mockCoderURLString := mockCoder.URL()
-	mockCoderURL, err := url.Parse(mockCoderURLString)
-	if err != nil {
-		t.Fatalf("parse mock coder URL %q: %v", mockCoderURLString, err)
-	}
-
-	sdkClient := codersdk.New(mockCoderURL)
-	if sdkClient == nil {
-		t.Fatal("assertion failed: codersdk client must not be nil")
-	}
-	sdkClient.SetSessionToken("test-token")
-
-	provider := &coder.StaticClientProvider{Client: sdkClient, Namespace: "test-ns"}
-	if provider.Client == nil {
-		t.Fatal("assertion failed: provider client must not be nil")
-	}
-
-	scheme := NewScheme()
-	if scheme == nil {
-		t.Fatal("assertion failed: scheme must not be nil")
-	}
-	codecs := serializer.NewCodecFactory(scheme)
-
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("create aggregated API listener: %v", err)
-	}
-	defer func() {
-		_ = listener.Close()
-	}()
-
-	secureServingOptions := genericoptions.NewSecureServingOptions()
-	if secureServingOptions == nil {
-		t.Fatal("assertion failed: secure serving options must not be nil")
-	}
-	secureServingOptions.Listener = listener
-	secureServingOptions.BindPort = 0
-	secureServingOptions.ServerCert.CertDirectory = ""
-	secureServingOptions.ServerCert.PairName = ""
-
-	recommendedConfig, err := NewRecommendedConfig(scheme, codecs, secureServingOptions)
-	if err != nil {
-		t.Fatalf("build recommended config: %v", err)
-	}
-	if recommendedConfig == nil {
-		t.Fatal("assertion failed: recommended config must not be nil")
-	}
-	if recommendedConfig.LoopbackClientConfig == nil {
-		t.Fatal("assertion failed: loopback client config must not be nil")
-	}
-	if recommendedConfig.LoopbackClientConfig.Host == "" {
-		t.Fatal("assertion failed: loopback client host must not be empty")
-	}
-
-	server, err := NewGenericAPIServer(recommendedConfig)
-	if err != nil {
-		t.Fatalf("build generic API server: %v", err)
-	}
-	if server == nil {
-		t.Fatal("assertion failed: generic API server must not be nil")
-	}
-	defer server.Destroy()
-
-	apiGroupInfo, err := NewAPIGroupInfo(scheme, codecs, provider)
-	if err != nil {
-		t.Fatalf("build API group info: %v", err)
-	}
-	if apiGroupInfo == nil {
-		t.Fatal("assertion failed: API group info must not be nil")
-	}
-	if err := InstallAPIGroup(server, apiGroupInfo); err != nil {
-		t.Fatalf("install API group: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- server.PrepareRun().RunWithContext(ctx)
-	}()
-	defer func() {
-		cancel()
-		select {
-		case runErr := <-errCh:
-			if runErr != nil && !errors.Is(runErr, context.Canceled) {
-				t.Errorf("aggregated API server exited with error: %v", runErr)
-			}
-		case <-time.After(5 * time.Second):
-			t.Error("timed out waiting for aggregated API server to stop")
-		}
-	}()
-
-	httpClient := &http.Client{
-		Timeout: 5 * time.Second,
-		Transport: &http.Transport{
-			//nolint:gosec // Integration test uses ephemeral self-signed certs.
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
-
-	baseURL := strings.TrimSuffix(recommendedConfig.LoopbackClientConfig.Host, "/")
-	if baseURL == "" {
-		t.Fatal("assertion failed: base URL must not be empty")
-	}
+	harness := startIntegrationAggregatedAPIServer(t)
+	httpClient := harness.httpClient
+	errCh := harness.errCh
+	baseURL := harness.baseURL
 
 	templateListURL := fmt.Sprintf(
 		"%s/apis/aggregation.coder.com/v1alpha1/namespaces/test-ns/codertemplates",
@@ -165,6 +65,134 @@ func TestIntegrationAggregatedAPIServerBootstrapAndList(t *testing.T) {
 	}
 	if got := workspaceList.Items[0].Namespace; got != "test-ns" {
 		t.Fatalf("expected workspace namespace test-ns, got %q", got)
+	}
+}
+
+// integrationAggregatedAPIServer is a running in-process aggregated API server
+// backed by the integration mock Coder server.
+type integrationAggregatedAPIServer struct {
+	baseURL    string
+	httpClient *http.Client
+	errCh      <-chan error
+}
+
+// startIntegrationAggregatedAPIServer boots the production server
+// configuration against a mock Coder backend and registers cleanup that stops
+// the server, closes the listener, and closes the mock.
+func startIntegrationAggregatedAPIServer(t *testing.T) integrationAggregatedAPIServer {
+	t.Helper()
+
+	mockCoder := newIntegrationMockCoderServer("test-token")
+	t.Cleanup(mockCoder.Close)
+
+	mockCoderURLString := mockCoder.URL()
+	mockCoderURL, err := url.Parse(mockCoderURLString)
+	if err != nil {
+		t.Fatalf("parse mock coder URL %q: %v", mockCoderURLString, err)
+	}
+
+	sdkClient := codersdk.New(mockCoderURL)
+	if sdkClient == nil {
+		t.Fatal("assertion failed: codersdk client must not be nil")
+	}
+	sdkClient.SetSessionToken("test-token")
+
+	provider := &coder.StaticClientProvider{Client: sdkClient, Namespace: "test-ns"}
+	if provider.Client == nil {
+		t.Fatal("assertion failed: provider client must not be nil")
+	}
+
+	scheme := NewScheme()
+	if scheme == nil {
+		t.Fatal("assertion failed: scheme must not be nil")
+	}
+	codecs := serializer.NewCodecFactory(scheme)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("create aggregated API listener: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = listener.Close()
+	})
+
+	secureServingOptions := genericoptions.NewSecureServingOptions()
+	if secureServingOptions == nil {
+		t.Fatal("assertion failed: secure serving options must not be nil")
+	}
+	secureServingOptions.Listener = listener
+	secureServingOptions.BindPort = 0
+	secureServingOptions.ServerCert.CertDirectory = ""
+	secureServingOptions.ServerCert.PairName = ""
+
+	recommendedConfig, err := NewRecommendedConfig(scheme, codecs, secureServingOptions)
+	if err != nil {
+		t.Fatalf("build recommended config: %v", err)
+	}
+	if recommendedConfig == nil {
+		t.Fatal("assertion failed: recommended config must not be nil")
+	}
+	if recommendedConfig.LoopbackClientConfig == nil {
+		t.Fatal("assertion failed: loopback client config must not be nil")
+	}
+	if recommendedConfig.LoopbackClientConfig.Host == "" {
+		t.Fatal("assertion failed: loopback client host must not be empty")
+	}
+
+	server, err := NewGenericAPIServer(recommendedConfig)
+	if err != nil {
+		t.Fatalf("build generic API server: %v", err)
+	}
+	if server == nil {
+		t.Fatal("assertion failed: generic API server must not be nil")
+	}
+	t.Cleanup(server.Destroy)
+
+	apiGroupInfo, err := NewAPIGroupInfo(scheme, codecs, provider)
+	if err != nil {
+		t.Fatalf("build API group info: %v", err)
+	}
+	if apiGroupInfo == nil {
+		t.Fatal("assertion failed: API group info must not be nil")
+	}
+	if err := InstallAPIGroup(server, apiGroupInfo); err != nil {
+		t.Fatalf("install API group: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.PrepareRun().RunWithContext(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case runErr := <-errCh:
+			if runErr != nil && !errors.Is(runErr, context.Canceled) {
+				t.Errorf("aggregated API server exited with error: %v", runErr)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("timed out waiting for aggregated API server to stop")
+		}
+	})
+
+	httpClient := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			//nolint:gosec // Integration test uses ephemeral self-signed certs.
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+
+	baseURL := strings.TrimSuffix(recommendedConfig.LoopbackClientConfig.Host, "/")
+	if baseURL == "" {
+		t.Fatal("assertion failed: base URL must not be empty")
+	}
+
+	return integrationAggregatedAPIServer{
+		baseURL:    baseURL,
+		httpClient: httpClient,
+		errCh:      errCh,
 	}
 }
 
@@ -241,7 +269,31 @@ func newIntegrationMockCoderServer(expectedSessionToken string) *integrationMock
 	templateVersionID := uuid.MustParse("33333333-3333-3333-3333-333333333333")
 	workspaceID := uuid.MustParse("44444444-4444-4444-4444-444444444444")
 	workspaceBuildID := uuid.MustParse("55555555-5555-5555-5555-555555555555")
+	templateSourceFileID := uuid.MustParse("66666666-6666-6666-6666-666666666666")
 	now := time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+	// Template GET downloads the active version's source zip, so serve a
+	// minimal archive.
+	var templateSourceZip bytes.Buffer
+	zipWriter := zip.NewWriter(&templateSourceZip)
+	mainTF, err := zipWriter.Create("main.tf")
+	if err != nil {
+		panic(fmt.Sprintf("assertion failed: create template source zip entry: %v", err))
+	}
+	if _, err := mainTF.Write([]byte("# integration test template\n")); err != nil {
+		panic(fmt.Sprintf("assertion failed: write template source zip entry: %v", err))
+	}
+	if err := zipWriter.Close(); err != nil {
+		panic(fmt.Sprintf("assertion failed: close template source zip: %v", err))
+	}
+
+	templateVersion := codersdk.TemplateVersion{
+		ID:         templateVersionID,
+		TemplateID: &templateID,
+		Job:        codersdk.ProvisionerJob{FileID: templateSourceFileID},
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
 
 	organization := codersdk.Organization{
 		MinimalOrganization: codersdk.MinimalOrganization{
@@ -327,6 +379,22 @@ func newIntegrationMockCoderServer(expectedSessionToken string) *integrationMock
 				return
 			}
 			writeJSON(w, http.StatusOK, workspace)
+			return
+		case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templateversions") && len(segments) == 4:
+			if segments[3] != templateVersion.ID.String() {
+				writeCoderError(w, http.StatusNotFound, "template version not found")
+				return
+			}
+			writeJSON(w, http.StatusOK, templateVersion)
+			return
+		case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "files") && len(segments) == 4:
+			if segments[3] != templateSourceFileID.String() {
+				writeCoderError(w, http.StatusNotFound, "file not found")
+				return
+			}
+			w.Header().Set("Content-Type", "application/zip")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(templateSourceZip.Bytes())
 			return
 		default:
 			writeCoderError(w, http.StatusNotFound, fmt.Sprintf("unexpected route: %s %s", r.Method, r.URL.Path))
