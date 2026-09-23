@@ -333,17 +333,8 @@ jobs:
           test -n "$TOKEN_SECRET"
           kubectl -n coder get secret "$TOKEN_SECRET"
 
-      - name: Create CoderTemplate via kubectl
-        if: env.E2E_FULL == 'true'
-        run: kubectl apply -f config/e2e/codertemplate.yaml
-
-      - name: Verify CoderTemplate exists
-        if: env.E2E_FULL == 'true'
-        run: |
-          kubectl -n coder get codertemplates
-          kubectl -n coder get codertemplate coder.e2e-template -o yaml
-
-      - name: Workspace lifecycle (create, watch, rename, delete, recreate)
+      # The driver creates the CoderTemplate itself (kubectl apply of config/e2e/codertemplate.yaml) after its setup checks.
+      - name: Template and workspace lifecycle (apply, re-apply, watch, rename, delete, recreate)
         if: env.E2E_FULL == 'true'
         env:
           BUILT_IMAGE_ID: ${{ steps.build_image.outputs.image_id }}

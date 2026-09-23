@@ -12,6 +12,8 @@ APISERVER_SVC=${E2E_APISERVER_SERVICE:-coder-k8s-apiserver}
 ORG=${E2E_ORG:-coder}
 OWNER=${E2E_OWNER:-coder-k8s-operator}
 TEMPLATE=${E2E_TEMPLATE:-e2e-template}
+TEMPLATE_MANIFEST=${E2E_TEMPLATE_MANIFEST:-config/e2e/codertemplate.yaml} # must define $ORG.$TEMPLATE
+TEMPLATE_APPLY_TIMEOUT=${E2E_TEMPLATE_APPLY_TIMEOUT:-600s}                  # Create now waits for the import (#105)
 WS_NAME=${E2E_WORKSPACE:-e2e-lifecycle}
 RENAMED=${E2E_RENAMED_WORKSPACE:-e2e-lifecycle-renamed}
 TIMEOUT=${E2E_TIMEOUT_SECONDS:-300}
@@ -41,7 +43,8 @@ cleanup() {
   printf '%s\n' "=== RECEIPT ($RESULT) ===" "source_sha=$SOURCE_SHA" "run_id=${GITHUB_RUN_ID:-unset}" \
     "run_attempt=${GITHUB_RUN_ATTEMPT:-unset}" "coder_version=${CODER_VERSION:-unknown}" "built_image_id=$BUILT_IMAGE_ID" \
     "serving_image_id=${SERVING_IMAGE_ID:-unknown}" "pod=${POD_NAME:-unknown}" "uid0=${UID0:-unset}" "uid1=${UID1:-unset}" \
-    "rv_pre_rename=${OLD_RV:-unset}" "rv_post_rename=${NEW_RV:-unset}" \
+    "rv_pre_rename=${OLD_RV:-unset}" "rv_post_rename=${NEW_RV:-unset}" "template=${TPL_STATE:-unset}" \
+    "workspace=${WS_STATE:-unset}" "apply_failure=${APPLY_FAILURE:-none}" \
     "${CASES[@]}" | tee "$WORK/receipt.txt"
 }
 trap cleanup EXIT
@@ -142,30 +145,64 @@ CODER_VERSION=$(coder_api GET /api/v2/buildinfo | jq -er '.version') || fail "ca
 [[ $CODER_VERSION == "$EXPECT_VERSION" || $CODER_VERSION == "$EXPECT_VERSION+"* ]] ||
   fail "Coder version mismatch: expected $EXPECT_VERSION, serving $CODER_VERSION"
 
-step "wait for template import (#105: create does not wait)"
-template_imported() {
-  local vid st
-  vid=$(coder_api GET "/api/v2/organizations/$ORG/templates/$TEMPLATE" | jq -er '.active_version_id') || return 1
-  st=$(coder_api GET "/api/v2/templateversions/$vid" | jq -er '.job.status') || return 1
-  case $st in failed | canceled | canceling) fail "template version $vid import ended in status $st" ;; esac
-  [[ $st == succeeded ]]
+# apply_manifest <file> [request-timeout]: client-side kubectl apply; a failure is recorded in the receipt and stops.
+apply_manifest() {
+  kubectl --request-timeout="${2:-30s}" apply -f "$1" >"$WORK/apply.out" 2>&1 && return 0
+  APPLY_FAILURE="apply $1: $(tr -s '\n' ' ' <"$WORK/apply.out" | cut -c1-400)"
+  fail "$APPLY_FAILURE"
 }
-wait_until "template $ORG/$TEMPLATE import to succeed" template_imported
-
-create_ws() { # <name> -> created object on stdout
+template_state() { # Coder template id, active version and version count
+  local t id active n
+  t=$(coder_api GET "/api/v2/organizations/$ORG/templates/$TEMPLATE") || return 1
+  id=$(jq -er '.id' <<<"$t") || return 1
+  active=$(jq -er '.active_version_id' <<<"$t") || return 1
+  n=$(coder_api GET "/api/v2/templates/$id/versions?limit=100" | jq -er 'length') || return 1
+  echo "id=$id active=$active versions=$n"
+}
+latest_build() { coder_api GET "/api/v2/workspaces/$UID0" | jq -er '.latest_build.id'; }
+build_count() { coder_api GET "/api/v2/workspaces/$UID0/builds?limit=100" | jq -er 'length'; }
+ws_state() { # UID, latest build (aggregated/Coder), build count and status of the first workspace
+  local o latest n
+  o=$(ws_get "$NAME") || return 1
+  latest=$(latest_build) || return 1
+  n=$(build_count) || return 1
+  jq -er --arg l "$latest" --arg n "$n" '"uid=\(.metadata.uid) latest=\(.status.latestBuildID)/\($l) builds=\($n) status=\(.status.latestBuildStatus)"' <<<"$o"
+}
+ws_manifest() { # <leaf name>: writes $WORK/ws-<leaf>.json, a canonical CoderWorkspace manifest with running=true
   jq -n --arg n "$ORG.$OWNER.$1" --arg ns "$NS" --arg org "$ORG" --arg t "$TEMPLATE" \
     '{apiVersion:"aggregation.coder.com/v1alpha1",kind:"CoderWorkspace",metadata:{name:$n,namespace:$ns},
-      spec:{organization:$org,templateName:$t,running:true}}' >"$WORK/create.json" || return 1
-  [[ -s $WORK/create.json ]] || return 1
-  k create --raw "$API" -f "$WORK/create.json"
+      spec:{organization:$org,templateName:$t,running:true}}' >"$WORK/ws-$1.json" || return 1
+  [[ -s $WORK/ws-$1.json ]] || return 1
 }
+create_ws() { # <leaf name> -> created object on stdout
+  ws_manifest "$1" || return 1
+  k create --raw "$API" -f "$WORK/ws-$1.json"
+}
+
+step "kubectl apply creates the template; its import is ready immediately (#105)"
+apply_manifest "$TEMPLATE_MANIFEST" "$TEMPLATE_APPLY_TIMEOUT"
+TPL_STATE=$(template_state) || fail "template $ORG/$TEMPLATE unreadable right after apply"
+TPL_VERSION=$(sed -E 's/.* active=([^ ]+) .*/\1/' <<<"$TPL_STATE")
+IMPORT=$(coder_api GET "/api/v2/templateversions/$TPL_VERSION" | jq -er '.job.status') || fail "cannot read import of $TPL_VERSION"
+[[ $IMPORT == succeeded ]] || fail "template import not ready right after apply: version $TPL_VERSION job status $IMPORT"
 
 step "create workspace through the aggregated API"
 NAME=$ORG.$OWNER.$WS_NAME
-OBJ=$(create_ws "$WS_NAME")
-UID0=$(jq -er '.metadata.uid' <<<"$OBJ") || fail "create response lacks uid: $OBJ"
-BUILD=$(jq -er '.status.latestBuildID' <<<"$OBJ") || fail "create response lacks latestBuildID: $OBJ"
+ws_manifest "$WS_NAME" || fail "cannot render workspace manifest"
+apply_manifest "$WORK/ws-$WS_NAME.json"
+OBJ=$(ws_get "$NAME")
+UID0=$(jq -er '.metadata.uid' <<<"$OBJ") || fail "created workspace lacks uid: $OBJ"
+BUILD=$(jq -er '.status.latestBuildID' <<<"$OBJ") || fail "created workspace lacks latestBuildID: $OBJ"
 wait_until "start build $BUILD" build_done "$NAME" "$BUILD" running
+
+step "repeated kubectl apply of identical template and workspace manifests changes nothing (#105)"
+WS_STATE=$(ws_state) || fail "cannot read workspace state before re-apply"
+apply_manifest "$TEMPLATE_MANIFEST" "$TEMPLATE_APPLY_TIMEOUT"
+apply_manifest "$WORK/ws-$WS_NAME.json"
+AFTER=$(template_state) || fail "template unreadable after re-apply"
+[[ $AFTER == "$TPL_STATE" ]] || fail "template changed after identical re-apply: before=[$TPL_STATE] after=[$AFTER]"
+AFTER=$(ws_state) || fail "workspace unreadable after re-apply"
+[[ $AFTER == "$WS_STATE" ]] || fail "workspace changed after identical re-apply: before=[$WS_STATE] after=[$AFTER]"
 
 step "watch from current token, update spec.running, require matching MODIFIED"
 OBJ=$(ws_get "$NAME")
@@ -207,8 +244,6 @@ POST=$(jq -cS . "$WORK/renamed.json")
 NEW_RV=$(jq -er '.metadata.resourceVersion' <<<"$POST") || fail "renamed object lacks resourceVersion"
 [[ $(jq -r .metadata.name <<<"$PRE") != "$(jq -r .metadata.name <<<"$POST")" ]] || fail "canonical name did not change"
 [[ $NEW_RV != "$OLD_RV" ]] || fail "rename did not change resourceVersion (still $OLD_RV)"
-latest_build() { coder_api GET "/api/v2/workspaces/$UID0" | jq -er '.latest_build.id'; }
-build_count() { coder_api GET "/api/v2/workspaces/$UID0/builds?limit=100" | jq -er 'length'; }
 LATEST=$(latest_build) || fail "cannot read backend latest build of $UID0"
 COUNT=$(build_count) || fail "cannot list backend builds of $UID0"
 [[ $LATEST == "$BUILD" ]] || fail "backend latest build $LATEST is not the stop build $BUILD"
