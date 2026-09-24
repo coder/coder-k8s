@@ -3092,6 +3092,15 @@ func (s *mockCoderServerState) handleUploadFile(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// Like coderd (files.go, GetFileByHashAndCreator), identical bytes from the same user return the existing
+	// file ID with 200; the mock has a single user.
+	for existingID, existing := range s.filesByID {
+		if bytes.Equal(existing, fileData) {
+			writeJSON(w, http.StatusOK, codersdk.UploadResponse{ID: existingID})
+			return
+		}
+	}
+
 	fileID := uuid.New()
 	s.filesByID[fileID] = fileData
 

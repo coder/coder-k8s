@@ -275,7 +275,7 @@ func TestTemplateStorageUpdateReusesSucceededVersionWithoutNewVersion(t *testing
 	started := newestVersion(t, state, "reuse-succeeded", 1)
 	state.setTemplateVersionState(started.ID, codersdk.ProvisionerJobSucceeded, false) // the import finishes later
 
-	mutationsBefore := len(state.mutations())
+	mutationsBefore, filesBefore := len(state.mutations()), state.fileCount()
 	updated, err := updateTemplate(namespacedContext("control-plane"), templateStorage, desired)
 	if err != nil {
 		t.Fatalf("expected the retry to promote the finished attempt: %v", err)
@@ -283,8 +283,12 @@ func TestTemplateStorageUpdateReusesSucceededVersionWithoutNewVersion(t *testing
 	if calls := countMutations(state, mutationsBefore, createTemplateVersionMutation); calls != 0 {
 		t.Fatalf("expected no new template version, got %d CreateTemplateVersion call(s)", calls)
 	}
-	if uploads := countMutations(state, mutationsBefore, uploadMutation); uploads != 0 {
-		t.Fatalf("expected no upload when an attempt is reused, got %d", uploads)
+	// The retry uploads again to learn the file ID; Coder deduplicates identical bytes.
+	if uploads := countMutations(state, mutationsBefore, uploadMutation); uploads != 1 {
+		t.Fatalf("expected one (deduplicated) upload, got %d", uploads)
+	}
+	if files := state.fileCount(); files != filesBefore {
+		t.Fatalf("expected the upload to reuse the stored file, files before=%d after=%d", filesBefore, files)
 	}
 	if updated.Status.ActiveVersionID != started.ID.String() {
 		t.Fatalf("expected %s to be active, got %s", started.ID, updated.Status.ActiveVersionID)
@@ -592,8 +596,92 @@ func TestTemplateStorageUpdateBoundsAttemptLookups(t *testing.T) {
 		if got := lookups.Load(); got > 2 {
 			t.Fatalf("expected the scan to stop right after cancellation, got %d lookups", got)
 		}
-		if mutations := state.mutations()[mutationsBefore:]; len(mutations) != 0 {
-			t.Fatalf("expected no Coder mutation after cancellation, got %v", mutations)
+		// The (deduplicated) upload happens before the scan; nothing may follow the cancellation.
+		for _, mutation := range state.mutations()[mutationsBefore:] {
+			if !uploadMutation(mutation) {
+				t.Fatalf("expected no Coder mutation after cancellation, got %v", state.mutations()[mutationsBefore:])
+			}
 		}
 	})
+}
+
+func (s *mockCoderServerState) seedFile(content []byte) uuid.UUID {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	fileID := uuid.New()
+	s.filesByID[fileID] = content
+	return fileID
+}
+
+// derivedBaseName computes the attempt name an Update of templateName to desired's files derives.
+func derivedBaseName(t *testing.T, state *mockCoderServerState, templateName string, desired *aggregationv1alpha1.CoderTemplate) (string, uuid.UUID) {
+	t.Helper()
+	template, ok := state.templateByName("acme", templateName)
+	if !ok {
+		t.Fatalf("expected template %s in the mock", templateName)
+	}
+	currentZip, ok := state.templateActiveSourceZip("acme", templateName)
+	if !ok {
+		t.Fatalf("expected an active source zip for %s", templateName)
+	}
+	normalized, err := normalizeFileKeys(desired.Spec.Files)
+	if err != nil {
+		t.Fatalf("normalize files: %v", err)
+	}
+	zipBytes, err := buildMergedSourceZip(currentZip, normalized)
+	if err != nil {
+		t.Fatalf("build merged zip: %v", err)
+	}
+	baseName, err := templateVersionBaseName(template.ID, zipBytes)
+	if err != nil {
+		t.Fatalf("derive base name: %v", err)
+	}
+	return baseName, template.ID
+}
+
+// Coder version names are caller-controlled: a version created (or renamed) to the derived name but built
+// from other source must never be waited on or activated.
+func TestTemplateStorageUpdateNeverReusesSquattedName(t *testing.T) {
+	for _, status := range []codersdk.ProvisionerJobStatus{
+		codersdk.ProvisionerJobSucceeded, codersdk.ProvisionerJobPending, codersdk.ProvisionerJobRunning,
+	} {
+		t.Run(string(status), func(t *testing.T) {
+			setFastTemplateVersionBuildPolling(t, "5s")
+			templateStorage, state, _ := newTemplateReuseHarness(t, nil)
+			current, _ := createTemplateForMetadataUpdate(t, templateStorage, state, "squatted")
+			activeBefore, _ := state.templateActiveVersionID("acme", "squatted")
+
+			desired := filesUpdate(current, "squatted_source")
+			baseName, templateID := derivedBaseName(t, state, "squatted", desired)
+			otherSource := state.seedFile([]byte("not the source this update uploads"))
+			squatter := state.seedTemplateVersion(templateID, baseName, otherSource, status, 0)
+			mutationsBefore := len(state.mutations())
+
+			updated, err := updateTemplate(namespacedContext("control-plane"), templateStorage, desired)
+			if err != nil {
+				t.Fatalf("expected the update to import its own attempt: %v", err)
+			}
+			newest := newestVersion(t, state, "squatted", 2)
+			if newest.Name != baseName+"-2" || newest.ID == squatter {
+				t.Fatalf("expected a new attempt %s-2, got %q (%s)", baseName, newest.Name, newest.ID)
+			}
+			if updated.Status.ActiveVersionID != newest.ID.String() || updated.Status.ActiveVersionID == activeBefore.String() {
+				t.Fatalf("expected %s to be active, got %s", newest.ID, updated.Status.ActiveVersionID)
+			}
+			if calls := countMutations(state, mutationsBefore, createTemplateVersionMutation); calls != 1 {
+				t.Fatalf("expected one CreateTemplateVersion, got %d", calls)
+			}
+			for _, mutation := range state.mutations()[mutationsBefore:] {
+				if strings.Contains(mutation, squatter.String()) {
+					t.Fatalf("expected no request touching the squatted version, got %q", mutation)
+				}
+			}
+			if promotions := countMutations(state, mutationsBefore, func(m string) bool {
+				return strings.HasPrefix(m, "PATCH /api/v2/templates/") && strings.HasSuffix(m, "/versions")
+			}); promotions != 1 {
+				t.Fatalf("expected exactly one promotion (of the new attempt), got %d", promotions)
+			}
+		})
+	}
 }

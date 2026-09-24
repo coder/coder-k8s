@@ -67,9 +67,15 @@ func templateVersionAttemptName(baseName string, attempt int) (string, error) {
 	return name, nil
 }
 
-// templateVersionReusable reports whether an existing attempt can still become the active version.
-func templateVersionReusable(version codersdk.TemplateVersion) bool {
-	if version.Archived {
+// templateVersionReusable reports whether an existing attempt can still become the active version. Version
+// names are caller-controlled in Coder (set on create, or renamed later), so the name alone proves nothing: the
+// attempt must also have been built from the file this request uploaded. Coder returns the same file ID for
+// the same bytes from the same user.
+func templateVersionReusable(version codersdk.TemplateVersion, fileID uuid.UUID) bool {
+	if fileID == uuid.Nil {
+		panic("assertion failed: uploaded file ID must not be nil")
+	}
+	if version.Archived || version.Job.FileID != fileID {
 		return false
 	}
 	switch version.Job.Status {
@@ -163,10 +169,11 @@ func (l *templateVersionLookup) latestAttempt(ctx context.Context) (int, codersd
 	return present, presentVersion, nil
 }
 
-// ensureTemplateVersionForUpdate returns the template version an Update should wait on for zipBytes. It
-// reuses the latest attempt with the derived name while that attempt is pending, running or succeeded, and
-// otherwise creates the next attempt ("<base>-<n+1>"). If another request creates that name first, Coder
-// answers 409 and the lookup runs again, so concurrent retries converge on one version.
+// ensureTemplateVersionForUpdate returns the template version an Update should wait on for zipBytes. It uploads
+// the source first (Coder deduplicates it), then reuses the latest attempt with the derived name while that
+// attempt was built from the same file and is pending, running or succeeded, and otherwise creates the next
+// attempt ("<base>-<n+1>"). If another request creates that name first, Coder answers 409 and the lookup runs
+// again, so concurrent retries converge on one version.
 func ensureTemplateVersionForUpdate(
 	ctx context.Context,
 	sdk *codersdk.Client,
@@ -188,16 +195,22 @@ func ensureTemplateVersionForUpdate(
 	}
 	lookup := &templateVersionLookup{sdk: sdk, templateID: templateID, baseName: baseName, name: name}
 
-	var (
-		fileID uuid.UUID
-		orgID  uuid.UUID
-	)
+	uploadResponse, err := sdk.Upload(ctx, codersdk.ContentTypeZip, bytes.NewReader(zipBytes))
+	if err != nil {
+		return codersdk.TemplateVersion{}, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
+	}
+	fileID := uploadResponse.ID
+	if fileID == uuid.Nil {
+		return codersdk.TemplateVersion{}, fmt.Errorf("assertion failed: uploaded file ID must not be nil")
+	}
+
+	var orgID uuid.UUID
 	for {
 		attempt, version, err := lookup.latestAttempt(ctx)
 		if err != nil {
 			return codersdk.TemplateVersion{}, err
 		}
-		if attempt > 0 && templateVersionReusable(version) {
+		if attempt > 0 && templateVersionReusable(version, fileID) {
 			return version, nil
 		}
 
@@ -205,19 +218,12 @@ func ensureTemplateVersionForUpdate(
 		if err != nil {
 			return codersdk.TemplateVersion{}, err
 		}
-		if fileID == uuid.Nil {
-			uploadResponse, err := sdk.Upload(ctx, codersdk.ContentTypeZip, bytes.NewReader(zipBytes))
-			if err != nil {
-				return codersdk.TemplateVersion{}, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
-			}
-			if uploadResponse.ID == uuid.Nil {
-				return codersdk.TemplateVersion{}, fmt.Errorf("assertion failed: uploaded file ID must not be nil")
-			}
+		if orgID == uuid.Nil {
 			org, err := sdk.OrganizationByName(ctx, organization)
 			if err != nil {
 				return codersdk.TemplateVersion{}, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
 			}
-			fileID, orgID = uploadResponse.ID, org.ID
+			orgID = org.ID
 		}
 
 		created, err := sdk.CreateTemplateVersion(ctx, orgID, codersdk.CreateTemplateVersionRequest{
