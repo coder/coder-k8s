@@ -17,7 +17,8 @@ kubectl apply -f config/crd/bases/ -f config/rbac/
 
 ```bash
 kubectl apply -f deploy/deployment.yaml
-kubectl -n coder-system set args deployment/coder-k8s --containers=coder-k8s -- --app=controller
+kubectl -n coder-system patch deployment/coder-k8s --type=json \
+  -p='[{"op":"add","path":"/spec/template/spec/containers/0/args","value":["--app=controller"]}]'
 ```
 
 !!! tip "Pin the image"
@@ -40,7 +41,7 @@ kubectl get codercontrolplanes -A
 
 ## Want everything instead?
 
-Skip the `set args` step to keep `--app=all`, and apply the extra Services:
+Skip the `kubectl patch` step to keep `--app=all`, and apply the extra Services:
 
 ```bash
 kubectl apply -f deploy/apiserver-service.yaml -f deploy/apiserver-apiservice.yaml -f deploy/mcp-service.yaml
@@ -82,7 +83,7 @@ While `spec.database` is set, the controller reports the `DatabaseSecretResolved
 | `False` | `SecretNotFound` | The Secret does not exist in the namespace. |
 | `False` | `KeyNotFound` | The Secret exists but does not contain the key. |
 | `False` | `EmptyValue` | The value is empty or contains only whitespace. |
-| `False` | `InvalidURL` | The value does not parse as a `postgres://` or `postgresql://` URL. |
+| `False` | `InvalidURL` | The value does not parse as a `postgres://` or `postgresql://` URL. The scheme must be exactly lowercase: for example, `Postgres://` is rejected. |
 | `False` | `ConflictingConfiguration` | `spec.extraEnv` also sets `CODER_PG_CONNECTION_URL`. The controller leaves the Deployment unchanged. |
 
 `Resolved` does not mean that the database is healthy or reachable. The controller does not connect to PostgreSQL to set this condition. Condition messages name the Secret and key, but never contain the URL or credentials.
