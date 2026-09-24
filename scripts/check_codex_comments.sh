@@ -223,8 +223,9 @@ def leading_count(f): (map(f) | index(false)) // length;
 
 def advisory_heading_regex: "^#### Advisory findings \\((?<n>[1-9][0-9]{0,2})\\)$";
 
+# The link label may contain brackets (e.g. `args[0]` or escaped `\[`); only "](" ends it.
 def finding_regex:
-  "^- [^ ]{1,4} \\[[^\\[\\]]+\\]\\(https://github\\.com/(?<owner>[^/()]+)/(?<repo>[^/()]+)/pull/(?<pr>[0-9]+)"
+  "^- [^ ]{1,4} \\[(?:[^\\]]|\\](?!\\())+\\]\\(https://github\\.com/(?<owner>[^/()]+)/(?<repo>[^/()]+)/pull/(?<pr>[0-9]+)"
   + "#discussion_r(?<id>[0-9]+)\\) · \\*\\*(Critical|High|Medium|Low)\\*\\*$";
 
 # True when the finding line links to a resolved, bot-started thread on this PR.

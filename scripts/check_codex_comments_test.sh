@@ -213,6 +213,14 @@ run_case pr99_full_payload 0 "Found 0 unminimized regular comment(s) from bot" \
 CASE_PR=89 run_case summary_finding_thread_resolved 0 "$CLEAN_MSG" \
   "$(finding_card)" "$(page reviewThreads "$(thread_node "$BOT" true "$FINDING_ID")")"
 
+CASE_PR=89 run_case summary_finding_title_with_brackets_resolved 0 "$CLEAN_MSG" \
+  "$(finding_card 's/\[Example advisory finding\]/[Check args[0] and \\[escaped\\] bounds]/')" \
+  "$(page reviewThreads "$(thread_node "$BOT" true "$FINDING_ID")")"
+
+CASE_PR=89 run_case summary_finding_title_with_brackets_unresolved 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card 's/\[Example advisory finding\]/[Check args[0] and \\[escaped\\] bounds]/')" \
+  "$(page reviewThreads "$(thread_node "$BOT" false "$FINDING_ID")")"
+
 CASE_PR=89 run_case summary_two_findings_threads_resolved 0 "$CLEAN_MSG" \
   "$(finding_card "$TWO_FINDINGS_SED")" \
   "$(page reviewThreads "$(thread_node "$BOT" true "$FINDING_ID")" "$(thread_node "$BOT" true $((FINDING_ID + 1)))")"
