@@ -36,3 +36,6 @@ terraform.rc
 # Backend config (local-only, not committed)
 terraform/backend.hcl
 /coder-k8s
+
+# GoReleaser output (see dist: in .goreleaser.yaml)
+/.goreleaser-dist/

@@ -79,7 +79,7 @@ Run from repository root.
 - **Code generation:** `make codegen` (or `bash ./hack/update-codegen.sh`)
 - **Docs (serve):** `make docs-serve`
 - **Docs (strict build):** `make docs-check`
-- **Clean:** `go clean -cache -testcache && rm -f ./coder-k8s && rm -rf ./dist`
+- **Clean:** `go clean -cache -testcache && rm -f ./coder-k8s && rm -rf ./.goreleaser-dist` (keep `dist/`: it holds the tracked `dist/install.yaml`)
 - **Shell scripts:** `find . -type f -name '*.sh' -not -path './vendor/*'`
 - **Update coder-docs skill:** `make update-coder-docs-skill`
 
