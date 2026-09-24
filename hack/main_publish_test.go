@@ -3,6 +3,7 @@ package hack_test
 import (
 	"os"
 	"os/exec"
+	"path"
 	"strings"
 	"testing"
 	"text/template"
@@ -47,6 +48,37 @@ func TestChangelogChannels(t *testing.T) {
 				t.Fatalf("changelog disabled = %q for channel %q", result.String(), channel)
 			}
 		})
+	}
+}
+
+// `goreleaser release --clean` deletes its output directory. dist/ holds the tracked install bundle, so
+// GoReleaser must write elsewhere, and git must ignore that directory to keep the release worktree clean.
+func TestGoReleaserDistIsIgnored(t *testing.T) {
+	data, err := os.ReadFile("../.goreleaser.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		Dist string `json:"dist"`
+	}
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		t.Fatal(err)
+	}
+	// path.Clean maps an unset dist to "." and "./dist/" to "dist"; GoReleaser defaults to dist.
+	dist := path.Clean(config.Dist)
+	if dist == "." || dist == "dist" {
+		t.Fatalf("GoReleaser dist = %q; set a top-level dist other than dist/", config.Dist)
+	}
+
+	cmd := exec.CommandContext(t.Context(), "git", "check-ignore", "--verbose", "--", path.Join(dist, "artifacts.json"))
+	cmd.Dir = ".."
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(),
+		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull,
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.HasPrefix(string(out), ".gitignore:") {
+		t.Fatalf(".gitignore must ignore GoReleaser dist %q: %v\n%s", dist, err, out)
 	}
 }
 
