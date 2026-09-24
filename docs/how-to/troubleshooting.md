@@ -11,7 +11,7 @@ kubectl logs -n coder-system deploy/coder-k8s
 `--app` is optional and defaults to `all` (every component). To isolate one component, set it explicitly:
 
 ```bash
-GOFLAGS=-mod=vendor go run . --app=controller   # or aggregated-apiserver, mcp-http
+GOFLAGS=-mod=vendor go run . --app=controller   # or aggregated-apiserver, or mcp-http --mcp-token-file=<file>
 ```
 
 An unknown value fails at startup with `assertion failed: unsupported --app value ...`.

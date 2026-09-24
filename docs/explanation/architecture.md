@@ -4,25 +4,23 @@
 
 | `--app` | Runs |
 | --- | --- |
-| `all` (default) | Controller, aggregated API server, and MCP server in one process |
+| `all` (default) | Controller and aggregated API server in one process |
 | `controller` | Controller-runtime manager and reconcilers |
 | `aggregated-apiserver` | Aggregated API server (`aggregation.coder.com/v1alpha1`) |
-| `mcp-http` | MCP HTTP server |
+| `mcp-http` | MCP HTTP server (only in this mode; requires `--mcp-token-file`) |
 
 ## All-in-one mode
 
-In `all` mode, `internal/app/allapp` creates one controller-runtime manager with one shared cache. It registers the reconcilers, then starts the aggregated API server and MCP server as non-leader runnables. One process, one cache, coordinated startup.
+In `all` mode, `internal/app/allapp` creates one controller-runtime manager with one shared cache. It registers the reconcilers, then starts the aggregated API server as a non-leader runnable. The MCP server is not part of `all` mode because it acts with the operator's authority; run it on purpose with `--app=mcp-http`. One process, one cache, coordinated startup.
 
 ```mermaid
 graph TD
   entry["coder-k8s (--app=all)"] --> mgr["controller-runtime manager"]
   mgr --> ctrl["Controller reconcilers"]
   mgr --> agg["Aggregated API server runnable"]
-  mgr --> mcp["MCP HTTP runnable"]
 
   ctrl --> crds["coder.com/v1alpha1 CRDs"]
   agg --> api["aggregation.coder.com/v1alpha1"]
-  mcp --> tools["MCP tools over /mcp"]
 ```
 
 ## Components
@@ -30,7 +28,7 @@ graph TD
 | | Controller | Aggregated API server | MCP server |
 | --- | --- | --- | --- |
 | **Code** | `internal/app/controllerapp/`, `internal/controller/` | `internal/app/apiserverapp/`, `internal/aggregated/storage/`, `internal/aggregated/coder/` | `internal/app/mcpapp/` |
-| **Listens on** | `:8081` (`/healthz`, `/readyz`) | `:6443` HTTPS (default) | `:8090` (`/mcp`, `/healthz`, `/readyz`) |
+| **Listens on** | `:8081` (`/healthz`, `/readyz`) | `:6443` HTTPS (default) | `127.0.0.1:8090` only (`/mcp` needs the bearer token; `/healthz`, `/readyz` do not) |
 | **Resources** | `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy` | `coderworkspaces`, `codertemplates` | Tools for control planes, templates, workspaces, events, pod logs, and run state |
 
 ### Controller
@@ -64,4 +62,3 @@ graph TD
 | `config/rbac/` | ServiceAccount, `manager-role`, and bindings (including auth-delegator) |
 | `deploy/deployment.yaml` | The `coder-k8s` Deployment (defaults to `--app=all`) |
 | `deploy/apiserver-service.yaml`, `deploy/apiserver-apiservice.yaml` | Expose the aggregated API |
-| `deploy/mcp-service.yaml` | MCP Service on port `8090` |

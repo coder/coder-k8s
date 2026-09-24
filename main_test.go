@@ -263,19 +263,35 @@ func TestRunDispatchesMCPHTTPMode(t *testing.T) {
 
 	expectedErr := errors.New("sentinel mcp-http error")
 	called := false
-	runMCPHTTPApp = func(ctx context.Context) error {
+	runMCPHTTPApp = func(ctx context.Context, path string) error {
 		called = true
 		if ctx == nil {
 			t.Fatal("expected non-nil context passed to MCP HTTP runner")
 		}
+		if path != "/etc/mcp/token" {
+			t.Fatalf("expected token file path to be forwarded, got %q", path)
+		}
 		return expectedErr
 	}
 
-	err := run([]string{"--app=mcp-http"})
+	err := run([]string{"--app=mcp-http", "--mcp-token-file=/etc/mcp/token"})
 	if !called {
 		t.Fatal("expected MCP HTTP runner to be called")
 	}
 	if !errors.Is(err, expectedErr) {
 		t.Fatalf("expected sentinel error %v, got %v", expectedErr, err)
+	}
+}
+
+func TestRunRejectsMCPTokenFileOutsideMCPHTTPMode(t *testing.T) {
+	installMockSignalHandler(t)
+
+	for _, mode := range []string{"all", "controller", "aggregated-apiserver"} {
+		t.Run(mode, func(t *testing.T) {
+			err := run([]string{"--app=" + mode, "--mcp-token-file=/etc/mcp/token"})
+			if err == nil || !strings.Contains(err.Error(), "--mcp-token-file is only used with --app=mcp-http") {
+				t.Fatalf("expected --mcp-token-file rejection for --app=%s, got %v", mode, err)
+			}
+		})
 	}
 }

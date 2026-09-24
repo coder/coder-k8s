@@ -14,5 +14,3 @@ spec:
           ports:
             - containerPort: 6443
               $patch: delete
-            - containerPort: 8090
-              $patch: delete

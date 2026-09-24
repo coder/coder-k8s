@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
 func TestRunRejectsNilContext(t *testing.T) {
@@ -63,5 +65,40 @@ func TestNonLeaderRunnableStartRequiresRunFunction(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "runnable function must not be nil") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+type recordingManager struct {
+	manager.Manager
+	added []manager.Runnable
+}
+
+func (m *recordingManager) Add(r manager.Runnable) error {
+	m.added = append(m.added, r)
+	return nil
+}
+
+// TestAddRunnablesRegistersOnlyAggregatedAPIServer guards the security decision that --app=all never
+// starts the MCP HTTP server.
+func TestAddRunnablesRegistersOnlyAggregatedAPIServer(t *testing.T) {
+	mgr := &recordingManager{}
+	if err := addRunnables(mgr, 30*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if len(mgr.added) != 1 {
+		t.Fatalf("expected exactly one runnable (aggregated-apiserver), got %d", len(mgr.added))
+	}
+	runnable, ok := mgr.added[0].(nonLeaderRunnable)
+	if !ok || runnable.run == nil {
+		t.Fatalf("expected a nonLeaderRunnable with a run function, got %T", mgr.added[0])
+	}
+}
+
+func TestAddRunnablesRejectsInvalidArguments(t *testing.T) {
+	if err := addRunnables(nil, time.Second); err == nil || !strings.Contains(err.Error(), "manager must not be nil") {
+		t.Fatalf("expected nil manager assertion, got %v", err)
+	}
+	if err := addRunnables(&recordingManager{}, 0); err == nil || !strings.Contains(err.Error(), "request timeout must be positive") {
+		t.Fatalf("expected request timeout assertion, got %v", err)
 	}
 }

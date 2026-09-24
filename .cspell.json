@@ -52,7 +52,8 @@
     "pooler",
     "finalizer",
     "superfences",
-    "tolerations"
+    "tolerations",
+    "portforward"
   ],
   "ignorePaths": [
     ".git/**",

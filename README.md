@@ -23,10 +23,10 @@ Pick what runs with `--app`:
 
 | `--app` | Runs |
 | --- | --- |
-| `all` (default) | Everything in one process |
+| `all` (default) | Operator and aggregated API server in one process |
 | `controller` | Operator only |
 | `aggregated-apiserver` | Aggregated API server only |
-| `mcp-http` | MCP server only |
+| `mcp-http` | MCP server only (never part of `all`; needs `--mcp-token-file`) |
 
 ## Quick start
 

@@ -2,29 +2,60 @@
 
 The MCP server gives MCP clients (such as AI agents) tools to inspect and operate `coder-k8s` resources over HTTP.
 
-It runs by default: `--app=all` in `deploy/deployment.yaml` includes it. To run it alone, use `--app=mcp-http`.
+It is off by default. `--app=all` does not include it. It runs only with `--app=mcp-http`, and only with a bearer token file.
 
-!!! danger "No authentication"
-    Any client that can reach the endpoint can call every tool with the server's Kubernetes permissions. RBAC limits what the server can do; it does not identify callers. Keep it on trusted networks. Never expose port `8090` to untrusted clients. Remote access needs its own authentication layer and network restrictions.
+!!! danger "What the token grants"
+    The MCP server calls every tool with its own Kubernetes ServiceAccount's permissions (in the default install, the operator's). The token is a shared administrative credential for those tool powers. It does not identify callers and there is no per-caller RBAC: anyone who holds the token can use every tool.
 
-## 1. Deploy and connect
+The server listens on `127.0.0.1:8090` inside the Pod only. To reach it, a client needs the token **and** a way into the Pod's loopback interface, such as `kubectl port-forward` (which Kubernetes authorizes with `pods/portforward` on that Pod). Other containers in the same Pod can reach it too. Do not add a proxy that exposes it on the Pod network.
 
-From a clone of this repository:
+## 1. Create the token
+
+The token file must hold one token of at least 32 bytes without whitespace (a trailing newline is ignored).
+
+The server reads the token file once, at startup. To rotate the token, update the Secret, then restart the pod (for example, `kubectl -n coder-system rollout restart deployment/coder-k8s`). Until the restart, the old token keeps working.
 
 ```bash
-kubectl apply -f config/rbac/ -f deploy/deployment.yaml -f deploy/mcp-service.yaml
-kubectl port-forward svc/coder-k8s -n coder-system 8090:8090
+openssl rand -hex 32 > mcp-token
+chmod 600 mcp-token
+kubectl -n coder-system create secret generic coder-k8s-mcp-token --from-file=token=mcp-token
 ```
 
-Point your MCP client at:
+## 2. Run the MCP server next to the operator
 
-```text
-http://127.0.0.1:8090/mcp
+From a clone of this repository, deploy the operator, then append an `mcp` container that runs `--app=mcp-http`. The JSON patch keeps the operator as the first container, so other patches that address `containers/0` still target it:
+
+```bash
+kubectl apply -f config/rbac/ -f deploy/deployment.yaml
+
+kubectl -n coder-system patch deployment coder-k8s --type=json -p '[
+  {"op": "add", "path": "/spec/template/spec/volumes", "value": [
+    {"name": "mcp-token", "secret": {"secretName": "coder-k8s-mcp-token"}}
+  ]},
+  {"op": "add", "path": "/spec/template/spec/containers/-", "value": {
+    "name": "mcp",
+    "image": "ghcr.io/coder/coder-k8s:latest",
+    "args": ["--app=mcp-http", "--mcp-token-file=/etc/coder-k8s-mcp/token"],
+    "volumeMounts": [{"name": "mcp-token", "mountPath": "/etc/coder-k8s-mcp", "readOnly": true}]
+  }}
+]'
 ```
 
-In-cluster clients use `coder-k8s.coder-system.svc` on port `8090`.
+Use the same image as the operator container.
 
-## 2. Check health
+The `mcp` container exits at startup if `--mcp-token-file` is missing, unreadable, empty, or too short. The operator container is not affected.
+
+## 3. Connect
+
+```bash
+kubectl -n coder-system port-forward deploy/coder-k8s 8090:8090
+```
+
+Point your MCP client at `http://127.0.0.1:8090/mcp` and send `Authorization: Bearer <token>` on every request. Requests without the correct token get `401 Unauthorized`, including requests that carry an existing `Mcp-Session-Id`.
+
+## 4. Check health
+
+Only these two paths answer without the token:
 
 ```bash
 curl -fsS http://127.0.0.1:8090/healthz
@@ -42,7 +73,7 @@ curl -fsS http://127.0.0.1:8090/readyz
 
 ## Request rules
 
-The MCP Go SDK (1.4.1) enforces these transport checks. They are protections, not authentication, and they can cause surprising errors:
+The bearer token check runs first. After it, the MCP Go SDK (1.4.1) enforces these transport checks. They are protections, not authentication, and they can cause surprising errors:
 
 | Rule | Error when broken |
 | --- | --- |
@@ -52,7 +83,6 @@ The MCP Go SDK (1.4.1) enforces these transport checks. They are protections, no
 
 Also note:
 
-- The loopback check uses the address the server sees. It is not a hostname allowlist for Pod or Service traffic, and not every port-forward or proxy path arrives from loopback.
 - JSON field names are case-sensitive. A key with an appended null character does not alias the original key.
-- Service names and client-supplied headers are not credentials.
+- Service names, session IDs, and other client-supplied headers are not credentials. Only the bearer token is.
 - Do not disable the SDK's localhost or cross-origin protections to work around routing problems.

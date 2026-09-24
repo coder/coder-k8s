@@ -1,4 +1,7 @@
-// Package allapp composes controller, aggregated API server, and MCP app modes in one process.
+// Package allapp composes the controller and aggregated API server app modes in one process.
+//
+// The MCP HTTP server is deliberately not part of this mode: it acts with the operator's authority and
+// only runs when explicitly requested with --app=mcp-http and a bearer token file.
 package allapp
 
 import (
@@ -6,14 +9,12 @@ import (
 	"fmt"
 	"time"
 
-	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/coder/coder-k8s/internal/aggregated/coder"
 	"github.com/coder/coder-k8s/internal/app/apiserverapp"
 	"github.com/coder/coder-k8s/internal/app/controllerapp"
-	"github.com/coder/coder-k8s/internal/app/mcpapp"
 	"github.com/coder/coder-k8s/internal/app/sharedscheme"
 )
 
@@ -29,8 +30,6 @@ var (
 	runAggregatedAPIServer = func(ctx context.Context, opts apiserverapp.Options) error {
 		return apiserverapp.RunWithOptions(ctx, opts)
 	}
-	runMCPHTTPWithClients = mcpapp.RunHTTPWithClients
-	newClientset          = kubernetes.NewForConfig
 )
 
 var _ manager.LeaderElectionRunnable = nonLeaderRunnable{}
@@ -89,6 +88,22 @@ func Run(ctx context.Context, coderRequestTimeout time.Duration) error {
 		return err
 	}
 
+	if err := addRunnables(mgr, requestTimeout); err != nil {
+		return err
+	}
+
+	return mgr.Start(ctx)
+}
+
+// addRunnables registers the non-controller runnables that share the manager's cache.
+func addRunnables(mgr manager.Manager, requestTimeout time.Duration) error {
+	if mgr == nil {
+		return fmt.Errorf("assertion failed: manager must not be nil")
+	}
+	if requestTimeout <= 0 {
+		return fmt.Errorf("assertion failed: request timeout must be positive: %s", requestTimeout)
+	}
+
 	if err := mgr.Add(nonLeaderRunnable{
 		run: func(runnableCtx context.Context) error {
 			if runnableCtx == nil {
@@ -126,41 +141,7 @@ func Run(ctx context.Context, coderRequestTimeout time.Duration) error {
 		return fmt.Errorf("add aggregated-apiserver runnable: %w", err)
 	}
 
-	if err := mgr.Add(nonLeaderRunnable{
-		run: func(runnableCtx context.Context) error {
-			if runnableCtx == nil {
-				return fmt.Errorf("assertion failed: context must not be nil")
-			}
-
-			if err := waitForCacheSync(runnableCtx, mgr, "mcp-http"); err != nil {
-				return err
-			}
-
-			managerClient := mgr.GetClient()
-			if managerClient == nil {
-				return fmt.Errorf("assertion failed: manager client is nil")
-			}
-
-			managerConfig := mgr.GetConfig()
-			if managerConfig == nil {
-				return fmt.Errorf("assertion failed: manager config is nil")
-			}
-
-			clientset, err := newClientset(managerConfig)
-			if err != nil {
-				return fmt.Errorf("build Kubernetes clientset: %w", err)
-			}
-			if clientset == nil {
-				return fmt.Errorf("assertion failed: Kubernetes clientset is nil after successful construction")
-			}
-
-			return runMCPHTTPWithClients(runnableCtx, managerClient, clientset)
-		},
-	}); err != nil {
-		return fmt.Errorf("add mcp-http runnable: %w", err)
-	}
-
-	return mgr.Start(ctx)
+	return nil
 }
 
 func waitForCacheSync(ctx context.Context, mgr manager.Manager, runnableName string) error {
