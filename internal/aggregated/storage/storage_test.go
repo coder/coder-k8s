@@ -2903,6 +2903,8 @@ func (s *mockCoderServerState) handleRequest(t *testing.T, w http.ResponseWriter
 	case r.Method == http.MethodDelete && hasSegments(segments, "api", "v2", "templates") && len(segments) == 4:
 		s.handleDeleteTemplate(w, segments[3])
 		return
+	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templates") && len(segments) == 6 && segments[4] == "versions":
+		s.handleGetTemplateVersionByName(w, segments[3], segments[5])
 	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templateversions") && len(segments) == 4:
 		s.handleGetTemplateVersion(w, segments[3])
 		return
@@ -3146,6 +3148,24 @@ func (s *mockCoderServerState) handleCreateTemplateVersion(w http.ResponseWriter
 		return
 	}
 
+	// Like coderd, keep a requested name and generate one otherwise; names are unique per template, and a
+	// duplicate answers 409 with a "name" validation error (coderd/templateversions.go, Coder v2.37.2).
+	templateVersionName := request.Name
+	if templateVersionName == "" {
+		templateVersionName = fmt.Sprintf("template-version-%d", len(s.templateVersionsByID)+1)
+	}
+	if request.TemplateID != uuid.Nil {
+		for _, existing := range s.templateVersionsByID {
+			if existing.TemplateID != nil && *existing.TemplateID == request.TemplateID && existing.Name == templateVersionName {
+				writeJSON(w, http.StatusConflict, codersdk.Response{
+					Message:     fmt.Sprintf("A template version with name %q already exists for this template.", templateVersionName),
+					Validations: []codersdk.ValidationError{{Field: "name", Detail: "This value is already in use and should be unique."}},
+				})
+				return
+			}
+		}
+	}
+
 	now := time.Now().UTC()
 	initialStatus := s.nextTemplateVersionInitialStatus
 	if initialStatus == "" {
@@ -3156,7 +3176,7 @@ func (s *mockCoderServerState) handleCreateTemplateVersion(w http.ResponseWriter
 		OrganizationID: s.organization.ID,
 		CreatedAt:      now,
 		UpdatedAt:      now,
-		Name:           fmt.Sprintf("template-version-%d", len(s.templateVersionsByID)+1),
+		Name:           templateVersionName,
 		Message:        request.Message,
 		Job: codersdk.ProvisionerJob{
 			FileID: request.FileID,
@@ -3308,6 +3328,30 @@ func (s *mockCoderServerState) handleDeleteTemplate(w http.ResponseWriter, templ
 	delete(orgTemplates, template.Name)
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "template deleted"})
+}
+
+// handleGetTemplateVersionByName serves GET /api/v2/templates/{template}/versions/{name}. Like coderd it does
+// not advance simulated imports; only by-ID polls do.
+func (s *mockCoderServerState) handleGetTemplateVersionByName(w http.ResponseWriter, templateIDSegment, name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	templateID, err := uuid.Parse(templateIDSegment)
+	if err != nil {
+		writeCoderError(w, http.StatusBadRequest, fmt.Sprintf("invalid template id %q", templateIDSegment))
+		return
+	}
+	if _, ok := s.templatesByID[templateID]; !ok {
+		writeCoderError(w, http.StatusNotFound, "template not found")
+		return
+	}
+	for _, version := range s.templateVersionsByID {
+		if version.TemplateID != nil && *version.TemplateID == templateID && version.Name == name {
+			writeJSON(w, http.StatusOK, version)
+			return
+		}
+	}
+	writeCoderError(w, http.StatusNotFound, "template version not found")
 }
 
 func (s *mockCoderServerState) handleGetTemplateVersion(w http.ResponseWriter, templateVersionIDSegment string) {
