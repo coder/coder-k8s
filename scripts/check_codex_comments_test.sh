@@ -24,6 +24,8 @@ PRIMARY_SUMMARY_SHA256="cb7624eb0869f631aca6e3efde64656369924c9e5741020e78fa1128
 FINDING_SUMMARY_SHA256="d46fcf1cc41042be58dd18b514e14e8e2fd6c6a57957d5b20ce2e90aac1733ee"
 # Review comment ID the PR #89 card's finding links to (discussion_r<ID>).
 FINDING_ID=4092909628
+# 2^53 + 1: the smallest integer a JSON number cannot carry exactly through jq.
+BIG_ID=9007199254740993
 
 for tool in jq sha256sum mktemp; do
   command -v "$tool" >/dev/null || {
@@ -62,8 +64,8 @@ case "${1:-}" in
     done
     case "$query" in
       *'comments(first: 100'*) cat "$STUB_GH_COMMENTS_PAGE" ;;
-      # Finding links carry the review comment's databaseId, so the threads query must request it.
-      *'reviewThreads(first: 100'*'databaseId'*) cat "$STUB_GH_THREADS_PAGE" ;;
+      # Finding links carry the review comment's fullDatabaseId, so the threads query must request it.
+      *'reviewThreads(first: 100'*'fullDatabaseId'*) cat "$STUB_GH_THREADS_PAGE" ;;
       *)
         echo "stub gh: unexpected GraphQL query" >&2
         exit 2
@@ -88,10 +90,16 @@ comment_node() {
     '{id: "IC_test", author: {login: $login}, body: $body, createdAt: "2026-09-18T16:00:00Z", isMinimized: $minimized}'
 }
 
-# thread_node <login> <isResolved> [first comment databaseId]
+# thread_node <login> <isResolved> [first comment fullDatabaseId]
+# The ID is sent as a JSON string, as GitHub sends the BigInt scalar.
 thread_node() {
-  jq -cn --arg login "$1" --argjson resolved "$2" --argjson database_id "${3:-1}" \
-    '{id: "PRRT_test", isResolved: $resolved, comments: {nodes: [{id: "PRRC_test", databaseId: $database_id, author: {login: $login}, body: "Consider handling the nil case.", createdAt: "2026-09-18T16:00:00Z", path: "main.go", line: 1}]}}'
+  thread_node_json "$1" "$2" "$(jq -cn --arg id "${3:-1}" '$id')"
+}
+
+# thread_node_json <login> <isResolved> <fullDatabaseId JSON> [databaseId JSON]
+thread_node_json() {
+  jq -cn --arg login "$1" --argjson resolved "$2" --argjson full_id "$3" --argjson legacy_id "${4:-null}" \
+    '{id: "PRRT_test", isResolved: $resolved, comments: {nodes: [{id: "PRRC_test", fullDatabaseId: $full_id, databaseId: $legacy_id, author: {login: $login}, body: "Consider handling the nil case.", createdAt: "2026-09-18T16:00:00Z", path: "main.go", line: 1}]}}'
 }
 
 # page <field> <node...>  -> GraphQL response with a single page of nodes
@@ -225,6 +233,15 @@ CASE_PR=89 run_case summary_two_findings_threads_resolved 0 "$CLEAN_MSG" \
   "$(finding_card "$TWO_FINDINGS_SED")" \
   "$(page reviewThreads "$(thread_node "$BOT" true "$FINDING_ID")" "$(thread_node "$BOT" true $((FINDING_ID + 1)))")"
 
+# fullDatabaseId above 2^31 as a JSON number: an exact integer, so it still matches.
+CASE_PR=89 run_case summary_finding_full_id_number_resolved 0 "$CLEAN_MSG" \
+  "$(finding_card)" "$(page reviewThreads "$(thread_node_json "$BOT" true "$FINDING_ID")")"
+
+# Above 2^53 the string form keeps the exact ID.
+CASE_PR=89 run_case summary_finding_full_id_string_above_2p53_resolved 0 "$CLEAN_MSG" \
+  "$(finding_card "s/discussion_r${FINDING_ID}/discussion_r${BIG_ID}/")" \
+  "$(page reviewThreads "$(thread_node "$BOT" true "$BIG_ID")")"
+
 # --- Findings and lookalikes (must stay blocking) --------------------------
 
 run_case real_finding_comment 1 "$BLOCK_MSG" \
@@ -285,6 +302,26 @@ run_case summary_with_unresolved_thread 1 "Found 1 unresolved review thread(s) f
 # A card listing findings counts as a comment unless each linked thread is resolved.
 CASE_PR=89 run_case summary_finding_thread_unresolved 1 "Found 1 unminimized regular comment(s) from bot" \
   "$(finding_card)" "$(page reviewThreads "$(thread_node "$BOT" false "$FINDING_ID")")"
+
+# A null, missing or malformed fullDatabaseId never matches, even when the
+# legacy databaseId field would.
+CASE_PR=89 run_case summary_finding_full_id_null 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card)" "$(page reviewThreads "$(thread_node_json "$BOT" true null "$FINDING_ID")")"
+
+CASE_PR=89 run_case summary_finding_full_id_missing 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card)" \
+  "$(page reviewThreads "$(thread_node_json "$BOT" true null "$FINDING_ID" | jq -c 'del(.comments.nodes[0].fullDatabaseId)')")"
+
+CASE_PR=89 run_case summary_finding_full_id_malformed_string 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card)" "$(page reviewThreads "$(thread_node "$BOT" true "${FINDING_ID}.0")")"
+
+CASE_PR=89 run_case summary_finding_full_id_fractional_number 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card)" "$(page reviewThreads "$(thread_node_json "$BOT" true "${FINDING_ID}.5")")"
+
+# A JSON number above 2^53 may have been rounded, so it never matches.
+CASE_PR=89 run_case summary_finding_full_id_number_above_2p53 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card "s/discussion_r${FINDING_ID}/discussion_r${BIG_ID}/")" \
+  "$(page reviewThreads "$(thread_node_json "$BOT" true "$BIG_ID")")"
 
 CASE_PR=89 run_case summary_finding_thread_missing 1 "Found 1 unminimized regular comment(s) from bot" \
   "$(finding_card)" "$NO_THREADS"

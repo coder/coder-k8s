@@ -61,7 +61,7 @@ THREADS_QUERY='query($owner: String!, $repo: String!, $pr: Int!, $cursor: String
           comments(first: 1) {
             nodes {
               id
-              databaseId
+              fullDatabaseId
               author { login }
               body
               createdAt
@@ -305,9 +305,17 @@ def is_known_non_finding:
 EOF
 )
 # Review comment IDs (the discussion_r<ID> in finding links) of resolved threads
-# the bot started. A summary card's findings must all appear here.
-RESOLVED_FINDING_IDS=$(echo "$ALL_THREADS" | jq -c --arg bot "$BOT_LOGIN_GRAPHQL" \
-  '[.[] | select(.isResolved == true and .comments.nodes[0].author.login == $bot) | .comments.nodes[0].databaseId | select(type == "number") | tostring]')
+# the bot started, as decimal text. A summary card's findings must all appear
+# here. fullDatabaseId is a BigInt that GitHub sends as a string; a number is
+# accepted only while it is an exact integer (at most 2^53 - 1). A null,
+# missing or malformed ID leaves its thread out, so a card linking it stays
+# blocking.
+RESOLVED_FINDING_IDS=$(echo "$ALL_THREADS" | jq -c --arg bot "$BOT_LOGIN_GRAPHQL" '
+  [.[]
+    | select(.isResolved == true and .comments.nodes[0].author.login == $bot)
+    | .comments.nodes[0].fullDatabaseId
+    | if type == "number" and . >= 1 and . <= 9007199254740991 and . == floor then tostring else . end
+    | select(type == "string" and test("^[1-9][0-9]*$"))]')
 REGULAR_COMMENTS=$(echo "$ALL_COMMENTS" | jq --arg bot "$BOT_LOGIN_GRAPHQL" \
   --arg owner "$OWNER" --arg repo "$REPO" --arg pr "$PR_NUMBER" \
   --argjson resolved "$RESOLVED_FINDING_IDS" "$NON_FINDING_JQ")
