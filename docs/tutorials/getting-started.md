@@ -64,7 +64,7 @@ You should see:
 kubectl port-forward svc/codercontrolplane-sample -n coder 3000:80
 ```
 
-Then browse to <http://127.0.0.1:3000>.
+Then browse to `http://127.0.0.1:3000`.
 
 ## 5. Clean up (optional)
 

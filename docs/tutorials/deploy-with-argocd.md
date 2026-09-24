@@ -68,7 +68,7 @@ Port-forward Coder in a separate terminal and keep it running:
 kubectl -n coder port-forward svc/coder 3000:80
 ```
 
-Open <http://127.0.0.1:3000/setup>, create the admin user, and confirm the templates page loads.
+Open `http://127.0.0.1:3000/setup`, create the admin user, and confirm the templates page loads.
 
 ## 7. Push a template (optional)
 
