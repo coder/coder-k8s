@@ -3,8 +3,9 @@ VENDOR_STAMP := vendor/modules.txt
 MODULE_FILES := go.mod $(wildcard go.sum)
 ENVTEST_K8S_VERSION ?= 1.35.x
 ENVTEST_ASSETS_DIR := $(shell pwd)/bin/envtest
+INSTALLER_MANIFEST := dist/install.yaml
 
-.PHONY: vendor test test-integration test-scripts setup-envtest build lint vuln verify-vendor codegen manifests docs-reference docs-reference-check docs-serve docs-build docs-check update-coder-docs-skill kind-dev-up kind-dev-ctx kind-dev-load-image kind-dev-status kind-dev-k9s kind-dev-down
+.PHONY: vendor test test-integration test-scripts setup-envtest build lint vuln verify-vendor codegen manifests build-installer docs-reference docs-reference-check docs-serve docs-build docs-check update-coder-docs-skill kind-dev-up kind-dev-ctx kind-dev-load-image kind-dev-status kind-dev-k9s kind-dev-down
 
 $(VENDOR_STAMP): $(MODULE_FILES)
 	go mod tidy
@@ -45,6 +46,13 @@ verify-vendor:
 
 manifests: $(VENDOR_STAMP)
 	bash ./hack/update-manifests.sh
+
+# dist/install.yaml installs the operator and aggregated API server (CRDs, RBAC, Deployment, Service,
+# APIService). It is generated from config/default; regenerate it whenever those inputs change.
+build-installer: manifests
+	@mkdir -p $(dir $(INSTALLER_MANIFEST))
+	GOFLAGS=$(GOFLAGS) go tool kustomize build --load-restrictor=LoadRestrictionsNone config/default > $(INSTALLER_MANIFEST).tmp
+	mv $(INSTALLER_MANIFEST).tmp $(INSTALLER_MANIFEST)
 
 codegen: $(VENDOR_STAMP)
 	bash ./hack/update-codegen.sh
