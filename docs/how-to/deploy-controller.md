@@ -1,71 +1,49 @@
-# Deploy the controller (in-cluster)
+# Deploy the controller
 
-This guide deploys `coder-k8s` in **controller-only mode** (`--app=controller`).
+Run `coder-k8s` as an operator only (`--app=controller`). It reconciles `CoderControlPlane`, `CoderProvisioner`, and `CoderWorkspaceProxy`.
 
-!!! note
-    `deploy/deployment.yaml` defaults to `--app=all`. In this guide, we explicitly switch it to controller-only mode.
+Commands run from a clone of this repository.
 
-## 1) Create namespace
+## 1. Install CRDs and RBAC
 
 ```bash
 kubectl create namespace coder-system
+kubectl apply -f config/crd/bases/ -f config/rbac/
 ```
 
-## 2) Install CRDs
+## 2. Deploy in controller-only mode
 
-`config/crd/bases/` includes CRDs for:
-
-- `CoderControlPlane`
-- `CoderProvisioner`
-- `CoderWorkspaceProxy`
-
-Apply them:
-
-```bash
-kubectl apply -f config/crd/bases/
-```
-
-## 3) Apply RBAC
-
-```bash
-kubectl apply -f config/rbac/
-```
-
-## 4) Deploy and force controller-only mode
+`deploy/deployment.yaml` defaults to `--app=all`. Switch it to the controller:
 
 ```bash
 kubectl apply -f deploy/deployment.yaml
 kubectl -n coder-system set args deployment/coder-k8s --containers=coder-k8s -- --app=controller
 ```
 
-## 5) Verify
+!!! tip "Pin the image"
+    The manifest uses `ghcr.io/coder/coder-k8s:latest`. Edit the tag before applying to pin a version.
+
+## 3. Verify
 
 ```bash
 kubectl rollout status deployment/coder-k8s -n coder-system
-kubectl get pods -n coder-system
 kubectl logs -n coder-system deploy/coder-k8s
 ```
 
-Optional smoke check:
+Optional smoke test:
 
 ```bash
+kubectl create namespace coder
 kubectl apply -f config/samples/coder_v1alpha1_codercontrolplane.yaml
 kubectl get codercontrolplanes -A
 ```
 
-## Customizing image
+## Want everything instead?
 
-By default, `deploy/deployment.yaml` uses `ghcr.io/coder/coder-k8s:latest`.
-Edit the image tag before applying if you need a pinned version.
-
-## If you want all-in-one mode instead
-
-Skip `kubectl set args ... --app=controller` and keep the default `--app=all`, then also apply:
+Skip the `set args` step to keep `--app=all`, and apply the extra Services:
 
 ```bash
-kubectl apply -f deploy/apiserver-service.yaml
-kubectl apply -f deploy/apiserver-apiservice.yaml
-kubectl apply -f deploy/mcp-service.yaml
+kubectl apply -f deploy/apiserver-service.yaml -f deploy/apiserver-apiservice.yaml -f deploy/mcp-service.yaml
 ```
 
 ## Connect an external PostgreSQL database

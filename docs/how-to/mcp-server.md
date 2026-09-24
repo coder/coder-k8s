@@ -1,89 +1,58 @@
 # Run the MCP server
 
-This guide shows how to run the `coder-k8s` **MCP server** for local development and in-cluster access.
+The MCP server gives MCP clients (such as AI agents) tools to inspect and operate `coder-k8s` resources over HTTP.
 
-`deploy/deployment.yaml` defaults to `--app=all`, which runs the controller, aggregated API server, and MCP server in a single pod. For split deployments, set `--app=mcp-http` (or `--app=controller` / `--app=aggregated-apiserver`) in the Deployment args.
+It runs by default: `--app=all` in `deploy/deployment.yaml` includes it. To run it alone, use `--app=mcp-http`.
 
-## 1. Overview
+!!! danger "No authentication"
+    Any client that can reach the endpoint can call every tool with the server's Kubernetes permissions. RBAC limits what the server can do; it does not identify callers. Keep it on trusted networks. Never expose port `8090` to untrusted clients. Remote access needs its own authentication layer and network restrictions.
 
-The MCP server provides tools for inspecting and updating Kubernetes resources managed by `coder-k8s`, including:
+## 1. Deploy and connect
 
-- `CoderControlPlane` resources
-- Control-plane Deployment, Service, and Pod status
-- `CoderWorkspace` resources (including `spec.running` updates)
-- `CoderTemplate` resources (including `spec.running` updates)
-- Namespace events
-- Pod logs
-
-## 2. HTTP mode (port-forward / remote clients)
-
-Apply RBAC, deployment, and service manifests:
+From a clone of this repository:
 
 ```bash
-kubectl apply -f config/rbac/
-kubectl apply -f deploy/deployment.yaml
-kubectl apply -f deploy/mcp-service.yaml
-```
-
-The RBAC manifests create the shared `coder-k8s` ServiceAccount and bindings used by the Deployment.
-
-Port-forward the MCP service:
-
-```bash
+kubectl apply -f config/rbac/ -f deploy/deployment.yaml -f deploy/mcp-service.yaml
 kubectl port-forward svc/coder-k8s -n coder-system 8090:8090
 ```
 
-Connect MCP clients to:
+Point your MCP client at:
 
 ```text
 http://127.0.0.1:8090/mcp
 ```
 
-### Access and transport limits
+In-cluster clients use `coder-k8s.coder-system.svc` on port `8090`.
 
-The MCP HTTP endpoint has **no application authentication**. Any client that can reach it can use the registered tools with the server's Kubernetes permissions. Kubernetes RBAC limits the server's permissions; it does not authenticate MCP callers. Keep this alpha service on trusted networks. Do not expose port 8090 to untrusted clients. Remote access needs a separate authentication boundary and network restrictions.
-
-MCP Go SDK 1.4.1 adds transport protections, not authentication:
-
-- Requests received on a loopback address must use a loopback `Host`, such as `localhost:8090` or `127.0.0.1:8090`. A reverse proxy that connects over loopback but preserves a service or external hostname will receive `403 Forbidden`.
-- The loopback check uses the address seen by the MCP server. It does not provide a general hostname allowlist for Pod or Service traffic. Do not assume every port-forward or proxy path presents a loopback address to the server.
-- Cross-site POST requests identified by `Origin` or `Sec-Fetch-Site` are rejected. Direct clients without these headers remain allowed.
-- POST requests must use exactly `Content-Type: application/json`. Missing headers, browser form content types, and `application/json; charset=utf-8` receive `415 Unsupported Media Type`.
-- JSON field names are case-sensitive. A key with an appended null character does not alias the original key.
-
-Use the loopback URL above for local clients. For in-cluster clients, the service is `coder-k8s.coder-system.svc` on port 8090. Service names and client-supplied headers are not credentials. Do not disable the SDK's localhost or cross-origin protections to work around routing problems.
-
-## 3. Available tools
-
-The server exposes the following MCP tools:
-
-- `list_control_planes`
-- `get_control_plane_status`
-- `list_control_plane_pods`
-- `get_control_plane_deployment_status`
-- `get_service_status`
-- `list_workspaces`
-- `get_workspace`
-- `set_workspace_running`
-- `list_templates`
-- `get_template`
-- `set_template_running`
-- `get_events`
-- `get_pod_logs`
-- `check_health`
-
-## 4. Health checks
-
-<!-- cspell:ignore healthz readyz -->
-
-The HTTP server exposes standard health endpoints:
-
-- `/healthz`
-- `/readyz`
-
-Example checks:
+## 2. Check health
 
 ```bash
 curl -fsS http://127.0.0.1:8090/healthz
 curl -fsS http://127.0.0.1:8090/readyz
 ```
+
+## Tools
+
+| Area | Tools |
+| --- | --- |
+| Control planes | `list_control_planes`, `get_control_plane_status`, `list_control_plane_pods`, `get_control_plane_deployment_status`, `get_service_status` |
+| Workspaces | `list_workspaces`, `get_workspace`, `set_workspace_running` |
+| Templates | `list_templates`, `get_template`, `set_template_running` |
+| Diagnostics | `get_events`, `get_pod_logs`, `check_health` |
+
+## Request rules
+
+The MCP Go SDK (1.4.1) enforces these transport checks. They are protections, not authentication, and they can cause surprising errors:
+
+| Rule | Error when broken |
+| --- | --- |
+| Requests arriving on a loopback address must use a loopback `Host` (`localhost:8090`, `127.0.0.1:8090`). A reverse proxy that connects over loopback but keeps a Service or external hostname fails. | `403 Forbidden` |
+| POST requests must have exactly `Content-Type: application/json`. A missing header, form types, and `application/json; charset=utf-8` all fail. | `415 Unsupported Media Type` |
+| Cross-site POST requests (detected via `Origin` or `Sec-Fetch-Site`) are rejected. Clients that send neither header are allowed. | Rejected |
+
+Also note:
+
+- The loopback check uses the address the server sees. It is not a hostname allowlist for Pod or Service traffic, and not every port-forward or proxy path arrives from loopback.
+- JSON field names are case-sensitive. A key with an appended null character does not alias the original key.
+- Service names and client-supplied headers are not credentials.
+- Do not disable the SDK's localhost or cross-origin protections to work around routing problems.

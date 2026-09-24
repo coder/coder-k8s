@@ -1,75 +1,70 @@
 # coder-k8s
 
 [![CI](https://github.com/coder/coder-k8s/actions/workflows/ci.yaml/badge.svg)](https://github.com/coder/coder-k8s/actions/workflows/ci.yaml)
-[![Go](https://img.shields.io/badge/go-1.25%2B-00ADD8?logo=go)](./go.mod)
+[![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go)](./go.mod)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](./LICENSE)
 
+**Run and manage [Coder](https://coder.com) with native Kubernetes APIs.**
+
 > [!WARNING]
-> **Highly Experimental / Alpha Software**
-> This repository is a **hackathon contribution** and remains a **highly experimental, alpha-stage** project.
-> **Do not use this in production or expose it to end users.**
+> Experimental alpha software from a hackathon. Do not use it in production or expose it to end users.
 
-`coder-k8s` is a Kubernetes control-plane project for managing Coder-related resources with native Kubernetes APIs.
+## What you get
 
-## Documentation
+One binary, three components:
 
-Start with the published docs: **https://coder.github.io/coder-k8s/**
-
-Helpful entry points:
-
-- Getting started: <https://coder.github.io/coder-k8s/tutorials/getting-started/>
-- Deploy the controller: <https://coder.github.io/coder-k8s/how-to/deploy-controller/>
-- Deploy the workspace/template API server: <https://coder.github.io/coder-k8s/how-to/deploy-aggregated-apiserver/>
-- API reference: <https://coder.github.io/coder-k8s/reference/api/codercontrolplane/>
-
-Prefer reading docs in-repo? See [`docs/`](docs/) and run `make docs-serve`.
-
-## What this project provides
-
-- A controller-runtime operator for `coder.com/v1alpha1` resources:
-  - `CoderControlPlane`
-  - `CoderProvisioner`
-  - `CoderWorkspaceProxy`
-- A workspace/template API server for `aggregation.coder.com/v1alpha1` resources:
-  - `CoderWorkspace`
-  - `CoderTemplate`
-- An MCP HTTP server for operational tooling.
-- A single binary that can run in all-in-one mode or split app modes.
-
-## Application modes
-
-| Mode | Description | Typical usage |
+| Component | Manages | API group |
 | --- | --- | --- |
-| `all` (default) | Runs controller + workspace/template API + MCP HTTP together | Single deployment for evaluation environments |
-| `controller` | Runs only Kubernetes reconcilers | Controller-only deployments |
-| `aggregated-apiserver` | Runs only the workspace/template API server | Split deployments with dedicated API serving |
-| `mcp-http` | Runs only MCP HTTP server | MCP-focused integrations |
+| **Operator** | `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy` (CRDs) | `coder.com/v1alpha1` |
+| **Aggregated API server** | `CoderWorkspace`, `CoderTemplate` (backed by a live Coder instance) | `aggregation.coder.com/v1alpha1` |
+| **MCP server** | Tools for inspecting and operating the above over HTTP | — |
 
-## Quick start (brief, in-cluster)
+Pick what runs with `--app`:
 
-For a full setup guide, use the docs links above. For a quick smoke deploy:
+| `--app` | Runs |
+| --- | --- |
+| `all` (default) | Everything in one process |
+| `controller` | Operator only |
+| `aggregated-apiserver` | Aggregated API server only |
+| `mcp-http` | MCP server only |
+
+## Quick start
+
+From a clone of this repo:
 
 ```bash
 kubectl create namespace coder-system
-kubectl apply -f config/crd/bases/
-kubectl apply -f config/rbac/
-kubectl apply -f deploy/deployment.yaml
-kubectl apply -f deploy/apiserver-service.yaml
-kubectl apply -f deploy/apiserver-apiservice.yaml
-kubectl apply -f deploy/mcp-service.yaml
+kubectl apply -f config/crd/bases/ -f config/rbac/
+kubectl apply -f deploy/
 kubectl rollout status deployment/coder-k8s -n coder-system
 ```
 
+Then create a Coder instance:
+
+```bash
+kubectl create namespace coder
+kubectl apply -f config/samples/coder_v1alpha1_codercontrolplane.yaml
+```
+
+Full walkthrough: [Deploy a Coder Control Plane](https://coder.github.io/coder-k8s/tutorials/getting-started/).
+
+## Documentation
+
+📖 **<https://coder.github.io/coder-k8s/>** (source in [`docs/`](docs/); preview with `make docs-serve`)
+
+- [Getting started](https://coder.github.io/coder-k8s/tutorials/getting-started/)
+- [Deploy the aggregated API server](https://coder.github.io/coder-k8s/how-to/deploy-aggregated-apiserver/)
+- [Run the MCP server](https://coder.github.io/coder-k8s/how-to/mcp-server/)
+- [API reference](https://coder.github.io/coder-k8s/reference/api/codercontrolplane/)
+
 ## Examples
 
-- [`examples/cloudnativepg/`](examples/cloudnativepg/) — Deploy a `CoderControlPlane` with a CloudNativePG-managed PostgreSQL backend.
-- [`examples/argocd/`](examples/argocd/) — Bootstrap CloudNativePG + `coder-k8s` + PostgreSQL + `CoderControlPlane` from one Argo CD `ApplicationSet`.
-- [`examples/coder-templates/`](examples/coder-templates/) — Reusable `CoderTemplate` manifests for workspace/template API testing.
+| Example | Shows |
+| --- | --- |
+| [`examples/cloudnativepg/`](examples/cloudnativepg/) | `CoderControlPlane` backed by CloudNativePG PostgreSQL |
+| [`examples/argocd/`](examples/argocd/) | The whole stack from one Argo CD `ApplicationSet` |
+| [`examples/coder-templates/`](examples/coder-templates/) | Reusable `CoderTemplate` manifests |
 
 ## Contributing
 
-For local development workflows, validation commands, and PR guidance, see [CONTRIBUTING.md](./CONTRIBUTING.md).
-
-## License
-
-Apache-2.0. See [LICENSE](./LICENSE).
+See [CONTRIBUTING.md](./CONTRIBUTING.md). Licensed under [Apache-2.0](./LICENSE).
