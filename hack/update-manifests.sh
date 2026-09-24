@@ -65,6 +65,16 @@ fi
 
 cd "${SCRIPT_ROOT}"
 
+# config/crd/bases/ is fully generated, and controller-gen never deletes CRDs of removed or renamed API types.
+# Clear it first so a stale CRD cannot keep shipping in config/default and dist/install.yaml.
+if [[ ! -d config/crd/bases ]]; then
+	echo "assertion failed: expected CRD directory at ${SCRIPT_ROOT}/config/crd/bases" >&2
+	exit 1
+fi
+find config/crd/bases -maxdepth 1 -mindepth 1 -type f -name '*.yaml' -delete
+# config/rbac/ also holds hand-written manifests, so only its generated role.yaml is removed and must be recreated.
+rm -f config/rbac/role.yaml
+
 # Generate CRDs for operator-owned coder.com APIs only.
 GOFLAGS=-mod=vendor go run ./vendor/sigs.k8s.io/controller-tools/cmd/controller-gen \
 	crd:crdVersions=v1 \
@@ -76,5 +86,10 @@ GOFLAGS=-mod=vendor go run ./vendor/sigs.k8s.io/controller-tools/cmd/controller-
 	rbac:roleName=manager-role \
 	paths=./... \
 	output:rbac:artifacts:config=config/rbac
+
+if [[ ! -s config/rbac/role.yaml ]]; then
+	echo "assertion failed: controller-gen did not write config/rbac/role.yaml" >&2
+	exit 1
+fi
 
 write_default_kustomization

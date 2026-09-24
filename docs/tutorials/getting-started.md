@@ -7,7 +7,7 @@ Install the `coder-k8s` operator, then create one Coder instance from a `CoderCo
 ## Prerequisites
 
 - A Kubernetes cluster and `kubectl` pointed at it.
-- Permission to create namespaces, CRDs, RBAC, and Deployments.
+- Permission to create what `dist/install.yaml` contains: a Namespace, CustomResourceDefinitions, a ServiceAccount, a ClusterRole, ClusterRoleBindings, a RoleBinding in `kube-system`, a Service, a Deployment, and an `apiregistration.k8s.io/v1` APIService. Step 1 also creates the `coder` namespace.
 
 ## 1. Install the operator
 
