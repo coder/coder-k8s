@@ -53,7 +53,10 @@
     "finalizer",
     "superfences",
     "tolerations",
-    "portforward"
+    "portforward",
+    "livez",
+    "requestheader",
+    "subjectaccessreviews"
   ],
   "ignorePaths": [
     ".git/**",

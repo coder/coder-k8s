@@ -39,6 +39,10 @@ Uses controller-runtime with leader election. For each `CoderControlPlane`, it c
 
 Storage is backed by the Coder SDK, not memory or etcd: each request becomes a Coder API call. See [Aggregated API behavior](../reference/aggregated-api-behavior.md) for the consequences.
 
+The Coder calls use the control plane's operator credentials, so the server checks every Kubernetes caller first. It uses delegated authentication (front-proxy client certificates from kube-apiserver, TokenReview for bearer tokens) and delegated authorization (SubjectAccessReview), and fails closed when those checks are unavailable. Only exact `/healthz`, `/livez`, and `/readyz` answer anonymous callers. See [How callers are checked](../how-to/deploy-aggregated-apiserver.md#how-callers-are-checked).
+
+Kubernetes users are not mapped to Coder users. Kubernetes RBAC on `aggregation.coder.com` in a namespace therefore grants owner-equivalent access in the Coder deployment of the control plane that serves that namespace.
+
 How it finds its Coder backend:
 
 - **`all` mode:** `ControlPlaneClientProvider` discovers eligible `CoderControlPlane` resources and reads their operator token Secrets dynamically.

@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	authenticationv1 "k8s.io/api/authentication/v1"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	genericoptions "k8s.io/apiserver/pkg/server/options"
 
@@ -66,6 +68,19 @@ func TestIntegrationAggregatedAPIServerBootstrapAndList(t *testing.T) {
 	if got := workspaceList.Items[0].Namespace; got != "test-ns" {
 		t.Fatalf("expected workspace namespace test-ns, got %q", got)
 	}
+}
+
+const integrationBearerToken = "integration-bearer-token"
+
+type bearerRoundTripper struct {
+	token string
+	base  http.RoundTripper
+}
+
+func (rt bearerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	clone.Header.Set("Authorization", "Bearer "+rt.token)
+	return rt.base.RoundTrip(clone)
 }
 
 // integrationAggregatedAPIServer is a running in-process aggregated API server
@@ -125,7 +140,15 @@ func startIntegrationAggregatedAPIServer(t *testing.T) integrationAggregatedAPIS
 	secureServingOptions.ServerCert.CertDirectory = ""
 	secureServingOptions.ServerCert.PairName = ""
 
-	recommendedConfig, err := NewRecommendedConfig(scheme, codecs, secureServingOptions)
+	// Every request authenticates with a bearer token through the real delegated
+	// TokenReview/SubjectAccessReview path; the fake Kubernetes API allows this user everything.
+	kubeAPI := newFakeKubeAPI(t)
+	kubeAPI.setToken(integrationBearerToken, authenticationv1.UserInfo{Username: "integration-tester"})
+	kubeAPI.setDecide(func(spec authorizationv1.SubjectAccessReviewSpec) bool {
+		return spec.User == "integration-tester"
+	})
+	authn, authz := kubeAPI.options(false)
+	recommendedConfig, err := NewRecommendedConfig(scheme, codecs, secureServingOptions, authn, authz)
 	if err != nil {
 		t.Fatalf("build recommended config: %v", err)
 	}
@@ -178,9 +201,12 @@ func startIntegrationAggregatedAPIServer(t *testing.T) integrationAggregatedAPIS
 
 	httpClient := &http.Client{
 		Timeout: 5 * time.Second,
-		Transport: &http.Transport{
-			//nolint:gosec // Integration test uses ephemeral self-signed certs.
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		Transport: bearerRoundTripper{
+			token: integrationBearerToken,
+			base: &http.Transport{
+				//nolint:gosec // Integration test uses ephemeral self-signed certs.
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			},
 		},
 	}
 

@@ -372,6 +372,50 @@ jobs:
           test -n "$TOKEN_SECRET"
           kubectl -n coder get secret "$TOKEN_SECRET"
 
+      # Delegated authentication/authorization of the aggregated API server:
+      # RBAC via kube-apiserver for a non-admin identity, and direct requests to
+      # port 6443 from another pod (anonymous, forged front-proxy headers, and a
+      # ServiceAccount token without RBAC) are rejected. MCP is not served in --app=all.
+      - name: Verify aggregated API authentication and authorization
+        if: env.E2E_FULL == 'true'
+        env:
+          PROBE_IMAGE: curlimages/curl:8.16.0@sha256:463eaf6072688fe96ac64fa623fe73e1dbe25d8ad6c34404a669ad3ce1f104b6
+        run: |
+          set -euo pipefail
+          kubectl -n coder create serviceaccount e2e-reader
+          kubectl -n coder create role e2e-template-reader --verb=get,list --resource=codertemplates.aggregation.coder.com
+          kubectl -n coder create rolebinding e2e-template-reader --role=e2e-template-reader --serviceaccount=coder:e2e-reader
+          reader=(--as=system:serviceaccount:coder:e2e-reader)
+          kubectl "${reader[@]}" -n coder get codertemplates.aggregation.coder.com
+          expect_forbidden() {
+            local out
+            if out=$("$@" 2>&1); then
+              echo "expected Forbidden, command succeeded: $*" >&2
+              return 1
+            fi
+            grep -q Forbidden <<<"$out" || { echo "expected Forbidden, got: $out" >&2; return 1; }
+          }
+          expect_forbidden kubectl "${reader[@]}" -n default get codertemplates.aggregation.coder.com
+          expect_forbidden kubectl "${reader[@]}" -n coder get coderworkspaces.aggregation.coder.com
+          expect_forbidden kubectl "${reader[@]}" -n coder delete codertemplates.aggregation.coder.com --all --dry-run=server
+
+          kubectl -n default run e2e-authn-probe --image="$PROBE_IMAGE" --restart=Never --command -- sleep 600
+          kubectl -n default wait --for=condition=Ready pod/e2e-authn-probe --timeout=180s
+          probe() { kubectl -n default exec e2e-authn-probe -- sh -c "$1"; }
+          api=https://coder-k8s-apiserver.coder-system.svc
+          list="$api/apis/aggregation.coder.com/v1alpha1/namespaces/coder/codertemplates"
+          code() { probe "curl -sk -o /dev/null -w '%{http_code}' $1"; }
+          test "$(code "$list")" = 401
+          test "$(code "-H 'X-Remote-User: kubernetes-admin' -H 'X-Remote-Group: system:masters' $list")" = 401
+          test "$(code "-H \"Authorization: Bearer \$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)\" $list")" = 403
+          test "$(code "$api/healthz")" = 200
+          pod_ip=$(kubectl -n coder-system get pod -l app=coder-k8s -o jsonpath='{.items[0].status.podIP}')
+          if probe "curl -s --max-time 5 http://$pod_ip:8090/healthz"; then
+            echo "MCP must not listen on the pod network" >&2
+            exit 1
+          fi
+          kubectl -n default delete pod e2e-authn-probe --wait=false
+
       # The driver creates the CoderTemplate itself (kubectl apply of config/e2e/codertemplate.yaml) after its setup checks.
       - name: Template and workspace lifecycle (apply, re-apply, watch, rename, delete, recreate)
         if: env.E2E_FULL == 'true'
