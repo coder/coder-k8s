@@ -159,12 +159,12 @@ The upload, the template version creation, and the import wait all count against
 
 When the budget runs out:
 
-- The client gets `504 Gateway Timeout` with the message `request did not complete within requested timeout`.
+- The client gets `504 Gateway Timeout`. The message is usually `request did not complete within requested timeout - context deadline exceeded`, but it can also be the server's own template import timeout message.
 - Usually, Create creates no template and Update does not activate the new version. But if the import finishes just before the deadline, Coder can still create the template or activate the version while the client gets the `504`. The final state after a `504` is not certain, so re-read the template with `kubectl get` before you retry.
-- The uploaded file and the new template version stay in Coder. The import keeps running and can still succeed, but nothing uses it.
+- The uploaded file and the new template version stay in Coder. If the request timed out while still waiting for the import, the import keeps running and can still succeed, but nothing uses it.
 
 !!! warning "Retries are not idempotent"
-    Each retry creates another template version and starts another import. Coder reuses an identical uploaded file, but not the version. If the import takes longer than the budget, every retry times out again, even after an earlier import has succeeded. A timed-out Update never activates its version later. If your client gave up before the server answered, re-read the template before retrying.
+    Each retry creates another template version and starts another import. Coder reuses an identical uploaded file, but not the version. If the import takes longer than the budget, every retry times out again, even after an earlier import has succeeded. An Update that timed out while waiting for the import never activates its version later. If your client gave up before the server answered, re-read the template before retrying.
 
 !!! tip "Keep template imports fast"
     Imports that take longer than the budget cannot complete through this API today. Keep the import well under 34 seconds. Follow [issue #117](https://github.com/coder/coder-k8s/issues/117) for changes to this behavior.
@@ -183,3 +183,5 @@ Set these environment variables on the `coder-k8s` Deployment:
 The aggregated API server's request timeout defaults to `30m`. Neither that timeout nor `CODER_K8S_TEMPLATE_BUILD_WAIT_TIMEOUT` can extend a write request beyond the 34-second budget. The wait fails if the version build ends `failed` or `canceled`, or if the budget or the wait timeout runs out.
 
 The server checks these values on each create or update that uploads files, after it uploads them and creates the template version. If the values are invalid, the request fails before the wait starts, and the file and version stay in Coder. For example, `CODER_K8S_TEMPLATE_BUILD_WAIT_TIMEOUT=1m` with the default `2m` backoff makes every such request fail. When you lower the wait timeout below `2m`, lower `CODER_K8S_TEMPLATE_BUILD_BACKOFF_AFTER` too.
+
+Keep the poll intervals well below 34 seconds. The wait sleeps a full interval between polls, so a long interval can miss an import that finishes within the budget, and the request then returns `504`. The maximum interval matters only when `CODER_K8S_TEMPLATE_BUILD_BACKOFF_AFTER` is shorter than the budget.
