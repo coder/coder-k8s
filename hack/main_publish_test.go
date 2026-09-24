@@ -70,6 +70,11 @@ func TestGoReleaserDistIsIgnored(t *testing.T) {
 		t.Fatalf("GoReleaser dist = %q; set a top-level dist other than dist/", config.Dist)
 	}
 
+	// git reads .gitignore in a subprocess, so open it here too: go test's result cache only tracks files the
+	// test process opens, and would otherwise replay a pass after .gitignore stops ignoring dist.
+	if _, err := os.ReadFile("../.gitignore"); err != nil {
+		t.Fatal(err)
+	}
 	//nolint:gosec // G204: fixed git command; the path comes from the repository's own .goreleaser.yaml.
 	cmd := exec.CommandContext(t.Context(), "git", "check-ignore", "--verbose", "--", path.Join(dist, "artifacts.json"))
 	cmd.Dir = ".."
