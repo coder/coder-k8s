@@ -4,7 +4,10 @@
 # Runs the real helper end-to-end with a stub `gh` (and a no-op `sleep`) on
 # PATH; `jq` is the real binary. Fixture bodies under testdata/ are byte-exact
 # copies of comments the Codex GitHub App posted on coder/coder-k8s PR #99
-# (human requester logins in the full-page fixture are replaced by "alice").
+# (human requester logins in the full-page fixture are replaced by "alice"),
+# except summary-security-advisory-finding-pr89.txt: the PR #89 summary card
+# (comment 5812405711) with its finding title replaced by "Example advisory
+# finding". Its link, severity and layout are unchanged.
 #
 # Usage: ./scripts/check_codex_comments_test.sh
 set -euo pipefail
@@ -17,6 +20,12 @@ BOT="chatgpt-codex-connector"
 
 # sha256 of the primary frozen summary body (PR #99 comment 5732628692).
 PRIMARY_SUMMARY_SHA256="cb7624eb0869f631aca6e3efde64656369924c9e5741020e78fa11287a36af2e"
+# sha256 of the PR #89 summary card with one advisory finding (see above).
+FINDING_SUMMARY_SHA256="d46fcf1cc41042be58dd18b514e14e8e2fd6c6a57957d5b20ce2e90aac1733ee"
+# Review comment ID the PR #89 card's finding links to (discussion_r<ID>).
+FINDING_ID=4092909628
+# 2^53 + 1: the smallest integer a JSON number cannot carry exactly through jq.
+BIG_ID=9007199254740993
 
 for tool in jq sha256sum mktemp; do
   command -v "$tool" >/dev/null || {
@@ -55,7 +64,8 @@ case "${1:-}" in
     done
     case "$query" in
       *'comments(first: 100'*) cat "$STUB_GH_COMMENTS_PAGE" ;;
-      *'reviewThreads(first: 100'*) cat "$STUB_GH_THREADS_PAGE" ;;
+      # Finding links carry the review comment's fullDatabaseId, so the threads query must request it.
+      *'reviewThreads(first: 100'*'fullDatabaseId'*) cat "$STUB_GH_THREADS_PAGE" ;;
       *)
         echo "stub gh: unexpected GraphQL query" >&2
         exit 2
@@ -80,10 +90,16 @@ comment_node() {
     '{id: "IC_test", author: {login: $login}, body: $body, createdAt: "2026-09-18T16:00:00Z", isMinimized: $minimized}'
 }
 
-# thread_node <login> <isResolved>
+# thread_node <login> <isResolved> [first comment fullDatabaseId]
+# The ID is sent as a JSON string, as GitHub sends the BigInt scalar.
 thread_node() {
-  jq -cn --arg login "$1" --argjson resolved "$2" \
-    '{id: "PRRT_test", isResolved: $resolved, comments: {nodes: [{id: "PRRC_test", author: {login: $login}, body: "Consider handling the nil case.", createdAt: "2026-09-18T16:00:00Z", path: "main.go", line: 1}]}}'
+  thread_node_json "$1" "$2" "$(jq -cn --arg id "${3:-1}" '$id')"
+}
+
+# thread_node_json <login> <isResolved> <fullDatabaseId JSON> [databaseId JSON]
+thread_node_json() {
+  jq -cn --arg login "$1" --argjson resolved "$2" --argjson full_id "$3" --argjson legacy_id "${4:-null}" \
+    '{id: "PRRT_test", isResolved: $resolved, comments: {nodes: [{id: "PRRC_test", fullDatabaseId: $full_id, databaseId: $legacy_id, author: {login: $login}, body: "Consider handling the nil case.", createdAt: "2026-09-18T16:00:00Z", path: "main.go", line: 1}]}}'
 }
 
 # page <field> <node...>  -> GraphQL response with a single page of nodes
@@ -102,6 +118,7 @@ PASS=0
 FAIL=0
 
 # run_case <name> <expected-exit> <expected-output-substring> <comments-page-json> <threads-page-json>
+# The helper checks PR ${CASE_PR:-99}.
 run_case() {
   local name="$1" expected_exit="$2" expected_text="$3" comments_json="$4" threads_json="$5"
   local comments_file="$WORK/${name}.comments.json" threads_file="$WORK/${name}.threads.json"
@@ -114,7 +131,7 @@ run_case() {
     STUB_GH_COMMENTS_PAGE="$comments_file" \
     STUB_GH_THREADS_PAGE="$threads_file" \
     STUB_GH_GRAPHQL_FAIL="${STUB_GH_GRAPHQL_FAIL:-0}" \
-    "$HELPER" 99 >"$out_file" 2>&1; then
+    "$HELPER" "${CASE_PR:-99}" >"$out_file" 2>&1; then
     rc=0
   else
     rc=$?
@@ -148,6 +165,19 @@ if [ "$actual_sha" != "$PRIMARY_SUMMARY_SHA256" ]; then
   echo "❌ Assertion failed: summary-completed-both.txt sha256 ${actual_sha} != ${PRIMARY_SUMMARY_SHA256}"
   exit 1
 fi
+actual_sha=$(sha256sum "${BODIES}/summary-security-advisory-finding-pr89.txt" | cut -d' ' -f1)
+if [ "$actual_sha" != "$FINDING_SUMMARY_SHA256" ]; then
+  echo "❌ Assertion failed: summary-security-advisory-finding-pr89.txt sha256 ${actual_sha} != ${FINDING_SUMMARY_SHA256}"
+  exit 1
+fi
+
+# finding_card [sed-script]  -> comments page holding the PR #89 card, optionally edited
+finding_card() {
+  page comments "$(comment_node "$BOT" "$(body summary-security-advisory-finding-pr89 | sed -e "${1:-}")")"
+}
+
+# Second finding line and count, for the two-finding cases.
+TWO_FINDINGS_SED="s/^#### Advisory findings (1)\$/#### Advisory findings (2)/;/discussion_r${FINDING_ID}/{p;s/discussion_r${FINDING_ID}/discussion_r$((FINDING_ID + 1))/}"
 
 # --- Known non-finding shapes (must pass) ---------------------------------
 
@@ -187,6 +217,30 @@ run_case summary_with_resolved_thread 0 "$CLEAN_MSG" \
 
 run_case pr99_full_payload 0 "Found 0 unminimized regular comment(s) from bot" \
   "$(cat "${FIXTURES}/pr99-comments-page.json")" "$NO_THREADS"
+
+CASE_PR=89 run_case summary_finding_thread_resolved 0 "$CLEAN_MSG" \
+  "$(finding_card)" "$(page reviewThreads "$(thread_node "$BOT" true "$FINDING_ID")")"
+
+CASE_PR=89 run_case summary_finding_title_with_brackets_resolved 0 "$CLEAN_MSG" \
+  "$(finding_card 's/\[Example advisory finding\]/[Check args[0] and \\[escaped\\] bounds]/')" \
+  "$(page reviewThreads "$(thread_node "$BOT" true "$FINDING_ID")")"
+
+CASE_PR=89 run_case summary_finding_title_with_brackets_unresolved 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card 's/\[Example advisory finding\]/[Check args[0] and \\[escaped\\] bounds]/')" \
+  "$(page reviewThreads "$(thread_node "$BOT" false "$FINDING_ID")")"
+
+CASE_PR=89 run_case summary_two_findings_threads_resolved 0 "$CLEAN_MSG" \
+  "$(finding_card "$TWO_FINDINGS_SED")" \
+  "$(page reviewThreads "$(thread_node "$BOT" true "$FINDING_ID")" "$(thread_node "$BOT" true $((FINDING_ID + 1)))")"
+
+# fullDatabaseId above 2^31 as a JSON number: an exact integer, so it still matches.
+CASE_PR=89 run_case summary_finding_full_id_number_resolved 0 "$CLEAN_MSG" \
+  "$(finding_card)" "$(page reviewThreads "$(thread_node_json "$BOT" true "$FINDING_ID")")"
+
+# Above 2^53 the string form keeps the exact ID.
+CASE_PR=89 run_case summary_finding_full_id_string_above_2p53_resolved 0 "$CLEAN_MSG" \
+  "$(finding_card "s/discussion_r${FINDING_ID}/discussion_r${BIG_ID}/")" \
+  "$(page reviewThreads "$(thread_node "$BOT" true "$BIG_ID")")"
 
 # --- Findings and lookalikes (must stay blocking) --------------------------
 
@@ -244,6 +298,70 @@ run_case security_clean_sentence_only 1 "$BLOCK_MSG" \
 run_case summary_with_unresolved_thread 1 "Found 1 unresolved review thread(s) from bot" \
   "$(page comments "$(comment_node "$BOT" "$(body summary-completed-both)")")" \
   "$(page reviewThreads "$(thread_node "$BOT" false)")"
+
+# A card listing findings counts as a comment unless each linked thread is resolved.
+CASE_PR=89 run_case summary_finding_thread_unresolved 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card)" "$(page reviewThreads "$(thread_node "$BOT" false "$FINDING_ID")")"
+
+# A null, missing or malformed fullDatabaseId never matches, even when the
+# legacy databaseId field would.
+CASE_PR=89 run_case summary_finding_full_id_null 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card)" "$(page reviewThreads "$(thread_node_json "$BOT" true null "$FINDING_ID")")"
+
+CASE_PR=89 run_case summary_finding_full_id_missing 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card)" \
+  "$(page reviewThreads "$(thread_node_json "$BOT" true null "$FINDING_ID" | jq -c 'del(.comments.nodes[0].fullDatabaseId)')")"
+
+CASE_PR=89 run_case summary_finding_full_id_malformed_string 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card)" "$(page reviewThreads "$(thread_node "$BOT" true "${FINDING_ID}.0")")"
+
+CASE_PR=89 run_case summary_finding_full_id_fractional_number 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card)" "$(page reviewThreads "$(thread_node_json "$BOT" true "${FINDING_ID}.5")")"
+
+# IDs are canonical decimal text: a leading zero never matches, even when the link repeats it.
+CASE_PR=89 run_case summary_finding_full_id_leading_zero 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card "s/discussion_r${FINDING_ID}/discussion_r0${FINDING_ID}/")" \
+  "$(page reviewThreads "$(thread_node "$BOT" true "0${FINDING_ID}")")"
+
+# A JSON number above 2^53 may have been rounded, so it never matches.
+CASE_PR=89 run_case summary_finding_full_id_number_above_2p53 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card "s/discussion_r${FINDING_ID}/discussion_r${BIG_ID}/")" \
+  "$(page reviewThreads "$(thread_node_json "$BOT" true "$BIG_ID")")"
+
+CASE_PR=89 run_case summary_finding_thread_missing 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card)" "$NO_THREADS"
+
+CASE_PR=89 run_case summary_finding_other_thread_resolved 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card)" "$(page reviewThreads "$(thread_node "$BOT" true $((FINDING_ID - 1)))")"
+
+CASE_PR=89 run_case summary_finding_thread_started_by_human 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card)" "$(page reviewThreads "$(thread_node alice true "$FINDING_ID")")"
+
+CASE_PR=89 run_case summary_one_of_two_findings_unresolved 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card "$TWO_FINDINGS_SED")" "$(page reviewThreads "$(thread_node "$BOT" true "$FINDING_ID")")"
+
+run_case summary_finding_links_other_pr 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card)" "$(page reviewThreads "$(thread_node "$BOT" true "$FINDING_ID")")"
+
+CASE_PR=89 run_case summary_finding_links_other_repo 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card 's|github\.com/coder/coder-k8s/|github.com/coder/other/|')" \
+  "$(page reviewThreads "$(thread_node "$BOT" true "$FINDING_ID")")"
+
+CASE_PR=89 run_case summary_finding_count_mismatch 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card 's/^#### Advisory findings (1)$/#### Advisory findings (2)/')" \
+  "$(page reviewThreads "$(thread_node "$BOT" true "$FINDING_ID")")"
+
+CASE_PR=89 run_case summary_unknown_findings_kind 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card 's/^#### Advisory findings/#### Blocking findings/')" \
+  "$(page reviewThreads "$(thread_node "$BOT" true "$FINDING_ID")")"
+
+CASE_PR=89 run_case summary_unknown_findings_section 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card 's/^### Security findings$/### Code findings/')" \
+  "$(page reviewThreads "$(thread_node "$BOT" true "$FINDING_ID")")"
+
+CASE_PR=89 run_case summary_finding_with_extra_text 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card "/discussion_r${FINDING_ID}/a **P1** Missing bounds check.")" \
+  "$(page reviewThreads "$(thread_node "$BOT" true "$FINDING_ID")")"
 
 run_case summary_plus_finding_comment 1 "Found 1 unminimized regular comment(s) from bot" \
   "$(page comments "$(comment_node "$BOT" "$(body summary-completed-both)")" "$(comment_node "$BOT" "**P2** Unused parameter.")")" "$NO_THREADS"
