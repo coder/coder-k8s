@@ -181,7 +181,8 @@ Retrying the same Update therefore converges on one import. If the import takes 
 
 - A retry must send the same files. The name also covers files in the active version that `spec.files` does not list, so if the active version changes between retries, a new import starts.
 - `kubectl apply` re-reads the template on each run, so running it again is a valid retry. A client that sends an old `resourceVersion` again gets `409 Conflict` once the template has changed, for example after a late activation.
-- Finding the attempt takes a few lookups per request, at most 48. If that is not enough, the request fails with `503 Service Unavailable` and creates nothing; the next request starts over. If the request's deadline passes during the lookups, it fails with `504` and creates nothing.
+- Finding the attempt takes a few lookups per request, at most 48. If that is not enough, the request fails with `503 Service Unavailable`; the next request starts over. If the request's deadline passes during the lookups, it fails with `504`. In both cases no template version or import is created, but the uploaded file can remain in Coder.
+- Retries converge only while the `k8s-…` versions are not renamed or otherwise changed outside coder-k8s. Renaming one can make a later retry start another import.
 - Any Coder user who can edit the template can create or rename a version, so the name alone is not trusted. A version with that name but other source, or one created by another Coder user (whose upload has its own file ID), is never reused.
 - Versions created before this behavior have random names and are never reused.
 

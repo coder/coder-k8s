@@ -685,3 +685,62 @@ func TestTemplateStorageUpdateNeverReusesSquattedName(t *testing.T) {
 		})
 	}
 }
+
+func (s *mockCoderServerState) renameTemplateVersion(id uuid.UUID, name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	version, ok := s.templateVersionsByID[id]
+	if !ok {
+		panic("assertion failed: template version to rename must exist in the mock")
+	}
+	version.Name = name
+	s.templateVersionsByID[id] = version
+}
+
+// Renaming a managed attempt out of band breaks the contiguous attempt names: the lookup no longer sees the
+// later attempts, so a retry starts another import under the free name. Documented limitation; the retry
+// still activates only a version it created from its own upload, never the renamed or skipped attempts.
+func TestTemplateStorageUpdateAfterAttemptRenamedOutOfBand(t *testing.T) {
+	setFastTemplateVersionBuildPolling(t, "5s")
+	templateStorage, state, _ := newTemplateReuseHarness(t, nil)
+	current, _ := createTemplateForMetadataUpdate(t, templateStorage, state, "renamed-attempt")
+	desired := filesUpdate(current, "renamed_attempt")
+
+	state.setNextCreatedTemplateVersionStatus(codersdk.ProvisionerJobFailed)
+	if _, err := updateTemplate(namespacedContext("control-plane"), templateStorage, desired); !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected the first attempt to fail, got %v", err)
+	}
+	first := newestVersion(t, state, "renamed-attempt", 1)
+	state.setNextCreatedTemplateVersionStatus(codersdk.ProvisionerJobPending)
+	if _, err := updateTemplate(requestTimeoutContext(t, 200*time.Millisecond), templateStorage, desired); !apierrors.IsTimeout(err) {
+		t.Fatalf("expected the second attempt to time out, got %v", err)
+	}
+	second := newestVersion(t, state, "renamed-attempt", 2)
+	if second.Name != first.Name+"-2" {
+		t.Fatalf("assertion failed: expected the second attempt to be %s-2, got %q", first.Name, second.Name)
+	}
+
+	state.renameTemplateVersion(first.ID, "renamed-out-of-band")
+	state.setTemplateVersionState(second.ID, codersdk.ProvisionerJobSucceeded, false)
+	mutationsBefore := len(state.mutations())
+
+	updated, err := updateTemplate(namespacedContext("control-plane"), templateStorage, desired)
+	if err != nil {
+		t.Fatalf("expected the retry to import and activate a new attempt: %v", err)
+	}
+	if calls := countMutations(state, mutationsBefore, createTemplateVersionMutation); calls != 1 {
+		t.Fatalf("expected the rename to cost exactly one extra import, got %d CreateTemplateVersion call(s)", calls)
+	}
+	third := newestVersion(t, state, "renamed-attempt", 3)
+	if third.Name != first.Name || third.ID == first.ID || third.ID == second.ID {
+		t.Fatalf("expected a new attempt under the freed name %q, got %q (%s)", first.Name, third.Name, third.ID)
+	}
+	if third.Job.FileID != second.Job.FileID {
+		t.Fatalf("assertion failed: expected the new attempt to use this update's upload %s, got %s", second.Job.FileID, third.Job.FileID)
+	}
+	if updated.Status.ActiveVersionID != third.ID.String() {
+		t.Fatalf("expected the new attempt %s to be active, not the renamed %s or skipped %s; got %s",
+			third.ID, first.ID, second.ID, updated.Status.ActiveVersionID)
+	}
+}
