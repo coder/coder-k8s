@@ -36,13 +36,14 @@ nav:
   - Tutorials:
       - Deploy a Coder Control Plane: tutorials/getting-started.md
       - Deploy an External Provisioner: tutorials/deploy-coderprovisioner.md
-      - Deploy operator stack with Argo CD: tutorials/deploy-with-argocd.md
+      - Deploy with Argo CD: tutorials/deploy-with-argocd.md
   - How-to guides:
-      - Deploy controller: how-to/deploy-controller.md
-      - Deploy aggregated API server: how-to/deploy-aggregated-apiserver.md
-      - MCP server: how-to/mcp-server.md
+      - Deploy the controller: how-to/deploy-controller.md
+      - Deploy the aggregated API server: how-to/deploy-aggregated-apiserver.md
+      - Run the MCP server: how-to/mcp-server.md
       - Troubleshooting: how-to/troubleshooting.md
   - Reference:
+      - Aggregated API behavior: reference/aggregated-api-behavior.md
       - API:
           # BEGIN GENERATED API NAV
           - CoderControlPlane: reference/api/codercontrolplane.md

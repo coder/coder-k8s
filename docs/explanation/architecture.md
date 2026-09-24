@@ -1,28 +1,17 @@
 # Architecture
 
-`coder-k8s` is a single Go binary that can run different components depending on the `--app` flag.
+`coder-k8s` is one Go binary. The `--app` flag picks which components run; it defaults to `all`.
 
-## Application modes
+| `--app` | Runs |
+| --- | --- |
+| `all` (default) | Controller, aggregated API server, and MCP server in one process |
+| `controller` | Controller-runtime manager and reconcilers |
+| `aggregated-apiserver` | Aggregated API server (`aggregation.coder.com/v1alpha1`) |
+| `mcp-http` | MCP HTTP server |
 
-| Mode | Purpose | Default |
-| --- | --- | --- |
-| `all` | Runs controller + aggregated API server + MCP HTTP server in one process | ✅ |
-| `controller` | Runs only the controller-runtime manager and reconcilers |  |
-| `aggregated-apiserver` | Runs only the aggregated API server (`aggregation.coder.com/v1alpha1`) |  |
-| `mcp-http` | Runs only the MCP HTTP server |  |
+## All-in-one mode
 
-!!! note
-    `--app` is optional. If omitted, `coder-k8s` defaults to `--app=all`.
-
-## Default process model (`--app=all`)
-
-In `all` mode, `internal/app/allapp` creates one shared controller-runtime manager and cache, then:
-
-1. Registers controller reconcilers.
-2. Starts aggregated API server as a non-leader runnable.
-3. Starts MCP HTTP server as a non-leader runnable.
-
-This keeps component startup coordinated and avoids separate cache/process management for local and demo deployments.
+In `all` mode, `internal/app/allapp` creates one controller-runtime manager with one shared cache. It registers the reconcilers, then starts the aggregated API server and MCP server as non-leader runnables. One process, one cache, coordinated startup.
 
 ```mermaid
 graph TD
@@ -36,70 +25,26 @@ graph TD
   mcp --> tools["MCP tools over /mcp"]
 ```
 
-## Controller subsystem
+## Components
 
-Controller behavior lives in:
+| | Controller | Aggregated API server | MCP server |
+| --- | --- | --- | --- |
+| **Code** | `internal/app/controllerapp/`, `internal/controller/` | `internal/app/apiserverapp/`, `internal/aggregated/storage/`, `internal/aggregated/coder/` | `internal/app/mcpapp/` |
+| **Listens on** | `:8081` (`/healthz`, `/readyz`) | `:6443` HTTPS (default) | `:8090` (`/mcp`, `/healthz`, `/readyz`) |
+| **Resources** | `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy` | `coderworkspaces`, `codertemplates` | Tools for control planes, templates, workspaces, events, pod logs, and run state |
 
-- `internal/app/controllerapp/`
-- `internal/controller/`
+### Controller
 
-Key facts:
+Uses controller-runtime with leader election. For each `CoderControlPlane`, it creates or updates a Deployment and Service in the same namespace, then writes status such as `status.url`, `status.phase`, and the operator token reference.
 
-- Uses controller-runtime with leader election.
-- Exposes health probes on `:8081` (`/healthz`, `/readyz`).
-- Reconciles three CRDs in `coder.com/v1alpha1`:
-  - `CoderControlPlane`
-  - `CoderProvisioner`
-  - `CoderWorkspaceProxy`
+### Aggregated API server
 
-For `CoderControlPlane`, the reconciler creates/updates a Deployment + Service in the same namespace, and writes status fields such as `status.url`, `status.phase`, and operator token references.
+Storage is backed by the Coder SDK, not memory or etcd: each request becomes a Coder API call. See [Aggregated API behavior](../reference/aggregated-api-behavior.md) for the consequences.
 
-## Aggregated API subsystem
+How it finds its Coder backend:
 
-Aggregated API server behavior lives in:
-
-- `internal/app/apiserverapp/`
-- `internal/aggregated/storage/`
-- `internal/aggregated/coder/`
-
-Key facts:
-
-- Serves HTTPS on port `6443` by default.
-- Installs `aggregation.coder.com/v1alpha1` resources:
-  - `coderworkspaces`
-  - `codertemplates`
-- Storage is **codersdk-backed**, not in-memory: requests are translated to Coder API operations.
-
-Client provider behavior:
-
-- In `all` mode, `ControlPlaneClientProvider` discovers eligible `CoderControlPlane` resources and reads operator token secrets dynamically.
-- In standalone `--app=aggregated-apiserver` mode, static configuration is expected via:
-  - `--coder-url`
-  - `--coder-session-token`
-  - `--coder-namespace`
-
-## MCP subsystem
-
-MCP behavior lives in `internal/app/mcpapp/`.
-
-Key facts:
-
-- HTTP listen address: `:8090`
-- Endpoints:
-  - `/mcp`
-  - `/healthz`
-  - `/readyz`
-- Provides tooling for control planes, templates, workspaces, events, pod logs, and run-state updates.
-
-## Kubernetes manifests
-
-- `config/crd/bases/`: generated CRDs for `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy`
-- `config/rbac/`: ServiceAccount and RBAC bindings (`manager-role`, `coder-k8s`, auth-delegator bindings)
-- `deploy/deployment.yaml`: all-in-one deployment (defaults to `--app=all`)
-- `deploy/apiserver-service.yaml` + `deploy/apiserver-apiservice.yaml`: aggregated API exposure
-- `deploy/mcp-service.yaml`: MCP service on port `8090`
-
-## High-level request flow (aggregated API)
+- **`all` mode:** `ControlPlaneClientProvider` discovers eligible `CoderControlPlane` resources and reads their operator token Secrets dynamically.
+- **Standalone mode:** static flags `--coder-url`, `--coder-session-token`, and `--coder-namespace`.
 
 ```mermaid
 graph TD
@@ -110,3 +55,13 @@ graph TD
   provider --> sdk["Coder SDK client"]
   sdk --> coderd["Backing coderd instance"]
 ```
+
+## Manifests
+
+| Path | Contents |
+| --- | --- |
+| `config/crd/bases/` | Generated CRDs for `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy` |
+| `config/rbac/` | ServiceAccount, `manager-role`, and bindings (including auth-delegator) |
+| `deploy/deployment.yaml` | The `coder-k8s` Deployment (defaults to `--app=all`) |
+| `deploy/apiserver-service.yaml`, `deploy/apiserver-apiservice.yaml` | Expose the aggregated API |
+| `deploy/mcp-service.yaml` | MCP Service on port `8090` |

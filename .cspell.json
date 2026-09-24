@@ -13,6 +13,8 @@
     "apisvc",
     "clusterrole",
     "clusterrolebinding",
+    "rolebinding",
+    "serviceaccount",
     "coder-k8s",
     "codercontrolplane",
     "codercontrolplanes",
