@@ -70,6 +70,7 @@ func TestGoReleaserDistIsIgnored(t *testing.T) {
 		t.Fatalf("GoReleaser dist = %q; set a top-level dist other than dist/", config.Dist)
 	}
 
+	//nolint:gosec // G204: fixed git command; the path comes from the repository's own .goreleaser.yaml.
 	cmd := exec.CommandContext(t.Context(), "git", "check-ignore", "--verbose", "--", path.Join(dist, "artifacts.json"))
 	cmd.Dir = ".."
 	cmd.Env = []string{
