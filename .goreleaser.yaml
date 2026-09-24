@@ -2,6 +2,10 @@ version: 2
 
 project_name: coder-k8s
 
+# dist/ holds the tracked install bundle (dist/install.yaml), and `release --clean` deletes the output
+# directory, which leaves git dirty and fails the release. Keep GoReleaser output elsewhere.
+dist: .goreleaser-dist
+
 before:
   hooks:
     - go mod tidy
