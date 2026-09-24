@@ -3,7 +3,7 @@ package hack_test
 import (
 	"os"
 	"os/exec"
-	"path"
+	"path/filepath"
 	"strings"
 	"testing"
 	"text/template"
@@ -52,8 +52,10 @@ func TestChangelogChannels(t *testing.T) {
 }
 
 // `goreleaser release --clean` deletes its output directory. dist/ holds the tracked install bundle, so
-// GoReleaser must write elsewhere, and git must ignore that directory to keep the release worktree clean.
+// GoReleaser writes to .goreleaser-dist instead, and .gitignore must ignore that whole directory to keep the
+// release worktree clean.
 func TestGoReleaserDistIsIgnored(t *testing.T) {
+	const wantDist = ".goreleaser-dist"
 	data, err := os.ReadFile("../.goreleaser.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -64,27 +66,40 @@ func TestGoReleaserDistIsIgnored(t *testing.T) {
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		t.Fatal(err)
 	}
-	// path.Clean maps an unset dist to "." and "./dist/" to "dist"; GoReleaser defaults to dist.
-	dist := path.Clean(config.Dist)
-	if dist == "." || dist == "dist" {
-		t.Fatalf("GoReleaser dist = %q; set a top-level dist other than dist/", config.Dist)
+	if config.Dist != wantDist {
+		t.Fatalf("GoReleaser dist = %q, want %q", config.Dist, wantDist)
 	}
 
-	// git reads .gitignore in a subprocess, so open it here too: go test's result cache only tracks files the
-	// test process opens, and would otherwise replay a pass after .gitignore stops ignoring dist.
-	if _, err := os.ReadFile("../.gitignore"); err != nil {
+	// Check a copy of .gitignore in a new repository, so the test needs no .git of its own (source export)
+	// and no enclosing repository's rules apply. Reading the file here also makes go test's result cache
+	// track it; git reads it in a subprocess, which the cache does not see.
+	gitignore, err := os.ReadFile("../.gitignore")
+	if err != nil {
 		t.Fatal(err)
 	}
-	//nolint:gosec // G204: fixed git command; the path comes from the repository's own .goreleaser.yaml.
-	cmd := exec.CommandContext(t.Context(), "git", "check-ignore", "--verbose", "--", path.Join(dist, "artifacts.json"))
-	cmd.Dir = ".."
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(),
-		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull,
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), gitignore, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	out, err := cmd.CombinedOutput()
-	if err != nil || !strings.HasPrefix(string(out), ".gitignore:") {
-		t.Fatalf(".gitignore must ignore GoReleaser dist %q: %v\n%s", dist, err, out)
+	git := func(args ...string) (string, error) {
+		cmd := exec.CommandContext(t.Context(), "git", args...)
+		cmd.Dir = dir
+		cmd.Env = []string{
+			"PATH=" + os.Getenv("PATH"), "HOME=" + dir,
+			"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull,
+		}
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	if out, err := git("init", "--quiet"); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	// The directory itself must be ignored, not only files GoReleaser happens to write today.
+	for _, p := range []string{wantDist + "/", wantDist + "/any/nested/file"} {
+		out, err := git("check-ignore", "--verbose", "--", p)
+		if err != nil || !strings.HasPrefix(out, ".gitignore:") {
+			t.Errorf(".gitignore must ignore %q: %v\n%s", p, err, out)
+		}
 	}
 }
 
