@@ -103,7 +103,7 @@ jobs:
 
   lint:
     needs: changes
-    if: github.event_name == 'merge_group' || (needs.changes.outputs.go == 'true' && (github.event_name != 'push' || github.actor != 'github-merge-queue[bot]'))
+    if: github.event_name == 'merge_group' || ((needs.changes.outputs.go == 'true' || needs.changes.outputs.installer == 'true') && (github.event_name != 'push' || github.actor != 'github-merge-queue[bot]'))
     runs-on: depot-ubuntu-24.04-8
     timeout-minutes: 20
     env:
@@ -131,35 +131,6 @@ jobs:
           bash ./hack/update-reference-docs.sh
           git diff --exit-code -- docs/reference/api/
 
-      - name: Run golangci-lint
-        run: go tool golangci-lint run --timeout=5m ./...
-
-      - name: Run golangci-lint formatter checks
-        run: go tool golangci-lint fmt --diff
-
-      - name: Run govulncheck
-        run: go tool govulncheck ./...
-
-  installer-manifest:
-    name: Verify installer manifest is up to date
-    needs: changes
-    if: github.event_name == 'merge_group' || ((needs.changes.outputs.go == 'true' || needs.changes.outputs.installer == 'true') && (github.event_name != 'push' || github.actor != 'github-merge-queue[bot]'))
-    runs-on: depot-ubuntu-24.04
-    timeout-minutes: 10
-    env:
-      GOFLAGS: -mod=vendor
-    steps:
-      - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-
-      - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version-file: go.mod
-          cache: true
-
       - name: Verify installer manifests are up to date
         run: |
           make build-installer
@@ -171,6 +142,15 @@ jobs:
             printf '%s\n' "${UNTRACKED_GENERATED}" >&2
             exit 1
           fi
+
+      - name: Run golangci-lint
+        run: go tool golangci-lint run --timeout=5m ./...
+
+      - name: Run golangci-lint formatter checks
+        run: go tool golangci-lint fmt --diff
+
+      - name: Run govulncheck
+        run: go tool govulncheck ./...
 
   scan-fs:
     name: Trivy filesystem scan
@@ -575,7 +555,7 @@ jobs:
 
   publish-main:
     name: Publish GHCR :main
-    needs: [changes, test, lint, installer-manifest, scan-fs, lint-actions, e2e-kind, image-scan, terraform]
+    needs: [changes, test, lint, scan-fs, lint-actions, e2e-kind, image-scan, terraform]
     if: |
       always() &&
       github.event_name == 'push' &&
@@ -583,7 +563,6 @@ jobs:
       needs.changes.outputs.publish == 'true' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       (needs.lint.result == 'success' || needs.lint.result == 'skipped') &&
-      (needs.installer-manifest.result == 'success' || needs.installer-manifest.result == 'skipped') &&
       (needs.scan-fs.result == 'success' || needs.scan-fs.result == 'skipped') &&
       (needs.lint-actions.result == 'success' || needs.lint-actions.result == 'skipped') &&
       (needs.e2e-kind.result == 'success' || needs.e2e-kind.result == 'skipped') &&
