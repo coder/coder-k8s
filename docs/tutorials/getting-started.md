@@ -7,35 +7,26 @@ Install the `coder-k8s` operator, then create one Coder instance from a `CoderCo
 ## Prerequisites
 
 - A Kubernetes cluster and `kubectl` pointed at it.
-- Permission to create namespaces, CRDs, RBAC, and Deployments.
+- Permission to create what `dist/install.yaml` contains: a Namespace, CustomResourceDefinitions, a ServiceAccount, a ClusterRole, a ClusterRoleBinding, and a Deployment. Step 1 also creates the `coder` namespace.
 
 ## 1. Install the operator
 
-Set the source once. Use a release tag instead of `main` (for example `v0.1.0`) for reproducible installs.
+Set the source once. For reproducible installs, use a release tag that contains `dist/install.yaml` instead of `main`.
 
 ```bash
 BASE="https://raw.githubusercontent.com/coder/coder-k8s/main"
 ```
 
-Create the namespaces and apply the CRDs, RBAC, and operator Deployment:
+Apply the install bundle, then create the namespace for the control plane:
 
 ```bash
-kubectl create namespace coder-system
-kubectl create namespace coder
-
-kubectl apply \
-  -f "$BASE/config/crd/bases/coder.com_codercontrolplanes.yaml" \
-  -f "$BASE/config/crd/bases/coder.com_coderprovisioners.yaml" \
-  -f "$BASE/config/crd/bases/coder.com_coderworkspaceproxies.yaml" \
-  -f "$BASE/config/rbac/serviceaccount.yaml" \
-  -f "$BASE/config/rbac/role.yaml" \
-  -f "$BASE/config/rbac/clusterrolebinding.yaml" \
-  -f "$BASE/config/rbac/authentication-reader-binding.yaml" \
-  -f "$BASE/config/rbac/auth-delegator-binding.yaml" \
-  -f "$BASE/deploy/deployment.yaml"
-
+kubectl apply -f "$BASE/dist/install.yaml"
 kubectl rollout status deployment/coder-k8s -n coder-system
+
+kubectl create namespace coder
 ```
+
+`dist/install.yaml` installs the operator in controller mode: the `coder-system` namespace, the `coder.com` CRDs, RBAC, and the operator Deployment. It does not deploy Coder; step 2 does that. It also does not include the aggregated API server; to add it, see [Deploy the aggregated API server](../how-to/deploy-aggregated-apiserver.md). The bundle runs the `ghcr.io/coder/coder-k8s:latest` image, so pin the image too if you need a fixed operator version.
 
 ## 2. Create a control plane
 
@@ -68,24 +59,18 @@ Then browse to `http://127.0.0.1:3000`.
 
 ## 5. Clean up (optional)
 
-Delete in reverse order. The block sets `BASE` again in case you are in a new shell:
+Delete the control plane first, while the operator is still running, so it can clean up and remove its finalizer. Then remove the bundle. The block sets `BASE` again in case you are in a new shell:
 
 ```bash
 BASE="https://raw.githubusercontent.com/coder/coder-k8s/main"
 
-kubectl delete \
-  -f "$BASE/config/samples/coder_v1alpha1_codercontrolplane.yaml" \
-  -f "$BASE/deploy/deployment.yaml" \
-  -f "$BASE/config/rbac/auth-delegator-binding.yaml" \
-  -f "$BASE/config/rbac/authentication-reader-binding.yaml" \
-  -f "$BASE/config/rbac/clusterrolebinding.yaml" \
-  -f "$BASE/config/rbac/role.yaml" \
-  -f "$BASE/config/rbac/serviceaccount.yaml" \
-  -f "$BASE/config/crd/bases/coder.com_coderworkspaceproxies.yaml" \
-  -f "$BASE/config/crd/bases/coder.com_coderprovisioners.yaml" \
-  -f "$BASE/config/crd/bases/coder.com_codercontrolplanes.yaml"
-kubectl delete namespace coder coder-system --ignore-not-found
+kubectl delete -f "$BASE/config/samples/coder_v1alpha1_codercontrolplane.yaml" --ignore-not-found
+kubectl wait --for=delete codercontrolplane/codercontrolplane-sample -n coder --timeout=120s
+kubectl delete -f "$BASE/dist/install.yaml" --ignore-not-found
+kubectl delete namespace coder --ignore-not-found
 ```
+
+Deleting the bundle also deletes the `coder.com` CRDs, which removes every remaining `CoderControlPlane`, `CoderProvisioner`, and `CoderWorkspaceProxy` in the cluster; delete those first. Deleting the `coder` namespace removes everything else in it, such as Secrets and PersistentVolumeClaims.
 
 ## Next steps
 
