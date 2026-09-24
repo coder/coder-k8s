@@ -11,7 +11,7 @@
 | [Workspace `resourceVersion`](#workspace-resourceversion) | An opaque fingerprint. Compare for equality only. Workspace activity alone can cause `409`. |
 | [Watch](#watch) | Reports only writes made through this server. No replay, no initial events. |
 | [Server-side apply](#server-side-apply) | Create-on-update works. Field ownership is not persisted. |
-| [Template builds](#template-builds) | Create and update with `spec.files` wait for Coder to finish the import. |
+| [Template builds](#template-builds) | Create and update with `spec.files` wait for Coder to finish the import. The whole request must finish within 34 seconds. |
 
 ## Object names
 
@@ -151,8 +151,23 @@ For a `CoderTemplate` with `spec.files`, the server waits for Coder to finish im
 
 If the import fails, times out, or the request is cancelled, Create creates no template and Update changes nothing (neither the source nor the metadata). The uploaded file and template version stay in Coder; they are not deleted or cancelled.
 
+### The 34-second write budget
+
+Every create, update, and patch request must finish within **34 seconds**. The limit comes from the Kubernetes API server library that the aggregated API server is built on (`requestTimeoutUpperBound` in the vendored `k8s.io/apiserver`). A client timeout, such as `kubectl --request-timeout`, can only shorten it.
+
+The upload, the template version creation, and the import wait all count against this budget. In practice, the import must finish in about 33 seconds.
+
+When the budget runs out:
+
+- The client gets `504 Gateway Timeout`. The message is usually `request did not complete within requested timeout - context deadline exceeded`, but it can also be the server's own template import timeout message.
+- Usually, Create creates no template and Update does not activate the new version. But if the import finishes just before the deadline, Coder can still create the template or activate the version while the client gets the `504`. The final state after a `504` is not certain, so re-read the template with `kubectl get` before you retry.
+- If the upload or the version creation had already finished, the file or the template version stays in Coder. If the request timed out while still waiting for the import, the import keeps running and can still succeed, but nothing uses it.
+
 !!! warning "Retries are not idempotent"
-    Each retry uploads and imports again, so retries can leave extra template versions. If your client gave up before the server answered, re-read the template before retrying.
+    Each retry creates another template version and starts another import. Coder reuses an identical uploaded file, but not the version. If the import takes longer than the budget, every retry times out again, even after an earlier import has succeeded. An Update that timed out while waiting for the import never activates its version later. If your client gave up before the server answered, re-read the template before retrying.
+
+!!! tip "Keep template imports fast"
+    Imports that take longer than the budget cannot complete through this API today. Keep the import well under 34 seconds. Follow [issue #117](https://github.com/coder/coder-k8s/issues/117) for changes to this behavior.
 
 ### Tuning
 
@@ -160,9 +175,13 @@ Set these environment variables on the `coder-k8s` Deployment:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `CODER_K8S_TEMPLATE_BUILD_WAIT_TIMEOUT` | `25m` | Total wait. Values above `30m` are rejected. |
-| `CODER_K8S_TEMPLATE_BUILD_BACKOFF_AFTER` | `2m` | Poll at the initial interval for this long, then back off. |
-| `CODER_K8S_TEMPLATE_BUILD_INITIAL_POLL_INTERVAL` | `2s` | Poll interval before backoff. |
-| `CODER_K8S_TEMPLATE_BUILD_MAX_POLL_INTERVAL` | `10s` | Backoff doubles the interval up to this value. |
+| `CODER_K8S_TEMPLATE_BUILD_WAIT_TIMEOUT` | `25m` | Upper limit for the import wait. Must be greater than `0`, at most `30m`, and at least `CODER_K8S_TEMPLATE_BUILD_BACKOFF_AFTER`. Values above the 34-second budget are allowed but do not extend the wait. |
+| `CODER_K8S_TEMPLATE_BUILD_BACKOFF_AFTER` | `2m` | Poll at the initial interval for this long, then back off. `0` turns backoff off, so the interval never grows. Must be `0` or more and at most the wait timeout. |
+| `CODER_K8S_TEMPLATE_BUILD_INITIAL_POLL_INTERVAL` | `2s` | Poll interval before backoff. Must be greater than `0`. |
+| `CODER_K8S_TEMPLATE_BUILD_MAX_POLL_INTERVAL` | `10s` | Backoff doubles the interval up to this value. Must be at least the initial poll interval. |
 
-The wait timeout cannot exceed the aggregated API request timeout, which defaults to `30m`. The wait fails if the version build ends `failed` or `canceled`, or the timeout passes.
+The aggregated API server's request timeout defaults to `30m`. Neither that timeout nor `CODER_K8S_TEMPLATE_BUILD_WAIT_TIMEOUT` can extend a write request beyond the 34-second budget. The wait fails if the version build ends `failed` or `canceled`, or if the budget or the wait timeout runs out.
+
+The server checks these values on each create or update that uploads files, after it uploads them and creates the template version. If the values are invalid, the request fails before the wait starts, and the file and version stay in Coder. For example, `CODER_K8S_TEMPLATE_BUILD_WAIT_TIMEOUT=1m` with the default `2m` backoff makes every such request fail. When you lower the wait timeout below `2m`, lower `CODER_K8S_TEMPLATE_BUILD_BACKOFF_AFTER` too.
+
+Keep the poll intervals well below 34 seconds. The wait sleeps a full interval between polls, so a long interval can miss an import that finishes within the budget, and the request then returns `504`. The maximum interval matters only when `CODER_K8S_TEMPLATE_BUILD_BACKOFF_AFTER` is greater than `0` and shorter than the budget.
