@@ -19,6 +19,7 @@
 | `extraArgs` | string array | ExtraArgs are appended to the default Coder server arguments. |
 | `extraEnv` | [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#envvar-v1-core) array | ExtraEnv are injected into the Coder control plane container. |
 | `imagePullSecrets` | [LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#localobjectreference-v1-core) array | ImagePullSecrets are used by the pod to pull private images. |
+| `database` | [DatabaseSpec](#databasespec) | Database configures the external PostgreSQL database for Coder. When set, CODER_PG_CONNECTION_URL must not also be set in extraEnv. |
 | `operatorAccess` | [OperatorAccessSpec](#operatoraccessspec) | OperatorAccess configures bootstrap API access to the coderd instance. |
 | `licenseSecretRef` | [SecretKeySelector](#secretkeyselector) | LicenseSecretRef references a Secret key containing a Coder Enterprise license JWT. When set, the controller uploads the license after the control plane is ready and re-uploads when the Secret value changes. |
 | `serviceAccount` | [ServiceAccountSpec](#serviceaccountspec) | ServiceAccount configures the ServiceAccount for the control plane pod. |
@@ -75,6 +76,14 @@ CertsSpec configures additional CA certificate mounts.
 | Field | Type | Description |
 | --- | --- | --- |
 | `secrets` | [CertSecretSelector](#certsecretselector) array | Secrets lists Secret key selectors for CA certificates. Each is mounted at `/etc/ssl/certs/\{name\}.crt`. |
+
+### DatabaseSpec
+
+DatabaseSpec configures the external PostgreSQL database used by Coder.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `connectionSecretRef` | [SecretKeySelector](#secretkeyselector) | ConnectionSecretRef references a key in a Secret in the CoderControlPlane's namespace. The value must be a postgres:// or postgresql:// connection URL. The controller injects it into the Coder container as CODER_PG_CONNECTION_URL through a Secret reference and uses it for operator access bootstrap. Running pods keep the old value after the Secret changes; restart the Deployment after rotating credentials. |
 
 ### ExposeSpec
 
