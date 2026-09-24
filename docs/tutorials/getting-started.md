@@ -68,9 +68,11 @@ Then browse to `http://127.0.0.1:3000`.
 
 ## 5. Clean up (optional)
 
-Delete in reverse order:
+Delete in reverse order. The block sets `BASE` again in case you are in a new shell:
 
 ```bash
+BASE="https://raw.githubusercontent.com/coder/coder-k8s/main"
+
 kubectl delete \
   -f "$BASE/config/samples/coder_v1alpha1_codercontrolplane.yaml" \
   -f "$BASE/deploy/deployment.yaml" \

@@ -1,7 +1,7 @@
 # coder-k8s
 
 [![CI](https://github.com/coder/coder-k8s/actions/workflows/ci.yaml/badge.svg)](https://github.com/coder/coder-k8s/actions/workflows/ci.yaml)
-[![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go)](./go.mod)
+[![Go](https://img.shields.io/badge/go-1.26.8%2B-00ADD8?logo=go)](./go.mod)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](./LICENSE)
 
 **Run and manage [Coder](https://coder.com) with native Kubernetes APIs.**
