@@ -31,11 +31,16 @@ Deploy, then set the backend:
 ```bash
 kubectl apply -f deploy/deployment.yaml
 
-kubectl -n coder-system set args deployment/coder-k8s --containers=coder-k8s -- \
-  --app=aggregated-apiserver \
-  --coder-url="https://coder.example.com" \
-  --coder-session-token="replace-me" \
-  --coder-namespace="coder-system"
+kubectl -n coder-system patch deployment coder-k8s --type=json -p '[{
+  "op": "add",
+  "path": "/spec/template/spec/containers/0/args",
+  "value": [
+    "--app=aggregated-apiserver",
+    "--coder-url=https://coder.example.com",
+    "--coder-session-token=replace-me",
+    "--coder-namespace=coder-system"
+  ]
+}]'
 ```
 
 Standalone mode serves health checks over HTTPS on port `6443`. Update the probes:
