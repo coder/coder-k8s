@@ -1059,7 +1059,7 @@ func (r *CoderProvisionerReconciler) reconcileDeployment(
 
 		deployment.Spec.Replicas = &replicas
 		deployment.Spec.Selector = &metav1.LabelSelector{MatchLabels: maps.Clone(labels)}
-		deployment.Spec.Template = corev1.PodTemplateSpec{
+		deployment.Spec.Template = withPreservedRolloutRestart(deployment.Spec.Template, corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{
 				Labels: maps.Clone(labels),
 				Annotations: map[string]string{
@@ -1079,7 +1079,7 @@ func (r *CoderProvisionerReconciler) reconcileDeployment(
 					Resources: provisioner.Spec.Resources,
 				}},
 			},
-		}
+		})
 
 		return nil
 	})
