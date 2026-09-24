@@ -6,11 +6,9 @@ resources:
   - ../crd/bases/coder.com_codercontrolplanes.yaml
   - ../crd/bases/coder.com_coderprovisioners.yaml
   - ../crd/bases/coder.com_coderworkspaceproxies.yaml
-  - ../rbac/auth-delegator-binding.yaml
-  - ../rbac/authentication-reader-binding.yaml
   - ../rbac/clusterrolebinding.yaml
   - ../rbac/role.yaml
   - ../rbac/serviceaccount.yaml
   - ../../deploy/deployment.yaml
-  - ../../deploy/apiserver-service.yaml
-  - ../../deploy/apiserver-apiservice.yaml
+patches:
+  - path: controller-mode-patch.yaml

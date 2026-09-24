@@ -1,0 +1,18 @@
+# Runs the bundled operator in controller mode only and drops the container ports that mode does not serve.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coder-k8s
+  namespace: coder-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: coder-k8s
+          args:
+            - --app=controller
+          ports:
+            - containerPort: 6443
+              $patch: delete
+            - containerPort: 8090
+              $patch: delete

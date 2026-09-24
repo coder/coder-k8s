@@ -94,8 +94,6 @@ jobs:
               - 'config/rbac/**'
               - 'config/default/**'
               - 'deploy/deployment.yaml'
-              - 'deploy/apiserver-service.yaml'
-              - 'deploy/apiserver-apiservice.yaml'
               - 'hack/update-manifests.sh'
               - 'Makefile'
               - 'dist/install.yaml'

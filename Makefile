@@ -47,8 +47,8 @@ verify-vendor:
 manifests: $(VENDOR_STAMP)
 	bash ./hack/update-manifests.sh
 
-# dist/install.yaml installs the operator and aggregated API server (CRDs, RBAC, Deployment, Service,
-# APIService). It is generated from config/default; regenerate it whenever those inputs change.
+# dist/install.yaml installs the operator in controller mode (namespace, CRDs, RBAC, Deployment). It is
+# generated from config/default; regenerate it whenever those inputs change.
 build-installer: manifests
 	@mkdir -p $(dir $(INSTALLER_MANIFEST))
 	GOFLAGS=$(GOFLAGS) go tool kustomize build --load-restrictor=LoadRestrictionsNone config/default > $(INSTALLER_MANIFEST).tmp

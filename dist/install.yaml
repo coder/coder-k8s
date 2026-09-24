@@ -5434,20 +5434,6 @@ rules:
   - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: coder-k8s-authentication-reader
-  namespace: kube-system
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: extension-apiserver-authentication-reader
-subjects:
-- kind: ServiceAccount
-  name: coder-k8s
-  namespace: coder-system
----
-apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: coder-k8s
@@ -5459,33 +5445,6 @@ subjects:
 - kind: ServiceAccount
   name: coder-k8s
   namespace: coder-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: coder-k8s-auth-delegator
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: system:auth-delegator
-subjects:
-- kind: ServiceAccount
-  name: coder-k8s
-  namespace: coder-system
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: coder-k8s-apiserver
-  namespace: coder-system
-spec:
-  ports:
-  - name: https
-    port: 443
-    protocol: TCP
-    targetPort: 6443
-  selector:
-    app: coder-k8s
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -5503,7 +5462,9 @@ spec:
         app: coder-k8s
     spec:
       containers:
-      - image: ghcr.io/coder/coder-k8s:latest
+      - args:
+        - --app=controller
+        image: ghcr.io/coder/coder-k8s:latest
         livenessProbe:
           httpGet:
             path: /healthz
@@ -5512,26 +5473,8 @@ spec:
         ports:
         - containerPort: 8081
           name: health
-        - containerPort: 6443
-          name: https
-        - containerPort: 8090
-          name: mcp
         readinessProbe:
           httpGet:
             path: /readyz
             port: health
       serviceAccountName: coder-k8s
----
-apiVersion: apiregistration.k8s.io/v1
-kind: APIService
-metadata:
-  name: v1alpha1.aggregation.coder.com
-spec:
-  group: aggregation.coder.com
-  groupPriorityMinimum: 1000
-  insecureSkipTLSVerify: true
-  service:
-    name: coder-k8s-apiserver
-    namespace: coder-system
-  version: v1alpha1
-  versionPriority: 100

@@ -7,7 +7,7 @@ Install the `coder-k8s` operator, then create one Coder instance from a `CoderCo
 ## Prerequisites
 
 - A Kubernetes cluster and `kubectl` pointed at it.
-- Permission to create what `dist/install.yaml` contains: a Namespace, CustomResourceDefinitions, a ServiceAccount, a ClusterRole, ClusterRoleBindings, a RoleBinding in `kube-system`, a Service, a Deployment, and an `apiregistration.k8s.io/v1` APIService. Step 1 also creates the `coder` namespace.
+- Permission to create what `dist/install.yaml` contains: a Namespace, CustomResourceDefinitions, a ServiceAccount, a ClusterRole, a ClusterRoleBinding, and a Deployment. Step 1 also creates the `coder` namespace.
 
 ## 1. Install the operator
 
@@ -26,7 +26,7 @@ kubectl rollout status deployment/coder-k8s -n coder-system
 kubectl create namespace coder
 ```
 
-`dist/install.yaml` creates the `coder-system` namespace, the `coder.com` CRDs, RBAC, the operator Deployment, and the aggregated API server's Service and APIService. It does not deploy Coder; step 2 does that. The bundle runs the `ghcr.io/coder/coder-k8s:latest` image, so pin the image too if you need a fixed operator version.
+`dist/install.yaml` installs the operator in controller mode: the `coder-system` namespace, the `coder.com` CRDs, RBAC, and the operator Deployment. It does not deploy Coder; step 2 does that. It also does not include the aggregated API server; to add it, see [Deploy the aggregated API server](../how-to/deploy-aggregated-apiserver.md). The bundle runs the `ghcr.io/coder/coder-k8s:latest` image, so pin the image too if you need a fixed operator version.
 
 ## 2. Create a control plane
 
