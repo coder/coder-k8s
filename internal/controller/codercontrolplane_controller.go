@@ -255,9 +255,11 @@ func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if databaseConnectionURLConflicts(coderControlPlane) {
 		// Admission rejects this combination; objects that bypass it must not
 		// silently pick one source. Report it and leave workloads untouched.
+		// The top-level observedGeneration stays unchanged because phase,
+		// readyReplicas, and url still describe the previous generation; the
+		// condition's own observedGeneration records that this one was seen.
 		originalStatus := *coderControlPlane.Status.DeepCopy()
 		nextStatus := *coderControlPlane.Status.DeepCopy()
-		nextStatus.ObservedGeneration = coderControlPlane.Generation
 		if err := setControlPlaneCondition(
 			&nextStatus,
 			coderControlPlane.Generation,
@@ -268,7 +270,7 @@ func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		); err != nil {
 			return ctrl.Result{}, err
 		}
-		if err := r.reconcileStatus(ctx, coderControlPlane, originalStatus, nextStatus); err != nil {
+		if err := r.reconcileStatusForGeneration(ctx, coderControlPlane, originalStatus, nextStatus, coderControlPlane.Generation); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -2393,23 +2395,20 @@ func (r *CoderControlPlaneReconciler) resolveDatabaseSecret(
 	}, nil
 }
 
-// isPostgresConnectionURL reports whether value parses as a postgres:// or
-// postgresql:// URL. It never returns the parser error because url.Parse
-// errors echo the input, which can contain credentials.
+// isPostgresConnectionURL reports whether value starts with the exact
+// lowercase prefix postgres:// or postgresql:// and parses as a URL. lib/pq
+// only treats those case-sensitive prefixes as URLs, so other casings are
+// rejected rather than normalized. It never returns the parser error because
+// url.Parse errors echo the input, which can contain credentials.
 func isPostgresConnectionURL(value string) bool {
+	if !strings.HasPrefix(value, "postgres://") && !strings.HasPrefix(value, "postgresql://") {
+		return false
+	}
 	parsed, err := url.Parse(value)
 	if err != nil || parsed == nil {
 		return false
 	}
-	if parsed.Opaque != "" {
-		return false
-	}
-	switch strings.ToLower(parsed.Scheme) {
-	case "postgres", "postgresql":
-		return true
-	default:
-		return false
-	}
+	return parsed.Opaque == ""
 }
 
 // reconcileDatabaseSecretCondition sets DatabaseSecretResolved while
@@ -3065,6 +3064,18 @@ func (r *CoderControlPlaneReconciler) reconcileStatus(
 	baseStatus coderv1alpha1.CoderControlPlaneStatus,
 	nextStatus coderv1alpha1.CoderControlPlaneStatus,
 ) error {
+	return r.reconcileStatusForGeneration(ctx, coderControlPlane, baseStatus, nextStatus, nextStatus.ObservedGeneration)
+}
+
+// reconcileStatusForGeneration writes the status delta unless the object has
+// moved past computedForGeneration, the generation nextStatus was computed from.
+func (r *CoderControlPlaneReconciler) reconcileStatusForGeneration(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+	baseStatus coderv1alpha1.CoderControlPlaneStatus,
+	nextStatus coderv1alpha1.CoderControlPlaneStatus,
+	computedForGeneration int64,
+) error {
 	if coderControlPlane == nil {
 		return fmt.Errorf("assertion failed: coder control plane must not be nil")
 	}
@@ -3095,7 +3106,7 @@ func (r *CoderControlPlaneReconciler) reconcileStatus(
 			return fmt.Errorf("assertion failed: fetched object %s/%s does not match expected %s/%s",
 				latest.Namespace, latest.Name, namespacedName.Namespace, namespacedName.Name)
 		}
-		if nextStatus.ObservedGeneration > 0 && latest.Generation != nextStatus.ObservedGeneration {
+		if computedForGeneration > 0 && latest.Generation != computedForGeneration {
 			// A newer reconcile has observed a newer generation. Avoid overwriting
 			// status with stale data from an older reconcile attempt.
 			coderControlPlane.Status = latest.Status

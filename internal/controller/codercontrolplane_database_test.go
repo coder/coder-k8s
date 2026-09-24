@@ -243,6 +243,9 @@ func TestReconcile_DatabaseSecretRef_UnresolvedReasons(t *testing.T) {
 		{name: "parse-error", secretData: map[string][]byte{"uri": []byte("postgres://coder:" + testDatabasePassword + "@coder-db-rw.default.svc:port/coder")}, wantReason: "InvalidURL"},
 		{name: "trailing-newline", secretData: map[string][]byte{"uri": []byte(testDatabaseURL + "\n")}, wantReason: "InvalidURL"},
 		{name: "not-a-url", secretData: map[string][]byte{"uri": []byte("host=coder-db-rw.default.svc password=" + testDatabasePassword)}, wantReason: "InvalidURL"},
+		// lib/pq only recognizes the exact lowercase prefixes as URLs.
+		{name: "uppercase-scheme", secretData: map[string][]byte{"uri": []byte("POSTGRES://coder:" + testDatabasePassword + "@coder-db-rw.default.svc/coder")}, wantReason: "InvalidURL"},
+		{name: "mixed-case-scheme", secretData: map[string][]byte{"uri": []byte("PostgreSQL://coder:" + testDatabasePassword + "@coder-db-rw.default.svc/coder")}, wantReason: "InvalidURL"},
 	}
 
 	for _, tt := range tests {
@@ -454,6 +457,63 @@ func TestReconcile_DatabaseSecretRef_ControllerRejectsConflict(t *testing.T) {
 		t.Fatalf("expected conflict message to name both fields, got %q", condition.Message)
 	}
 	assertStatusAndEventsRedacted(t, reconciled)
+}
+
+func TestReconcile_DatabaseSecretRef_ConflictKeepsObservedGeneration(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	secret := newDatabaseSecret("test-db-ref-conflict-gen-app", "default", map[string][]byte{"uri": []byte(testDatabaseURL)})
+	createTestObject(t, secret)
+	cp := newDatabaseControlPlane("test-db-ref-conflict-gen", "default", secret.Name, "uri")
+	createTestObject(t, cp)
+
+	// Generation 1 reconciles successfully.
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	reconcileControlPlane(t, r, cp)
+	healthy := getControlPlane(t, cp)
+	if healthy.Generation != 1 || healthy.Status.ObservedGeneration != 1 {
+		t.Fatalf("assertion failed: expected generation 1 observed, got generation=%d observedGeneration=%d",
+			healthy.Generation, healthy.Status.ObservedGeneration)
+	}
+	requireDatabaseCondition(t, healthy, metav1.ConditionTrue, "Resolved")
+	deploymentBefore := getControlPlaneDeployment(t, cp)
+
+	// Generation 2 changes the spec, and every read also carries a conflicting
+	// CODER_PG_CONNECTION_URL, as if the object bypassed admission.
+	healthy.Spec.Image = "test-database-secret-ref:v2"
+	if err := k8sClient.Update(ctx, healthy); err != nil {
+		t.Fatalf("update control plane spec: %v", err)
+	}
+	conflicting := &controller.CoderControlPlaneReconciler{Client: &conflictInjectingClient{Client: k8sClient}, Scheme: scheme}
+	result := reconcileControlPlane(t, conflicting, cp)
+	if result != (ctrl.Result{}) {
+		t.Fatalf("expected no requeue for conflicting configuration, got %+v", result)
+	}
+
+	reconciled := getControlPlane(t, cp)
+	if reconciled.Generation != 2 {
+		t.Fatalf("assertion failed: expected generation 2, got %d", reconciled.Generation)
+	}
+	// The top-level status still describes generation 1 ...
+	if reconciled.Status.ObservedGeneration != 1 {
+		t.Fatalf("expected top-level observedGeneration to stay 1 on the conflict path, got %d", reconciled.Status.ObservedGeneration)
+	}
+	if reconciled.Status.Phase != healthy.Status.Phase || reconciled.Status.URL != healthy.Status.URL ||
+		reconciled.Status.ReadyReplicas != healthy.Status.ReadyReplicas {
+		t.Fatalf("expected phase/url/readyReplicas unchanged, before=%+v after=%+v", healthy.Status, reconciled.Status)
+	}
+	// ... while the condition records that generation 2 was observed.
+	requireDatabaseCondition(t, reconciled, metav1.ConditionFalse, "ConflictingConfiguration")
+	assertStatusAndEventsRedacted(t, reconciled)
+
+	deploymentAfter := getControlPlaneDeployment(t, cp)
+	if deploymentAfter.ResourceVersion != deploymentBefore.ResourceVersion {
+		t.Fatalf("expected the Deployment to be untouched on the conflict path")
+	}
+	if got := deploymentAfter.Spec.Template.Spec.Containers[0].Image; got != "test-database-secret-ref:latest" {
+		t.Fatalf("expected the Deployment to keep the generation 1 image, got %q", got)
+	}
 }
 
 // TestDatabaseSecretRef_SecretEventsTriggerReconcile runs the real manager
