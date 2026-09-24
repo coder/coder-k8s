@@ -3,6 +3,7 @@ package hack_test
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"text/template"
@@ -47,6 +48,58 @@ func TestChangelogChannels(t *testing.T) {
 				t.Fatalf("changelog disabled = %q for channel %q", result.String(), channel)
 			}
 		})
+	}
+}
+
+// `goreleaser release --clean` deletes its output directory. dist/ holds the tracked install bundle, so
+// GoReleaser writes to .goreleaser-dist instead, and .gitignore must ignore that whole directory to keep the
+// release worktree clean.
+func TestGoReleaserDistIsIgnored(t *testing.T) {
+	const wantDist = ".goreleaser-dist"
+	data, err := os.ReadFile("../.goreleaser.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		Dist string `json:"dist"`
+	}
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		t.Fatal(err)
+	}
+	if config.Dist != wantDist {
+		t.Fatalf("GoReleaser dist = %q, want %q", config.Dist, wantDist)
+	}
+
+	// Check a copy of .gitignore in a new repository, so the test needs no .git of its own (source export)
+	// and no enclosing repository's rules apply. Reading the file here also makes go test's result cache
+	// track it; git reads it in a subprocess, which the cache does not see.
+	gitignore, err := os.ReadFile("../.gitignore")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), gitignore, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git := func(args ...string) (string, error) {
+		cmd := exec.CommandContext(t.Context(), "git", args...)
+		cmd.Dir = dir
+		cmd.Env = []string{
+			"PATH=" + os.Getenv("PATH"), "HOME=" + dir,
+			"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull,
+		}
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	if out, err := git("init", "--quiet"); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	// The directory itself must be ignored, not only files GoReleaser happens to write today.
+	for _, p := range []string{wantDist + "/", wantDist + "/any/nested/file"} {
+		out, err := git("check-ignore", "--verbose", "--", p)
+		if err != nil || !strings.HasPrefix(out, ".gitignore:") {
+			t.Errorf(".gitignore must ignore %q: %v\n%s", p, err, out)
+		}
 	}
 }
 
