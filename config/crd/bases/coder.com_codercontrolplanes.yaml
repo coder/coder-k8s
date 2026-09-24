@@ -975,6 +975,37 @@ spec:
                       type: object
                     type: array
                 type: object
+              database:
+                description: |-
+                  Database configures the external PostgreSQL database for Coder.
+                  When set, CODER_PG_CONNECTION_URL must not also be set in extraEnv.
+                properties:
+                  connectionSecretRef:
+                    description: |-
+                      ConnectionSecretRef references a key in a Secret in the
+                      CoderControlPlane's namespace. The value must be a postgres:// or
+                      postgresql:// connection URL. The controller injects it into the Coder
+                      container as CODER_PG_CONNECTION_URL through a Secret reference and uses
+                      it for operator access bootstrap. Running pods keep the old value after
+                      the Secret changes; restart the Deployment after rotating credentials.
+                    properties:
+                      key:
+                        description: Key is the key inside the Secret data map.
+                        type: string
+                      name:
+                        description: Name is the Kubernetes Secret name.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                    x-kubernetes-validations:
+                    - message: connectionSecretRef.name must not be empty
+                      rule: size(self.name) > 0
+                    - message: connectionSecretRef.key must not be empty
+                      rule: has(self.key) && size(self.key) > 0
+                required:
+                - connectionSecretRef
+                type: object
               envFrom:
                 description: EnvFrom injects environment variables from ConfigMaps/Secrets.
                 items:
@@ -4207,6 +4238,11 @@ spec:
                   type: object
                 type: array
             type: object
+            x-kubernetes-validations:
+            - message: spec.extraEnv must not set CODER_PG_CONNECTION_URL when spec.database.connectionSecretRef
+                is set
+              rule: '!has(self.database) || !has(self.extraEnv) || !self.extraEnv.exists(e,
+                e.name == ''CODER_PG_CONNECTION_URL'')'
           status:
             description: CoderControlPlaneStatus defines the observed state of a CoderControlPlane.
             properties:

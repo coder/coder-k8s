@@ -326,6 +326,21 @@ jobs:
           kubectl -n coder wait --for=jsonpath='{.status.phase}'=Ready codercontrolplane/coder --timeout=600s
           kubectl -n coder wait --for=jsonpath='{.status.operatorAccessReady}'=true codercontrolplane/coder --timeout=600s
 
+      # The example is applied before CloudNativePG creates coder-db-app, so this
+      # also covers the control-plane-before-Secret path.
+      - name: Verify database Secret reference
+        if: env.E2E_FULL == 'true'
+        run: |
+          kubectl -n coder wait --for=condition=DatabaseSecretResolved codercontrolplane/coder --timeout=120s
+          REASON=$(kubectl -n coder get codercontrolplane coder -o jsonpath='{.status.conditions[?(@.type=="DatabaseSecretResolved")].reason}')
+          test "$REASON" = "Resolved"
+          # Exactly one CODER_PG_CONNECTION_URL, injected by Secret reference with no literal value.
+          kubectl -n coder get deployment coder -o json |
+            jq -e '[.spec.template.spec.containers[] | select(.name == "coder") | .env[]? | select(.name == "CODER_PG_CONNECTION_URL")] as $pg
+              | ($pg | length) == 1
+              and ($pg[0] | has("value") | not)
+              and $pg[0].valueFrom.secretKeyRef == {"name": "coder-db-app", "key": "uri"}'
+
       - name: Verify operator token secret
         if: env.E2E_FULL == 'true'
         run: |

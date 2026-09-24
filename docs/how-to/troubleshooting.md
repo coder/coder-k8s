@@ -55,6 +55,7 @@ Typical causes:
 1. Control-plane Deployment has no ready pods.
 2. Operator bootstrap token is not ready yet.
 3. Optional license Secret is missing or invalid when `spec.licenseSecretRef` is set.
+4. The database Secret cannot be resolved when `spec.database.connectionSecretRef` is set. Check the `DatabaseSecretResolved` condition reason; see [Connect an external PostgreSQL database](deploy-controller.md#connect-an-external-postgresql-database).
 
 Debug commands:
 

@@ -12,6 +12,10 @@ const (
 	CoderControlPlanePhaseReady = "Ready"
 	// CoderControlPlaneConditionLicenseApplied indicates whether the operator uploaded the configured license.
 	CoderControlPlaneConditionLicenseApplied = "LicenseApplied"
+	// CoderControlPlaneConditionDatabaseSecretResolved indicates whether the
+	// spec.database.connectionSecretRef configuration can be resolved. It does
+	// not report database health or reachability.
+	CoderControlPlaneConditionDatabaseSecretResolved = "DatabaseSecretResolved"
 
 	// CoderControlPlaneLicenseTierNone indicates no license is currently installed.
 	CoderControlPlaneLicenseTierNone = "none"
@@ -29,6 +33,7 @@ const (
 )
 
 // CoderControlPlaneSpec defines the desired state of a CoderControlPlane.
+// +kubebuilder:validation:XValidation:rule="!has(self.database) || !has(self.extraEnv) || !self.extraEnv.exists(e, e.name == 'CODER_PG_CONNECTION_URL')",message="spec.extraEnv must not set CODER_PG_CONNECTION_URL when spec.database.connectionSecretRef is set"
 type CoderControlPlaneSpec struct {
 	// Image is the container image used for the Coder control plane pod.
 	// +kubebuilder:default="ghcr.io/coder/coder:latest"
@@ -45,6 +50,10 @@ type CoderControlPlaneSpec struct {
 	ExtraEnv []corev1.EnvVar `json:"extraEnv,omitempty"`
 	// ImagePullSecrets are used by the pod to pull private images.
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+	// Database configures the external PostgreSQL database for Coder.
+	// When set, CODER_PG_CONNECTION_URL must not also be set in extraEnv.
+	// +optional
+	Database *DatabaseSpec `json:"database,omitempty"`
 	// OperatorAccess configures bootstrap API access to the coderd instance.
 	// +kubebuilder:default={}
 	OperatorAccess OperatorAccessSpec `json:"operatorAccess,omitempty"`
@@ -110,6 +119,19 @@ type CoderControlPlaneSpec struct {
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 	// TopologySpreadConstraints control pod topology spread.
 	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+}
+
+// DatabaseSpec configures the external PostgreSQL database used by Coder.
+type DatabaseSpec struct {
+	// ConnectionSecretRef references a key in a Secret in the
+	// CoderControlPlane's namespace. The value must be a postgres:// or
+	// postgresql:// connection URL. The controller injects it into the Coder
+	// container as CODER_PG_CONNECTION_URL through a Secret reference and uses
+	// it for operator access bootstrap. Running pods keep the old value after
+	// the Secret changes; restart the Deployment after rotating credentials.
+	// +kubebuilder:validation:XValidation:rule="size(self.name) > 0",message="connectionSecretRef.name must not be empty"
+	// +kubebuilder:validation:XValidation:rule="has(self.key) && size(self.key) > 0",message="connectionSecretRef.key must not be empty"
+	ConnectionSecretRef SecretKeySelector `json:"connectionSecretRef"`
 }
 
 // OperatorAccessSpec configures the controller-managed coderd operator user.
