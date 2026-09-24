@@ -650,12 +650,6 @@ func (s *TemplateStorage) Update(
 	metadataChanged := updatedTemplate.Spec.DisplayName != currentTemplate.Spec.DisplayName ||
 		updatedTemplate.Spec.Description != currentTemplate.Spec.Description ||
 		updatedTemplate.Spec.Icon != currentTemplate.Spec.Icon
-	if metadataChanged {
-		_, err := sdk.UpdateTemplateMeta(ctx, templateID, convert.TemplateUpdateMetaRequestFromK8s(updatedTemplate))
-		if err != nil {
-			return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
-		}
-	}
 
 	if updatedTemplate.Spec.Files != nil {
 		if normalizedDesiredFiles == nil {
@@ -717,6 +711,12 @@ func (s *TemplateStorage) Update(
 				return nil, false, mapTemplateVersionBuildWaitError(waitErr, name)
 			}
 
+			// The import can take long. Re-check the preconditions against a fresh read before the first
+			// Coder mutation, so a template changed or replaced meanwhile is not overwritten (#117).
+			if err := s.requireTemplateUnchangedDuringImport(ctx, name, currentTemplate); err != nil {
+				return nil, false, err
+			}
+
 			if err := sdk.UpdateActiveTemplateVersion(ctx, templateID, codersdk.UpdateActiveTemplateVersion{ID: newVersion.ID}); err != nil {
 				return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
 			}
@@ -738,6 +738,16 @@ func (s *TemplateStorage) Update(
 		}
 	}
 
+	// Apply metadata only after changed files are active, so a failed, timed-out or cancelled import leaves
+	// the template unchanged (#117). The Coder calls are not atomic: if this call fails after a promotion,
+	// the new source stays active with the old metadata.
+	if metadataChanged {
+		_, err := sdk.UpdateTemplateMeta(ctx, templateID, convert.TemplateUpdateMetaRequestFromK8s(updatedTemplate))
+		if err != nil {
+			return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
+		}
+	}
+
 	refreshedObj, err := s.Get(ctx, name, nil)
 	if err != nil {
 		return nil, false, err
@@ -754,6 +764,50 @@ func (s *TemplateStorage) Update(
 	s.enqueueWatchEvent(watch.Modified, result.DeepCopy())
 
 	return result, false, nil
+}
+
+// requireTemplateUnchangedDuringImport returns 409 Conflict when the template read at the start of an
+// Update was replaced (UID) or changed (resourceVersion) while its new source was importing.
+func (s *TemplateStorage) requireTemplateUnchangedDuringImport(
+	ctx context.Context,
+	name string,
+	readBeforeImport *aggregationv1alpha1.CoderTemplate,
+) error {
+	if readBeforeImport == nil {
+		return fmt.Errorf("assertion failed: template read before the import must not be nil")
+	}
+	if readBeforeImport.UID == "" || readBeforeImport.ResourceVersion == "" {
+		return fmt.Errorf("assertion failed: template read before the import must have a UID and resourceVersion")
+	}
+
+	freshObj, err := s.Get(ctx, name, nil)
+	if err != nil {
+		return err
+	}
+	fresh, ok := freshObj.(*aggregationv1alpha1.CoderTemplate)
+	if !ok || fresh == nil {
+		return fmt.Errorf("assertion failed: expected *CoderTemplate, got %T", freshObj)
+	}
+
+	var change string
+	switch {
+	case fresh.UID != readBeforeImport.UID:
+		change = "was replaced"
+	case fresh.ResourceVersion != readBeforeImport.ResourceVersion:
+		change = fmt.Sprintf("changed (resourceVersion %q is now %q)", readBeforeImport.ResourceVersion, fresh.ResourceVersion)
+	default:
+		return nil
+	}
+
+	return apierrors.NewConflict(
+		aggregationv1alpha1.Resource("codertemplates"),
+		name,
+		fmt.Errorf(
+			"the template %s while the new source was importing; the imported version was not activated "+
+				"and metadata was not applied; re-read the template and retry",
+			change,
+		),
+	)
 }
 
 // Delete deletes a CoderTemplate through codersdk.
