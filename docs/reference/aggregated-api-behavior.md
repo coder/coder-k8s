@@ -180,7 +180,7 @@ An Update with changed files names its template version after the template and t
 Retrying the same Update therefore converges on one import. If the import takes longer than the budget, each retry waits for that same import and gets `504` while it runs. The retry that is waiting when it succeeds, or the first retry after that, activates it and returns `200`. This also works after the aggregated API server restarts, because the name is computed from the request. If two requests create the same attempt at the same time, Coder rejects the second one, and that request waits for the first one's version.
 
 - A retry must send the same files. The name also covers files in the active version that `spec.files` does not list, so if the active version changes between retries, a new import starts.
-- `kubectl apply` re-reads the template on each run, so running it again is a valid retry. A client that resends an old `resourceVersion` gets `409 Conflict` once the template has changed, for example after a late activation.
+- `kubectl apply` re-reads the template on each run, so running it again is a valid retry. A client that sends an old `resourceVersion` again gets `409 Conflict` once the template has changed, for example after a late activation.
 - Finding the attempt takes a few lookups per request, at most 48. If that is not enough, the request fails with `503 Service Unavailable` and creates nothing; the next request starts over. If the request's deadline passes during the lookups, it fails with `504` and creates nothing.
 - Versions created before this behavior have random names and are never reused.
 
