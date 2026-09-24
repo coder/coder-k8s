@@ -6,7 +6,7 @@ It creates:
 
 - a `coder` namespace
 - a CloudNativePG `Cluster` named `coder-db`
-- a `CoderControlPlane` named `coder` wired to the CloudNativePG app Secret (`coder-db-app`)
+- a `CoderControlPlane` named `coder` that reads its PostgreSQL connection URL from the CloudNativePG app Secret (`spec.database.connectionSecretRef`: Secret `coder-db-app`, key `uri`)
 
 ## Prerequisites
 
@@ -55,12 +55,23 @@ kubectl -n coder wait --for=condition=Ready cluster/coder-db --timeout=10m
 kubectl -n coder get secret coder-db-app
 ```
 
+When you apply the whole directory, CloudNativePG usually creates `coder-db-app` after the `CoderControlPlane` exists. Until the Secret exists, the `DatabaseSecretResolved` condition is `False` with reason `SecretNotFound`, and the Coder pod waits for the Secret. The controller reconciles again when the Secret appears. Check the condition:
+
+```bash
+kubectl -n coder get codercontrolplane coder \
+  -o jsonpath='{.status.conditions[?(@.type=="DatabaseSecretResolved")].reason}{"\n"}'
+```
+
+The expected reason is `Resolved`. This only means the Secret holds a PostgreSQL URL; it does not check that the database is reachable.
+
 Wait for the `CoderControlPlane` deployment:
 
 ```bash
 kubectl -n coder rollout status deployment/coder --timeout=10m
 kubectl -n coder get codercontrolplane coder
 ```
+
+If CloudNativePG rotates the `coder-db-app` credentials, restart the Coder Deployment. See [Rotate database credentials](../../docs/how-to/deploy-controller.md#rotate-database-credentials).
 
 ## 4. Access Coder
 
