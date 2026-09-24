@@ -66,12 +66,22 @@ const (
 	envFromConfigMapNameFieldIndex = ".spec.envFrom.configMapRef.name"
 	envFromSecretNameFieldIndex    = ".spec.envFrom.secretRef.name" // #nosec G101 -- this is a field index key, not a credential.
 
+	// #nosec G101 -- this is a field index key, not a credential.
+	databaseSecretNameFieldIndex = ".spec.database.connectionSecretRef.name"
+
 	licenseConditionReasonApplied       = "Applied"
 	licenseConditionReasonPending       = "Pending"
 	licenseConditionReasonSecretMissing = "SecretMissing"
 	licenseConditionReasonForbidden     = "Forbidden"
 	licenseConditionReasonNotSupported  = "NotSupported"
 	licenseConditionReasonError         = "Error"
+
+	databaseConditionReasonResolved                 = "Resolved"
+	databaseConditionReasonSecretNotFound           = "SecretNotFound"
+	databaseConditionReasonKeyNotFound              = "KeyNotFound"
+	databaseConditionReasonEmptyValue               = "EmptyValue"
+	databaseConditionReasonInvalidURL               = "InvalidURL"
+	databaseConditionReasonConflictingConfiguration = "ConflictingConfiguration"
 
 	workspaceRBACDriftRequeueInterval = 2 * time.Minute
 	gatewayExposureRequeueInterval    = 2 * time.Minute
@@ -242,6 +252,28 @@ func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 
+	if databaseConnectionURLConflicts(coderControlPlane) {
+		// Admission rejects this combination; objects that bypass it must not
+		// silently pick one source. Report it and leave workloads untouched.
+		originalStatus := *coderControlPlane.Status.DeepCopy()
+		nextStatus := *coderControlPlane.Status.DeepCopy()
+		nextStatus.ObservedGeneration = coderControlPlane.Generation
+		if err := setControlPlaneCondition(
+			&nextStatus,
+			coderControlPlane.Generation,
+			coderv1alpha1.CoderControlPlaneConditionDatabaseSecretResolved,
+			metav1.ConditionFalse,
+			databaseConditionReasonConflictingConfiguration,
+			databaseConflictMessage,
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.reconcileStatus(ctx, coderControlPlane, originalStatus, nextStatus); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
 	if err := r.reconcileServiceAccount(ctx, coderControlPlane); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -264,6 +296,10 @@ func (r *CoderControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	originalStatus := *coderControlPlane.Status.DeepCopy()
 	nextStatus := r.desiredStatus(coderControlPlane, deployment, service)
+
+	if err := r.reconcileDatabaseSecretCondition(ctx, coderControlPlane, &nextStatus); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	operatorResult, err := r.reconcileOperatorAccess(ctx, coderControlPlane, &nextStatus)
 	if err != nil {
@@ -1086,6 +1122,25 @@ func (r *CoderControlPlaneReconciler) reconcileDeployment(ctx context.Context, c
 			})
 		}
 
+		if coderControlPlane.Spec.Database != nil {
+			if databaseConnectionURLConflicts(coderControlPlane) {
+				return fmt.Errorf("assertion failed: conflicting database configuration must be rejected before deployment reconcile")
+			}
+			secretRef := coderControlPlane.Spec.Database.ConnectionSecretRef
+			if secretRef.Name == "" || secretRef.Key == "" {
+				return fmt.Errorf("assertion failed: database connection secret name and key must not be empty")
+			}
+			// Reference the Secret instead of copying its value into the pod spec.
+			env = append(env, corev1.EnvVar{
+				Name: postgresConnectionURLEnvVar,
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: secretRef.Name},
+						Key:                  secretRef.Key,
+					},
+				},
+			})
+		}
 		env = append(env, coderControlPlane.Spec.ExtraEnv...)
 		volumes = append(volumes, coderControlPlane.Spec.Volumes...)
 		volumeMounts = append(volumeMounts, coderControlPlane.Spec.VolumeMounts...)
@@ -1656,7 +1711,7 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 		return ctrl.Result{}, fmt.Errorf("read operator token secret %q: %w", operatorTokenSecretName, err)
 	}
 
-	postgresURL, resolveErr := r.resolvePostgresURLFromExtraEnv(ctx, coderControlPlane)
+	postgresURL, resolveErr := r.resolveBootstrapPostgresURL(ctx, coderControlPlane)
 	if resolveErr != nil {
 		nextStatus.OperatorTokenSecretRef = nil
 		nextStatus.OperatorAccessReady = false
@@ -2173,7 +2228,7 @@ func (r *CoderControlPlaneReconciler) cleanupDisabledOperatorAccess(
 		}
 	}
 
-	postgresURL, err := r.resolvePostgresURLFromExtraEnv(ctx, coderControlPlane)
+	postgresURL, err := r.resolveBootstrapPostgresURL(ctx, coderControlPlane)
 	if err != nil {
 		if cleanupRequired {
 			return fmt.Errorf("resolve postgres URL while disabling operator access: %w", err)
@@ -2199,12 +2254,26 @@ func isManagedOperatorTokenSecret(secret *corev1.Secret, coderControlPlane *code
 	return isOwnedByCoderControlPlane(secret, coderControlPlane)
 }
 
-func (r *CoderControlPlaneReconciler) resolvePostgresURLFromExtraEnv(
+// resolveBootstrapPostgresURL returns the PostgreSQL URL used for operator
+// access bootstrap. spec.database takes precedence; otherwise extraEnv is used.
+// Returned errors never contain the URL or other Secret values.
+func (r *CoderControlPlaneReconciler) resolveBootstrapPostgresURL(
 	ctx context.Context,
 	coderControlPlane *coderv1alpha1.CoderControlPlane,
 ) (string, error) {
 	if coderControlPlane == nil {
 		return "", fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+
+	if coderControlPlane.Spec.Database != nil {
+		resolution, err := r.resolveDatabaseSecret(ctx, coderControlPlane)
+		if err != nil {
+			return "", err
+		}
+		if resolution.reason != databaseConditionReasonResolved {
+			return "", fmt.Errorf("database connection secret is not resolved: %s", resolution.reason)
+		}
+		return resolution.postgresURL, nil
 	}
 
 	pgEnvVar, err := findEnvVar(coderControlPlane.Spec.ExtraEnv, postgresConnectionURLEnvVar)
@@ -2235,6 +2304,150 @@ func (r *CoderControlPlaneReconciler) resolvePostgresURLFromExtraEnv(
 	}
 
 	return r.readSecretValue(ctx, coderControlPlane.Namespace, secretRef.Name, secretRef.Key)
+}
+
+const databaseConflictMessage = "spec.extraEnv must not set CODER_PG_CONNECTION_URL when spec.database.connectionSecretRef is set"
+
+// databaseConnectionURLConflicts reports whether spec.database and an explicit
+// CODER_PG_CONNECTION_URL in extraEnv are both configured.
+func databaseConnectionURLConflicts(coderControlPlane *coderv1alpha1.CoderControlPlane) bool {
+	if coderControlPlane == nil || coderControlPlane.Spec.Database == nil {
+		return false
+	}
+	for i := range coderControlPlane.Spec.ExtraEnv {
+		if coderControlPlane.Spec.ExtraEnv[i].Name == postgresConnectionURLEnvVar {
+			return true
+		}
+	}
+	return false
+}
+
+// databaseSecretResolution is the outcome of resolving
+// spec.database.connectionSecretRef. Reason and message never contain Secret
+// values; postgresURL is set only when reason is Resolved.
+type databaseSecretResolution struct {
+	reason      string
+	message     string
+	postgresURL string
+}
+
+// resolveDatabaseSecret reads the referenced Secret and classifies its value.
+// It returns an error only for unexpected API failures.
+func (r *CoderControlPlaneReconciler) resolveDatabaseSecret(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+) (databaseSecretResolution, error) {
+	if coderControlPlane == nil {
+		return databaseSecretResolution{}, fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+	if coderControlPlane.Spec.Database == nil {
+		return databaseSecretResolution{}, fmt.Errorf("assertion failed: spec.database must be set to resolve its secret")
+	}
+	namespace := coderControlPlane.Namespace
+	secretName := coderControlPlane.Spec.Database.ConnectionSecretRef.Name
+	secretKey := coderControlPlane.Spec.Database.ConnectionSecretRef.Key
+	if namespace == "" || secretName == "" || secretKey == "" {
+		return databaseSecretResolution{}, fmt.Errorf("assertion failed: database connection secret namespace, name, and key must not be empty")
+	}
+
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: secretName}, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return databaseSecretResolution{
+				reason:  databaseConditionReasonSecretNotFound,
+				message: fmt.Sprintf("Secret %q was not found in namespace %q.", secretName, namespace),
+			}, nil
+		}
+		return databaseSecretResolution{}, fmt.Errorf("get database connection secret %s/%s: %w", namespace, secretName, err)
+	}
+
+	value, ok := secret.Data[secretKey]
+	if !ok {
+		return databaseSecretResolution{
+			reason:  databaseConditionReasonKeyNotFound,
+			message: fmt.Sprintf("Secret %q does not contain key %q.", secretName, secretKey),
+		}, nil
+	}
+	postgresURL := string(value)
+	if strings.TrimSpace(postgresURL) == "" {
+		return databaseSecretResolution{
+			reason:  databaseConditionReasonEmptyValue,
+			message: fmt.Sprintf("Secret %q key %q is empty.", secretName, secretKey),
+		}, nil
+	}
+	if !isPostgresConnectionURL(postgresURL) {
+		return databaseSecretResolution{
+			reason:  databaseConditionReasonInvalidURL,
+			message: fmt.Sprintf("Secret %q key %q is not a valid postgres:// or postgresql:// URL.", secretName, secretKey),
+		}, nil
+	}
+
+	return databaseSecretResolution{
+		reason: databaseConditionReasonResolved,
+		message: fmt.Sprintf(
+			"Secret %q key %q contains a PostgreSQL connection URL. This does not check that the database is reachable.",
+			secretName,
+			secretKey,
+		),
+		postgresURL: postgresURL,
+	}, nil
+}
+
+// isPostgresConnectionURL reports whether value parses as a postgres:// or
+// postgresql:// URL. It never returns the parser error because url.Parse
+// errors echo the input, which can contain credentials.
+func isPostgresConnectionURL(value string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed == nil {
+		return false
+	}
+	if parsed.Opaque != "" {
+		return false
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "postgres", "postgresql":
+		return true
+	default:
+		return false
+	}
+}
+
+// reconcileDatabaseSecretCondition sets DatabaseSecretResolved while
+// spec.database is set and removes it otherwise.
+func (r *CoderControlPlaneReconciler) reconcileDatabaseSecretCondition(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+	nextStatus *coderv1alpha1.CoderControlPlaneStatus,
+) error {
+	if coderControlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+	if nextStatus == nil {
+		return fmt.Errorf("assertion failed: next status must not be nil")
+	}
+
+	if coderControlPlane.Spec.Database == nil {
+		meta.RemoveStatusCondition(&nextStatus.Conditions, coderv1alpha1.CoderControlPlaneConditionDatabaseSecretResolved)
+		return nil
+	}
+
+	resolution, err := r.resolveDatabaseSecret(ctx, coderControlPlane)
+	if err != nil {
+		return err
+	}
+	conditionStatus := metav1.ConditionFalse
+	if resolution.reason == databaseConditionReasonResolved {
+		conditionStatus = metav1.ConditionTrue
+	}
+
+	return setControlPlaneCondition(
+		nextStatus,
+		coderControlPlane.Generation,
+		coderv1alpha1.CoderControlPlaneConditionDatabaseSecretResolved,
+		conditionStatus,
+		resolution.reason,
+		resolution.message,
+	)
 }
 
 func (r *CoderControlPlaneReconciler) envFromDefinesEnvVar(
@@ -2574,6 +2787,20 @@ func indexByLicenseSecretName(obj client.Object) []string {
 	return []string{licenseSecretName}
 }
 
+func indexByDatabaseSecretName(obj client.Object) []string {
+	coderControlPlane, ok := obj.(*coderv1alpha1.CoderControlPlane)
+	if !ok || coderControlPlane.Spec.Database == nil {
+		return nil
+	}
+
+	databaseSecretName := strings.TrimSpace(coderControlPlane.Spec.Database.ConnectionSecretRef.Name)
+	if databaseSecretName == "" {
+		return nil
+	}
+
+	return []string{databaseSecretName}
+}
+
 func indexByEnvFromConfigMapName(obj client.Object) []string {
 	coderControlPlane, ok := obj.(*coderv1alpha1.CoderControlPlane)
 	if !ok {
@@ -2734,8 +2961,14 @@ func (r *CoderControlPlaneReconciler) reconcileRequestsForLicenseSecret(
 		secret.Name,
 	)
 	envFromSecretRequests := r.reconcileRequestsForEnvFromSecret(ctx, secret)
+	databaseSecretRequests := r.reconcileRequestsForIndexedControlPlanes(
+		ctx,
+		secret.Namespace,
+		databaseSecretNameFieldIndex,
+		secret.Name,
+	)
 
-	return mergeReconcileRequests(licenseSecretRequests, envFromSecretRequests)
+	return mergeReconcileRequests(licenseSecretRequests, envFromSecretRequests, databaseSecretRequests)
 }
 
 func isDuplicateLicenseUploadError(err error) bool {
@@ -2924,6 +3157,14 @@ func (r *CoderControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		indexByEnvFromSecretName,
 	); err != nil {
 		return fmt.Errorf("index coder control planes by envFrom Secret name: %w", err)
+	}
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&coderv1alpha1.CoderControlPlane{},
+		databaseSecretNameFieldIndex,
+		indexByDatabaseSecretName,
+	); err != nil {
+		return fmt.Errorf("index coder control planes by database Secret name: %w", err)
 	}
 
 	builder := ctrl.NewControllerManagedBy(mgr).
