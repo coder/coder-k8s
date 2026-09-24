@@ -318,6 +318,11 @@ CASE_PR=89 run_case summary_finding_full_id_malformed_string 1 "Found 1 unminimi
 CASE_PR=89 run_case summary_finding_full_id_fractional_number 1 "Found 1 unminimized regular comment(s) from bot" \
   "$(finding_card)" "$(page reviewThreads "$(thread_node_json "$BOT" true "${FINDING_ID}.5")")"
 
+# IDs are canonical decimal text: a leading zero never matches, even when the link repeats it.
+CASE_PR=89 run_case summary_finding_full_id_leading_zero 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card "s/discussion_r${FINDING_ID}/discussion_r0${FINDING_ID}/")" \
+  "$(page reviewThreads "$(thread_node "$BOT" true "0${FINDING_ID}")")"
+
 # A JSON number above 2^53 may have been rounded, so it never matches.
 CASE_PR=89 run_case summary_finding_full_id_number_above_2p53 1 "Found 1 unminimized regular comment(s) from bot" \
   "$(finding_card "s/discussion_r${FINDING_ID}/discussion_r${BIG_ID}/")" \
