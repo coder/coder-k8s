@@ -61,6 +61,7 @@ THREADS_QUERY='query($owner: String!, $repo: String!, $pr: Int!, $cursor: String
           comments(first: 1) {
             nodes {
               id
+              databaseId
               author { login }
               body
               createdAt
@@ -169,7 +170,11 @@ done
 # - "usage limits have been reached" (rate limit error, not a real review)
 # - the "Codex Review Summary" status table the Codex app keeps editing in
 #   place (marker on line 1, optional metadata marker, fixed header, one or
-#   more Running/Completed rows, fixed "About Codex" footer)
+#   more Running/Completed rows, fixed "About Codex" footer). The card may also
+#   carry one "### Security findings" section with one "#### Advisory findings
+#   (N)" list of exactly N links to review threads on this PR; it only counts
+#   as a non-finding when every linked thread is a resolved thread that the bot
+#   started. An unresolved or missing thread keeps the card blocking.
 # - the explicit clean security verdict ("No security issues were found")
 # Recognition is structural and line-anchored: the summary and security shapes
 # must match line for line, so a marker alone, a quoted marker, or a summary
@@ -216,8 +221,37 @@ def summary_about: [
 # Count of leading elements satisfying f.
 def leading_count(f): (map(f) | index(false)) // length;
 
+def advisory_heading_regex: "^#### Advisory findings \\((?<n>[1-9][0-9]{0,2})\\)$";
+
+def finding_regex:
+  "^- [^ ]{1,4} \\[[^\\[\\]]+\\]\\(https://github\\.com/(?<owner>[^/()]+)/(?<repo>[^/()]+)/pull/(?<pr>[0-9]+)"
+  + "#discussion_r(?<id>[0-9]+)\\) · \\*\\*(Critical|High|Medium|Low)\\*\\*$";
+
+# True when the finding line links to a resolved, bot-started thread on this PR.
+def is_resolved_finding:
+  (capture(finding_regex) // null) as $m
+  | $m != null
+    and $m.owner == $owner and $m.repo == $repo and $m.pr == $pr
+    and ($resolved | any(. == $m.id));
+
+# Input: the card lines between the status table's blank lines and the About
+# footer. Valid when empty, or when it is exactly one security findings section
+# whose findings all link to resolved threads.
+def findings_all_resolved:
+  . as $s
+  | if length == 0 then true
+    elif length < 6
+      or $s[0] != "### Security findings" or $s[1] != "" or $s[3] != "" or $s[-1] != ""
+      or ($s[2] | test(advisory_heading_regex) | not)
+    then false
+    else
+      ($s[2] | capture(advisory_heading_regex).n | tonumber) as $n
+      | length == $n + 5 and ($s[4:4 + $n] | all(is_resolved_finding))
+    end;
+
 def is_codex_review_summary:
   body_lines as $l
+  | (summary_about | length) as $about_len
   | ($l | length) > 8
     and $l[0] == summary_marker
     and ($l[1] == "" or ($l[1] | is_summary_metadata_marker))
@@ -227,7 +261,10 @@ def is_codex_review_summary:
       | $rows >= 1
         and ($rest[$rows:] as $tail
           | ($tail | leading_count(. == "")) as $blanks
-          | $blanks >= 1 and $tail[$blanks:] == summary_about));
+          | $blanks >= 1
+            and ($tail | length) >= $blanks + $about_len
+            and $tail[($tail | length) - $about_len:] == summary_about
+            and ($tail[$blanks:($tail | length) - $about_len] | findings_all_resolved)));
 
 def security_about: [
   "<details> <summary>ℹ️ About Codex security reviews in GitHub</summary>",
@@ -266,7 +303,13 @@ def is_known_non_finding:
 [.[] | select(.author.login == $bot and .isMinimized == false and (.body | is_known_non_finding | not))]
 EOF
 )
-REGULAR_COMMENTS=$(echo "$ALL_COMMENTS" | jq --arg bot "$BOT_LOGIN_GRAPHQL" "$NON_FINDING_JQ")
+# Review comment IDs (the discussion_r<ID> in finding links) of resolved threads
+# the bot started. A summary card's findings must all appear here.
+RESOLVED_FINDING_IDS=$(echo "$ALL_THREADS" | jq -c --arg bot "$BOT_LOGIN_GRAPHQL" \
+  '[.[] | select(.isResolved == true and .comments.nodes[0].author.login == $bot) | .comments.nodes[0].databaseId | select(type == "number") | tostring]')
+REGULAR_COMMENTS=$(echo "$ALL_COMMENTS" | jq --arg bot "$BOT_LOGIN_GRAPHQL" \
+  --arg owner "$OWNER" --arg repo "$REPO" --arg pr "$PR_NUMBER" \
+  --argjson resolved "$RESOLVED_FINDING_IDS" "$NON_FINDING_JQ")
 REGULAR_COUNT=$(echo "$REGULAR_COMMENTS" | jq 'length')
 
 # Filter unresolved review threads from bot
