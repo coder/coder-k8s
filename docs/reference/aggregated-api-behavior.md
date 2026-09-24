@@ -146,10 +146,10 @@ This is **best-effort**. Coder has no place to store Kubernetes `metadata.manage
 For a `CoderTemplate` with `spec.files`, the server waits for Coder to finish importing (building) the uploaded template version before using it:
 
 - **Create** uploads the files, creates the version, waits for the import, then creates the template. On success, workspaces can use the template right away.
-- **Update** with changed files waits the same way before making the new version active.
+- **Update** with changed files waits the same way before making the new version active. Metadata changes in the same request (`displayName`, `description`, `icon`) are applied only after that. If the template changed in Coder during the wait, the Update returns `409 Conflict` and changes nothing.
 - **Create without `spec.files`** does not wait.
 
-If the import fails, times out, or the request is cancelled, Create creates no template and Update activates nothing. The uploaded file and template version stay in Coder; they are not deleted or cancelled.
+If the import fails, times out, or the request is cancelled, Create creates no template and Update changes nothing (neither the source nor the metadata). The uploaded file and template version stay in Coder; they are not deleted or cancelled.
 
 !!! warning "Retries are not idempotent"
     Each retry uploads and imports again, so retries can leave extra template versions. If your client gave up before the server answered, re-read the template before retrying.
