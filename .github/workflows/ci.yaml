@@ -134,9 +134,9 @@ jobs:
       - name: Verify installer manifests are up to date
         run: |
           make build-installer
-          git diff --exit-code -- dist/install.yaml config/crd/bases/ config/rbac/
+          git diff --exit-code -- dist/install.yaml config/default/ config/crd/bases/ config/rbac/
 
-          UNTRACKED_GENERATED="$(git ls-files --others --exclude-standard -- dist/ config/crd/bases/ config/rbac/)"
+          UNTRACKED_GENERATED="$(git ls-files --others --exclude-standard -- dist/ config/default/ config/crd/bases/ config/rbac/)"
           if [[ -n "${UNTRACKED_GENERATED}" ]]; then
             echo "assertion failed: generated installer artifacts must be tracked" >&2
             printf '%s\n' "${UNTRACKED_GENERATED}" >&2
