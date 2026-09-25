@@ -512,6 +512,26 @@ func TestResolveDelegationKubeconfig(t *testing.T) {
 
 	homeValid := t.TempDir()
 	mustWrite(t, filepath.Join(homeValid, ".kube", "config"), string(data))
+	// A kubeconfig whose tokenFile is relative to the kubeconfig's directory, not the working directory.
+	relDir := t.TempDir()
+	relative := filepath.Join(relDir, "relative")
+	mustWrite(t, filepath.Join(relDir, "token"), "test-token\n")
+	mustWrite(t, relative, `apiVersion: v1
+kind: Config
+clusters:
+- name: c
+  cluster:
+    server: https://127.0.0.1:1
+    insecure-skip-tls-verify: true
+users:
+- name: u
+  user:
+    tokenFile: token
+contexts:
+- name: x
+  context: {cluster: c, user: u}
+current-context: x
+`)
 	homeInvalid := t.TempDir()
 	mustWrite(t, filepath.Join(homeInvalid, ".kube", "config"), "apiVersion: v1\nkind: Config\n")
 
@@ -526,6 +546,7 @@ func TestResolveDelegationKubeconfig(t *testing.T) {
 		{name: "explicit wins over in-cluster", env: map[string]string{"KUBECONFIG": valid, "KUBERNETES_SERVICE_HOST": "10.0.0.1"}, want: valid},
 		{name: "explicit missing never falls back", env: map[string]string{"KUBECONFIG": filepath.Join(dir, "absent"), "KUBERNETES_SERVICE_HOST": "10.0.0.1"}, home: homeValid, wantError: "load kubeconfig"},
 		{name: "explicit empty never falls back", env: map[string]string{"KUBECONFIG": empty, "KUBERNETES_SERVICE_HOST": "10.0.0.1"}, home: homeValid, wantError: "invalid kubeconfig"},
+		{name: "explicit with tokenFile relative to the kubeconfig", env: map[string]string{"KUBECONFIG": relative}, want: relative},
 		{name: "explicit garbage", env: map[string]string{"KUBECONFIG": garbage}, wantError: "load kubeconfig"},
 		{name: "explicit list", env: map[string]string{"KUBECONFIG": valid + string(os.PathListSeparator) + valid}, wantError: "exactly one file"},
 		{name: "in cluster", env: map[string]string{"KUBERNETES_SERVICE_HOST": "10.0.0.1"}, home: homeValid, want: ""},

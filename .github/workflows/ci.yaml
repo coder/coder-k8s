@@ -397,7 +397,7 @@ jobs:
           }
           expect_forbidden kubectl "${reader[@]}" -n default get codertemplates.aggregation.coder.com
           expect_forbidden kubectl "${reader[@]}" -n coder get coderworkspaces.aggregation.coder.com
-          expect_forbidden kubectl "${reader[@]}" -n coder delete codertemplates.aggregation.coder.com --all --dry-run=server
+          expect_forbidden kubectl "${reader[@]}" -n coder delete codertemplates.aggregation.coder.com coder.e2e-authz-probe --dry-run=server
 
           kubectl -n default run e2e-authn-probe --image="$PROBE_IMAGE" --restart=Never --command -- sleep 600
           kubectl -n default wait --for=condition=Ready pod/e2e-authn-probe --timeout=180s

@@ -131,6 +131,11 @@ func validateKubeconfigFile(path string) error {
 	if err != nil {
 		return fmt.Errorf("load kubeconfig %s for delegated authentication: %w", path, err)
 	}
+	// Resolve relative file references (tokenFile, certificate paths) against the kubeconfig's own
+	// directory, as the vendored options' loader does, instead of the process working directory.
+	if err := clientcmd.ResolveLocalPaths(cfg); err != nil {
+		return fmt.Errorf("resolve paths in kubeconfig %s for delegated authentication: %w", path, err)
+	}
 	if _, err := clientcmd.NewDefaultClientConfig(*cfg, &clientcmd.ConfigOverrides{}).ClientConfig(); err != nil {
 		return fmt.Errorf("invalid kubeconfig %s for delegated authentication: %w", path, err)
 	}
