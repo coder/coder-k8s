@@ -152,7 +152,7 @@ A read or create error instead of a field name means the ServiceAccount cannot g
 
 ## Aggregated reads return `ServiceUnavailable`
 
-This section covers `ServiceUnavailable` errors that come from the aggregated API server itself; their message names a `CoderControlPlane` or the Coder client configuration. The generic `the server is currently unable to handle the request` comes from kube-apiserver; see [Proxied requests fail with 503 and an x509 error](#proxied-requests-fail-with-503-and-an-x509-error).
+This section covers `ServiceUnavailable` errors that come from the aggregated API server itself. Their messages are specific, for example that no eligible `CoderControlPlane` was found, or that standalone mode is missing configuration. kube-apiserver instead returns the generic `the server is currently unable to handle the request`; for that error, see [Proxied requests fail with 503 and an x509 error](#proxied-requests-fail-with-503-and-an-x509-error).
 
 - **`all` mode:** no eligible `CoderControlPlane` exists yet, or its operator access is not ready.
 - **Standalone mode (`--app=aggregated-apiserver`):** set all three flags: `--coder-url`, `--coder-session-token`, and `--coder-namespace`.

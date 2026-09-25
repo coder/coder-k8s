@@ -127,7 +127,7 @@ In a cluster, the aggregated API server serves a certificate signed by its own C
 
 ### Replace the CA
 
-Replacing the CA takes a restart of every replica, and requests through kube-apiserver fail with `503 ServiceUnavailable` for several seconds while it happens (about 10 seconds with two replicas in testing). Clients retry, so plan it like a short maintenance window.
+Replacing the CA takes a restart of every replica, and requests through kube-apiserver fail with `503 ServiceUnavailable` for several seconds while it happens (about 10 seconds with two replicas in testing). Plan it as a short maintenance window.
 
 1. Note the current CA fingerprint, so you can tell the new one apart:
 
