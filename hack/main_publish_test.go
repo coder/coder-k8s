@@ -51,6 +51,67 @@ func TestChangelogChannels(t *testing.T) {
 	}
 }
 
+// The release workflow does not set GORELEASER_CHANNEL, and GoReleaser fails a template that reads a missing
+// .Env key ("map has no entry"). Every channel-dependent disable template must render for an unset channel,
+// and pick the right pipes per channel.
+func TestReleaseAndImageChannels(t *testing.T) {
+	data, err := os.ReadFile("../.goreleaser.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		Release struct {
+			Disable string `json:"disable"`
+		} `json:"release"`
+		DockersV2 []struct {
+			ID      string `json:"id"`
+			Disable string `json:"disable"`
+		} `json:"dockers_v2"`
+	}
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		t.Fatal(err)
+	}
+	// want maps each template to whether it must be disabled on the main channel (and enabled otherwise).
+	type check struct {
+		name, text     string
+		disabledOnMain bool
+	}
+	checks := []check{{name: "release", text: config.Release.Disable, disabledOnMain: true}}
+	for _, d := range config.DockersV2 {
+		switch d.ID {
+		case "coder-k8s-image-main":
+			checks = append(checks, check{name: d.ID, text: d.Disable, disabledOnMain: false})
+		case "coder-k8s-image-release":
+			checks = append(checks, check{name: d.ID, text: d.Disable, disabledOnMain: true})
+		default:
+			t.Fatalf("unexpected dockers_v2 id %q; add it to this test", d.ID)
+		}
+	}
+	if len(checks) != 3 {
+		t.Fatalf("expected release plus two dockers_v2 entries, got %d checks", len(checks))
+	}
+	for _, c := range checks {
+		tmpl, err := template.New(c.name).Option("missingkey=error").Parse(c.text)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		for _, channel := range []string{"main", "", "release", "unset"} {
+			env := map[string]string{}
+			if channel != "unset" {
+				env["GORELEASER_CHANNEL"] = channel
+			}
+			var result strings.Builder
+			if err := tmpl.Execute(&result, struct{ Env map[string]string }{Env: env}); err != nil {
+				t.Fatalf("%s, channel %q: %v", c.name, channel, err)
+			}
+			wantDisabled := (channel == "main") == c.disabledOnMain
+			if (result.String() == "true") != wantDisabled {
+				t.Fatalf("%s disabled = %q for channel %q", c.name, result.String(), channel)
+			}
+		}
+	}
+}
+
 // `goreleaser release --clean` deletes its output directory. dist/ holds the tracked install bundle, so
 // GoReleaser writes to .goreleaser-dist instead, and .gitignore must ignore that whole directory to keep the
 // release worktree clean.

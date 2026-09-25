@@ -31,11 +31,11 @@ archives:
       - README.md
 
 release:
-  disable: '{{ eq .Env.GORELEASER_CHANNEL "main" }}'
+  disable: '{{ eq (index .Env "GORELEASER_CHANNEL") "main" }}'
 
 dockers_v2:
   - id: coder-k8s-image-main
-    disable: '{{ ne .Env.GORELEASER_CHANNEL "main" }}'
+    disable: '{{ ne (index .Env "GORELEASER_CHANNEL") "main" }}'
     dockerfile: Dockerfile.goreleaser
     ids:
       - coder-k8s
@@ -64,7 +64,7 @@ dockers_v2:
       - "--provenance=false"
 
   - id: coder-k8s-image-release
-    disable: '{{ eq .Env.GORELEASER_CHANNEL "main" }}'
+    disable: '{{ eq (index .Env "GORELEASER_CHANNEL") "main" }}'
     dockerfile: Dockerfile.goreleaser
     ids:
       - coder-k8s
