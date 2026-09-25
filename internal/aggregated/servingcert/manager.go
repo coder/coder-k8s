@@ -12,8 +12,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/server/dynamiccertificates"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/klog/v2"
+	ctrl "sigs.k8s.io/controller-runtime"
 )
+
+var log = ctrl.Log.WithName("servingcert")
 
 // DefaultCheckInterval is how often Run re-reads the Secret and renews the serving certificate.
 const DefaultCheckInterval = 12 * time.Hour
@@ -76,7 +78,7 @@ func (m *Manager) Ensure(ctx context.Context) (*Bundle, error) {
 			if err != nil {
 				return nil, fmt.Errorf("create secret %s/%s: %w", m.namespace, SecretName, err)
 			}
-			klog.InfoS("Created aggregated API server CA and serving certificate", "secret", klog.KRef(m.namespace, SecretName))
+			log.Info("Created aggregated API server CA and serving certificate", "namespace", m.namespace, "secret", SecretName)
 			return bundle, m.serve(bundle)
 		case err != nil:
 			return nil, fmt.Errorf("get secret %s/%s: %w", m.namespace, SecretName, err)
@@ -101,7 +103,7 @@ func (m *Manager) Ensure(ctx context.Context) (*Bundle, error) {
 		if err != nil {
 			return nil, fmt.Errorf("update secret %s/%s: %w", m.namespace, SecretName, err)
 		}
-		klog.InfoS("Renewed aggregated API server serving certificate", "secret", klog.KRef(m.namespace, SecretName), "notAfter", bundle.Cert.NotAfter)
+		log.Info("Renewed aggregated API server serving certificate", "namespace", m.namespace, "secret", SecretName, "notAfter", bundle.Cert.NotAfter)
 		return bundle, m.serve(bundle)
 	}
 	return nil, fmt.Errorf("secret %s/%s kept changing; gave up after %d attempts", m.namespace, SecretName, maxEnsureAttempts)
@@ -121,7 +123,7 @@ func (m *Manager) Run(ctx context.Context, interval time.Duration) {
 			return
 		case <-ticker.C:
 			if _, err := m.Ensure(ctx); err != nil {
-				klog.ErrorS(err, "Could not refresh the aggregated API server serving certificate; still serving the current one")
+				log.Error(err, "Could not refresh the aggregated API server serving certificate; still serving the current one")
 			}
 		}
 	}
