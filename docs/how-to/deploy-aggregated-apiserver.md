@@ -118,7 +118,7 @@ In a cluster, the aggregated API server serves a certificate signed by its own C
 
 - The server creates the Secret on first start and reuses it afterwards. With several replicas, they all use the same Secret.
 - The serving certificate is valid for 1 year. The server checks it at startup and every 12 hours, and renews it with the same CA when less than a third of its lifetime is left. The new certificate is served without a restart.
-- The CA is valid for 10 years. To replace it, delete the Secret and restart **every** replica (`kubectl -n coder-system rollout restart deployment/coder-k8s`). The first new pod generates a CA and updates the APIService `caBundle`; until the old pods are gone, requests routed to them fail certificate verification, so expect `503 ServiceUnavailable` for a few seconds. Other clients that trusted the old CA must then trust the new one.
+- The CA is valid for 10 years. To replace it, delete the Secret and restart **every** replica (`kubectl -n coder-system rollout restart deployment/coder-k8s`). The first new pod generates a CA and updates the APIService `caBundle`; until the old pods are gone, requests routed to them fail certificate verification, so expect `503 ServiceUnavailable` for several seconds (about 10 seconds with two replicas in testing). Other clients that trusted the old CA must then trust the new one.
 - If the Secret exists but is unusable (a missing key, unparsable PEM, a key that does not match its certificate, a serving certificate not signed by the CA, or an expired CA), the server does not start and the log names the field. Fix the Secret or delete it.
 - Outside a cluster (for example `go run`), the server serves a self-signed certificate for `localhost` instead.
 
