@@ -72,6 +72,17 @@ The aggregated API server checks every caller with the Kubernetes API and refuse
 - `no Kubernetes configuration for delegated authentication and authorization` (outside a cluster): set `KUBECONFIG` to one kubeconfig file, or create `~/.kube/config`.
 - `load kubeconfig ...` or `invalid kubeconfig ...`: the file named by `KUBECONFIG` is missing or incomplete. The server does not fall back to another configuration.
 
+## The pod exits with `configure aggregated API server serving certificate`
+
+The Secret `coder-k8s-apiserver-tls` exists but cannot be used; the message names the field (for example `data["ca.key"] is missing or empty`). Fix the Secret, or delete it so the server generates a new CA on its next start:
+
+```bash
+kubectl -n coder-system delete secret coder-k8s-apiserver-tls
+kubectl -n coder-system rollout restart deployment/coder-k8s
+```
+
+A read or create error instead of a field name means the ServiceAccount cannot get or create Secrets in its namespace.
+
 ## Aggregated requests fail with `401 Unauthorized` or `403 Forbidden`
 
 - **`401`:** the request has no valid credential. Requests sent straight to port `6443` need a Kubernetes bearer token; anonymous requests only reach `/healthz`, `/livez`, and `/readyz`. Use `kubectl`, which goes through kube-apiserver.

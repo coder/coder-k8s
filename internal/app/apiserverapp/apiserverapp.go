@@ -31,6 +31,7 @@ import (
 
 	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
 	"github.com/coder/coder-k8s/internal/aggregated/coder"
+	"github.com/coder/coder-k8s/internal/aggregated/servingcert"
 	"github.com/coder/coder-k8s/internal/aggregated/storage"
 )
 
@@ -65,6 +66,10 @@ type Options struct {
 	// resolveDelegationKubeconfig. There is no anonymous or allow-all mode.
 	Authentication *genericoptions.DelegatingAuthenticationOptions
 	Authorization  *genericoptions.DelegatingAuthorizationOptions
+	// ServingCert is a test seam. When nil and the production authentication path is used, the
+	// server manages a CA-signed serving certificate in its own namespace if it runs in a cluster,
+	// and falls back to a self-signed localhost certificate otherwise.
+	ServingCert *servingcert.Manager
 }
 
 type errClientProvider struct {
@@ -200,8 +205,13 @@ func NewRecommendedConfig(
 		return nil, fmt.Errorf("assertion failed: recommended config is nil after successful construction")
 	}
 
-	if err := secureServingOptions.MaybeDefaultWithSelfSignedCerts("localhost", []string{"localhost"}, nil); err != nil {
-		return nil, fmt.Errorf("configure self-signed serving certs: %w", err)
+	// A managed serving certificate (see servingcert) is already set as GeneratedCert; only fall
+	// back to an in-memory self-signed localhost certificate without one, because
+	// MaybeDefaultWithSelfSignedCerts would replace it.
+	if secureServingOptions.ServerCert.GeneratedCert == nil {
+		if err := secureServingOptions.MaybeDefaultWithSelfSignedCerts("localhost", []string{"localhost"}, nil); err != nil {
+			return nil, fmt.Errorf("configure self-signed serving certs: %w", err)
+		}
 	}
 	if err := secureServingOptions.WithLoopback().ApplyTo(&recommendedConfig.SecureServing, &recommendedConfig.LoopbackClientConfig); err != nil {
 		return nil, fmt.Errorf("configure secure serving: %w", err)
@@ -360,6 +370,7 @@ func RunWithOptions(ctx context.Context, opts Options) error {
 	secureServingOptions.ServerCert.CertDirectory = ""
 	secureServingOptions.ServerCert.PairName = ""
 
+	servingCert := opts.ServingCert
 	authenticationOptions, authorizationOptions := opts.Authentication, opts.Authorization
 	switch {
 	case authenticationOptions == nil && authorizationOptions == nil:
@@ -369,8 +380,24 @@ func RunWithOptions(ctx context.Context, opts Options) error {
 			return fmt.Errorf("configure aggregated API server: %w", err)
 		}
 		authenticationOptions, authorizationOptions = newDelegatedAuthOptions(kubeconfigPath)
+		if servingCert == nil {
+			servingCert, err = newServingCertManager(kubeconfigPath, serviceAccountNamespaceFile)
+			if err != nil {
+				return fmt.Errorf("configure aggregated API server serving certificate: %w", err)
+			}
+		}
 	case authenticationOptions == nil || authorizationOptions == nil:
 		return fmt.Errorf("assertion failed: authentication and authorization options must be set together")
+	}
+
+	if servingCert != nil {
+		if _, err := servingCert.Ensure(ctx); err != nil {
+			return fmt.Errorf("configure aggregated API server serving certificate: %w", err)
+		}
+		secureServingOptions.ServerCert.GeneratedCert = servingCert
+		go servingCert.Run(ctx, servingcert.DefaultCheckInterval)
+	} else {
+		log.Printf("warning: no managed serving certificate (not running in a Pod); serving a self-signed certificate for localhost")
 	}
 
 	recommendedConfig, err := NewRecommendedConfig(scheme, codecs, secureServingOptions, authenticationOptions, authorizationOptions)
