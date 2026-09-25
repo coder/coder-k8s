@@ -173,6 +173,11 @@ func TestEnsureFillsPlaceholder(t *testing.T) {
 			if stored.Type != SecretType || stored.Labels["kept"] != "yes" {
 				t.Fatalf("fill must keep the placeholder's type and metadata: type %q, labels %v", stored.Type, stored.Labels)
 			}
+			for k, v := range SecretLabels {
+				if stored.Labels[k] != v {
+					t.Fatalf("filled Secret must carry managed label %s=%s like a created one; labels %v", k, v, stored.Labels)
+				}
+			}
 			if _, err := Parse(stored, testNS, time.Now()); err != nil {
 				t.Fatalf("filled Secret must be valid: %v", err)
 			}

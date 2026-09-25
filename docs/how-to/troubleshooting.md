@@ -142,7 +142,11 @@ kubectl -n coder-system delete secret coder-k8s-apiserver-tls
 kubectl -n coder-system rollout restart deployment/coder-k8s
 ```
 
-A read or create error instead of a field name means the ServiceAccount cannot get or create Secrets in its namespace.
+An error without a field name means the ServiceAccount is missing a permission on this Secret. The message says which:
+
+- `get secret …`: it may not read the Secret. Grant `get` on `coder-k8s-apiserver-tls`.
+- `create secret …`: the Secret does not exist and the ServiceAccount may not create Secrets. Grant `create`, or create the empty placeholder that the message describes (the server fills it).
+- `fill placeholder secret …` or `update secret …`: the ServiceAccount may not update the Secret, to fill a placeholder or to renew the serving certificate. Grant `update` on `coder-k8s-apiserver-tls`.
 
 ## Aggregated requests fail with `401 Unauthorized` or `403 Forbidden`
 

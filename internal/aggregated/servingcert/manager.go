@@ -99,6 +99,13 @@ func (m *Manager) Ensure(ctx context.Context) (*Bundle, error) {
 			}
 			filled := secret.DeepCopy()
 			filled.Data = bundle.Data()
+			// Mark it like a created Secret, keeping any labels the placeholder already has.
+			if filled.Labels == nil {
+				filled.Labels = map[string]string{}
+			}
+			for k, v := range SecretLabels {
+				filled.Labels[k] = v
+			}
 			// Without a resourceVersion the update would be unconditional and could replace a CA
 			// that another replica wrote in the meantime.
 			if filled.ResourceVersion == "" {
