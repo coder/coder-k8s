@@ -118,12 +118,45 @@ In a cluster, the aggregated API server serves a certificate signed by its own C
 
 - The server creates the Secret on first start and reuses it afterwards. With several replicas, they all use the same Secret.
 - The serving certificate is valid for 1 year. The server checks it at startup and every 12 hours, and renews it with the same CA when less than a third of its lifetime is left. The new certificate is served without a restart.
-- The CA is valid for 10 years. To replace it, delete the Secret and restart **every** replica (`kubectl -n coder-system rollout restart deployment/coder-k8s`). The first new pod generates a CA and updates the APIService `caBundle`; until the old pods are gone, requests routed to them fail certificate verification, so expect `503 ServiceUnavailable` for several seconds (about 10 seconds with two replicas in testing). Other clients that trusted the old CA must then trust the new one.
+- The CA is valid for 10 years. To replace it earlier (for example after the Secret was exposed), see [Replace the CA](#replace-the-ca).
 - If the Secret exists but is unusable (a missing key, unparsable PEM, a key that does not match its certificate, a serving certificate not signed by the CA, or an expired CA), the server does not start and the log names the field. Fix the Secret or delete it.
 - Outside a cluster (for example `go run`), the server serves a self-signed certificate for `localhost` instead.
 
 !!! warning "The Secret holds the CA private key"
     Anyone who can read Secrets in the server's namespace can issue certificates that the aggregated API server's CA vouches for. Restrict Secret read access in `coder-system` accordingly.
+
+### Replace the CA
+
+Replacing the CA takes a restart of every replica, and requests through kube-apiserver fail with `503 ServiceUnavailable` for several seconds while it happens (about 10 seconds with two replicas in testing). Plan it as a short maintenance window.
+
+1. Note the current CA fingerprint, so you can tell the new one apart:
+
+    ```bash
+    kubectl -n coder-system get secret coder-k8s-apiserver-tls -o jsonpath='{.data.ca\.crt}' |
+      base64 -d | openssl x509 -noout -fingerprint -sha256
+    ```
+
+2. Delete the Secret and restart every replica. Do both: a running replica keeps serving the old certificate until it restarts.
+
+    ```bash
+    kubectl -n coder-system delete secret coder-k8s-apiserver-tls
+    kubectl -n coder-system rollout restart deployment/coder-k8s
+    kubectl -n coder-system rollout status deployment/coder-k8s
+    ```
+
+    The first new replica generates a new CA and sets the APIService `caBundle` to it. Requests that kube-apiserver sends to an old replica fail verification until that replica is gone; that is the `503` window.
+
+3. Check the result. The fingerprint differs from step 1, the APIService `caBundle` equals the Secret's `ca.crt` (the two commands print the same value), and a request through kube-apiserver succeeds:
+
+    ```bash
+    kubectl -n coder-system get secret coder-k8s-apiserver-tls -o jsonpath='{.data.ca\.crt}' |
+      base64 -d | openssl x509 -noout -fingerprint -sha256
+    kubectl -n coder-system get secret coder-k8s-apiserver-tls -o jsonpath='{.data.ca\.crt}'; echo
+    kubectl get apiservice v1alpha1.aggregation.coder.com -o jsonpath='{.spec.caBundle}'; echo
+    kubectl get --raw /apis/aggregation.coder.com/v1alpha1
+    ```
+
+If the APIService is [opted out](#opt-out), the server does not update the `caBundle`: set it to the new `ca.crt` yourself, or requests keep failing with `503`. Clients outside kube-apiserver that pinned the old CA must be given the new one. If requests still fail after the rollout, see [Proxied requests fail with 503 and an x509 error](troubleshooting.md#proxied-requests-fail-with-503-and-an-x509-error).
 
 ## How kube-apiserver trusts the server
 
@@ -135,6 +168,8 @@ kube-apiserver verifies the aggregated API server's certificate against the APIS
 - Without that permission the aggregated API server keeps serving, logs the missing permission (at most every 5 minutes), and retries with backoff up to 60 seconds.
 - On a fresh install, requests through kube-apiserver fail with `503 ServiceUnavailable` for a few seconds, until the first patch. `Available=True` alone does not show that verification works, because kube-apiserver's availability check does not verify the certificate. Check a real request instead: `kubectl get --raw /apis/aggregation.coder.com/v1alpha1`.
 - Running `kubectl apply -f deploy/apiserver-apiservice.yaml` again keeps the injected `caBundle`. Replacing or re-creating the APIService clears it; the aggregated API server sets it again within seconds.
+
+If requests through kube-apiserver fail with `503` while the APIService reports `Available=True`, see [Proxied requests fail with 503 and an x509 error](troubleshooting.md#proxied-requests-fail-with-503-and-an-x509-error).
 
 ### Upgrade from a version that used `insecureSkipTLSVerify`
 
