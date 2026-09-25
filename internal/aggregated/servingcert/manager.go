@@ -92,6 +92,10 @@ func (m *Manager) Ensure(ctx context.Context) (*Bundle, error) {
 			return nil, fmt.Errorf("get secret %s/%s: %w", m.namespace, SecretName, err)
 		}
 
+		if secret.Type == SecretType && len(secret.Data) == 0 && isImmutable(secret) {
+			// Kubernetes forbids data changes on an immutable Secret, so it can never be filled.
+			return nil, corrupt(m.namespace, "empty placeholder is immutable and cannot be filled; recreate it without immutable: true")
+		}
 		if IsPlaceholder(secret) {
 			bundle, genErr := Generate(m.namespace, now)
 			if genErr != nil {

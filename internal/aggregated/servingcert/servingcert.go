@@ -180,7 +180,11 @@ func (b *Bundle) issueServingCert(namespace string, now time.Time) error {
 // IsPlaceholder reports whether secret is an empty placeholder the server may fill: exactly the
 // managed type and zero data keys. Anything else is parsed, and invalid material stays corrupt.
 func IsPlaceholder(secret *corev1.Secret) bool {
-	return secret != nil && secret.Type == SecretType && len(secret.Data) == 0
+	return secret != nil && secret.Type == SecretType && len(secret.Data) == 0 && !isImmutable(secret)
+}
+
+func isImmutable(secret *corev1.Secret) bool {
+	return secret.Immutable != nil && *secret.Immutable
 }
 
 // Parse validates the Secret's trust material. Each failure names the field that is wrong.

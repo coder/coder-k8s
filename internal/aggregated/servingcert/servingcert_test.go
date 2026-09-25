@@ -238,11 +238,13 @@ func TestEnsureRejectsNonPlaceholderSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	immutable := true
 	tests := []struct {
 		name   string
 		secret corev1.Secret
 		want   string
 	}{
+		{"immutable empty placeholder", corev1.Secret{Type: SecretType, Immutable: &immutable}, "placeholder is immutable"},
 		{"opaque with no data", corev1.Secret{Type: corev1.SecretTypeOpaque}, `type is "Opaque"`},
 		{"no type with no data", corev1.Secret{}, `type is ""`},
 		{"TLS with no data", corev1.Secret{Type: corev1.SecretTypeTLS, Data: map[string][]byte{}}, `type is "kubernetes.io/tls"`},
@@ -639,3 +641,13 @@ func selfSignedCA(t *testing.T, notBefore, notAfter time.Time) ([]byte, []byte) 
 type countingListener struct{ count atomic.Int32 }
 
 func (l *countingListener) Enqueue() { l.count.Add(1) }
+
+func TestIsPlaceholderExcludesImmutable(t *testing.T) {
+	immutable, mutable := true, false
+	if IsPlaceholder(&corev1.Secret{Type: SecretType, Immutable: &immutable}) {
+		t.Fatal("an immutable Secret can never be filled, so it is not a placeholder")
+	}
+	if !IsPlaceholder(&corev1.Secret{Type: SecretType, Immutable: &mutable}) {
+		t.Fatal("immutable: false is still a placeholder")
+	}
+}
