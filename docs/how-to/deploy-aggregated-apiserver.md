@@ -26,22 +26,34 @@ kubectl apply -f deploy/deployment.yaml
 
 Run only the aggregated API server (`--app=aggregated-apiserver`) and point it at a Coder instance yourself.
 
-Deploy, then set the backend:
+Save the Coder session token in a file, for example `./coder-session-token`. Store it in a Secret, deploy, then set the backend:
 
 ```bash
+kubectl -n coder-system create secret generic coder-k8s-session-token \
+  --from-file=token=./coder-session-token
+
 kubectl apply -f deploy/deployment.yaml
 
 kubectl -n coder-system patch deployment coder-k8s --type=json -p '[{
+  "op": "add",
+  "path": "/spec/template/spec/containers/0/env",
+  "value": [{
+    "name": "CODER_SESSION_TOKEN",
+    "valueFrom": {"secretKeyRef": {"name": "coder-k8s-session-token", "key": "token"}}
+  }]
+}, {
   "op": "add",
   "path": "/spec/template/spec/containers/0/args",
   "value": [
     "--app=aggregated-apiserver",
     "--coder-url=https://coder.example.com",
-    "--coder-session-token=replace-me",
+    "--coder-session-token=$(CODER_SESSION_TOKEN)",
     "--coder-namespace=coder-system"
   ]
 }]'
 ```
+
+Kubernetes replaces `$(CODER_SESSION_TOKEN)` with the value from the Secret when it starts the container, so the Deployment holds only a reference to the Secret, not the token. Keep the single quotes so that your shell does not expand it.
 
 Standalone mode serves health checks over HTTPS on port `6443`. Update the probes:
 
