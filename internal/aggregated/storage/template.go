@@ -681,30 +681,12 @@ func (s *TemplateStorage) Update(
 				return nil, false, apierrors.NewBadRequest(fmt.Sprintf("invalid template spec.files: %v", err))
 			}
 
-			uploadResponse, err := sdk.Upload(ctx, codersdk.ContentTypeZip, bytes.NewReader(zipBytes))
+			// Retries with the same source reuse the attempt an earlier request started (#117).
+			newVersion, err := ensureTemplateVersionForUpdate(
+				ctx, sdk, currentTemplate.Spec.Organization, templateID, name, zipBytes,
+			)
 			if err != nil {
-				return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
-			}
-			if uploadResponse.ID == uuid.Nil {
-				return nil, false, fmt.Errorf("assertion failed: uploaded file ID must not be nil")
-			}
-
-			org, err := sdk.OrganizationByName(ctx, currentTemplate.Spec.Organization)
-			if err != nil {
-				return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
-			}
-
-			newVersion, err := sdk.CreateTemplateVersion(ctx, org.ID, codersdk.CreateTemplateVersionRequest{
-				TemplateID:    templateID,
-				StorageMethod: codersdk.ProvisionerStorageMethodFile,
-				FileID:        uploadResponse.ID,
-				Provisioner:   codersdk.ProvisionerTypeTerraform,
-			})
-			if err != nil {
-				return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
-			}
-			if newVersion.ID == uuid.Nil {
-				return nil, false, fmt.Errorf("assertion failed: new template version ID must not be nil")
+				return nil, false, err
 			}
 
 			if waitErr := waitForTemplateVersionBuild(ctx, sdk, newVersion.ID); waitErr != nil {

@@ -149,7 +149,7 @@ For a `CoderTemplate` with `spec.files`, the server waits for Coder to finish im
 - **Update** with changed files waits the same way before making the new version active. Metadata changes in the same request (`displayName`, `description`, `icon`) are applied only after that. If the template changed in Coder during the wait, the Update returns `409 Conflict` and changes nothing.
 - **Create without `spec.files`** does not wait.
 
-If the import fails, times out, or the request is cancelled, Create creates no template and Update changes nothing (neither the source nor the metadata). The uploaded file and template version stay in Coder; they are not deleted or cancelled.
+If the import fails, times out, or the request is cancelled, Create creates no template and Update changes nothing (neither the source nor the metadata). The exception is an import that finishes just before a timeout; see [The 34-second write budget](#the-34-second-write-budget). The uploaded file and template version stay in Coder; they are not deleted or cancelled.
 
 ### The 34-second write budget
 
@@ -161,13 +161,33 @@ When the budget runs out:
 
 - The client gets `504 Gateway Timeout`. The message is usually `request did not complete within requested timeout - context deadline exceeded`, but it can also be the server's own template import timeout message.
 - Usually, Create creates no template and Update does not activate the new version. But if the import finishes just before the deadline, Coder can still create the template or activate the version while the client gets the `504`. The final state after a `504` is not certain, so re-read the template with `kubectl get` before you retry.
-- If the upload or the version creation had already finished, the file or the template version stays in Coder. If the request timed out while still waiting for the import, the import keeps running and can still succeed, but nothing uses it.
+- If the upload or the version creation had already finished, the file or the template version stays in Coder. If the request timed out while still waiting for the import, the import keeps running and can still succeed. For Create, nothing uses it. For Update, a retry with the same files picks it up (see [Update retries](#update-retries)).
 
-!!! warning "Retries are not idempotent"
-    Each retry creates another template version and starts another import. Coder reuses an identical uploaded file, but not the version. If the import takes longer than the budget, every retry times out again, even after an earlier import has succeeded. An Update that timed out while waiting for the import never activates its version later. If your client gave up before the server answered, re-read the template before retrying.
+!!! warning "Create retries are not idempotent"
+    Each Create retry creates another template version and starts another import. Coder reuses an identical uploaded file, but not the version. If the import takes longer than the budget, every retry times out again, even after an earlier import has succeeded. If your client gave up before the server answered, re-read the template before retrying.
+
+#### Update retries
+
+An Update with changed files names its template version after the template and the exact source: `k8s-` followed by 20 hex digits. It uploads the files first; Coder returns the existing file for identical bytes from the same Coder user. Then it looks for the latest attempt with that name. An attempt counts only if it was built from that same uploaded file:
+
+| Latest attempt with that name | What the Update does |
+| --- | --- |
+| None | Creates the version with that name. |
+| Pending or running, same file | Waits for it. No new version. |
+| Succeeded, not archived, same file | Activates it. |
+| Failed, canceled, canceling, or archived, or built from a different file | Creates the next attempt, named `<name>-2`, then `<name>-3`, and so on. |
+
+Retrying the same Update therefore converges on one import. If the import takes longer than the budget, each retry waits for that same import and gets `504` while it runs. The retry that is waiting when it succeeds, or the first retry after that, activates it and returns `200`. This also works after the aggregated API server restarts, because the name is computed from the request. If two requests create the same attempt at the same time, Coder rejects the second one, and that request waits for the first one's version.
+
+- A retry must send the same files. The name also covers files in the active version that `spec.files` does not list, so if the active version changes between retries, a new import starts.
+- `kubectl apply` re-reads the template on each run, so running it again is a valid retry. A client that sends an old `resourceVersion` again gets `409 Conflict` once the template has changed, for example after a late activation.
+- Finding the attempt takes a few lookups per request, at most 48. If that is not enough, the request fails with `503 Service Unavailable`; the next request starts over. If the request's deadline passes during the lookups, it fails with `504`. In both cases no template version or import is created, but the uploaded file can remain in Coder.
+- Retries converge only while the `k8s-…` versions are not renamed or otherwise changed outside coder-k8s. Renaming one can make a later retry start another import.
+- Any Coder user who can edit the template can create or rename a version, so the name alone is not trusted. A version with that name but other source, or one created by another Coder user (whose upload has its own file ID), is never reused.
+- Versions created before this behavior have random names and are never reused.
 
 !!! tip "Keep template imports fast"
-    Imports that take longer than the budget cannot complete through this API today. Keep the import well under 34 seconds. Follow [issue #117](https://github.com/coder/coder-k8s/issues/117) for changes to this behavior.
+    Create cannot complete an import that takes longer than the budget. Update can, through retries. Keep imports well under 34 seconds where you can. Follow [issue #117](https://github.com/coder/coder-k8s/issues/117) for changes to this behavior.
 
 ### Tuning
 
@@ -178,7 +198,7 @@ Set these environment variables on the `coder-k8s` Deployment:
 | `CODER_K8S_TEMPLATE_BUILD_WAIT_TIMEOUT` | `25m` | Upper limit for the import wait. Must be greater than `0`, at most `30m`, and at least `CODER_K8S_TEMPLATE_BUILD_BACKOFF_AFTER`. Values above the 34-second budget are allowed but do not extend the wait. |
 | `CODER_K8S_TEMPLATE_BUILD_BACKOFF_AFTER` | `2m` | Poll at the initial interval for this long, then back off. `0` turns backoff off, so the interval never grows. Must be `0` or more and at most the wait timeout. |
 | `CODER_K8S_TEMPLATE_BUILD_INITIAL_POLL_INTERVAL` | `2s` | Poll interval before backoff. Must be greater than `0`. |
-| `CODER_K8S_TEMPLATE_BUILD_MAX_POLL_INTERVAL` | `10s` | Backoff doubles the interval up to this value. Must be at least the initial poll interval. |
+| `CODER_K8S_TEMPLATE_BUILD_MAX_POLL_INTERVAL` | `10s` | Backoff doubles the interval up to this value. Must be greater than `0` and at least the initial poll interval. |
 
 The aggregated API server's request timeout defaults to `30m`. Neither that timeout nor `CODER_K8S_TEMPLATE_BUILD_WAIT_TIMEOUT` can extend a write request beyond the 34-second budget. The wait fails if the version build ends `failed` or `canceled`, or if the budget or the wait timeout runs out.
 
