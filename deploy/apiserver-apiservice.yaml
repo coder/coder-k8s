@@ -10,4 +10,3 @@ spec:
     namespace: coder-system
   groupPriorityMinimum: 1000
   versionPriority: 100
-  insecureSkipTLSVerify: true

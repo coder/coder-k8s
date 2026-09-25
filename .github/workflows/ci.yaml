@@ -320,6 +320,30 @@ jobs:
           kubectl wait --for=condition=Available deploy/coder-k8s -n coder-system --timeout=120s
           kubectl wait --for=condition=Available apiservice/v1alpha1.aggregation.coder.com --timeout=180s
 
+      # The aggregated API server sets the APIService caBundle from its CA Secret and turns
+      # insecureSkipTLSVerify off shortly after it starts (Available can be False until then).
+      - name: Verify the APIService trusts the serving CA
+        if: env.E2E_FULL == 'true'
+        run: |
+          set -euo pipefail
+          apisvc=apiservice/v1alpha1.aggregation.coder.com
+          want="" have="" insecure=""
+          for _ in $(seq 1 60); do
+            want=$(kubectl -n coder-system get secret coder-k8s-apiserver-tls -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)
+            have=$(kubectl get "$apisvc" -o jsonpath='{.spec.caBundle}')
+            insecure=$(kubectl get "$apisvc" -o jsonpath='{.spec.insecureSkipTLSVerify}')
+            if [[ -n $want && $have == "$want" && -z $insecure ]]; then
+              break
+            fi
+            sleep 2
+          done
+          if [[ -z $want || $have != "$want" || -n $insecure ]]; then
+            echo "assertion failed: APIService caBundle does not match the serving CA Secret (insecureSkipTLSVerify='$insecure')" >&2
+            kubectl get "$apisvc" -o yaml >&2
+            exit 1
+          fi
+          kubectl wait --for=condition=Available "$apisvc" --timeout=180s
+
       - name: Install CloudNativePG operator
         if: env.E2E_FULL == 'true'
         run: |
@@ -429,6 +453,40 @@ jobs:
           E2E_SOURCE_SHA: ${{ steps.source.outputs.sha }}
           E2E_WORKDIR: ${{ runner.temp }}/workspace-lifecycle
         run: bash ./hack/e2e-workspace-lifecycle.sh
+
+      # Last functional step: with the sync's permission revoked (so it cannot repair the value),
+      # a wrong caBundle makes the APIService unavailable with an x509 error; restoring the
+      # permission lets the sync put the right CA back (retries back off to at most 60s).
+      - name: Verify the APIService rejects a wrong CA
+        if: env.E2E_FULL == 'true'
+        run: |
+          set -euo pipefail
+          apisvc=apiservice/v1alpha1.aggregation.coder.com
+          can_patch() {
+            kubectl auth can-i patch apiservices.apiregistration.k8s.io/v1alpha1.aggregation.coder.com \
+              --as=system:serviceaccount:coder-system:coder-k8s 2>/dev/null || true
+          }
+          kubectl delete clusterrolebinding coder-k8s-apiservice-cabundle
+          for _ in $(seq 1 30); do
+            [[ $(can_patch) == no ]] && break
+            sleep 1
+          done
+          test "$(can_patch)" = no
+          wrong=$(openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout /dev/null \
+            -days 1 -subj /CN=e2e-wrong-ca 2>/dev/null | base64 -w0)
+          kubectl patch "$apisvc" --type=merge -p "{\"spec\":{\"caBundle\":\"$wrong\"}}"
+          kubectl wait --for=condition=Available=False "$apisvc" --timeout=120s
+          msg=$(kubectl get "$apisvc" -o jsonpath='{.status.conditions[?(@.type=="Available")].message}')
+          echo "$msg"
+          grep -q x509 <<<"$msg"
+          if kubectl -n coder get codertemplates.aggregation.coder.com; then
+            echo "assertion failed: aggregated API still served with a wrong caBundle" >&2
+            exit 1
+          fi
+          kubectl apply -f config/rbac/apiservice-cabundle-role.yaml
+          kubectl wait --for=condition=Available "$apisvc" --timeout=180s
+          test "$(kubectl get "$apisvc" -o jsonpath='{.spec.caBundle}')" = \
+            "$(kubectl -n coder-system get secret coder-k8s-apiserver-tls -o jsonpath='{.data.ca\.crt}')"
 
       # ---- Failure diagnostics ----
       - name: Dump cluster state on failure

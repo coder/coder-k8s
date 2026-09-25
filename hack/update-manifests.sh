@@ -29,7 +29,7 @@ list_manifests() {
 }
 
 # RBAC manifests that only the aggregated API server needs; the controller-only install bundle leaves them out.
-BUNDLE_EXCLUDED_RBAC=(auth-delegator-binding.yaml authentication-reader-binding.yaml)
+BUNDLE_EXCLUDED_RBAC=(apiservice-cabundle-role.yaml auth-delegator-binding.yaml authentication-reader-binding.yaml)
 
 # write_default_kustomization lists every generated CRD and RBAC file individually, so the install bundle
 # picks up new files automatically without placing kustomization files in the directories above. The bundle

@@ -56,7 +56,8 @@
     "portforward",
     "livez",
     "requestheader",
-    "subjectaccessreviews"
+    "subjectaccessreviews",
+    "cabundle"
   ],
   "ignorePaths": [
     ".git/**",

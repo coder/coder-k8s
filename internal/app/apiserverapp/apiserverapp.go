@@ -30,6 +30,7 @@ import (
 	"k8s.io/kube-openapi/pkg/validation/spec"
 
 	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
+	"github.com/coder/coder-k8s/internal/aggregated/apiservicetrust"
 	"github.com/coder/coder-k8s/internal/aggregated/coder"
 	"github.com/coder/coder-k8s/internal/aggregated/servingcert"
 	"github.com/coder/coder-k8s/internal/aggregated/storage"
@@ -70,6 +71,9 @@ type Options struct {
 	// server manages a CA-signed serving certificate in its own namespace if it runs in a cluster,
 	// and falls back to a self-signed localhost certificate otherwise.
 	ServingCert *servingcert.Manager
+	// CABundleSync is a test seam. It keeps the APIService caBundle trusting ServingCert's CA; the
+	// production path creates it together with the managed serving certificate.
+	CABundleSync *apiservicetrust.Controller
 }
 
 type errClientProvider struct {
@@ -370,7 +374,7 @@ func RunWithOptions(ctx context.Context, opts Options) error {
 	secureServingOptions.ServerCert.CertDirectory = ""
 	secureServingOptions.ServerCert.PairName = ""
 
-	servingCert := opts.ServingCert
+	servingCert, caBundleSync := opts.ServingCert, opts.CABundleSync
 	authenticationOptions, authorizationOptions := opts.Authentication, opts.Authorization
 	switch {
 	case authenticationOptions == nil && authorizationOptions == nil:
@@ -381,9 +385,12 @@ func RunWithOptions(ctx context.Context, opts Options) error {
 		}
 		authenticationOptions, authorizationOptions = newDelegatedAuthOptions(kubeconfigPath)
 		if servingCert == nil {
-			servingCert, err = newServingCertManager(kubeconfigPath, serviceAccountNamespaceFile)
+			tlsSetup, err := newManagedTLS(kubeconfigPath, serviceAccountNamespaceFile)
 			if err != nil {
 				return fmt.Errorf("configure aggregated API server serving certificate: %w", err)
+			}
+			if tlsSetup != nil {
+				servingCert, caBundleSync = tlsSetup.manager, tlsSetup.sync
 			}
 		}
 	case authenticationOptions == nil || authorizationOptions == nil:
@@ -396,6 +403,11 @@ func RunWithOptions(ctx context.Context, opts Options) error {
 		}
 		secureServingOptions.ServerCert.GeneratedCert = servingCert
 		go servingCert.Run(ctx, servingcert.DefaultCheckInterval)
+		if caBundleSync != nil {
+			// CA changes reach the APIService without polling; failures never stop serving.
+			servingCert.AddListener(caBundleSync)
+			go caBundleSync.Run(ctx)
+		}
 	} else {
 		log.Printf("warning: no managed serving certificate (not running in a Pod); serving a self-signed certificate for localhost")
 	}

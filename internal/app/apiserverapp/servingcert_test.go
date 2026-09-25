@@ -3,6 +3,7 @@ package apiserverapp
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -16,8 +17,13 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"github.com/coder/coder-k8s/internal/aggregated/apiservicetrust"
 	"github.com/coder/coder-k8s/internal/aggregated/servingcert"
 )
 
@@ -127,30 +133,30 @@ func TestRunWithOptionsFailsOnCorruptServingCertSecret(t *testing.T) {
 	}
 }
 
-func TestNewServingCertManager(t *testing.T) {
+func TestNewManagedTLS(t *testing.T) {
 	dir := t.TempDir()
-	if m, err := newServingCertManager("", filepath.Join(dir, "absent")); err != nil || m != nil {
-		t.Fatalf("outside a Pod: manager=%v err=%v, want nil, nil", m, err)
+	if m, err := newManagedTLS("", filepath.Join(dir, "absent")); err != nil || m != nil {
+		t.Fatalf("outside a Pod: setup=%v err=%v, want nil, nil", m, err)
 	}
 	empty := filepath.Join(dir, "empty")
 	mustWrite(t, empty, " \n")
-	if _, err := newServingCertManager("", empty); err == nil || !strings.Contains(err.Error(), "is empty") {
+	if _, err := newManagedTLS("", empty); err == nil || !strings.Contains(err.Error(), "is empty") {
 		t.Fatalf("expected empty namespace file error, got %v", err)
 	}
 	nsFile := filepath.Join(dir, "namespace")
 	mustWrite(t, nsFile, servingTestNS+"\n")
-	if _, err := newServingCertManager(filepath.Join(dir, "no-kubeconfig"), nsFile); err == nil || !strings.Contains(err.Error(), "client config") {
+	if _, err := newManagedTLS(filepath.Join(dir, "no-kubeconfig"), nsFile); err == nil || !strings.Contains(err.Error(), "client config") {
 		t.Fatalf("expected client config error, got %v", err)
 	}
-	m, err := newServingCertManager(newFakeKubeAPI(t).kubeconfigPath, nsFile)
-	if err != nil || m == nil {
-		t.Fatalf("in a Pod: manager=%v err=%v", m, err)
+	m, err := newManagedTLS(newFakeKubeAPI(t).kubeconfigPath, nsFile)
+	if err != nil || m == nil || m.manager == nil || m.sync == nil {
+		t.Fatalf("in a Pod: setup=%+v err=%v; want both the certificate manager and the caBundle sync", m, err)
 	}
-	if !strings.Contains(m.Name(), servingTestNS+"/"+servingcert.SecretName) {
-		t.Fatalf("manager must target %s/%s, got %s", servingTestNS, servingcert.SecretName, m.Name())
+	if !strings.Contains(m.manager.Name(), servingTestNS+"/"+servingcert.SecretName) {
+		t.Fatalf("manager must target %s/%s, got %s", servingTestNS, servingcert.SecretName, m.manager.Name())
 	}
 	if err := os.Chmod(nsFile, 0o000); err == nil && os.Geteuid() != 0 {
-		if _, err := newServingCertManager("", nsFile); err == nil || !strings.Contains(err.Error(), "read pod namespace") {
+		if _, err := newManagedTLS("", nsFile); err == nil || !strings.Contains(err.Error(), "read pod namespace") {
 			t.Fatalf("expected read error, got %v", err)
 		}
 	}
@@ -199,4 +205,73 @@ func waitForHealthz(t *testing.T, addr string, caPEM []byte, serverName string) 
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// TestRunWithOptionsKeepsAPIServiceCABundleInSync checks the wiring: the caBundle sync starts with
+// the managed certificate and follows CA changes signalled by the certificate manager.
+func TestRunWithOptionsKeepsAPIServiceCABundleInSync(t *testing.T) {
+	client := fake.NewClientset()
+	manager := ensuredManager(t, client)
+	apiService := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apiregistration.k8s.io/v1", "kind": "APIService",
+		"metadata": map[string]any{"name": apiservicetrust.APIServiceName},
+		"spec":     map[string]any{"insecureSkipTLSVerify": true},
+	}}
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{apiservicetrust.APIServiceGVR: "APIServiceList"}, apiService)
+	sync, err := apiservicetrust.New(dyn, client, servingTestNS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, listener := newTestSecureServing(t)
+	authn, authz := newFakeKubeAPI(t).options(false)
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunWithOptions(ctx, Options{Listener: listener, Authentication: authn, Authorization: authz, ServingCert: manager, CABundleSync: sync})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-errCh:
+		case <-time.After(10 * time.Second):
+			t.Error("timed out waiting for server shutdown")
+		}
+	})
+	caBundle := func() string {
+		u, err := dyn.Resource(apiservicetrust.APIServiceGVR).Get(context.Background(), apiservicetrust.APIServiceName, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		v, _, _ := unstructured.NestedString(u.Object, "spec", "caBundle")
+		return v
+	}
+	waitFor := func(what, want string) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for caBundle() != want {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s", what)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	waitFor("initial caBundle", base64.StdEncoding.EncodeToString(manager.CABundle()))
+
+	rotated, err := servingcert.Generate(servingTestNS, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, err := client.CoreV1().Secrets(servingTestNS).Get(ctx, servingcert.SecretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret.Data = rotated.Data()
+	if _, err := client.CoreV1().Secrets(servingTestNS).Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Ensure(ctx); err != nil { // adopts the new CA and notifies listeners
+		t.Fatal(err)
+	}
+	waitFor("rotated caBundle", base64.StdEncoding.EncodeToString(rotated.CACertPEM))
 }
