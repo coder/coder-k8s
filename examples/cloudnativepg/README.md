@@ -36,7 +36,7 @@ kubectl apply -f deploy/deployment.yaml
 kubectl rollout status deployment/coder-k8s -n coder-system
 ```
 
-`deploy/deployment.yaml` defaults to `--app=all`, which runs the controller, aggregated API server, and MCP server in a single pod. For split deployments, you can set `--app=controller`, `--app=aggregated-apiserver`, or `--app=mcp-http` in the Deployment args.
+`deploy/deployment.yaml` defaults to `--app=all`, which runs the controller and aggregated API server in a single pod. The MCP server never runs in `--app=all`; see [Run the MCP server](../../docs/how-to/mcp-server.md). For split deployments, you can set `--app=controller`, `--app=aggregated-apiserver`, or `--app=mcp-http` in the Deployment args.
 
 ## 3. Deploy this example
 

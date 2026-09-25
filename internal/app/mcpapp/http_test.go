@@ -18,6 +18,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// testToken is a fixed, non-secret test credential of the minimum accepted length.
+const testToken = "test-token-0123456789abcdef-0123456789"
+
 const workspaceCall = `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"set_workspace_running","arguments":{"namespace":"default","name":"dev","running":true}}}`
 
 func TestHTTPTransportSecurity(t *testing.T) {
@@ -76,6 +79,7 @@ func TestHTTPTransportSecurity(t *testing.T) {
 					t.Fatal(err)
 				}
 				req.Header.Set("Mcp-Session-Id", sessionID)
+				req.Header.Set("Authorization", "Bearer "+testToken)
 				resp, err := server.Client().Do(req)
 				if err != nil {
 					t.Errorf("delete session: %v", err)
@@ -134,7 +138,7 @@ func TestHTTPTransportSDKClient(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
-	session, err := mcpClient.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: server.URL + "/mcp", HTTPClient: server.Client()}, nil)
+	session, err := mcpClient.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: server.URL + "/mcp", HTTPClient: tokenHTTPClient(server, testToken)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,12 +165,8 @@ func newHTTPTestServer(t *testing.T, podAddress bool) (*observedHTTPClient, *htt
 	k8sClient := &observedHTTPClient{Client: mustNewFakeClient(t, &aggregationv1alpha1.CoderWorkspace{
 		ObjectMeta: metav1.ObjectMeta{Name: "dev", Namespace: "default"},
 	})}
-	handler := newMCPHTTPHandler(NewServer(k8sClient, k8sfake.NewClientset()))
+	handler := newMCPHTTPMux(newMCPHTTPHandler(NewServer(k8sClient, k8sfake.NewClientset())), []byte(testToken))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/mcp" {
-			http.NotFound(w, r)
-			return
-		}
 		if podAddress {
 			// Model net/http's Pod-side local address without opening a non-loopback
 			// listener or contacting a cluster. This is not a Kubernetes network test.
@@ -184,9 +184,17 @@ func newHTTPTestServer(t *testing.T, podAddress bool) (*observedHTTPClient, *htt
 
 func postMCP(ctx context.Context, t *testing.T, server *httptest.Server, sessionID, host, origin, fetchSite, contentType, body string) (int, http.Header, string) {
 	t.Helper()
+	return postMCPWithAuth(ctx, t, server, "Bearer "+testToken, sessionID, host, origin, fetchSite, contentType, body)
+}
+
+func postMCPWithAuth(ctx context.Context, t *testing.T, server *httptest.Server, authorization, sessionID, host, origin, fetchSite, contentType, body string) (int, http.Header, string) {
+	t.Helper()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/mcp", strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
 	}
 	req.Host = host
 	req.Header.Set("Accept", "application/json, text/event-stream")

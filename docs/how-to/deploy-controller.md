@@ -41,10 +41,10 @@ kubectl get codercontrolplanes -A
 
 ## Want everything instead?
 
-Skip the `kubectl patch` step to keep `--app=all`, and apply the extra Services:
+Skip the `kubectl patch` step to keep `--app=all` (operator plus aggregated API server), and register the aggregated API:
 
 ```bash
-kubectl apply -f deploy/apiserver-service.yaml -f deploy/apiserver-apiservice.yaml -f deploy/mcp-service.yaml
+kubectl apply -f deploy/apiserver-service.yaml -f deploy/apiserver-apiservice.yaml
 ```
 
 ## Connect an external PostgreSQL database

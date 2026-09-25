@@ -36,6 +36,7 @@ func run(args []string) error {
 		coderSessionToken   string
 		coderNamespace      string
 		coderRequestTimeout time.Duration
+		mcpTokenFile        string
 	)
 	fs.StringVar(&appMode, "app", "all", "Application mode (all, controller, aggregated-apiserver, mcp-http)")
 	fs.StringVar(
@@ -62,6 +63,12 @@ func run(args []string) error {
 		30*time.Second,
 		"Timeout for Coder SDK API requests",
 	)
+	fs.StringVar(
+		&mcpTokenFile,
+		"mcp-token-file",
+		"",
+		"Path to a file holding the bearer token that every MCP HTTP request must present (required for --app=mcp-http)",
+	)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -83,6 +90,10 @@ func run(args []string) error {
 		}
 	}
 
+	if mcpTokenFile != "" && appMode != "mcp-http" {
+		return fmt.Errorf("--mcp-token-file is only used with --app=mcp-http; --app=%s does not run the MCP server", appMode)
+	}
+
 	switch appMode {
 	case "all":
 		return runAllApp(setupSignalHandler(), coderRequestTimeout)
@@ -97,7 +108,7 @@ func run(args []string) error {
 		}
 		return runAggregatedAPIServerApp(setupSignalHandler(), opts)
 	case "mcp-http":
-		return runMCPHTTPApp(setupSignalHandler())
+		return runMCPHTTPApp(setupSignalHandler(), mcpTokenFile)
 	default:
 		return fmt.Errorf("assertion failed: unsupported --app value %q; must be one of: %s", appMode, supportedAppModes)
 	}

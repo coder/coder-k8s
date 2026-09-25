@@ -52,7 +52,11 @@
     "pooler",
     "finalizer",
     "superfences",
-    "tolerations"
+    "tolerations",
+    "portforward",
+    "livez",
+    "requestheader",
+    "subjectaccessreviews"
   ],
   "ignorePaths": [
     ".git/**",

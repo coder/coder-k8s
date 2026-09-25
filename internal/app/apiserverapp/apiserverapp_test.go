@@ -215,7 +215,8 @@ func TestInstallAPIGroupRegistersDiscovery(t *testing.T) {
 	secureServingOptions.ServerCert.CertDirectory = ""
 	secureServingOptions.ServerCert.PairName = ""
 
-	recommendedConfig, err := NewRecommendedConfig(scheme, codecs, secureServingOptions)
+	authn, authz := newFakeKubeAPI(t).options(false)
+	recommendedConfig, err := NewRecommendedConfig(scheme, codecs, secureServingOptions, authn, authz)
 	if err != nil {
 		t.Fatalf("build recommended config: %v", err)
 	}
@@ -304,7 +305,8 @@ func TestNewRecommendedConfigSetsExtendedRequestTimeout(t *testing.T) {
 	secureServingOptions.ServerCert.CertDirectory = ""
 	secureServingOptions.ServerCert.PairName = ""
 
-	recommendedConfig, err := NewRecommendedConfig(scheme, codecs, secureServingOptions)
+	authn, authz := newFakeKubeAPI(t).options(false)
+	recommendedConfig, err := NewRecommendedConfig(scheme, codecs, secureServingOptions, authn, authz)
 	if err != nil {
 		t.Fatalf("build recommended config: %v", err)
 	}
@@ -417,6 +419,7 @@ func TestRunWithOptionsUsesClientProviderOverride(t *testing.T) {
 		t.Fatalf("build static client provider: %v", err)
 	}
 
+	authn, authz := newFakeKubeAPI(t).options(false)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -426,6 +429,8 @@ func TestRunWithOptionsUsesClientProviderOverride(t *testing.T) {
 			Listener:       listener,
 			CoderURL:       "https://coder.example.com",
 			ClientProvider: provider,
+			Authentication: authn,
+			Authorization:  authz,
 		})
 	}()
 
@@ -491,9 +496,10 @@ func TestRunWithOptionsStartsWithMissingCoderConfig(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	authn, authz := newFakeKubeAPI(t).options(false)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- RunWithOptions(ctx, Options{Listener: listener})
+		errCh <- RunWithOptions(ctx, Options{Listener: listener, Authentication: authn, Authorization: authz})
 	}()
 
 	select {

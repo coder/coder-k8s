@@ -3,10 +3,12 @@ package apiserverapp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -18,8 +20,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apiserver/pkg/authentication/request/anonymous"
-	"k8s.io/apiserver/pkg/authorization/authorizerfactory"
 	apiserveropenapi "k8s.io/apiserver/pkg/endpoints/openapi"
 	"k8s.io/apiserver/pkg/registry/rest"
 	genericapiserver "k8s.io/apiserver/pkg/server"
@@ -60,6 +60,11 @@ type Options struct {
 	// ClientProvider overrides the default static provider.
 	// When set, CoderURL/CoderSessionToken/CoderNamespace flags are ignored.
 	ClientProvider coder.ClientProvider
+	// Authentication and Authorization are test seams. When both are nil, the server uses
+	// delegated authentication and authorization against the Kubernetes API resolved by
+	// resolveDelegationKubeconfig. There is no anonymous or allow-all mode.
+	Authentication *genericoptions.DelegatingAuthenticationOptions
+	Authorization  *genericoptions.DelegatingAuthorizationOptions
 }
 
 type errClientProvider struct {
@@ -168,17 +173,26 @@ func NewScheme() *runtime.Scheme {
 	return scheme
 }
 
-// NewRecommendedConfig builds a recommended generic API server config.
+// NewRecommendedConfig builds a recommended generic API server config with delegated
+// authentication and authorization.
 func NewRecommendedConfig(
 	scheme *runtime.Scheme,
 	codecs serializer.CodecFactory,
 	secureServingOptions *genericoptions.SecureServingOptions,
+	authenticationOptions *genericoptions.DelegatingAuthenticationOptions,
+	authorizationOptions *genericoptions.DelegatingAuthorizationOptions,
 ) (*genericapiserver.RecommendedConfig, error) {
 	if scheme == nil {
 		return nil, fmt.Errorf("assertion failed: scheme must not be nil")
 	}
 	if secureServingOptions == nil {
 		return nil, fmt.Errorf("assertion failed: secure serving options must not be nil")
+	}
+	if authenticationOptions == nil || authorizationOptions == nil {
+		return nil, fmt.Errorf("assertion failed: delegated authentication and authorization options must not be nil")
+	}
+	if authenticationOptions.RemoteKubeConfigFile != authorizationOptions.RemoteKubeConfigFile {
+		return nil, fmt.Errorf("assertion failed: delegated authentication and authorization must use the same Kubernetes API authority")
 	}
 
 	recommendedConfig := genericapiserver.NewRecommendedConfig(codecs)
@@ -199,21 +213,34 @@ func NewRecommendedConfig(
 		return nil, fmt.Errorf("assertion failed: loopback client config is nil after successful ApplyTo")
 	}
 
-	authz := authorizerfactory.NewAlwaysAllowAuthorizer()
-	recommendedConfig.Authentication = genericapiserver.AuthenticationInfo{
-		Authenticator: anonymous.NewAuthenticator(nil),
-	}
-	recommendedConfig.Authorization = genericapiserver.AuthorizationInfo{
-		Authorizer: authz,
-	}
-	recommendedConfig.RuleResolver = authz
-	recommendedConfig.EffectiveVersion = apiservercompatibility.DefaultBuildEffectiveVersion()
-	recommendedConfig.SkipOpenAPIInstallation = true
-	recommendedConfig.RequestTimeout = defaultRequestTimeout
-
 	definitionNamer := apiserveropenapi.NewDefinitionNamer(scheme)
 	recommendedConfig.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(getOpenAPIDefinitions, definitionNamer)
 	recommendedConfig.OpenAPIV3Config = genericapiserver.DefaultOpenAPIV3Config(getOpenAPIDefinitions, definitionNamer)
+
+	if errs := authenticationOptions.Validate(); len(errs) > 0 {
+		return nil, fmt.Errorf("validate delegated authentication options: %w", errors.Join(errs...))
+	}
+	if errs := authorizationOptions.Validate(); len(errs) > 0 {
+		return nil, fmt.Errorf("validate delegated authorization options: %w", errors.Join(errs...))
+	}
+	if err := authenticationOptions.ApplyTo(&recommendedConfig.Authentication, recommendedConfig.SecureServing, recommendedConfig.OpenAPIConfig); err != nil {
+		return nil, fmt.Errorf("configure delegated authentication: %w", err)
+	}
+	if err := authorizationOptions.ApplyTo(&recommendedConfig.Authorization); err != nil {
+		return nil, fmt.Errorf("configure delegated authorization: %w", err)
+	}
+	if recommendedConfig.Authentication.Authenticator == nil {
+		return nil, fmt.Errorf("assertion failed: authenticator is nil after successful delegated authentication setup")
+	}
+	if recommendedConfig.Authorization.Authorizer == nil {
+		return nil, fmt.Errorf("assertion failed: authorizer is nil after successful delegated authorization setup")
+	}
+	// Applied before Complete(), which prepends the in-memory loopback token authenticator.
+	recommendedConfig.Authentication.Authenticator = anonymousHealthOnly{delegate: recommendedConfig.Authentication.Authenticator}
+
+	recommendedConfig.EffectiveVersion = apiservercompatibility.DefaultBuildEffectiveVersion()
+	recommendedConfig.SkipOpenAPIInstallation = true
+	recommendedConfig.RequestTimeout = defaultRequestTimeout
 
 	return recommendedConfig, nil
 }
@@ -333,7 +360,20 @@ func RunWithOptions(ctx context.Context, opts Options) error {
 	secureServingOptions.ServerCert.CertDirectory = ""
 	secureServingOptions.ServerCert.PairName = ""
 
-	recommendedConfig, err := NewRecommendedConfig(scheme, codecs, secureServingOptions)
+	authenticationOptions, authorizationOptions := opts.Authentication, opts.Authorization
+	switch {
+	case authenticationOptions == nil && authorizationOptions == nil:
+		homeDir, _ := os.UserHomeDir()
+		kubeconfigPath, err := resolveDelegationKubeconfig(os.Getenv, homeDir)
+		if err != nil {
+			return fmt.Errorf("configure aggregated API server: %w", err)
+		}
+		authenticationOptions, authorizationOptions = newDelegatedAuthOptions(kubeconfigPath)
+	case authenticationOptions == nil || authorizationOptions == nil:
+		return fmt.Errorf("assertion failed: authentication and authorization options must be set together")
+	}
+
+	recommendedConfig, err := NewRecommendedConfig(scheme, codecs, secureServingOptions, authenticationOptions, authorizationOptions)
 	if err != nil {
 		return fmt.Errorf("configure aggregated API server: %w", err)
 	}

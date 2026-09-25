@@ -11,7 +11,7 @@ Run and manage [Coder](https://coder.com) with native Kubernetes APIs.
 
 | `--app` | Runs | Resources |
 | --- | --- | --- |
-| `all` (default) | All three components in one process | Everything below |
+| `all` (default) | Operator and aggregated API server in one process (not the MCP server) | Everything below except MCP |
 | `controller` | Operator | `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy` (`coder.com/v1alpha1`) |
 | `aggregated-apiserver` | Aggregated API server | `CoderWorkspace`, `CoderTemplate` (`aggregation.coder.com/v1alpha1`) |
 | `mcp-http` | MCP server | Operational tools over HTTP |

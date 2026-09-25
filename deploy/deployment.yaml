@@ -22,8 +22,6 @@ spec:
               name: health
             - containerPort: 6443
               name: https
-            - containerPort: 8090
-              name: mcp
           livenessProbe:
             httpGet:
               path: /healthz

@@ -73,7 +73,7 @@ Run from repository root.
 - **Workspace lifecycle E2E driver tests (offline, stubbed tools):** `bash ./hack/e2e-workspace-lifecycle_test.sh` (also run by `make test-scripts`)
 - **Lint (workflows):** `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.10`
 - **Development run (controller mode):** `GOFLAGS=-mod=vendor go run . --app=controller` (requires Kubernetes config via your env, e.g. `KUBECONFIG`)
-- **Development run (aggregated API mode):** `GOFLAGS=-mod=vendor go run . --app=aggregated-apiserver`
+- **Development run (aggregated API mode):** `GOFLAGS=-mod=vendor go run . --app=aggregated-apiserver` (needs `KUBECONFIG` or `~/.kube/config` with a cluster that can serve TokenReview/SubjectAccessReview and `kube-system/extension-apiserver-authentication`; the server does not start without it)
 - **Vendor consistency:** `make verify-vendor`
 - **Manifest generation:** `make manifests` (or `bash ./hack/update-manifests.sh`)
 - **Code generation:** `make codegen` (or `bash ./hack/update-codegen.sh`)
