@@ -101,7 +101,7 @@ If they differ, find the cause:
       --as=system:serviceaccount:coder-system:coder-k8s
     ```
 
-    Apply the RBAC (it must name the ServiceAccount the pod runs as); the server retries within about a minute:
+    In standalone mode, use `--as=system:serviceaccount:coder-system:coder-k8s-apiserver`. Apply the RBAC (it must name the ServiceAccount the pod runs as; standalone mode also needs `config/apiserver-standalone/apiservice-cabundle-binding.yaml`); the server retries within about a minute:
 
     ```bash
     kubectl apply -f config/rbac/apiservice-cabundle-role.yaml
@@ -129,7 +129,7 @@ See [Replace the CA](deploy-aggregated-apiserver.md#replace-the-ca) for the full
 
 The aggregated API server checks every caller with the Kubernetes API and refuses to start without it.
 
-- `... configmaps "extension-apiserver-authentication" is forbidden`: apply `config/rbac/authentication-reader-binding.yaml`. It must name the ServiceAccount the pod runs as (for example after installing into another namespace).
+- `... configmaps "extension-apiserver-authentication" is forbidden`: apply `config/rbac/authentication-reader-binding.yaml` (`config/apiserver-standalone/authentication-reader-binding.yaml` in standalone mode). It must name the ServiceAccount the pod runs as (for example after installing into another namespace).
 - `no Kubernetes configuration for delegated authentication and authorization` (outside a cluster): set `KUBECONFIG` to one kubeconfig file, or create `~/.kube/config`.
 - `load kubeconfig ...` or `invalid kubeconfig ...`: the file named by `KUBECONFIG` is missing or incomplete. The server does not fall back to another configuration.
 
@@ -142,17 +142,19 @@ kubectl -n coder-system delete secret coder-k8s-apiserver-tls
 kubectl -n coder-system rollout restart deployment/coder-k8s
 ```
 
+In standalone mode the server may not create the Secret: after deleting it, re-apply the placeholder with `kubectl apply -f config/apiserver-standalone/serving-ca-secret.yaml` before the restart.
+
 An error without a field name means the ServiceAccount is missing a permission on this Secret. The message says which:
 
 - `get secret …`: it may not read the Secret. Grant `get` on `coder-k8s-apiserver-tls`.
-- `create secret …`: the Secret does not exist and the ServiceAccount may not create Secrets. Grant `create`, or create the empty placeholder that the message describes (the server fills it).
+- `create secret …`: the Secret does not exist and the ServiceAccount may not create Secrets. In standalone mode with `coder-k8s-apiserver`, this is expected until the placeholder exists: apply `config/apiserver-standalone/serving-ca-secret.yaml`, and the pod recovers on its next restart. Otherwise grant `create`, or create the empty placeholder that the message describes (the server fills it).
 - `fill placeholder secret …` or `update secret …`: the ServiceAccount may not update the Secret, to fill a placeholder or to renew the serving certificate. Grant `update` on `coder-k8s-apiserver-tls`.
 
 ## Aggregated requests fail with `401 Unauthorized` or `403 Forbidden`
 
 - **`401`:** the request has no valid credential. Requests sent straight to port `6443` need a Kubernetes bearer token; anonymous requests only reach `/healthz`, `/livez`, and `/readyz`. Use `kubectl`, which goes through kube-apiserver.
 - **`403`:** the caller lacks RBAC for `aggregation.coder.com` in that namespace. Check with `kubectl auth can-i list codertemplates.aggregation.coder.com -n <namespace> --as=<user>`. Before you grant it, note that this RBAC is owner-equivalent inside Coder (see [How callers are checked](deploy-aggregated-apiserver.md#how-callers-are-checked)).
-- **`500` mentioning `subjectaccessreviews`:** the server's ServiceAccount cannot create SubjectAccessReviews. Apply `config/rbac/auth-delegator-binding.yaml`.
+- **`500` mentioning `subjectaccessreviews`:** the server's ServiceAccount cannot create SubjectAccessReviews. Apply `config/rbac/auth-delegator-binding.yaml` (`config/apiserver-standalone/auth-delegator-binding.yaml` in standalone mode).
 
 ## Aggregated reads return `ServiceUnavailable`
 

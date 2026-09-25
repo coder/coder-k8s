@@ -64,5 +64,6 @@ graph TD
 | --- | --- |
 | `config/crd/bases/` | Generated CRDs for `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy` |
 | `config/rbac/` | ServiceAccount, `manager-role`, and bindings (including auth-delegator) |
+| `config/apiserver-standalone/` | ServiceAccount `coder-k8s-apiserver`, its bindings, and the serving-CA placeholder Secret for standalone `--app=aggregated-apiserver` |
 | `deploy/deployment.yaml` | The `coder-k8s` Deployment (defaults to `--app=all`) |
 | `deploy/apiserver-service.yaml`, `deploy/apiserver-apiservice.yaml` | Expose the aggregated API |
