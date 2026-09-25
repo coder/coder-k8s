@@ -53,6 +53,9 @@ func NewManager(client kubernetes.Interface, namespace string) (*Manager, error)
 
 // Ensure loads, creates, or renews the Secret and makes it the served certificate. Invalid
 // trust material returns a *CorruptSecretError and is never overwritten.
+//
+// An existing placeholder (see IsPlaceholder) is filled with a new CA instead of being created,
+// so an identity that may only get and update this one Secret can still bootstrap it.
 func (m *Manager) Ensure(ctx context.Context) (*Bundle, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("assertion failed: context must not be nil")
@@ -75,6 +78,11 @@ func (m *Manager) Ensure(ctx context.Context) (*Bundle, error) {
 			if apierrors.IsAlreadyExists(err) {
 				continue // Another replica created it first; adopt theirs.
 			}
+			if apierrors.IsForbidden(err) {
+				return nil, fmt.Errorf("create secret %s/%s: %w; if this identity may not create Secrets, "+
+					"create an empty placeholder Secret %q of type %q (no data) and the server fills it",
+					m.namespace, SecretName, err, SecretName, SecretType)
+			}
 			if err != nil {
 				return nil, fmt.Errorf("create secret %s/%s: %w", m.namespace, SecretName, err)
 			}
@@ -82,6 +90,40 @@ func (m *Manager) Ensure(ctx context.Context) (*Bundle, error) {
 			return bundle, m.serve(bundle)
 		case err != nil:
 			return nil, fmt.Errorf("get secret %s/%s: %w", m.namespace, SecretName, err)
+		}
+
+		if secret.Type == SecretType && len(secret.Data) == 0 && isImmutable(secret) {
+			// Kubernetes forbids data changes on an immutable Secret, so it can never be filled.
+			return nil, corrupt(m.namespace, "empty placeholder is immutable and cannot be filled; recreate it without immutable: true")
+		}
+		if IsPlaceholder(secret) {
+			bundle, genErr := Generate(m.namespace, now)
+			if genErr != nil {
+				return nil, genErr
+			}
+			filled := secret.DeepCopy()
+			filled.Data = bundle.Data()
+			// Mark it like a created Secret, keeping any labels the placeholder already has.
+			if filled.Labels == nil {
+				filled.Labels = map[string]string{}
+			}
+			for k, v := range SecretLabels {
+				filled.Labels[k] = v
+			}
+			// Without a resourceVersion the update would be unconditional and could replace a CA
+			// that another replica wrote in the meantime.
+			if filled.ResourceVersion == "" {
+				return nil, fmt.Errorf("assertion failed: placeholder secret %s/%s has no resourceVersion", m.namespace, SecretName)
+			}
+			_, err = secrets.Update(ctx, filled, metav1.UpdateOptions{})
+			if apierrors.IsConflict(err) {
+				continue // Another replica filled it first; re-read and adopt theirs.
+			}
+			if err != nil {
+				return nil, fmt.Errorf("fill placeholder secret %s/%s: %w", m.namespace, SecretName, err)
+			}
+			log.Info("Created aggregated API server CA and serving certificate in the placeholder Secret", "namespace", m.namespace, "secret", SecretName)
+			return bundle, m.serve(bundle)
 		}
 
 		bundle, err := Parse(secret, m.namespace, now)

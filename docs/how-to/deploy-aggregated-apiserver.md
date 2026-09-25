@@ -117,9 +117,10 @@ These resources are backed by Coder, not etcd, so some Kubernetes behavior diffe
 In a cluster, the aggregated API server serves a certificate signed by its own CA. Both live in the Secret `coder-k8s-apiserver-tls` in the server's namespace (type `coder.com/aggregated-apiserver-serving-ca`, label `app.kubernetes.io/component: aggregated-apiserver-serving-ca`). The certificate is valid for `coder-k8s-apiserver`, `coder-k8s-apiserver.<namespace>`, `coder-k8s-apiserver.<namespace>.svc`, and `coder-k8s-apiserver.<namespace>.svc.cluster.local`.
 
 - The server creates the Secret on first start and reuses it afterwards. With several replicas, they all use the same Secret.
+- If the Secret already exists as an empty placeholder (type `coder.com/aggregated-apiserver-serving-ca`, no `data` keys at all, and not `immutable`), the server fills it with a new CA instead of creating it, so it does not need `create` on Secrets. If the Secret does not exist and the server may not create Secrets, it does not start, and the log says to create the placeholder.
 - The serving certificate is valid for 1 year. The server checks it at startup and every 12 hours, and renews it with the same CA when less than a third of its lifetime is left. The new certificate is served without a restart.
 - The CA is valid for 10 years. To replace it earlier (for example after the Secret was exposed), see [Replace the CA](#replace-the-ca).
-- If the Secret exists but is unusable (a missing key, unparsable PEM, a key that does not match its certificate, a serving certificate not signed by the CA, or an expired CA), the server does not start and the log names the field. Fix the Secret or delete it.
+- If the Secret exists but is unusable and is not an empty placeholder (a missing key, unparsable PEM, a key that does not match its certificate, a serving certificate not signed by the CA, or an expired CA), the server does not start and the log names the field. Fix the Secret or delete it.
 - Outside a cluster (for example `go run`), the server serves a self-signed certificate for `localhost` instead.
 
 !!! warning "The Secret holds the CA private key"
