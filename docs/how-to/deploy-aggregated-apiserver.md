@@ -123,7 +123,27 @@ In a cluster, the aggregated API server serves a certificate signed by its own C
 - Outside a cluster (for example `go run`), the server serves a self-signed certificate for `localhost` instead.
 
 !!! warning "The Secret holds the CA private key"
-    Anyone who can read Secrets in the server's namespace can issue certificates that the aggregated API server's CA vouches for. Restrict Secret read access in `coder-system` accordingly.
+    Anyone who can read this Secret can issue certificates that kube-apiserver accepts for the aggregated API server. That includes readers outside `coder-system`; see [Who can read the CA key](#who-can-read-the-ca-key).
+
+### Who can read the CA key
+
+With the CA key, someone who can also redirect the `coder-k8s-apiserver` Service's traffic can impersonate the aggregated API server: they receive the requests kube-apiserver proxies to it, and can answer them.
+
+These identities can read the key:
+
+- Any subject allowed to `get`, `list`, or `watch` Secrets in the server's namespace (`coder-system` by default).
+- Any subject allowed to read Secrets cluster-wide. These are easy to miss: cluster administrators, and GitOps, backup, or monitoring tools with cluster-wide Secret access.
+- The `coder-k8s` ServiceAccount. Its `manager-role` allows every verb on Secrets in every namespace, because the controller manages Secrets for each `CoderControlPlane`.
+
+By deployment:
+
+| Deployment | Runs as | Can read the CA key |
+| --- | --- | --- |
+| `--app=all` ([Option A](#option-a-all-in-one-recommended)) | `coder-k8s` | Yes. The process also keeps every Secret in the cluster in its cache, because the controllers watch Secrets. |
+| Standalone `--app=aggregated-apiserver` ([Option B](#option-b-standalone)) | `coder-k8s`, as this guide deploys it | Yes, through `manager-role`, although this mode reads no Secret except its own. |
+| Controller only (`dist/install.yaml`) | `coder-k8s` | Only if an aggregated API server has created the Secret somewhere in the cluster; this bundle never creates it. |
+
+For `--app=all`, a narrower Role would not change this: one process runs both the controller and the aggregated API server under one ServiceAccount, and the controller needs cluster-wide Secret access. The same access also covers the operator token Secrets, which give owner rights in Coder and are more sensitive than the CA key. Limit who can read Secrets in `coder-system` and cluster-wide, and [replace the CA](#replace-the-ca) if the Secret may have been exposed.
 
 ### Replace the CA
 
