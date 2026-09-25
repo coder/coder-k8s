@@ -43,6 +43,7 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CHANNEL: release
 
       - name: Compute release image tag
         id: release_image_tag
