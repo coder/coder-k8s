@@ -334,6 +334,23 @@ func TestSyncRetriesAfterForbiddenWithoutGivingUp(t *testing.T) {
 	eventually(t, "patch after RBAC is fixed", func() bool { return caBundleOf(h.get(t)) == want })
 }
 
+func TestMissingListPermissionIsReported(t *testing.T) {
+	h := newHarness(t, newAPIService("", true, nil), true)
+	h.dyn.PrependReactor("list", "apiservices", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(APIServiceGVR.GroupResource(), "", errFake("rbac"))
+	})
+	h.run(t)
+	eventually(t, "a missing-permission warning", func() bool {
+		h.ctrl.warnMu.Lock()
+		defer h.ctrl.warnMu.Unlock()
+		_, ok := h.ctrl.lastWarn["forbidden-watch"]
+		return ok
+	})
+	if h.patches.Load() != 0 {
+		t.Fatal("nothing may be patched before the APIService can be read")
+	}
+}
+
 func TestWarnIsRateLimitedPerKind(t *testing.T) {
 	c := &Controller{lastWarn: map[string]time.Time{}}
 	now := time.Unix(1000, 0)

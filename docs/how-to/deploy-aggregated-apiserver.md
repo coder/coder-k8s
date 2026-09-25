@@ -146,12 +146,15 @@ Apply the changes in this order:
 
 If the new image starts before step 1, it logs a missing-permission error until the RBAC exists, and the APIService keeps working without verification in the meantime. If you apply step 3 before the new image runs, the APIService is `Available=False` until the new image starts. Do not re-apply an old copy of `deploy/apiserver-apiservice.yaml`: once a `caBundle` is set, the API rejects `insecureSkipTLSVerify: true`.
 
-To roll back to a version without a managed serving certificate, restore the old registration first:
+To roll back to a version without a managed serving certificate, restore the old registration before you change the image. The opt-out annotation stops the running server from setting the `caBundle` again:
 
 ```bash
+kubectl annotate apiservice v1alpha1.aggregation.coder.com coder.com/manage-ca-bundle=false
 kubectl patch apiservice v1alpha1.aggregation.coder.com --type=merge \
   -p '{"spec":{"caBundle":null,"insecureSkipTLSVerify":true}}'
 ```
+
+Then deploy the old image and re-apply its `deploy/apiserver-apiservice.yaml`.
 
 ### Opt out
 

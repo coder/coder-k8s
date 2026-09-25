@@ -98,6 +98,17 @@ func New(dyn dynamic.Interface, secrets kubernetes.Interface, namespace string) 
 		informer: factory.ForResource(APIServiceGVR).Informer(),
 		lastWarn: map[string]time.Time{},
 	}
+	// Without list/watch permission the informer never syncs; say so instead of waiting silently.
+	if err := c.informer.SetWatchErrorHandler(func(_ *cache.Reflector, err error) {
+		if apierrors.IsForbidden(err) {
+			c.warn("forbidden-watch", err, "missing permission to list and watch the APIService; apply config/rbac/apiservice-cabundle-role.yaml",
+				"permission", "list,watch apiservices.apiregistration.k8s.io/"+APIServiceName, "docs", DocsURL)
+			return
+		}
+		c.warn("watch", err, "cannot watch the APIService; retrying")
+	}); err != nil {
+		return nil, fmt.Errorf("set APIService watch error handler: %w", err)
+	}
 	if _, err := c.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(any) { c.Enqueue() },
 		UpdateFunc: func(any, any) { c.Enqueue() },
