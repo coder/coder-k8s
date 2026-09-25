@@ -112,5 +112,18 @@ If something fails, check `kubectl logs -n coder-system deploy/coder-k8s` and [T
 
 These resources are backed by Coder, not etcd, so some Kubernetes behavior differs. Read [Aggregated API behavior](../reference/aggregated-api-behavior.md) before you write manifests. The most important rule: object names must use Coder's canonical names.
 
-!!! warning "TLS"
-    `deploy/apiserver-apiservice.yaml` sets `insecureSkipTLSVerify: true` for development. Use CA-backed TLS in any real environment.
+## Serving certificate
+
+In a cluster, the aggregated API server serves a certificate signed by its own CA. Both live in the Secret `coder-k8s-apiserver-tls` in the server's namespace (type `coder.com/aggregated-apiserver-serving-ca`, label `app.kubernetes.io/component: aggregated-apiserver-serving-ca`). The certificate is valid for `coder-k8s-apiserver`, `coder-k8s-apiserver.<namespace>`, `coder-k8s-apiserver.<namespace>.svc`, and `coder-k8s-apiserver.<namespace>.svc.cluster.local`.
+
+- The server creates the Secret on first start and reuses it afterwards. With several replicas, they all use the same Secret.
+- The serving certificate is valid for 1 year. The server checks it at startup and every 12 hours, and renews it with the same CA when less than a third of its lifetime is left. The new certificate is served without a restart.
+- The CA is valid for 10 years. To replace it, delete the Secret and restart the Deployment (`kubectl -n coder-system rollout restart deployment/coder-k8s`). Clients that trusted the old CA must then trust the new one.
+- If the Secret exists but is unusable (a missing key, unparsable PEM, a key that does not match its certificate, a serving certificate not signed by the CA, or an expired CA), the server does not start and the log names the field. Fix the Secret or delete it.
+- Outside a cluster (for example `go run`), the server serves a self-signed certificate for `localhost` instead.
+
+!!! warning "The Secret holds the CA private key"
+    Anyone who can read Secrets in the server's namespace can issue certificates that the aggregated API server's CA vouches for. Restrict Secret read access in `coder-system` accordingly.
+
+!!! warning "TLS verification is still off"
+    `deploy/apiserver-apiservice.yaml` still sets `insecureSkipTLSVerify: true`, so kube-apiserver does not check this certificate yet. Registering the CA in the APIService `caBundle` is tracked in [#137](https://github.com/coder/coder-k8s/issues/137).
