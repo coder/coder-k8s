@@ -118,7 +118,7 @@ In a cluster, the aggregated API server serves a certificate signed by its own C
 
 - The server creates the Secret on first start and reuses it afterwards. With several replicas, they all use the same Secret.
 - The serving certificate is valid for 1 year. The server checks it at startup and every 12 hours, and renews it with the same CA when less than a third of its lifetime is left. The new certificate is served without a restart.
-- The CA is valid for 10 years. To replace it, delete the Secret and restart **every** replica (`kubectl -n coder-system rollout restart deployment/coder-k8s`). The first new pod generates a CA and updates the APIService `caBundle`; until the old pods are gone, requests routed to them fail certificate verification, so expect `Available=False` for a few seconds. Other clients that trusted the old CA must then trust the new one.
+- The CA is valid for 10 years. To replace it, delete the Secret and restart **every** replica (`kubectl -n coder-system rollout restart deployment/coder-k8s`). The first new pod generates a CA and updates the APIService `caBundle`; until the old pods are gone, requests routed to them fail certificate verification, so expect `503 ServiceUnavailable` for a few seconds. Other clients that trusted the old CA must then trust the new one.
 - If the Secret exists but is unusable (a missing key, unparsable PEM, a key that does not match its certificate, a serving certificate not signed by the CA, or an expired CA), the server does not start and the log names the field. Fix the Secret or delete it.
 - Outside a cluster (for example `go run`), the server serves a self-signed certificate for `localhost` instead.
 
@@ -133,7 +133,7 @@ kube-apiserver verifies the aggregated API server's certificate against the APIS
 - It writes only a CA that passed the same checks as at startup. If the Secret is missing or invalid, it leaves the APIService unchanged and logs why.
 - It needs `config/rbac/apiservice-cabundle-role.yaml`: `get`, `list`, `watch`, and `patch` on that one APIService (`resourceNames`). `list` and `watch` are allowed only for requests that select it by name. The controller-only install bundle (`dist/install.yaml`) does not include this file, because it registers no APIService.
 - Without that permission the aggregated API server keeps serving, logs the missing permission (at most every 5 minutes), and retries with backoff up to 60 seconds.
-- On a fresh install the APIService reports `Available=False` for a few seconds, until the first patch. `kubectl wait --for=condition=Available apiservice/v1alpha1.aggregation.coder.com` covers this.
+- On a fresh install, requests through kube-apiserver fail with `503 ServiceUnavailable` for a few seconds, until the first patch. `Available=True` alone does not show that verification works, because kube-apiserver's availability check does not verify the certificate. Check a real request instead: `kubectl get --raw /apis/aggregation.coder.com/v1alpha1`.
 - Running `kubectl apply -f deploy/apiserver-apiservice.yaml` again keeps the injected `caBundle`. Replacing or re-creating the APIService clears it; the aggregated API server sets it again within seconds.
 
 ### Upgrade from a version that used `insecureSkipTLSVerify`
@@ -144,7 +144,7 @@ Apply the changes in this order:
 2. Deploy the new image. It sets `caBundle` and turns `insecureSkipTLSVerify` off in one step.
 3. `kubectl apply -f deploy/apiserver-apiservice.yaml` (the file no longer sets `insecureSkipTLSVerify`).
 
-If the new image starts before step 1, it logs a missing-permission error until the RBAC exists, and the APIService keeps working without verification in the meantime. If you apply step 3 before the new image runs, the APIService is `Available=False` until the new image starts. Do not re-apply an old copy of `deploy/apiserver-apiservice.yaml`: once a `caBundle` is set, the API rejects `insecureSkipTLSVerify: true`.
+If the new image starts before step 1, it logs a missing-permission error until the RBAC exists, and the APIService keeps working without verification in the meantime. If you apply step 3 before the new image runs, requests through kube-apiserver fail with `503` until the new image starts. Do not re-apply an old copy of `deploy/apiserver-apiservice.yaml`: once a `caBundle` is set, the API rejects `insecureSkipTLSVerify: true`.
 
 To roll back to a version without a managed serving certificate, restore the old registration before you change the image. The opt-out annotation stops the running server from setting the `caBundle` again:
 
