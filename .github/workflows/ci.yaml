@@ -492,7 +492,7 @@ jobs:
             exit 1
           fi
           x509=""
-          for _ in $(seq 1 45); do
+          for _ in $(seq 1 30); do
             x509=$(kubectl -n kube-system logs -l component=kube-apiserver --since-time="$since" --tail=-1 |
               grep 'v1alpha1.aggregation.coder.com' | grep -m1 'x509: certificate signed by unknown authority' || true)
             [[ -n $x509 ]] && break
