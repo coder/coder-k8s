@@ -51,9 +51,9 @@ func TestChangelogChannels(t *testing.T) {
 	}
 }
 
-// The release workflow does not set GORELEASER_CHANNEL, and GoReleaser fails a template that reads a missing
-// .Env key ("map has no entry"). Every channel-dependent disable template must render for an unset channel,
-// and pick the right pipes per channel.
+// Both workflows set GORELEASER_CHANNEL, but GoReleaser fails a template that reads a missing .Env key ("map
+// has no entry"), so every channel-dependent disable template must still render when the channel is unset
+// (for example, a local run), and pick the right pipes per channel.
 func TestReleaseAndImageChannels(t *testing.T) {
 	data, err := os.ReadFile("../.goreleaser.yaml")
 	if err != nil {

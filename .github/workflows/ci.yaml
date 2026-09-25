@@ -410,8 +410,13 @@ jobs:
           test "$(code "-H \"Authorization: Bearer \$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)\" $list")" = 403
           test "$(code "$api/healthz")" = 200
           pod_ip=$(kubectl -n coder-system get pod -l app=coder-k8s -o jsonpath='{.items[0].status.podIP}')
-          if probe "curl -s --max-time 5 http://$pod_ip:8090/healthz"; then
-            echo "MCP must not listen on the pod network" >&2
+          test -n "$pod_ip" || { echo "could not read the coder-k8s pod IP" >&2; exit 1; }
+          # MCP must not listen on the pod network: only "connection refused" (curl exit 7) passes.
+          # Any other result, including success or a timeout (28), fails.
+          mcp_rc=0
+          probe "curl -s --max-time 5 http://$pod_ip:8090/healthz" || mcp_rc=$?
+          if [ "$mcp_rc" -ne 7 ]; then
+            echo "MCP port check: want connection refused (curl exit 7) from $pod_ip:8090, got exit $mcp_rc" >&2
             exit 1
           fi
           kubectl -n default delete pod e2e-authn-probe --wait=false
