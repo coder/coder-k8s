@@ -4,23 +4,23 @@ Serve `CoderWorkspace` and `CoderTemplate` (`aggregation.coder.com/v1alpha1`) th
 
 Commands run from a clone of this repository.
 
-## 1. Apply RBAC and register the API
+## 1. Register the API
 
 ```bash
 kubectl create namespace coder-system
-kubectl apply -f config/rbac/
 kubectl apply -f deploy/apiserver-service.yaml -f deploy/apiserver-apiservice.yaml
 ```
 
-`config/rbac/` includes two bindings the aggregated API server needs to check callers: `auth-delegator-binding.yaml` (create TokenReviews and SubjectAccessReviews) and `authentication-reader-binding.yaml` (read `kube-system/extension-apiserver-authentication`; the default `manager-role` also grants cluster-wide ConfigMap reads). Both name the `coder-k8s` ServiceAccount in `coder-system`; edit them if you install elsewhere. The server fails closed without these permissions: without read access to that ConfigMap it does not start, and without permission to create SubjectAccessReviews it answers every request with an error (members of `system:masters` excepted).
+Each option in step 2 applies its own RBAC. Both include two bindings the aggregated API server needs to check callers: `auth-delegator-binding.yaml` (create TokenReviews and SubjectAccessReviews) and `authentication-reader-binding.yaml` (read `kube-system/extension-apiserver-authentication`). They name the ServiceAccount in `coder-system`; edit them if you install elsewhere. The server fails closed without these permissions: without read access to that ConfigMap it does not start, and without permission to create SubjectAccessReviews it answers every request with an error (members of `system:masters` excepted).
 
 ## 2. Deploy
 
 ### Option A: all-in-one (recommended)
 
-The default `--app=all` already includes the aggregated API server. It finds its Coder backend automatically from an eligible `CoderControlPlane`.
+The default `--app=all` already includes the aggregated API server. It finds its Coder backend automatically from an eligible `CoderControlPlane`. It runs as the `coder-k8s` ServiceAccount with `manager-role`, which the controller needs.
 
 ```bash
+kubectl apply -f config/rbac/
 kubectl apply -f deploy/deployment.yaml
 ```
 
@@ -28,7 +28,21 @@ kubectl apply -f deploy/deployment.yaml
 
 Run only the aggregated API server (`--app=aggregated-apiserver`) and point it at a Coder instance yourself.
 
-Save the Coder session token in a file, for example `./coder-session-token`. Store it in a Secret, deploy, then set the backend:
+It runs as its own ServiceAccount, `coder-k8s-apiserver`, and needs nothing from `manager-role`. `config/apiserver-standalone/` grants it only:
+
+- `get` and `update` on the `coder-k8s-apiserver-tls` Secret, which the directory ships as an empty placeholder that the server fills. There is no `create`: namespace-wide `create` would let this identity mint tokens for other ServiceAccounts in the namespace.
+- Creating TokenReviews and SubjectAccessReviews, and reading `kube-system/extension-apiserver-authentication`.
+- Its own APIService, through the ClusterRole in `config/rbac/apiservice-cabundle-role.yaml` (that file's binding for `coder-k8s` is unused here).
+
+Apply the placeholder and the RBAC before the Deployment:
+
+```bash
+kubectl apply -f config/apiserver-standalone/ -f config/rbac/apiservice-cabundle-role.yaml
+```
+
+If the pod starts before the placeholder exists, it exits because it may not create the Secret. Apply the placeholder; the pod recovers on its next restart (Kubernetes restarts it with a back-off of up to 5 minutes).
+
+Save the Coder session token in a file, for example `./coder-session-token`. Store it in a Secret, deploy, then set the ServiceAccount and the backend:
 
 ```bash
 kubectl -n coder-system create secret generic coder-k8s-session-token \
@@ -37,6 +51,10 @@ kubectl -n coder-system create secret generic coder-k8s-session-token \
 kubectl apply -f deploy/deployment.yaml
 
 kubectl -n coder-system patch deployment coder-k8s --type=json -p '[{
+  "op": "add",
+  "path": "/spec/template/spec/serviceAccountName",
+  "value": "coder-k8s-apiserver"
+}, {
   "op": "add",
   "path": "/spec/template/spec/containers/0/env",
   "value": [{
@@ -68,6 +86,28 @@ kubectl -n coder-system patch deployment coder-k8s --type=strategic -p '{
   }]}}}
 }'
 ```
+
+#### Move a standalone server from `coder-k8s` to its own ServiceAccount
+
+Earlier versions of this guide ran the standalone server as `coder-k8s`. To move it:
+
+1. Apply the standalone RBAC and placeholder. Applying the placeholder over the existing Secret keeps its data and CA.
+
+    ```bash
+    kubectl apply -f config/apiserver-standalone/ -f config/rbac/apiservice-cabundle-role.yaml
+    ```
+
+2. Switch the ServiceAccount. The new pods reuse the existing Secret and CA, so the APIService `caBundle` does not change.
+
+    ```bash
+    kubectl -n coder-system patch deployment coder-k8s --type=json \
+      -p '[{"op": "replace", "path": "/spec/template/spec/serviceAccountName", "value": "coder-k8s-apiserver"}]'
+    kubectl -n coder-system rollout status deployment/coder-k8s
+    ```
+
+3. If nothing else runs as `coder-k8s` in this cluster, delete the `config/rbac/` bindings for it.
+
+A tool that replaces the whole Secret from the manifest (for example a GitOps sync that replaces instead of applying) clears its data. The server then generates a new CA, so treat that as a [CA replacement](#replace-the-ca) and restart every replica.
 
 ## How callers are checked
 
@@ -116,11 +156,11 @@ These resources are backed by Coder, not etcd, so some Kubernetes behavior diffe
 
 In a cluster, the aggregated API server serves a certificate signed by its own CA. Both live in the Secret `coder-k8s-apiserver-tls` in the server's namespace (type `coder.com/aggregated-apiserver-serving-ca`, label `app.kubernetes.io/component: aggregated-apiserver-serving-ca`). The certificate is valid for `coder-k8s-apiserver`, `coder-k8s-apiserver.<namespace>`, `coder-k8s-apiserver.<namespace>.svc`, and `coder-k8s-apiserver.<namespace>.svc.cluster.local`.
 
-- The server creates the Secret on first start and reuses it afterwards. With several replicas, they all use the same Secret.
+- In `--app=all`, the server creates the Secret on first start. In standalone mode, `config/apiserver-standalone/` ships it as an empty placeholder that the server fills. Afterwards the server reuses it. With several replicas, they all use the same Secret.
 - If the Secret already exists as an empty placeholder (type `coder.com/aggregated-apiserver-serving-ca`, no `data` keys at all, and not `immutable`), the server fills it with a new CA instead of creating it, so it does not need `create` on Secrets. If the Secret does not exist and the server may not create Secrets, it does not start, and the log says to create the placeholder.
 - The serving certificate is valid for 1 year. The server checks it at startup and every 12 hours, and renews it with the same CA when less than a third of its lifetime is left. The new certificate is served without a restart.
 - The CA is valid for 10 years. To replace it earlier (for example after the Secret was exposed), see [Replace the CA](#replace-the-ca).
-- If the Secret exists but is unusable and is not an empty placeholder (a missing key, unparsable PEM, a key that does not match its certificate, a serving certificate not signed by the CA, or an expired CA), the server does not start and the log names the field. Fix the Secret or delete it.
+- If the Secret exists but is unusable and is not an empty placeholder (a missing key, unparsable PEM, a key that does not match its certificate, a serving certificate not signed by the CA, or an expired CA), the server does not start and the log names the field. Fix the Secret or delete it (in standalone mode, re-apply the placeholder after deleting it).
 - Outside a cluster (for example `go run`), the server serves a self-signed certificate for `localhost` instead.
 
 !!! warning "The Secret holds the CA private key"
@@ -135,13 +175,14 @@ These identities can read the key:
 - Any subject allowed to `get`, `list`, or `watch` Secrets in the server's namespace (`coder-system` by default).
 - Any subject allowed to read Secrets cluster-wide. These are easy to miss: cluster administrators, and GitOps, backup, or monitoring tools with cluster-wide Secret access.
 - The `coder-k8s` ServiceAccount. Its `manager-role` allows every verb on Secrets in every namespace, because the controller manages Secrets for each `CoderControlPlane`.
+- The `coder-k8s-apiserver` ServiceAccount, for this one Secret only.
 
 By deployment:
 
 | Deployment | Runs as | Can read the CA key |
 | --- | --- | --- |
 | `--app=all` ([Option A](#option-a-all-in-one-recommended)) | `coder-k8s` | Yes. The process also keeps every Secret in the cluster in its cache, because the controllers watch Secrets. |
-| Standalone `--app=aggregated-apiserver` ([Option B](#option-b-standalone)) | `coder-k8s`, as this guide deploys it | Yes, through `manager-role`, although this mode reads no Secret except its own. |
+| Standalone `--app=aggregated-apiserver` ([Option B](#option-b-standalone)) | `coder-k8s-apiserver`, with `config/apiserver-standalone/` | Yes, and no other Secret: it may `get` and `update` only `coder-k8s-apiserver-tls`, and may not list, watch, or create Secrets. `coder-k8s` can still read the key if it exists in the cluster. |
 | Controller only (`dist/install.yaml`) | `coder-k8s` | Only if an aggregated API server has created the Secret somewhere in the cluster; this bundle never creates it. |
 
 For `--app=all`, a narrower Role would not change this: one process runs both the controller and the aggregated API server under one ServiceAccount, and the controller needs cluster-wide Secret access. The same access also covers the operator token Secrets, which give owner rights in Coder and are more sensitive than the CA key. Limit who can read Secrets in `coder-system` and cluster-wide, and [replace the CA](#replace-the-ca) if the Secret may have been exposed.
@@ -157,10 +198,20 @@ Replacing the CA takes a restart of every replica, and requests through kube-api
       base64 -d | openssl x509 -noout -fingerprint -sha256
     ```
 
-2. Delete the Secret and restart every replica. Do both: a running replica keeps serving the old certificate until it restarts.
+2. Remove the old CA and restart every replica. Do both: a running replica keeps serving the old certificate until it restarts.
+
+    With `--app=all`, delete the Secret; the server creates a new one:
 
     ```bash
     kubectl -n coder-system delete secret coder-k8s-apiserver-tls
+    kubectl -n coder-system rollout restart deployment/coder-k8s
+    kubectl -n coder-system rollout status deployment/coder-k8s
+    ```
+
+    In standalone mode, the server may not create the Secret. Clear its data instead, which turns it back into the empty placeholder (or delete it and re-apply `config/apiserver-standalone/serving-ca-secret.yaml`):
+
+    ```bash
+    kubectl -n coder-system patch secret coder-k8s-apiserver-tls --type=json -p '[{"op": "remove", "path": "/data"}]'
     kubectl -n coder-system rollout restart deployment/coder-k8s
     kubectl -n coder-system rollout status deployment/coder-k8s
     ```

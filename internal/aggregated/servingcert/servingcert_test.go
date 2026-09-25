@@ -472,7 +472,8 @@ func TestEnsureRejectsCorruptSecret(t *testing.T) {
 			if !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error %q does not name the problem %q", err, tt.want)
 			}
-			if !strings.Contains(err.Error(), "secret coder-system/coder-k8s-apiserver-tls") || !strings.Contains(err.Error(), "delete it") {
+			if !strings.Contains(err.Error(), "secret coder-system/coder-k8s-apiserver-tls") || !strings.Contains(err.Error(), "delete it") ||
+				!strings.Contains(err.Error(), "re-apply the empty placeholder if this identity may not create Secrets") {
 				t.Fatalf("error must name the Secret and the remedy: %q", err)
 			}
 			assertNoWrites(t, client)

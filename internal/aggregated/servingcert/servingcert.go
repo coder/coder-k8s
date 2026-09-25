@@ -92,7 +92,7 @@ type CorruptSecretError struct {
 }
 
 func (e *CorruptSecretError) Error() string {
-	return fmt.Sprintf("secret %s/%s: %s; fix it, or delete it so coder-k8s generates a new CA (clients that trust the old CA must then be updated)",
+	return fmt.Sprintf("secret %s/%s: %s; fix it, or delete it so coder-k8s generates a new CA (re-apply the empty placeholder if this identity may not create Secrets); clients that trust the old CA must then be updated",
 		e.Namespace, SecretName, e.Problem)
 }
 
