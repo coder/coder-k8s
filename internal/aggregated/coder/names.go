@@ -44,6 +44,43 @@ func BuildWorkspaceName(org, user, workspace string) string {
 	return org + nameSeparator + user + nameSeparator + workspace
 }
 
+// ParseTemplateVersionName splits "<org>.<template-name>.<version-name>". Organization and template
+// names cannot contain ".", so the first two dots always separate segments and the version name keeps
+// any further dots.
+func ParseTemplateVersionName(name string) (org, template, version string, err error) {
+	if name == "" {
+		return "", "", "", fmt.Errorf("invalid template version name: name must not be empty")
+	}
+
+	segments := strings.SplitN(name, nameSeparator, 3)
+	if len(segments) != 3 {
+		return "", "", "", fmt.Errorf(
+			"invalid template version name %q: expected <organization>.<template>.<version>", name,
+		)
+	}
+	for segmentIndex, segment := range segments {
+		if segment == "" {
+			return "", "", "", fmt.Errorf(
+				"invalid template version name %q: segment %d must not be empty", name, segmentIndex,
+			)
+		}
+	}
+
+	return segments[0], segments[1], segments[2], nil
+}
+
+// BuildTemplateVersionName constructs "<org>.<template-name>.<version-name>". The version name may
+// contain "."; the organization and template names may not.
+func BuildTemplateVersionName(org, template, version string) string {
+	assertNameSegment("organization", org)
+	assertNameSegment("template", template)
+	if version == "" {
+		panic("assertion failed: template version must not be empty")
+	}
+
+	return org + nameSeparator + template + nameSeparator + version
+}
+
 func parseNameSegments(name string, expectedSegments int, objectType string) ([]string, error) {
 	if name == "" {
 		return nil, fmt.Errorf("invalid %s name: name must not be empty", objectType)
