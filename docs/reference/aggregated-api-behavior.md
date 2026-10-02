@@ -415,5 +415,6 @@ Unlike writes to `coderworkspaces` and `codertemplates` (see [Server-side dry-ru
 
 ### Other effects
 
+- A request that queues a build sends a `MODIFIED` watch event for the `CoderWorkspace` to watchers on this server, as an update of `spec.running` does. A dry-run or a request that queues nothing sends none.
 - A start clears the dormant state of a dormant workspace in Coder.
 - The Coder audit log shows the operator user of the control plane as the initiator of each build, not the Kubernetes user. The audit log of kube-apiserver records the Kubernetes user.
