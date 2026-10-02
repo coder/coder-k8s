@@ -160,6 +160,11 @@ type CoderTemplateVersionStatus struct {
 	Job CoderTemplateVersionJob `json:"job"`
 }
 
+// The kubebuilder root-object markers for CoderTemplateVersion and its list, and with them the
+// generated reference page under docs/reference/api/, are added in the same change that registers
+// storage for codertemplateversions. Until then no server serves the kind, so it is not documented
+// as an available resource (#149).
+
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // CoderTemplateVersion is a read-only view of a Coder template version.
