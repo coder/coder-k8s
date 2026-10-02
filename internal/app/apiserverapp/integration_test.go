@@ -392,6 +392,12 @@ func newIntegrationMockCoderServer(expectedSessionToken string) *integrationMock
 	}
 
 	mock := &integrationMockCoderServer{}
+	// currentTemplate returns the template; the active-version PATCH changes it under mock.mu.
+	currentTemplate := func() codersdk.Template {
+		mock.mu.Lock()
+		defer mock.mu.Unlock()
+		return template
+	}
 	mock.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mock.mu.Lock()
 		mock.requests = append(mock.requests, r.Method+" "+r.URL.Path)
@@ -413,7 +419,7 @@ func newIntegrationMockCoderServer(expectedSessionToken string) *integrationMock
 			writeJSON(w, http.StatusOK, organization)
 			return
 		case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templates") && len(segments) == 3:
-			writeJSON(w, http.StatusOK, []codersdk.Template{template})
+			writeJSON(w, http.StatusOK, []codersdk.Template{currentTemplate()})
 			return
 		case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "organizations") && len(segments) == 6 && segments[4] == "templates":
 			orgSegment := segments[3]
@@ -426,7 +432,22 @@ func newIntegrationMockCoderServer(expectedSessionToken string) *integrationMock
 				writeCoderError(w, http.StatusNotFound, "template not found")
 				return
 			}
-			writeJSON(w, http.StatusOK, template)
+			writeJSON(w, http.StatusOK, currentTemplate())
+			return
+		case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templates") && len(segments) == 4 && segments[3] == template.ID.String():
+			writeJSON(w, http.StatusOK, currentTemplate())
+			return
+		case r.Method == http.MethodPatch && hasSegments(segments, "api", "v2", "templates") && len(segments) == 5 && segments[3] == template.ID.String() && segments[4] == "versions":
+			var request codersdk.UpdateActiveTemplateVersion
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				writeCoderError(w, http.StatusBadRequest, "invalid body")
+				return
+			}
+			mock.mu.Lock()
+			template.ActiveVersionID = request.ID
+			template.UpdatedAt = template.UpdatedAt.Add(time.Second)
+			mock.mu.Unlock()
+			writeJSON(w, http.StatusOK, map[string]string{"message": "template active version updated"})
 			return
 		case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "workspaces") && len(segments) == 3:
 			writeJSON(w, http.StatusOK, codersdk.WorkspacesResponse{Workspaces: []codersdk.Workspace{workspace}, Count: 1})

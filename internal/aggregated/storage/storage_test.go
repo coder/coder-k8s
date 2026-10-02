@@ -2742,6 +2742,7 @@ type mockCoderServerState struct {
 	failBuildTransitions              map[codersdk.WorkspaceTransition]int
 	templateMetaPatchCall             int
 	failActiveVersionPromotion        bool
+	promoteFault                      *promoteFault
 	caseInsensitiveLeafLookups        bool // models coderd resolving template/workspace names case-insensitively
 	frozenWorkspaceUpdatedAt          bool // models Coder 2.37.2: builds, rename, TTL and autostart do not bump workspaces.updated_at (#109)
 	templateVersionPollsBeforeSuccess map[uuid.UUID]int
@@ -3085,8 +3086,54 @@ func (s *mockCoderServerState) handleGetTemplate(w http.ResponseWriter, template
 		writeCoderError(w, http.StatusNotFound, "template not found")
 		return
 	}
+	if s.promoteFault != nil && s.promoteFault.failReread {
+		writeCoderError(w, http.StatusInternalServerError, "injected template read failure")
+		return
+	}
 
 	writeJSON(w, http.StatusOK, template)
+}
+
+// promoteFault replaces the outcome of the active-version PATCH. It is the one fault-injection hook
+// of the promote tests.
+type promoteFault struct {
+	apply         bool          // activate the requested version
+	activateAfter uuid.UUID     // then activate this version instead: a concurrent supersede or revert
+	delay         time.Duration // wait this long before answering
+	status        int           // answer with this status; 0 drops the connection without an answer
+	failReread    bool          // GET /api/v2/templates/{id} answers 500
+}
+
+// answerWithPromoteFault applies s.promoteFault. The caller holds s.mu and releases it when this
+// returns; the lock is dropped during the delay so the client's confirming re-read is not blocked.
+func (s *mockCoderServerState) answerWithPromoteFault(w http.ResponseWriter, templateID uuid.UUID, template codersdk.Template, versionID uuid.UUID) {
+	fault := *s.promoteFault
+	if fault.apply {
+		template.ActiveVersionID = versionID
+		template.UpdatedAt = time.Now().UTC()
+	}
+	if fault.activateAfter != uuid.Nil {
+		template.ActiveVersionID = fault.activateAfter
+		template.UpdatedAt = time.Now().UTC()
+	}
+	s.templatesByID[templateID] = template
+
+	s.mu.Unlock()
+	defer s.mu.Lock()
+	time.Sleep(fault.delay)
+	switch {
+	case fault.status == http.StatusOK:
+		writeJSON(w, http.StatusOK, map[string]string{"message": "template active version updated"})
+		return
+	case fault.status != 0:
+		writeCoderError(w, fault.status, "injected promote answer")
+		return
+	}
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		panic(fmt.Sprintf("assertion failed: hijack promote connection: %v", err))
+	}
+	_ = conn.Close()
 }
 
 func (s *mockCoderServerState) handleGetTemplateByName(w http.ResponseWriter, orgSegment, templateName string) {
@@ -3359,6 +3406,10 @@ func (s *mockCoderServerState) handleUpdateActiveTemplateVersion(w http.Response
 		return
 	}
 
+	if s.promoteFault != nil {
+		s.answerWithPromoteFault(w, templateID, template, request.ID)
+		return
+	}
 	if !s.failActiveVersionPromotion {
 		template.ActiveVersionID = request.ID
 	}

@@ -28,7 +28,7 @@ func promoteBody(versionID string) string {
 }
 
 // TestTemplatePromoteRoute runs codertemplates/promote through the production server: discovery,
-// the authorization attributes, the preview results, and that no request writes to Coder.
+// the authorization attributes, preview, promotion and rollback, and the Coder writes.
 func TestTemplatePromoteRoute(t *testing.T) {
 	f := newAuthFixture(t, func(k *fakeKubeAPI) { k.setDecide(allowAll) })
 	cert := f.frontProxyCert(t)
@@ -54,13 +54,16 @@ func TestTemplatePromoteRoute(t *testing.T) {
 	}
 
 	f.server.mock.resetRecordedRequests()
+	// Preview, promote, repeat, roll back: every step reports what Coder shows afterwards.
 	for _, tc := range []struct {
-		query, versionID string
-		result           aggregationv1alpha1.CoderTemplateVersionPromotionResult
+		query, versionID, previous, active string
+		result                             aggregationv1alpha1.CoderTemplateVersionPromotionResult
 	}{
-		{"?dryRun=All", testInactiveVersionID, aggregationv1alpha1.PromotionResultWouldPromote},
-		{"?dryRun=All", testActiveVersionID, aggregationv1alpha1.PromotionResultAlreadyActive},
-		{"", testActiveVersionID, aggregationv1alpha1.PromotionResultAlreadyActive},
+		{"?dryRun=All", testInactiveVersionID, testActiveVersionID, testActiveVersionID, aggregationv1alpha1.PromotionResultWouldPromote},
+		{"?dryRun=All", testActiveVersionID, testActiveVersionID, testActiveVersionID, aggregationv1alpha1.PromotionResultAlreadyActive},
+		{"", testInactiveVersionID, testActiveVersionID, testInactiveVersionID, aggregationv1alpha1.PromotionResultPromoted},
+		{"", testInactiveVersionID, testInactiveVersionID, testInactiveVersionID, aggregationv1alpha1.PromotionResultAlreadyActive},
+		{"", testActiveVersionID, testInactiveVersionID, testActiveVersionID, aggregationv1alpha1.PromotionResultPromoted},
 	} {
 		status, body := f.server.do(t, cert, http.MethodPost, testPromotePath+tc.query, alice, promoteBody(tc.versionID))
 		var got aggregationv1alpha1.CoderTemplateVersionPromotion
@@ -68,7 +71,7 @@ func TestTemplatePromoteRoute(t *testing.T) {
 			t.Fatalf("promote %s%s: status=%d body=%.300s", tc.versionID, tc.query, status, body)
 		}
 		want := aggregationv1alpha1.CoderTemplateVersionPromotionStatus{
-			Result: tc.result, PreviousActiveVersionID: testActiveVersionID, ActiveVersionID: testActiveVersionID,
+			Result: tc.result, PreviousActiveVersionID: tc.previous, ActiveVersionID: tc.active,
 		}
 		if got.Status != want || got.Name != "default.my-template" || got.Namespace != "test-ns" || got.Kind != "CoderTemplateVersionPromotion" {
 			t.Fatalf("promote %s%s: got %+v", tc.versionID, tc.query, got)
@@ -79,7 +82,6 @@ func TestTemplatePromoteRoute(t *testing.T) {
 		status      int
 		message     string
 	}{
-		{"", promoteBody(testInactiveVersionID), http.StatusBadRequest, "promotion is not enabled yet; use dryRun=All to preview it"},
 		{"?dryRun=Bogus", promoteBody(testInactiveVersionID), http.StatusUnprocessableEntity, "dryRun"},
 		{"?dryRun=All", promoteBody("not-a-uuid"), http.StatusUnprocessableEntity, "spec.versionID"},
 	} {
@@ -87,10 +89,19 @@ func TestTemplatePromoteRoute(t *testing.T) {
 			t.Errorf("POST promote%s: status=%d want %d, body=%.300s", tc.query, status, tc.status, body)
 		}
 	}
+	// Exactly the two real promotions wrote to Coder; nothing downloaded template source.
+	var writes []string
 	for _, request := range f.server.mock.recordedRequests() {
-		if !strings.HasPrefix(request, "GET ") || strings.Contains(request, "/files") {
-			t.Fatalf("promote preview sent a write or a file download to Coder: %v", f.server.mock.recordedRequests())
+		if strings.Contains(request, "/files") {
+			t.Fatalf("promote downloaded template source: %v", f.server.mock.recordedRequests())
 		}
+		if !strings.HasPrefix(request, "GET ") {
+			writes = append(writes, request)
+		}
+	}
+	patch := "PATCH /api/v2/templates/22222222-2222-2222-2222-222222222222/versions"
+	if len(writes) != 2 || writes[0] != patch || writes[1] != patch {
+		t.Fatalf("expected exactly two activation PATCHes, got %v", writes)
 	}
 
 	var promoteSARs []string

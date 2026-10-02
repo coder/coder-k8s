@@ -181,13 +181,18 @@ If that namespace has more than one eligible control plane, the first step does 
 
 `kubectl diff` and `--dry-run=server` send a server-side dry-run request. The server rejects it with `400` for `coderworkspaces` and `codertemplates`, and Coder does not change. To preview a change, compare the output of `kubectl get -o yaml` with your manifest, or use `--dry-run=client`. In Argo CD, keep server-side diff off for these resources. See [Server-side dry-run](../reference/aggregated-api-behavior.md#server-side-dry-run).
 
-## A template promotion returns `400`, `403`, or `422`
+## A template promotion returns `400`, `403`, `409`, `422`, `429`, or `503`
 
-- `400` that says `promotion is not enabled yet`: this release serves only the preview. Add `?dryRun=All` to the request path to see the result without a change. See [Promote a template version](../reference/aggregated-api-behavior.md#promote-a-template-version).
+See [Promote a template version](../reference/aggregated-api-behavior.md#promote-a-template-version) for the full rules.
+
 - `400` that says `is not a version of template`: `spec.versionID` is unknown or belongs to another template. Use `status.id` of a `codertemplateversion` of the same template.
 - `400` that says `is archived` or `its import job is`: only versions whose import succeeded and that are not archived can be promoted.
 - `403`: the caller has no `create` grant on `codertemplates/promote`, or its `resourceNames` do not include the template. Check with `kubectl auth can-i create codertemplates.aggregation.coder.com/<organization>.<template> --subresource=promote -n <namespace>`.
+- `400` that says `Coder refused to activate`: Coder rejected the activation, and nothing changed. Check that the import of the version succeeded and that it is not archived.
+- `409` that says `superseded by a concurrent change`: another version became active at the same time. Check which version is active before you try again.
 - `422`: `spec.versionID` is not a UUID, or the `dryRun` value is not `All`.
+- `429`: Coder rate-limited the operator token. Nothing changed. Wait and try again.
+- `503` that says `could not confirm the promotion`: the server could not find out if the activation was applied. Check the active version with `kubectl get codertemplateversions` before you try again.
 
 ## `coderworkspaces/log` returns `403`, `406`, `422`, `429`, or `504`
 
