@@ -157,6 +157,7 @@ func TestTemplateVersionStorageGetRejectsUnsafeNamesWithoutCoderRequests(t *test
 		"acme.starter-template.a?b", "acme.starter-template.a#b", "acme.starter-template..",
 		"acme.starter-template.a/../b", "acme.starter-template.a%2Fb", "acme.starter-template.a b",
 		"acme.starter-template.a\\b", "acme.starter-template.a\nb", "ac?me.starter-template.v1",
+		"acme.star#ter-template.v1", "acme.a%2Fb.v1", "acme.a b.v1",
 	} {
 		if _, err := getTemplateVersion(t, storage, name); !apierrors.IsBadRequest(err) {
 			t.Fatalf("expected BadRequest for %q, got %v", name, err)
@@ -164,5 +165,21 @@ func TestTemplateVersionStorageGetRejectsUnsafeNamesWithoutCoderRequests(t *test
 	}
 	if got := state.requests(); len(got) != 0 {
 		t.Fatalf("rejected names must not reach Coder, got %v", got)
+	}
+}
+
+func TestRequireCanonicalVersionSegmentBuildsHintOnlyOnMismatch(t *testing.T) {
+	t.Parallel()
+
+	mustNotBuild := func() string { panic("hint built on a non-mismatch path") }
+	if err := requireCanonicalVersionSegment("acme.docker.v1", "version", "v1", "v1", mustNotBuild); err != nil {
+		t.Fatalf("matching names: %v", err)
+	}
+	if err := requireCanonicalVersionSegment("acme.docker.v1", "organization", "acme", "", mustNotBuild); err == nil || !strings.Contains(err.Error(), "assertion failed") {
+		t.Fatalf("expected an assertion error for an empty resolved name, got %v", err)
+	}
+	err := requireCanonicalVersionSegment("acme.docker.V1", "version", "V1", "v1", func() string { return "acme.docker.v1" })
+	if !apierrors.IsBadRequest(err) || !strings.Contains(err.Error(), `"acme.docker.v1"`) {
+		t.Fatalf("expected a 400 naming the canonical name, got %v", err)
 	}
 }

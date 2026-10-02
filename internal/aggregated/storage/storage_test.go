@@ -2725,6 +2725,9 @@ type mockCoderServerState struct {
 	// requestLog records "METHOD /path" for every request, reads included, so tests can assert
 	// exact backend call counts.
 	requestLog []string
+	// versionListNotFound makes GET /templates/{id}/versions return 404 for that template, as if
+	// it was deleted after the template list was read.
+	versionListNotFound uuid.UUID
 
 	templatesByID        map[uuid.UUID]codersdk.Template
 	templateIDsByOrg     map[string]map[string]uuid.UUID
@@ -2900,6 +2903,9 @@ func (s *mockCoderServerState) handleRequest(t *testing.T, w http.ResponseWriter
 	case r.Method == http.MethodPost && hasSegments(segments, "api", "v2", "organizations") && len(segments) == 5 && segments[4] == "templateversions":
 		s.handleCreateTemplateVersion(w, r, segments[3])
 		return
+	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templates") && len(segments) == 5 && segments[4] == "versions":
+		s.handleListTemplateVersions(w, segments[3], r.URL.Query().Get("include_archived") == "true")
+		return
 	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templates") && len(segments) == 6 && segments[4] == "versions":
 		s.handleGetTemplateVersionByName(w, segments[3], segments[5])
 		return
@@ -2985,6 +2991,26 @@ func (s *mockCoderServerState) resetRequests() {
 	defer s.mu.Unlock()
 
 	s.requestLog = nil
+}
+
+// handleListTemplateVersions serves GET /templates/{id}/versions, oldest first like Coder.
+func (s *mockCoderServerState) handleListTemplateVersions(w http.ResponseWriter, templateIDSegment string, includeArchived bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.templatesByID[uuid.MustParse(templateIDSegment)]; !ok || s.versionListNotFound.String() == templateIDSegment {
+		writeCoderError(w, http.StatusNotFound, "template not found")
+		return
+	}
+	versions := make([]codersdk.TemplateVersion, 0)
+	for _, version := range s.templateVersionsByID {
+		if version.TemplateID != nil && version.TemplateID.String() == templateIDSegment && (includeArchived || !version.Archived) {
+			versions = append(versions, version)
+		}
+	}
+	sort.Slice(versions, func(i, j int) bool { return versions[i].CreatedAt.Before(versions[j].CreatedAt) })
+
+	writeJSON(w, http.StatusOK, versions)
 }
 
 // handleGetTemplateVersionByName serves GET /templates/{id}/versions/{name}. Coder matches version
