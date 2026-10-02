@@ -159,7 +159,7 @@ func (s *WorkspaceTransitionStorage) Create(
 		// POST again: one confirming re-read either finds the new build or reports the doubt.
 		// The re-read gets the rest of the budget, at least confirmTimeout.
 		current, rereadErr := sdk.Workspace(budgetCtx, workspace.ID)
-		if rereadErr == nil && current.LatestBuild.ID != workspace.LatestBuild.ID && current.LatestBuild.Transition == s.transition {
+		if rereadErr == nil && confirmsPost(budgetCtx, sdk, workspace.LatestBuild.ID, current.LatestBuild, req) {
 			return s.queued(namespace, name, current, current.LatestBuild)
 		}
 		return nil, apierrors.NewTimeoutError(fmt.Sprintf(
@@ -168,6 +168,22 @@ func (s *WorkspaceTransitionStorage) Create(
 	default:
 		return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), name)
 	}
+}
+
+// confirmsPost reports whether found, the latest build after an uncertain POST, is the build that
+// the POST queued: a new build of the requested transition, of the requested template version when
+// the request named one, started by the user whose token made the POST. A build that someone else
+// queued in the meantime (the Coder UI, the CLI, autostart) does not confirm it. If the operator
+// user itself queued a matching build elsewhere in that window, the two cannot be told apart.
+func confirmsPost(ctx context.Context, sdk *codersdk.Client, previousID uuid.UUID, found codersdk.WorkspaceBuild, req codersdk.CreateWorkspaceBuildRequest) bool {
+	if found.ID == previousID || found.Transition != req.Transition {
+		return false
+	}
+	if req.TemplateVersionID != uuid.Nil && found.TemplateVersionID != req.TemplateVersionID {
+		return false
+	}
+	me, err := sdk.User(ctx, codersdk.Me)
+	return err == nil && me.ID != uuid.Nil && found.InitiatorID == me.ID
 }
 
 // isUncertainStatus reports whether a Coder or proxy status leaves it open whether the build

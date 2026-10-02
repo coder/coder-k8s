@@ -30,8 +30,9 @@ import (
 // Lookups resolve names case-insensitively, as Coder does. A POST answers 201 with a new pending
 // build and leaves the workspace unchanged, unless onPost is set.
 type transitionFakeCoder struct {
-	server   *httptest.Server
-	activeID uuid.UUID
+	server     *httptest.Server
+	activeID   uuid.UUID
+	operatorID uuid.UUID // the user of the client token
 
 	mu         sync.Mutex
 	ws         codersdk.Workspace
@@ -48,7 +49,7 @@ type transitionFakeCoder struct {
 func newTransitionFakeCoder(t *testing.T, latest codersdk.WorkspaceBuild) *transitionFakeCoder {
 	t.Helper()
 	orgID, otherOrgID := uuid.New(), uuid.New()
-	f := &transitionFakeCoder{activeID: uuid.New()}
+	f := &transitionFakeCoder{activeID: uuid.New(), operatorID: uuid.New()}
 	if latest.ID == uuid.Nil {
 		latest.ID = uuid.New()
 	}
@@ -79,6 +80,8 @@ func newTransitionFakeCoder(t *testing.T, latest codersdk.WorkspaceBuild) *trans
 				return
 			}
 			writeLogFakeJSON(w, ws)
+		case r.Method == http.MethodGet && len(parts) == 4 && parts[2] == "users" && parts[3] == codersdk.Me:
+			writeLogFakeJSON(w, codersdk.User{ReducedUser: codersdk.ReducedUser{MinimalUser: codersdk.MinimalUser{ID: f.operatorID}}})
 		case r.Method == http.MethodGet && len(parts) == 4 && parts[2] == "organizations":
 			switch {
 			case strings.EqualFold(parts[3], "acme"):
@@ -110,6 +113,7 @@ func newTransitionFakeCoder(t *testing.T, latest codersdk.WorkspaceBuild) *trans
 			}
 			build := codersdk.WorkspaceBuild{
 				ID: uuid.New(), BuildNumber: ws.LatestBuild.BuildNumber + 1, Transition: req.Transition,
+				TemplateVersionID: req.TemplateVersionID, InitiatorID: f.operatorID,
 				Job: codersdk.ProvisionerJob{Status: codersdk.ProvisionerJobPending},
 			}
 			f.mu.Lock()
@@ -226,6 +230,7 @@ func TestWorkspaceTransitionDecisions(t *testing.T) {
 		{build(stop, codersdk.ProvisionerJobCanceled), queued, queued},
 		{build(del, codersdk.ProvisionerJobFailed), queued, queued},
 		{build(del, codersdk.ProvisionerJobCanceled), queued, queued},
+		// Neither action recreates a deleted workspace: 404 and no POST.
 		{build(del, codersdk.ProvisionerJobSucceeded), wantNotFound, wantNotFound},
 		{build(start, ""), wantInternal, wantInternal},
 		{build(start, codersdk.ProvisionerJobUnknown), wantInternal, wantInternal},
@@ -457,23 +462,55 @@ func TestWorkspaceTransitionCoderConflictRereads(t *testing.T) {
 // between Queued and an uncertain 504. The request budget also ends a stalled lookup.
 func TestWorkspaceTransitionUncertainPost(t *testing.T) {
 	stalledPost := func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }
+	start, stop := codersdk.WorkspaceTransitionStart, codersdk.WorkspaceTransitionStop
+	// found describes the latest build that the confirming re-read sees. A nil found means that
+	// the workspace did not change.
+	type found struct {
+		transition codersdk.WorkspaceTransition
+		byOther    bool // started by another user than the token's user
+		oldVersion bool // a template version other than the active one
+	}
 	for _, tc := range []struct {
-		name    string
-		changed bool
-		status  int // a Coder status for the POST; 0 stalls it until the client times out
+		name          string
+		transition    codersdk.WorkspaceTransition
+		requireActive bool
+		found         *found
+		status        int // a Coder status for the POST; 0 stalls it until the client times out
+		wantQueued    bool
 	}{
-		{"the build was queued", true, 0},
-		{"nothing changed", false, 0},
-		{"a proxy answered 502", false, http.StatusBadGateway},
-		{"a proxy answered 503 after the build was queued", true, http.StatusServiceUnavailable},
-		{"Coder answered 504", false, http.StatusGatewayTimeout},
+		{"the build was queued", stop, false, &found{transition: stop}, 0, true},
+		{"nothing changed", stop, false, nil, 0, false},
+		{"a proxy answered 502", stop, false, nil, http.StatusBadGateway, false},
+		{"a proxy answered 503 after the build was queued", stop, false, &found{transition: stop}, http.StatusServiceUnavailable, true},
+		{"Coder answered 504", stop, false, nil, http.StatusGatewayTimeout, false},
+		{"another user queued the same transition", stop, false, &found{transition: stop, byOther: true}, 0, false},
+		{"the new build has the other transition", stop, false, &found{transition: start}, 0, false},
+		{"a start with the requested version", start, true, &found{transition: start}, 0, true},
+		{"a start with another version", start, true, &found{transition: start, oldVersion: true}, 0, false},
 	} {
-		f := newTransitionFakeCoder(t, build(codersdk.WorkspaceTransitionStart, codersdk.ProvisionerJobSucceeded))
-		queued := build(codersdk.WorkspaceTransitionStop, codersdk.ProvisionerJobPending)
-		queued.ID, queued.BuildNumber = uuid.New(), 8
+		previous := codersdk.WorkspaceTransitionStart
+		if tc.transition == start {
+			previous = stop
+		}
+		f := newTransitionFakeCoder(t, build(previous, codersdk.ProvisionerJobSucceeded))
+		f.update(func(ws *codersdk.Workspace) { ws.TemplateRequireActiveVersion = tc.requireActive })
+		var queued codersdk.WorkspaceBuild
+		if tc.found != nil {
+			queued = build(tc.found.transition, codersdk.ProvisionerJobPending)
+			queued.ID, queued.BuildNumber, queued.InitiatorID = uuid.New(), 8, f.operatorID
+			if tc.found.byOther {
+				queued.InitiatorID = uuid.New()
+			}
+			if tc.requireActive {
+				queued.TemplateVersionID = f.activeID
+			}
+			if tc.found.oldVersion {
+				queued.TemplateVersionID = uuid.New()
+			}
+		}
 		f.set(func(f *transitionFakeCoder) {
 			f.onPost = func(w http.ResponseWriter, r *http.Request) {
-				if tc.changed {
+				if tc.found != nil {
 					f.update(func(ws *codersdk.Workspace) { ws.LatestBuild = queued })
 				}
 				if tc.status != 0 {
@@ -483,7 +520,7 @@ func TestWorkspaceTransitionUncertainPost(t *testing.T) {
 				stalledPost(w, r)
 			}
 		})
-		s := NewWorkspaceTransitionStorage(newTestWorkspaces(t, f, 300*time.Millisecond), codersdk.WorkspaceTransitionStop)
+		s := NewWorkspaceTransitionStorage(newTestWorkspaces(t, f, 300*time.Millisecond), tc.transition)
 		watcher, err := s.workspaces.Watch(transitionContext(t), nil)
 		if err != nil {
 			t.Fatalf("start workspace watch: %v", err)
@@ -493,7 +530,7 @@ func TestWorkspaceTransitionUncertainPost(t *testing.T) {
 		if posts, _ := f.recordedPosts(); len(posts) != 1 || f.rereads.Load() != 1 {
 			t.Fatalf("%s: POSTs=%d rereads=%d, want 1 and 1", tc.name, len(posts), f.rereads.Load())
 		}
-		if !tc.changed {
+		if !tc.wantQueued {
 			if !apierrors.IsTimeout(err) || !strings.Contains(err.Error(), "uncertain") || !strings.Contains(err.Error(), "re-read") {
 				t.Fatalf("%s: err=%v, want an uncertain 504", tc.name, err)
 			}
