@@ -235,3 +235,29 @@ func TestTemplateVersionTableTruncatesMessageOnRunes(t *testing.T) {
 		t.Fatalf("expected 57 runes plus an ellipsis, got %q", message)
 	}
 }
+
+func TestTemplateVersionStorageListStopsAtTimeBudget(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+	seedTemplateWithVersions(t, state, "docker", "v1")
+	seedTemplateWithVersions(t, state, "podman", "v1")
+	state.mu.Lock()
+	state.versionListDelay = 300 * time.Millisecond // 3 templates take 900ms in total
+	state.mu.Unlock()
+	storage := NewTemplateVersionStorage(newTestClientProvider(t, server.URL))
+	if storage.listBudget != TemplateVersionListBudget || TemplateVersionListBudget >= 60*time.Second {
+		t.Fatalf("the default budget %s must apply and stay below kube-apiserver's 60s proxy timeout", storage.listBudget)
+	}
+	storage.listBudget = 400 * time.Millisecond
+
+	started := time.Now()
+	list, err := listTemplateVersions(t, storage, nil)
+	if !apierrors.IsTimeout(err) || list != nil {
+		t.Fatalf("expected a 504 Timeout and no partial list, got list=%v err=%v", list, err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("the list ran for %s; the budget did not stop it", elapsed)
+	}
+}

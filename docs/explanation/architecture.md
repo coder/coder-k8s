@@ -31,7 +31,7 @@ graph TD
 | --- | --- | --- | --- |
 | Code | `internal/app/controllerapp/`, `internal/controller/` | `internal/app/apiserverapp/`, `internal/aggregated/storage/`, `internal/aggregated/coder/` | `internal/app/mcpapp/` |
 | Listens on | `:8081` (`/healthz`, `/readyz`) | `:6443` HTTPS (default) | `127.0.0.1:8090` only. `/mcp` requires the bearer token. `/healthz` and `/readyz` do not. |
-| Resources | `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy` | `coderworkspaces`, `codertemplates` | Tools for control planes, templates, workspaces, events, pod logs, and run state |
+| Resources | `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy` | `coderworkspaces`, `codertemplates`, `codertemplateversions` | Tools for control planes, templates, workspaces, events, pod logs, and run state |
 
 ### Controller
 

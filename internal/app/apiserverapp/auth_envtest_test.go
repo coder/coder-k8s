@@ -159,11 +159,17 @@ func mustCreate(t *testing.T, create func() error) {
 
 func grantTemplateReader(t *testing.T, namespace string, subject rbacv1.Subject, name string) {
 	t.Helper()
+	grantReader(t, namespace, subject, name, "codertemplates")
+}
+
+// grantReader binds subject to a Role that allows get and list on one aggregation.coder.com resource.
+func grantReader(t *testing.T, namespace string, subject rbacv1.Subject, name, resource string) {
+	t.Helper()
 	ctx := t.Context()
 	mustCreate(t, func() error {
 		_, err := envtestAdmin.RbacV1().Roles(namespace).Create(ctx, &rbacv1.Role{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Rules:      []rbacv1.PolicyRule{{APIGroups: []string{aggGroup}, Resources: []string{"codertemplates"}, Verbs: []string{"get", "list"}}},
+			Rules:      []rbacv1.PolicyRule{{APIGroups: []string{aggGroup}, Resources: []string{resource}, Verbs: []string{"get", "list"}}},
 		}, metav1.CreateOptions{})
 		return err
 	})
@@ -216,6 +222,9 @@ func TestEnvtestDelegatedAuthWithRealRBAC(t *testing.T) {
 	}{
 		{method: http.MethodGet, path: templatesOtherNS, cert: &frontProxy, headers: alice, want: http.StatusForbidden},
 		{method: http.MethodGet, path: workspacesTestNS, cert: &frontProxy, headers: alice, want: http.StatusForbidden},
+		// Reading templates does not grant reading template versions.
+		{method: http.MethodGet, path: versionsTestNS, cert: &frontProxy, headers: alice, want: http.StatusForbidden},
+		{method: http.MethodGet, path: versionsTestNS + "/" + testTemplateName + ".v1.0.0", cert: &frontProxy, headers: alice, want: http.StatusForbidden},
 		{method: http.MethodDelete, path: templatesTestNS + "/" + testTemplateName, cert: &frontProxy, headers: alice, want: http.StatusForbidden},
 		{method: http.MethodGet, path: templatesTestNS, cert: &frontProxy, headers: remoteUser("mallory"), want: http.StatusForbidden},
 		{method: http.MethodGet, path: templatesTestNS, want: http.StatusUnauthorized},
@@ -267,6 +276,27 @@ func TestEnvtestDelegatedAuthWithRealRBAC(t *testing.T) {
 			t.Fatalf("SA token after RoleBinding: status=%d, want 200", status)
 		}
 		time.Sleep(time.Second)
+	}
+
+	// The reverse holds too: reading template versions does not grant reading templates.
+	grantReader(t, "test-ns", rbacv1.Subject{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "bob"}, "bob-version-reader", "codertemplateversions")
+	bob := remoteUser("bob")
+	for deadline := time.Now().Add(30 * time.Second); ; {
+		status, body := server.do(t, &frontProxy, http.MethodGet, versionsTestNS, bob, "")
+		if status == http.StatusOK && strings.Contains(body, testTemplateName+".v1.0.0") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("bob list versions after RoleBinding: status=%d body=%.300s", status, body)
+		}
+		time.Sleep(time.Second)
+	}
+	callsBeforeDenial := server.provider.calls.Load()
+	if status, _ := server.do(t, &frontProxy, http.MethodGet, templatesTestNS, bob, ""); status != http.StatusForbidden {
+		t.Fatalf("bob list templates: status=%d, want 403", status)
+	}
+	if calls := server.provider.calls.Load(); calls != callsBeforeDenial {
+		t.Fatalf("a denied request reached the Coder backend: calls %d -> %d", callsBeforeDenial, calls)
 	}
 }
 

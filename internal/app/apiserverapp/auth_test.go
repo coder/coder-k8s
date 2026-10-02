@@ -25,6 +25,7 @@ const (
 	aggGroup          = "aggregation.coder.com"
 	templatesTestNS   = "/apis/aggregation.coder.com/v1alpha1/namespaces/test-ns/codertemplates"
 	workspacesTestNS  = "/apis/aggregation.coder.com/v1alpha1/namespaces/test-ns/coderworkspaces"
+	versionsTestNS    = "/apis/aggregation.coder.com/v1alpha1/namespaces/test-ns/codertemplateversions"
 	templatesOtherNS  = "/apis/aggregation.coder.com/v1alpha1/namespaces/other-ns/codertemplates"
 	templatesAllNS    = "/apis/aggregation.coder.com/v1alpha1/codertemplates"
 	frontProxyName    = "front-proxy-client"

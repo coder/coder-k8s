@@ -177,6 +177,8 @@ func NewScheme() *runtime.Scheme {
 		&aggregationv1alpha1.CoderWorkspaceList{},
 		&aggregationv1alpha1.CoderTemplate{},
 		&aggregationv1alpha1.CoderTemplateList{},
+		&aggregationv1alpha1.CoderTemplateVersion{},
+		&aggregationv1alpha1.CoderTemplateVersionList{},
 	)
 
 	return scheme
@@ -284,8 +286,9 @@ func NewAPIGroupInfo(
 		codecs,
 	)
 	apiGroupInfo.VersionedResourcesStorageMap[aggregationv1alpha1.SchemeGroupVersion.Version] = map[string]rest.Storage{
-		"coderworkspaces": storage.NewWorkspaceStorage(provider),
-		"codertemplates":  storage.NewTemplateStorage(provider),
+		"coderworkspaces":       storage.NewWorkspaceStorage(provider),
+		"codertemplates":        storage.NewTemplateStorage(provider),
+		"codertemplateversions": storage.NewTemplateVersionStorage(provider),
 	}
 	return &apiGroupInfo, nil
 }
@@ -593,7 +596,49 @@ func getOpenAPIDefinitions(_ openapicommon.ReferenceCallback) map[string]openapi
 		},
 	}
 
+	// codertemplateversions is read-only, so this schema only needs the typed summary fields.
+	objectOf := func(properties map[string]spec.Schema) spec.Schema {
+		return spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"object"}, Properties: properties}}
+	}
+	templateVersionSchema := objectOf(map[string]spec.Schema{
+		"apiVersion": stringSchema,
+		"kind":       stringSchema,
+		"metadata":   objectMetaSchema,
+		"spec": objectOf(map[string]spec.Schema{
+			"organization": stringSchema,
+			"templateName": stringSchema,
+			"message":      stringSchema,
+		}),
+		"status": objectOf(map[string]spec.Schema{
+			"id":         stringSchema,
+			"templateID": stringSchema,
+			"active":     boolSchema,
+			"archived":   boolSchema,
+			"createdBy":  stringSchema,
+			"updatedAt":  dateTimeSchema,
+			"job": objectOf(map[string]spec.Schema{
+				"status":      stringSchema,
+				"errorCode":   stringSchema,
+				"startedAt":   dateTimeSchema,
+				"completedAt": dateTimeSchema,
+			}),
+		}),
+	})
+	templateVersionSchema.VendorExtensible = groupVersionKindExtension("CoderTemplateVersion")
+	templateVersionListSchema := objectOf(map[string]spec.Schema{
+		"apiVersion": stringSchema,
+		"kind":       stringSchema,
+		"metadata":   listMetaSchema,
+		"items": {SchemaProps: spec.SchemaProps{
+			Type:  []string{"array"},
+			Items: &spec.SchemaOrArray{Schema: &templateVersionSchema},
+		}},
+	})
+	templateVersionListSchema.VendorExtensible = groupVersionKindExtension("CoderTemplateVersionList")
+
 	return map[string]openapicommon.OpenAPIDefinition{
+		openapiutil.GetCanonicalTypeName(&aggregationv1alpha1.CoderTemplateVersion{}):     {Schema: templateVersionSchema},
+		openapiutil.GetCanonicalTypeName(&aggregationv1alpha1.CoderTemplateVersionList{}): {Schema: templateVersionListSchema},
 		workspaceDefinitionName: {
 			Schema: workspaceSchema,
 		},

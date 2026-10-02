@@ -24,6 +24,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&CoderTemplate{},
 		&CoderTemplateList{},
 		&CoderWorkspaceLogOptions{},
+		&CoderTemplateVersion{},
+		&CoderTemplateVersionList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return addSubresourceConversionFuncs(scheme)

@@ -12,7 +12,7 @@ Use native Kubernetes APIs to run and manage [Coder](https://coder.com).
 | Component | Resources |
 | --- | --- |
 | Operator | `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy` (`coder.com/v1alpha1`) |
-| Aggregated API server | `CoderWorkspace`, `CoderTemplate` (`aggregation.coder.com/v1alpha1`) |
+| Aggregated API server | `CoderWorkspace`, `CoderTemplate`, `CoderTemplateVersion` (`aggregation.coder.com/v1alpha1`) |
 | MCP server | Operational tools over HTTP |
 
 The `--app` flag selects the components that run. The default, `--app=all`, runs the operator and the aggregated API server, but not the MCP server. For all values, and for how the components work together, see [Architecture](explanation/architecture.md).

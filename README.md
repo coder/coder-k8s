@@ -16,7 +16,7 @@ Use native Kubernetes APIs to run and manage [Coder](https://coder.com).
 | Component | Manages | API group |
 | --- | --- | --- |
 | Operator | `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy` (custom resources) | `coder.com/v1alpha1` |
-| Aggregated API server | `CoderWorkspace`, `CoderTemplate` (served from a live Coder instance) | `aggregation.coder.com/v1alpha1` |
+| Aggregated API server | `CoderWorkspace`, `CoderTemplate`, `CoderTemplateVersion` (served from a live Coder instance) | `aggregation.coder.com/v1alpha1` |
 | MCP server | Tools that inspect and operate these resources over HTTP | — |
 
 The operator is a Kubernetes controller. It creates and updates the Coder control planes, provisioners, and workspace proxies that these custom resources describe. The aggregated API server adds Coder workspaces and templates to the Kubernetes API, so you can use `kubectl` with them. The MCP (Model Context Protocol) server gives tools to AI agents and other MCP clients.

@@ -1,6 +1,6 @@
 # Aggregated API behavior
 
-The aggregated API server serves `coderworkspaces` and `codertemplates` from a live Coder instance. Kubernetes does not store them in etcd. This page lists where they behave differently from usual Kubernetes resources.
+The aggregated API server serves `coderworkspaces`, `codertemplates` and `codertemplateversions` from a live Coder instance. Kubernetes does not store them in etcd. This page lists where they behave differently from usual Kubernetes resources.
 
 ## Summary
 
@@ -12,6 +12,7 @@ The aggregated API server serves `coderworkspaces` and `codertemplates` from a l
 | [Watch](#watch) | Shows only writes made through this server. No replay, no initial events. |
 | [Server-side apply](#server-side-apply) | Create-on-update works. The server does not keep field ownership. |
 | [Server-side dry-run](#server-side-dry-run) | Not supported. `kubectl diff` and `--dry-run=server` return `400` and do not change Coder. |
+| [Template versions](#template-versions) | Read-only: `get` and `list`, no watch. Reads never download template source. |
 | [Template builds](#template-builds) | Create and update with `spec.files` wait until Coder completes the import. The full request must complete within 34 seconds. |
 
 ## Object names
@@ -155,6 +156,32 @@ These requests send `dryRun=All`. The server rejects them with `400 BadRequest` 
 The server rejects the request before it sends anything to Coder. Nothing is uploaded, built, or deleted.
 
 The default Argo CD diff and sync do not send `dryRun=All`, and neither does `--dry-run=client`. They work as before. To preview a change, compare the output of `kubectl get -o yaml` with your manifest.
+
+## Template versions
+
+`codertemplateversions` is a read-only view of the versions of each Coder template.
+
+- **Names:** `<organization>.<template>.<version>`, for example `acme.docker.v1.2.3`. The version name can contain `.`. Version names are case-sensitive, so `V1` and `v1` are different objects. Aliases and wrong casing in any segment return `400`, as for templates.
+- **Verbs:** `get` and `list` only. Writes return `405`. To make a new version, change `spec.files` of the `CoderTemplate`.
+- **No watch:** `?watch=true` returns `405`. Coder changes versions outside this server, so a watch that showed only writes made through this server would miss most changes. Tools that need `watch` skip the resource. For example, Argo CD does not show or sync resources whose API has no `watch` verb.
+- **Labels:** `aggregation.coder.com/organization` and `aggregation.coder.com/template`. For example: `kubectl get codertemplateversions -n coder -l aggregation.coder.com/template=docker`.
+- **Fields:** the status shows the version ID, the template ID, the active and archived flags, the creator's username, and the import job status, error code and times. The server does not return the job error text, because Terraform output can contain secrets. It also does not return source files, logs, template variables or the README.
+- **`resourceVersion`:** an opaque fingerprint of the object. Compare it only for equality. It changes when the version becomes active or inactive.
+- **Lists:** include archived, failed and pending versions, sorted by organization, template and creation time. A list is always complete: the server ignores `limit` and never sends a `continue` token. It rejects `continue`, `resourceVersionMatch`, and a `resourceVersion` other than `0`, with `400` or `422`.
+
+### Cost and limits of reads
+
+The server sends every request to Coder with the one operator token of the control plane. All Kubernetes clients therefore share the Coder rate limit of that token: 512 requests per minute for each request path.
+
+| Request | Coder requests | Time limit |
+| --- | --- | --- |
+| `get` | 3 | Request timeout of the API server |
+| `list` | 1, plus 1 for each template, one after another | 25 seconds in total, then `504 Timeout` and no partial list |
+
+- **No paging:** the server ignores `limit`, and the `continue` token in a list is always empty. Every list returns all versions. A client that sends a `continue` token gets `400`.
+- **No watch:** `?watch=true` returns `405`. Tools that need `watch` skip the resource. For example, Argo CD does not show or sync it.
+- **No file downloads:** reads of template versions never download template source, so they do not use the file download limit of 12 per minute.
+- **Tools that list everything:** tools that list every API resource also list all template versions. For example, a Velero backup that includes the `aggregation.coder.com` group sends one `list`, which costs 1 plus 1 for each template.
 
 ## Template builds
 

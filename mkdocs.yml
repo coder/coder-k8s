@@ -50,6 +50,7 @@ nav:
           - CoderProvisioner: reference/api/coderprovisioner.md
           - CoderWorkspaceProxy: reference/api/coderworkspaceproxy.md
           - CoderTemplate: reference/api/codertemplate.md
+          - CoderTemplateVersion: reference/api/codertemplateversion.md
           - CoderWorkspace: reference/api/coderworkspace.md
           # END GENERATED API NAV
   - Explanation:

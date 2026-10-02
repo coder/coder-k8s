@@ -323,9 +323,19 @@ func newIntegrationMockCoderServer(expectedSessionToken string) *integrationMock
 	templateVersion := codersdk.TemplateVersion{
 		ID:         templateVersionID,
 		TemplateID: &templateID,
-		Job:        codersdk.ProvisionerJob{FileID: templateSourceFileID},
+		Name:       "v1.0.0",
+		Job:        codersdk.ProvisionerJob{FileID: templateSourceFileID, Status: codersdk.ProvisionerJobSucceeded},
 		CreatedAt:  now,
 		UpdatedAt:  now,
+	}
+	// Version names are case-sensitive in Coder: "V1" and "v1" are different versions.
+	templateVersions := []codersdk.TemplateVersion{templateVersion}
+	for i, name := range []string{"V1", "v1"} {
+		version := templateVersion
+		version.ID = uuid.MustParse(fmt.Sprintf("77777777-7777-7777-7777-77777777777%d", i))
+		version.Name = name
+		version.CreatedAt = now.Add(time.Duration(i+1) * time.Hour)
+		templateVersions = append(templateVersions, version)
 	}
 
 	organization := codersdk.Organization{
@@ -417,6 +427,18 @@ func newIntegrationMockCoderServer(expectedSessionToken string) *integrationMock
 				return
 			}
 			writeJSON(w, http.StatusOK, workspace)
+			return
+		case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templates") && len(segments) == 5 && segments[3] == template.ID.String() && segments[4] == "versions":
+			writeJSON(w, http.StatusOK, templateVersions)
+			return
+		case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templates") && len(segments) == 6 && segments[3] == template.ID.String() && segments[4] == "versions":
+			for _, version := range templateVersions {
+				if version.Name == segments[5] {
+					writeJSON(w, http.StatusOK, version)
+					return
+				}
+			}
+			writeCoderError(w, http.StatusNotFound, "template version not found")
 			return
 		case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templateversions") && len(segments) == 4:
 			if segments[3] != templateVersion.ID.String() {

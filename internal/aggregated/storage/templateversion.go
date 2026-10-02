@@ -30,11 +30,18 @@ var (
 	_ rest.SingularNameProvider = (*TemplateVersionStorage)(nil)
 )
 
+// TemplateVersionListBudget bounds the total time of one LIST. A LIST makes 1+T sequential Coder
+// requests (T = number of templates), and the API server allows reads up to its request timeout
+// (30 minutes), far longer than kube-apiserver waits for a proxied read (60 seconds by default).
+// The budget makes a slow Coder fail the LIST with 504 instead of holding it open.
+const TemplateVersionListBudget = 25 * time.Second
+
 // TemplateVersionStorage serves read-only CoderTemplateVersion objects from codersdk. Versions
 // change outside this server (Coder UI and CLI, imports, template updates), so it deliberately
 // implements no watch and no write verbs.
 type TemplateVersionStorage struct {
-	provider coder.ClientProvider
+	provider   coder.ClientProvider
+	listBudget time.Duration
 }
 
 // NewTemplateVersionStorage builds codersdk-backed storage for CoderTemplateVersion resources.
@@ -43,7 +50,7 @@ func NewTemplateVersionStorage(provider coder.ClientProvider) *TemplateVersionSt
 		panic("assertion failed: template version client provider must not be nil")
 	}
 
-	return &TemplateVersionStorage{provider: provider}
+	return &TemplateVersionStorage{provider: provider, listBudget: TemplateVersionListBudget}
 }
 
 // New returns an empty CoderTemplateVersion object.
@@ -87,6 +94,13 @@ func (s *TemplateVersionStorage) List(ctx context.Context, opts *metainternalver
 		}
 	}
 
+	if s.listBudget <= 0 {
+		return nil, fmt.Errorf("assertion failed: template version list budget must be positive")
+	}
+	requestCtx := ctx
+	ctx, cancel := context.WithTimeout(ctx, s.listBudget)
+	defer cancel()
+
 	requestNamespace, err := namespaceFromRequestContext(ctx)
 	if err != nil {
 		return nil, err
@@ -121,6 +135,12 @@ func (s *TemplateVersionStorage) List(ctx context.Context, opts *metainternalver
 	for _, namespace := range namespaces {
 		items, err := s.listNamespace(ctx, namespace)
 		if err != nil {
+			if ctx.Err() != nil && requestCtx.Err() == nil {
+				return nil, apierrors.NewTimeoutError(fmt.Sprintf(
+					"listing codertemplateversions took longer than %s: Coder answered too slowly; no partial list is returned",
+					s.listBudget,
+				), 0)
+			}
 			return nil, err
 		}
 		for i := range items {
