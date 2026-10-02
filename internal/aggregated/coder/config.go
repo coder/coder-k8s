@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
@@ -20,26 +22,71 @@ const (
 	maxConnsPerCoderHost = 128
 )
 
-// sharedTransport carries every Coder SDK request of the aggregated API server.
-// http.Transport pools connections per scheme and host, so each Coder deployment gets
-// its own pool of at most maxConnsPerCoderHost connections. Clients stay per request:
-// the session token is set on each client, never on the transport.
-var sharedTransport = newSharedTransport()
+// coderTransports carries every Coder SDK request of the aggregated API server.
+var coderTransports = newTransportRegistry(newCoderTransport)
 
-func newSharedTransport() *http.Transport {
+// transportRegistry holds one long-lived transport per Coder deployment (URL scheme and
+// host). Separate transports keep the per-deployment limits separate even when an HTTP
+// proxy would make deployments share one connection-pool key. Clients stay per request:
+// the session token is set on each client, never on a transport.
+type transportRegistry struct {
+	newTransport func() (*http.Transport, error)
+
+	mu           sync.Mutex
+	byDeployment map[string]*http.Transport
+}
+
+func newTransportRegistry(newTransport func() (*http.Transport, error)) *transportRegistry {
+	return &transportRegistry{
+		newTransport: newTransport,
+		byDeployment: make(map[string]*http.Transport),
+	}
+}
+
+// forURL returns the transport for the deployment that serves coderURL.
+// Entries are never evicted: an unused transport closes its idle connections after
+// IdleConnTimeout and keeps no sockets.
+func (r *transportRegistry) forURL(coderURL *url.URL) (*http.Transport, error) {
+	if r == nil {
+		return nil, fmt.Errorf("assertion failed: transport registry must not be nil")
+	}
+	if coderURL == nil {
+		return nil, fmt.Errorf("assertion failed: coder URL must not be nil")
+	}
+
+	key := strings.ToLower(coderURL.Scheme) + "://" + strings.ToLower(coderURL.Host)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if transport, ok := r.byDeployment[key]; ok {
+		return transport, nil
+	}
+	transport, err := r.newTransport()
+	if err != nil {
+		return nil, err
+	}
+	if transport == nil {
+		return nil, fmt.Errorf("assertion failed: new Coder transport is nil after successful construction")
+	}
+	r.byDeployment[key] = transport
+
+	return transport, nil
+}
+
+func newCoderTransport() (*http.Transport, error) {
 	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
-		panic("assertion failed: http.DefaultTransport is not *http.Transport")
+		return nil, fmt.Errorf("assertion failed: http.DefaultTransport is not *http.Transport")
 	}
 
 	// Clone keeps the default proxy, dial, TLS handshake, and idle timeouts.
 	transport := defaultTransport.Clone()
 	transport.MaxConnsPerHost = maxConnsPerCoderHost
 	transport.MaxIdleConnsPerHost = maxConnsPerCoderHost
-	// No cross-host idle cap: the per-host limit and IdleConnTimeout bound it.
-	transport.MaxIdleConns = 0
+	transport.MaxIdleConns = maxConnsPerCoderHost
 
-	return transport
+	return transport, nil
 }
 
 // Config describes how to construct a Coder SDK client.
@@ -66,13 +113,14 @@ func NewSDKClient(cfg Config) (*codersdk.Client, error) {
 		requestTimeout = defaultRequestTimeout
 	}
 
-	if sharedTransport == nil {
-		return nil, fmt.Errorf("assertion failed: shared Coder transport must not be nil")
+	coderURL := *cfg.CoderURL
+	transport, err := coderTransports.forURL(&coderURL)
+	if err != nil {
+		return nil, fmt.Errorf("get Coder transport: %w", err)
 	}
 
-	coderURL := *cfg.CoderURL
 	client := codersdk.New(&coderURL, codersdk.WithHTTPClient(&http.Client{
-		Transport: sharedTransport,
+		Transport: transport,
 		Timeout:   requestTimeout,
 	}))
 	if client == nil {
