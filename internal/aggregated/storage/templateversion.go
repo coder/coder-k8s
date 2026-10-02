@@ -193,8 +193,8 @@ func (s *TemplateVersionStorage) ConvertToTable(_ context.Context, object, table
 	table := &metav1.Table{}
 	addRow := func(v *aggregationv1alpha1.CoderTemplateVersion) {
 		message, _, _ := strings.Cut(v.Spec.Message, "\n")
-		if len(message) > 60 {
-			message = message[:57] + "..."
+		if runes := []rune(message); len(runes) > 60 {
+			message = string(runes[:57]) + "..."
 		}
 		table.Rows = append(table.Rows, metav1.TableRow{
 			Cells: []interface{}{

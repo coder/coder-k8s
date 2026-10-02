@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -215,5 +216,22 @@ func TestTemplateVersionStorageConvertToTable(t *testing.T) {
 	single, err := storage.ConvertToTable(namespacedContext("control-plane"), &list.Items[0], &metav1.TableOptions{NoHeaders: true})
 	if err != nil || len(single.Rows) != 1 || single.ColumnDefinitions != nil || single.ResourceVersion != list.Items[0].ResourceVersion {
 		t.Fatalf("unexpected single-object table: err=%v table=%+v", err, single)
+	}
+}
+
+func TestTemplateVersionTableTruncatesMessageOnRunes(t *testing.T) {
+	t.Parallel()
+
+	storage := &TemplateVersionStorage{}
+	version := &aggregationv1alpha1.CoderTemplateVersion{}
+	version.Spec.Message = strings.Repeat("é", 70) + "\nsecond line"
+
+	table, err := storage.ConvertToTable(namespacedContext("control-plane"), version, nil)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	message, _ := table.Rows[0].Cells[7].(string)
+	if message != strings.Repeat("é", 57)+"..." || !utf8.ValidString(message) {
+		t.Fatalf("expected 57 runes plus an ellipsis, got %q", message)
 	}
 }
