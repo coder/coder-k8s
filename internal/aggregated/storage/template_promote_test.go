@@ -319,6 +319,10 @@ func TestTemplatePromoteConfirmation(t *testing.T) {
 		},
 		{name: "Coder rate limit", fault: promoteFault{status: http.StatusTooManyRequests}, check: apierrors.IsTooManyRequests, noReread: true},
 		{
+			name: "Coder 404: changed meanwhile", fault: promoteFault{status: http.StatusNotFound}, check: apierrors.IsConflict,
+			message: "was not found in Coder during the activation", noReread: true,
+		},
+		{
 			name: "Coder 403 is not an RBAC denial", fault: promoteFault{status: http.StatusForbidden}, check: apierrors.IsBadRequest,
 			message: "Coder refused to activate", noReread: true,
 		},
@@ -396,4 +400,49 @@ func TestTemplatePromoteEmitsNoTemplateWatchEvent(t *testing.T) {
 		t.Fatalf("promotion emitted a codertemplates watch event: %+v", event)
 	case <-time.After(200 * time.Millisecond):
 	}
+}
+
+// TestTemplatePromoteDeadline: the activation is sent only if it and the confirming re-read fit the
+// request deadline, and the re-read ends before the deadline, so the storage answers before the API
+// server's own 504.
+func TestTemplatePromoteDeadline(t *testing.T) {
+	t.Parallel()
+
+	t.Run("too little time left: 504 and nothing sent", func(t *testing.T) {
+		t.Parallel()
+		f := newPromoteFixture(t)
+		ctx, cancel := context.WithTimeout(namespacedContext("control-plane"), TemplatePromotePatchBudget+TemplatePromoteRereadReserve-time.Second)
+		defer cancel()
+		request := &aggregationv1alpha1.CoderTemplateVersionPromotion{Spec: aggregationv1alpha1.CoderTemplateVersionPromotionSpec{VersionID: f.v2.String()}}
+		_, err := f.storage.Create(ctx, promoteTemplateName, request, nil, &metav1.CreateOptions{})
+		if !apierrors.IsTimeout(err) || !strings.Contains(err.Error(), "nothing was sent to Coder") {
+			t.Fatalf("expected the fixed not-attempted 504, got %v", err)
+		}
+		if mutations := f.state.mutations(); len(mutations) != 0 {
+			t.Fatalf("a promotion without enough time left wrote to Coder: %v", mutations)
+		}
+	})
+
+	t.Run("slow re-read ends before the deadline", func(t *testing.T) {
+		t.Parallel()
+		f := newPromoteFixture(t)
+		f.storage.patchBudget, f.storage.rereadReserve = 100*time.Millisecond, time.Second
+		f.state.mu.Lock()
+		f.state.promoteFault = &promoteFault{apply: true, status: http.StatusOK, rereadDelay: 3 * time.Second}
+		f.state.mu.Unlock()
+		ctx, cancel := context.WithTimeout(namespacedContext("control-plane"), 1500*time.Millisecond)
+		defer cancel()
+		deadline, _ := ctx.Deadline()
+		request := &aggregationv1alpha1.CoderTemplateVersionPromotion{Spec: aggregationv1alpha1.CoderTemplateVersionPromotionSpec{VersionID: f.v2.String()}}
+		_, err := f.storage.Create(ctx, promoteTemplateName, request, nil, &metav1.CreateOptions{})
+		if !apierrors.IsServiceUnavailable(err) || !strings.Contains(err.Error(), "could not confirm") {
+			t.Fatalf("expected 503 could-not-confirm, got %v", err)
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatal("the storage answered after the request deadline, so the API server would have answered 504 first")
+		}
+		if mutations := f.state.mutations(); len(mutations) != 1 {
+			t.Fatalf("expected exactly one PATCH, got %v", mutations)
+		}
+	})
 }

@@ -181,7 +181,7 @@ If that namespace has more than one eligible control plane, the first step does 
 
 `kubectl diff` and `--dry-run=server` send a server-side dry-run request. The server rejects it with `400` for `coderworkspaces` and `codertemplates`, and Coder does not change. To preview a change, compare the output of `kubectl get -o yaml` with your manifest, or use `--dry-run=client`. In Argo CD, keep server-side diff off for these resources. See [Server-side dry-run](../reference/aggregated-api-behavior.md#server-side-dry-run).
 
-## A template promotion returns `400`, `403`, `409`, `422`, `429`, or `503`
+## A template promotion returns `400`, `403`, `409`, `422`, `429`, `503`, or `504`
 
 See [Promote a template version](../reference/aggregated-api-behavior.md#promote-a-template-version) for the full rules.
 
@@ -190,9 +190,12 @@ See [Promote a template version](../reference/aggregated-api-behavior.md#promote
 - `403`: the caller has no `create` grant on `codertemplates/promote`, or its `resourceNames` do not include the template. Check with `kubectl auth can-i create codertemplates.aggregation.coder.com/<organization>.<template> --subresource=promote -n <namespace>`.
 - `400` that says `Coder refused to activate`: Coder rejected the activation, and nothing changed. Check that the import of the version succeeded and that it is not archived.
 - `409` that says `superseded by a concurrent change`: another version became active at the same time. Check which version is active before you try again.
+- `409` that says `was not found in Coder during the activation`: the template or the version changed during the request. Nothing changed. Check that both still exist.
 - `422`: `spec.versionID` is not a UUID, or the `dryRun` value is not `All`.
 - `429`: Coder rate-limited the operator token. Nothing changed. Wait and try again.
 - `503` that says `could not confirm the promotion`: the server could not find out if the activation was applied. Check the active version with `kubectl get codertemplateversions` before you try again.
+- `504` that says `was not attempted`: the lookups in Coder were slow, or the client timeout was too short, so the server sent no activation. Nothing changed. If you set `kubectl --request-timeout`, make it longer than 15 seconds. Then try again.
+- A rollback disappears after a while: a GitOps tool applied the manifest again and created a new version. Pause self-heal or syncing before you roll back. See the GitOps note in [Promote a template version](../reference/aggregated-api-behavior.md#promote-a-template-version).
 
 ## `coderworkspaces/log` returns `403`, `406`, `422`, `429`, or `504`
 

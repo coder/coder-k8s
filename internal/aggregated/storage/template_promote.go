@@ -25,16 +25,22 @@ var (
 	_ rest.NamedCreater = (*TemplatePromoteStorage)(nil)
 )
 
-// TemplatePromotePatchBudget bounds the activation request to Coder. It leaves time in the API
-// server's request deadline for the confirming re-read, so a slow or timed-out activation still
-// gets a definite answer where possible.
-const TemplatePromotePatchBudget = 10 * time.Second
+// The API server cuts every create request at 34 seconds and then answers 504 itself, whatever the
+// storage did. A promotion therefore splits its deadline: the activation request gets at most
+// TemplatePromotePatchBudget, and TemplatePromoteRereadReserve stays for the confirming re-read and
+// the answer. The re-read ends a fifth of the reserve before the deadline, so after an activation the
+// caller gets Promoted, 409 or 503 from this storage, never the API server's 504.
+const (
+	TemplatePromotePatchBudget   = 10 * time.Second
+	TemplatePromoteRereadReserve = 5 * time.Second
+)
 
 // TemplatePromoteStorage serves the codertemplates/promote subresource. It activates an existing
 // version of a template. It never downloads template source and never retries the activation.
 type TemplatePromoteStorage struct {
-	provider    coder.ClientProvider
-	patchBudget time.Duration
+	provider      coder.ClientProvider
+	patchBudget   time.Duration
+	rereadReserve time.Duration
 }
 
 // NewTemplatePromoteStorage builds codersdk-backed storage for the codertemplates/promote subresource.
@@ -43,7 +49,7 @@ func NewTemplatePromoteStorage(provider coder.ClientProvider) *TemplatePromoteSt
 		panic("assertion failed: template promote client provider must not be nil")
 	}
 
-	return &TemplatePromoteStorage{provider: provider, patchBudget: TemplatePromotePatchBudget}
+	return &TemplatePromoteStorage{provider: provider, patchBudget: TemplatePromotePatchBudget, rereadReserve: TemplatePromoteRereadReserve}
 }
 
 // New returns an empty CoderTemplateVersionPromotion object.
@@ -78,8 +84,8 @@ func (s *TemplatePromoteStorage) Create(
 	if name == "" {
 		return nil, fmt.Errorf("assertion failed: template name must not be empty")
 	}
-	if s.patchBudget <= 0 {
-		return nil, fmt.Errorf("assertion failed: template promote patch budget must be positive")
+	if s.patchBudget <= 0 || s.rereadReserve <= 0 {
+		return nil, fmt.Errorf("assertion failed: template promote patch budget and re-read reserve must be positive")
 	}
 
 	request, ok := obj.(*aggregationv1alpha1.CoderTemplateVersionPromotion)
@@ -160,6 +166,14 @@ func (s *TemplatePromoteStorage) Create(
 		return result(aggregationv1alpha1.PromotionResultWouldPromote, previous), nil
 	}
 
+	// Send the activation only if the activation and the confirming re-read both still fit.
+	deadline, hasDeadline := ctx.Deadline()
+	if hasDeadline && time.Until(deadline) < s.patchBudget+s.rereadReserve {
+		return nil, apierrors.NewTimeoutError(fmt.Sprintf(
+			"the promotion of version %s on template %q was not attempted: too little of the request time was left after the lookups; nothing was sent to Coder, so it is safe to try again",
+			versionID, name,
+		), 0)
+	}
 	patchCtx, cancel := context.WithTimeout(ctx, s.patchBudget)
 	patchErr := patchActiveTemplateVersion(patchCtx, sdk, template.ID, versionID)
 	cancel()
@@ -169,7 +183,10 @@ func (s *TemplatePromoteStorage) Create(
 		// error text is not passed on.
 		switch coderErr.StatusCode() {
 		case http.StatusNotFound:
-			return nil, notVersionOfTemplateError(name)
+			// The checks above found both, so the template or the version changed meanwhile.
+			return nil, apierrors.NewConflict(resource, name, fmt.Errorf(
+				"the template or version %s was not found in Coder during the activation; nothing was changed: re-read before retrying", versionID,
+			))
 		case http.StatusTooManyRequests:
 			return nil, apierrors.NewTooManyRequests("Coder rate-limited the activation; nothing was changed", 0)
 		default:
@@ -182,7 +199,13 @@ func (s *TemplatePromoteStorage) Create(
 	}
 
 	// A success, a transport error, a timeout or a 5xx: re-read the template to learn the outcome.
-	confirmed, err := sdk.Template(ctx, template.ID)
+	rereadCtx := ctx
+	if hasDeadline {
+		var cancelReread context.CancelFunc
+		rereadCtx, cancelReread = context.WithDeadline(ctx, deadline.Add(-s.rereadReserve/5))
+		defer cancelReread()
+	}
+	confirmed, err := sdk.Template(rereadCtx, template.ID)
 	if err != nil {
 		return nil, couldNotConfirmPromotionError(name, versionID)
 	}

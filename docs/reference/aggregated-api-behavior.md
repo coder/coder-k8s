@@ -182,7 +182,7 @@ The message does not include the Coder URL.
 
 - After a `504` on a read, try again later.
 - After a `504` on a write (create, update, patch, or delete), the result is not certain. Coder can have applied the change before the call timed out. Re-read the object with `kubectl get` before you retry.
-- A promotion handles this itself. A `504` before the activation means that nothing changed. When the activation itself times out or fails without an answer, the server re-reads the template and answers `Promoted`, `409`, or `503`. See [Promote a template version](#promote-a-template-version).
+- A promotion handles this itself. It answers `504` only before it sends the activation, so a `504` on a promotion means that nothing changed. When the activation itself times out or fails without an answer, the server re-reads the template and answers `Promoted`, `409`, or `503`. See [Promote a template version](#promote-a-template-version).
 - After a `504` on start or stop, re-read the latest build of the workspace before you retry. See [Time limit and retries](#time-limit-and-retries).
 
 ## Template versions
@@ -230,7 +230,7 @@ The server answers `201 Created` with the same kind. The status shows what the s
 
 | `status.result` | Meaning |
 | --- | --- |
-| `Promoted` | This request changed the active version. A re-read of the template confirmed it. |
+| `Promoted` | The requested version is active after the request, as a re-read of the template confirmed. This request or a concurrent request activated it. |
 | `WouldPromote` | Dry-run only. A real promotion would change the active version. |
 | `AlreadyActive` | The version is already active. The server sends no write to Coder, with or without `dryRun`. |
 
@@ -254,10 +254,12 @@ The server answers `201 Created` with the same kind. The status shows what the s
 | Any | The re-read fails | `503 ServiceUnavailable` |
 
 - After a `409` or a `503`, check the active version (`kubectl get codertemplateversions -l aggregation.coder.com/template=<template>`) before you try again. The `503` has no `Retry-After`, so clients do not retry it on their own.
-- If Coder rejects the activation, nothing changed. The server answers `400`, or `429` when Coder rate-limits the operator token. The messages do not pass on the Coder error text.
+- If Coder rejects the activation, nothing changed. The server answers `400`, `409` when Coder no longer finds the template or the version, or `429` when Coder rate-limits the operator token. The messages do not pass on the Coder error text.
+- **Request deadline:** the API server ends every create request after 34 seconds (see [The 34-second write budget](#the-34-second-write-budget)). The activation request gets at most 10 seconds, and the server keeps 5 seconds for the re-read, which ends before the deadline. If the lookups leave less than 15 seconds, the server sends no activation and answers `504` ("was not attempted ... nothing was sent to Coder"). It is safe to try again.
+- A client timeout shortens the deadline. With `kubectl --request-timeout` of 15 seconds or less, every promotion that changes the active version answers this `504`, and nothing changes. Dry-run and `AlreadyActive` are not affected. Use a longer client timeout, or none.
 - Coder has no compare-and-swap for the active version, so the last writer wins. The re-read detects only a change that lands before it.
 - **Template resourceVersion:** a promotion changes the template in Coder, so the `CoderTemplate` gets a new `resourceVersion`. A client that holds the old one gets `409` on its next update. `AlreadyActive` and dry-run change nothing.
-- **GitOps:** an apply of a `CoderTemplate` manifest with other `spec.files` creates and activates a new version. That undoes a rollback. For a durable rollback, revert the manifest or pause syncing.
+- **GitOps:** a rollback changes the files that a `CoderTemplate` GET returns: it now returns the files of the older version. A GitOps tool that applies the manifest again therefore sees drift, even when the manifest did not change. Argo CD self-heal and a Flux reconcile apply the newer files, which creates and activates a new version. That silently undoes the rollback and adds a version each time. Before you roll back, pause self-heal or syncing for the template. For a durable rollback, revert `spec.files` in the manifest.
 - **Audit:** the Kubernetes audit log records the caller and the template. The Coder audit log, where the deployment has one, records the operator account and the version IDs.
 
 ## Template builds
