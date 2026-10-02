@@ -172,3 +172,39 @@ func expectAssertionPanic(t *testing.T, fn func()) {
 
 	fn()
 }
+
+func TestTemplateVersionNameRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	// Version names may contain ".", "_" and "-", may be mixed case, and may look like a UUID.
+	for _, version := range []string{
+		"v1", "v1.2.3", "1.0.0-rc.1", "a_b", "Mixed.Case_v2", "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+	} {
+		name := BuildTemplateVersionName("acme", "docker", version)
+		org, template, parsedVersion, err := ParseTemplateVersionName(name)
+		if err != nil {
+			t.Fatalf("parse %q: %v", name, err)
+		}
+		if org != "acme" || template != "docker" || parsedVersion != version {
+			t.Fatalf("parse(build(%q)) = %q, %q, %q", version, org, template, parsedVersion)
+		}
+	}
+}
+
+func TestParseTemplateVersionNameRejectsMalformedNames(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"", "acme", "acme.docker", ".docker.v1", "acme..v1", "acme.docker."} {
+		if _, _, _, err := ParseTemplateVersionName(name); err == nil {
+			t.Fatalf("expected %q to be rejected", name)
+		}
+	}
+}
+
+func TestBuildTemplateVersionNamePanicsForInvalidSegments(t *testing.T) {
+	t.Parallel()
+
+	expectAssertionPanic(t, func() { _ = BuildTemplateVersionName("", "docker", "v1") })
+	expectAssertionPanic(t, func() { _ = BuildTemplateVersionName("acme", "docker.v2", "v1") })
+	expectAssertionPanic(t, func() { _ = BuildTemplateVersionName("acme", "docker", "") })
+}

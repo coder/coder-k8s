@@ -118,3 +118,70 @@ type CoderTemplateList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []CoderTemplate `json:"items"`
 }
+
+// CoderTemplateVersionSpec names the template that a CoderTemplateVersion belongs to.
+type CoderTemplateVersionSpec struct {
+	// Organization is the canonical name of the organization that owns the template.
+	Organization string `json:"organization"`
+	// TemplateName is the canonical name of the template.
+	TemplateName string `json:"templateName"`
+	// Message is the message that was given when the version was created.
+	Message string `json:"message,omitempty"`
+}
+
+// CoderTemplateVersionJob summarizes the import job of a template version.
+// The job error text is not exposed: Terraform output can contain secrets.
+type CoderTemplateVersionJob struct {
+	// Status is the Coder provisioner job status, for example succeeded or failed.
+	Status string `json:"status"`
+	// ErrorCode is the Coder job error code, if the job failed with one.
+	ErrorCode string `json:"errorCode,omitempty"`
+	// StartedAt is when the import job started.
+	StartedAt *metav1.Time `json:"startedAt,omitempty"`
+	// CompletedAt is when the import job completed.
+	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+}
+
+// CoderTemplateVersionStatus is the observed state of a template version in Coder.
+type CoderTemplateVersionStatus struct {
+	// ID is the Coder template version ID.
+	ID string `json:"id"`
+	// TemplateID is the Coder ID of the template that owns the version.
+	TemplateID string `json:"templateID"`
+	// Active is true when this version is the active version of its template.
+	Active bool `json:"active"`
+	// Archived is true when the version is archived in Coder.
+	Archived bool `json:"archived"`
+	// CreatedBy is the Coder username of the user who created the version.
+	CreatedBy string `json:"createdBy,omitempty"`
+	// UpdatedAt is when Coder last updated the version.
+	UpdatedAt *metav1.Time `json:"updatedAt,omitempty"`
+	// Job summarizes the import job of the version.
+	Job CoderTemplateVersionJob `json:"job"`
+}
+
+// The kubebuilder root-object markers for CoderTemplateVersion and its list, and with them the
+// generated reference page under docs/reference/api/, are added in the same change that registers
+// storage for codertemplateversions. Until then no server serves the kind, so it is not documented
+// as an available resource (#149).
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// CoderTemplateVersion is a read-only view of a Coder template version.
+// metadata.name is <organization>.<template-name>.<version-name>; the version name can contain ".".
+type CoderTemplateVersion struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   CoderTemplateVersionSpec   `json:"spec,omitempty"`
+	Status CoderTemplateVersionStatus `json:"status,omitempty"`
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// CoderTemplateVersionList contains a list of CoderTemplateVersion objects.
+type CoderTemplateVersionList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []CoderTemplateVersion `json:"items"`
+}
