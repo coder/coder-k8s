@@ -33,6 +33,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/wait"
+	genericapiserver "k8s.io/apiserver/pkg/server"
 	genericoptions "k8s.io/apiserver/pkg/server/options"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -337,6 +338,7 @@ func startAuthTestServer(
 	t *testing.T,
 	authn *genericoptions.DelegatingAuthenticationOptions,
 	authz *genericoptions.DelegatingAuthorizationOptions,
+	configure ...func(*genericapiserver.RecommendedConfig),
 ) authTestServer {
 	t.Helper()
 
@@ -367,6 +369,9 @@ func startAuthTestServer(
 	recommendedConfig, err := NewRecommendedConfig(scheme, codecs, secureServingOptions, authn, authz)
 	if err != nil {
 		t.Fatalf("build recommended config: %v", err)
+	}
+	for _, c := range configure {
+		c(recommendedConfig)
 	}
 	server, err := NewGenericAPIServer(recommendedConfig)
 	if err != nil {
@@ -493,7 +498,7 @@ func mustNotContain(t *testing.T, list []string, unwanted string) {
 func describeSAR(spec authorizationv1.SubjectAccessReviewSpec) string {
 	if spec.ResourceAttributes != nil {
 		ra := spec.ResourceAttributes
-		return fmt.Sprintf("user=%s verb=%s group=%s resource=%s ns=%s name=%s", spec.User, ra.Verb, ra.Group, ra.Resource, ra.Namespace, ra.Name)
+		return fmt.Sprintf("user=%s verb=%s group=%s resource=%s subresource=%s ns=%s name=%s", spec.User, ra.Verb, ra.Group, ra.Resource, ra.Subresource, ra.Namespace, ra.Name)
 	}
 	if spec.NonResourceAttributes != nil {
 		return fmt.Sprintf("user=%s verb=%s path=%s", spec.User, spec.NonResourceAttributes.Verb, spec.NonResourceAttributes.Path)

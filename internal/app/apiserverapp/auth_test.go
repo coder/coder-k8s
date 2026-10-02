@@ -18,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/authentication/authenticator"
 	"k8s.io/apiserver/pkg/authentication/user"
+	genericapiserver "k8s.io/apiserver/pkg/server"
 )
 
 const (
@@ -41,7 +42,7 @@ type authFixture struct {
 	server       authTestServer
 }
 
-func newAuthFixture(t *testing.T, tune func(*fakeKubeAPI)) *authFixture {
+func newAuthFixture(t *testing.T, tune func(*fakeKubeAPI), configure ...func(*genericapiserver.RecommendedConfig)) *authFixture {
 	t.Helper()
 	f := &authFixture{
 		kube:         newFakeKubeAPI(t),
@@ -55,7 +56,7 @@ func newAuthFixture(t *testing.T, tune func(*fakeKubeAPI)) *authFixture {
 	authn.RequestHeader.ClientCAFile = f.frontProxyCA.pemPath
 	authn.RequestHeader.AllowedNames = []string{frontProxyName}
 	authn.ClientCert.ClientCA = f.clusterCA.pemPath
-	f.server = startAuthTestServer(t, authn, authz)
+	f.server = startAuthTestServer(t, authn, authz, configure...)
 	return f
 }
 
@@ -170,8 +171,8 @@ func TestDelegatedAuthFrontProxyIdentityAndSARAttributes(t *testing.T) {
 	}
 
 	denied := []struct {
-		method, path, body, contentType string
-		verb, resource, namespace, name string
+		method, path, body, contentType              string
+		verb, resource, subresource, namespace, name string
 	}{
 		{method: http.MethodGet, path: templatesOtherNS, verb: "list", resource: "codertemplates", namespace: "other-ns"},
 		{method: http.MethodGet, path: templatesAllNS, verb: "list", resource: "codertemplates"},
@@ -186,6 +187,8 @@ func TestDelegatedAuthFrontProxyIdentityAndSARAttributes(t *testing.T) {
 		{method: http.MethodPost, path: workspacesTestNS, body: `{"apiVersion":"aggregation.coder.com/v1alpha1","kind":"CoderWorkspace","metadata":{"name":"default.testuser.x"}}`, verb: "create", resource: "coderworkspaces", namespace: "test-ns"},
 		{method: http.MethodPatch, path: workspacesTestNS + "/" + testWorkspaceName, body: `{"spec":{"running":true}}`, contentType: "application/merge-patch+json", verb: "patch", resource: "coderworkspaces", namespace: "test-ns", name: testWorkspaceName},
 		{method: http.MethodDelete, path: workspacesTestNS + "/" + testWorkspaceName, verb: "delete", resource: "coderworkspaces", namespace: "test-ns", name: testWorkspaceName},
+		// Authorization runs before routing, so the subresource is checked even before its route exists.
+		{method: http.MethodGet, path: workspacesTestNS + "/" + testWorkspaceName + "/log", verb: "get", resource: "coderworkspaces", subresource: "log", namespace: "test-ns", name: testWorkspaceName},
 	}
 	for _, d := range denied {
 		f.kube.resetSARs()
@@ -204,8 +207,10 @@ func TestDelegatedAuthFrontProxyIdentityAndSARAttributes(t *testing.T) {
 			continue
 		}
 		ra := sars[0].ResourceAttributes
-		if sars[0].User != "alice" || ra.Verb != d.verb || ra.Group != aggGroup || ra.Resource != d.resource || ra.Namespace != d.namespace || ra.Name != d.name {
-			t.Errorf("%s %s: SAR %s, want verb=%s resource=%s ns=%q name=%q", d.method, d.path, describeSAR(sars[0]), d.verb, d.resource, d.namespace, d.name)
+		if sars[0].User != "alice" || ra.Verb != d.verb || ra.Group != aggGroup || ra.Resource != d.resource ||
+			ra.Subresource != d.subresource || ra.Namespace != d.namespace || ra.Name != d.name {
+			t.Errorf("%s %s: SAR %s, want verb=%s resource=%s subresource=%q ns=%q name=%q",
+				d.method, d.path, describeSAR(sars[0]), d.verb, d.resource, d.subresource, d.namespace, d.name)
 		}
 	}
 	if calls := f.server.provider.calls.Load(); calls != callsAfterAllowed {
