@@ -118,25 +118,55 @@ func (s *WorkspaceStorage) Get(ctx context.Context, name string, _ *metav1.GetOp
 		return nil, badNamespaceErr
 	}
 
-	orgName, userName, workspaceName, err := coder.ParseWorkspaceName(name)
+	_, workspace, err := s.resolveWorkspace(ctx, namespace, name)
 	if err != nil {
-		return nil, apierrors.NewBadRequest(fmt.Sprintf("invalid workspace name %q: %v", name, err))
-	}
-
-	sdk, err := s.clientForNamespace(ctx, namespace)
-	if err != nil {
-		return nil, wrapClientError(err)
-	}
-
-	workspace, err := sdk.WorkspaceByOwnerAndName(ctx, userName, workspaceName, codersdk.WorkspaceOptions{})
-	if err != nil {
-		return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), name)
-	}
-	if err := requireFetchedWorkspaceIdentity(ctx, sdk, name, orgName, userName, workspaceName, workspace); err != nil {
 		return nil, err
 	}
 
 	return convert.WorkspaceToK8s(namespace, workspace), nil
+}
+
+// resolveWorkspace parses name, looks the workspace up in the Coder
+// deployment bound to namespace, and checks that the fetched workspace's
+// canonical name equals name exactly. Subresources call it before any
+// further Coder call, so RBAC resourceNames grants stay exact.
+func (s *WorkspaceStorage) resolveWorkspace(
+	ctx context.Context,
+	namespace string,
+	name string,
+) (*codersdk.Client, codersdk.Workspace, error) {
+	if s == nil {
+		return nil, codersdk.Workspace{}, fmt.Errorf("assertion failed: workspace storage must not be nil")
+	}
+	if ctx == nil {
+		return nil, codersdk.Workspace{}, fmt.Errorf("assertion failed: context must not be nil")
+	}
+	if namespace == "" || name == "" {
+		return nil, codersdk.Workspace{}, fmt.Errorf("assertion failed: namespace and workspace name must not be empty")
+	}
+
+	orgName, userName, workspaceName, err := coder.ParseWorkspaceName(name)
+	if err != nil {
+		return nil, codersdk.Workspace{}, apierrors.NewBadRequest(fmt.Sprintf("invalid workspace name %q: %v", name, err))
+	}
+
+	sdk, err := s.clientForNamespace(ctx, namespace)
+	if err != nil {
+		return nil, codersdk.Workspace{}, wrapClientError(err)
+	}
+
+	workspace, err := sdk.WorkspaceByOwnerAndName(ctx, userName, workspaceName, codersdk.WorkspaceOptions{})
+	if err != nil {
+		return nil, codersdk.Workspace{}, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), name)
+	}
+	if err := requireFetchedWorkspaceIdentity(ctx, sdk, name, orgName, userName, workspaceName, workspace); err != nil {
+		return nil, codersdk.Workspace{}, err
+	}
+	if sdk == nil {
+		return nil, codersdk.Workspace{}, fmt.Errorf("assertion failed: resolved Coder client must not be nil")
+	}
+
+	return sdk, workspace, nil
 }
 
 // List fetches CoderWorkspace objects from codersdk.

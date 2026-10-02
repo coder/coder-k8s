@@ -255,6 +255,10 @@ func NewRecommendedConfig(
 	recommendedConfig.EffectiveVersion = apiservercompatibility.DefaultBuildEffectiveVersion()
 	recommendedConfig.SkipOpenAPIInstallation = true
 	recommendedConfig.RequestTimeout = defaultRequestTimeout
+	if err := validateLogResponseLifetime(logResponseLifetime, recommendedConfig.RequestTimeout); err != nil {
+		return nil, err
+	}
+	recommendedConfig.BuildHandlerChainFunc = newLogGuardedHandlerChain(logResponseLifetime)
 
 	return recommendedConfig, nil
 }
