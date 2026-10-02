@@ -30,6 +30,7 @@ func seedTemplateVersion(t *testing.T, state *mockCoderServerState, name string)
 			Name:       name,
 			Job:        codersdk.ProvisionerJob{Status: codersdk.ProvisionerJobSucceeded},
 		}
+		version.OrganizationID = state.organization.ID
 		state.templateVersionsByID[version.ID] = version
 		return version
 	}

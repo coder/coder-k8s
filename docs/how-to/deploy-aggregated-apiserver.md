@@ -166,6 +166,29 @@ rules:
 
 To check a subject, run `kubectl auth can-i get coderworkspaces.aggregation.coder.com --subresource=log -n coder --as=<user>`.
 
+A promotion of a template version (`codertemplates/promote`) also needs its own grant: `create` on `codertemplates/promote`.
+
+- No verb on `codertemplates` or `codertemplateversions` gives this access, and no default role includes it.
+- Add `resourceNames` with canonical template names to limit it to some templates. The name in a promotion request is the template name, so the grant also covers versions that are created later.
+- `update` on `codertemplates` already lets a subject create and activate a new version through `spec.files`. The promote grant is narrower. It does not remove that access.
+
+For example, this Role lets a CI ServiceAccount promote versions of `acme.docker` only:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: coder-template-promoter
+  namespace: coder
+rules:
+  - apiGroups: ["aggregation.coder.com"]
+    resources: ["codertemplates/promote"]
+    verbs: ["create"]
+    resourceNames: ["acme.docker"]
+```
+
+To check a subject, run `kubectl auth can-i create codertemplates.aggregation.coder.com/acme.docker --subresource=promote -n coder --as=<user>`.
+
 The server keeps these Kubernetes defaults:
 
 - Members of `system:masters` are authorized without a SubjectAccessReview, as in kube-apiserver.
