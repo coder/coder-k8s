@@ -1,19 +1,19 @@
 # Run the MCP server
 
-The MCP server gives MCP clients (such as AI agents) tools to inspect and operate `coder-k8s` resources over HTTP.
+The MCP (Model Context Protocol) server gives tools to MCP clients, for example AI agents. The clients use these tools over HTTP to inspect and operate `coder-k8s` resources.
 
-It is off by default. `--app=all` does not include it. It runs only with `--app=mcp-http`, and only with a bearer token file.
+The MCP server is off by default, and `--app=all` does not include it. It runs only with `--app=mcp-http`, and only with a bearer token file.
 
-!!! danger "What the token grants"
-    The MCP server calls every tool with its own Kubernetes ServiceAccount's permissions (in the default install, the operator's). The token is a shared administrative credential for those tool powers. It does not identify callers and there is no per-caller RBAC: anyone who holds the token can use every tool.
+!!! danger "What the token gives"
+    The MCP server does all tool calls with the permissions of its own Kubernetes ServiceAccount. In the default install, this is the ServiceAccount of the operator. The token is a shared administrative credential for all the tools. It does not identify callers, and there is no RBAC for each caller. Anyone who has the token can use all the tools.
 
-The server listens on `127.0.0.1:8090` inside the Pod only. To reach it, a client needs the token **and** a way into the Pod's loopback interface, such as `kubectl port-forward` (which Kubernetes authorizes with `pods/portforward` on that Pod). Other containers in the same Pod can reach it too. Do not add a proxy that exposes it on the Pod network.
+The server listens on `127.0.0.1:8090` in the Pod only. To connect to it, a client needs the token and a path to the loopback interface of the Pod. An example of such a path is `kubectl port-forward`, which Kubernetes authorizes with `pods/portforward` on that Pod. Other containers in the same Pod can also connect to it. Do not add a proxy that makes it available on the Pod network.
 
 ## 1. Create the token
 
-The token file must hold one token of at least 32 bytes without whitespace (a trailing newline is ignored).
+The token file must contain one token of 32 bytes or more, without whitespace. The server ignores a trailing newline.
 
-The server reads the token file once, at startup. To rotate the token, update the Secret, then restart the pod (for example, `kubectl -n coder-system rollout restart deployment/coder-k8s`). Until the restart, the old token keeps working.
+The server reads the token file one time, at startup. To rotate the token, update the Secret. Then restart the pod, for example with `kubectl -n coder-system rollout restart deployment/coder-k8s`. Until the restart, the old token continues to work.
 
 ```bash
 openssl rand -hex 32 > mcp-token
@@ -23,7 +23,7 @@ kubectl -n coder-system create secret generic coder-k8s-mcp-token --from-file=to
 
 ## 2. Run the MCP server next to the operator
 
-From a clone of this repository, deploy the operator, then append an `mcp` container that runs `--app=mcp-http`. The JSON patch keeps the operator as the first container, so other patches that address `containers/0` still target it:
+Run these commands from a clone of this repository. Deploy the operator. Then add an `mcp` container that runs `--app=mcp-http`. The JSON patch adds the new container at the end, so the operator stays the first container. Thus other patches that use `containers/0` still change the operator container:
 
 ```bash
 kubectl apply -f config/rbac/ -f deploy/deployment.yaml
@@ -43,7 +43,7 @@ kubectl -n coder-system patch deployment coder-k8s --type=json -p '[
 
 Use the same image as the operator container.
 
-The `mcp` container exits at startup if `--mcp-token-file` is missing, unreadable, empty, or too short. The operator container is not affected.
+If `--mcp-token-file` is missing, cannot be read, is empty, is too short, or contains whitespace, the `mcp` container stops at startup. This does not affect the operator container.
 
 ## 3. Connect
 
@@ -51,7 +51,7 @@ The `mcp` container exits at startup if `--mcp-token-file` is missing, unreadabl
 kubectl -n coder-system port-forward deploy/coder-k8s 8090:8090
 ```
 
-Point your MCP client at `http://127.0.0.1:8090/mcp` and send `Authorization: Bearer <token>` on every request. Requests without the correct token get `401 Unauthorized`, including requests that carry an existing `Mcp-Session-Id`.
+Set the URL of your MCP client to `http://127.0.0.1:8090/mcp`. Send `Authorization: Bearer <token>` with each request. A request without the correct token gets `401 Unauthorized`. This is also true for a request that has an existing `Mcp-Session-Id`.
 
 ## 4. Check health
 

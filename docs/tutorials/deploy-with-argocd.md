@@ -1,19 +1,19 @@
 # Deploy with Argo CD
 
-Deploy `coder-k8s` and a CloudNativePG-backed Coder instance from one Argo CD `ApplicationSet`.
+In this tutorial, you use one Argo CD `ApplicationSet` to deploy `coder-k8s` and a Coder instance that uses a CloudNativePG database.
 
-**Time:** 20–30 minutes.
+Time: 20–30 minutes.
 
-**You end up with:**
+When you complete the tutorial, you have:
 
-- The `coder-k8s` operator and aggregated API (`aggregation.coder.com/v1alpha1`).
-- The CloudNativePG operator and a PostgreSQL cluster named `coder-db`.
-- A `CoderControlPlane` named `coder`, served by `svc/coder`.
+- The `coder-k8s` operator and the aggregated API (`aggregation.coder.com/v1alpha1`).
+- The CloudNativePG operator and a PostgreSQL cluster with the name `coder-db`.
+- A `CoderControlPlane` with the name `coder`, served by `svc/coder`.
 
 ## Prerequisites
 
-- A Kubernetes cluster with `kubectl` v1.26+ access.
-- Argo CD, including the ApplicationSet controller, running in namespace `argocd`.
+- A Kubernetes cluster, and access to it with `kubectl` v1.26 or later.
+- Argo CD, including the ApplicationSet controller, that runs in the namespace `argocd`.
 - `jq` and `curl`.
 - The `coder` CLI (only for the optional steps).
 
@@ -23,7 +23,7 @@ Deploy `coder-k8s` and a CloudNativePG-backed Coder instance from one Argo CD `A
 kubectl -n argocd get deploy,pods
 ```
 
-`argocd-application-controller`, `argocd-applicationset-controller`, `argocd-repo-server`, and `argocd-server` should be running.
+Make sure that `argocd-application-controller`, `argocd-applicationset-controller`, `argocd-repo-server`, and `argocd-server` are running.
 
 ## 2. Apply the ApplicationSet
 
@@ -49,7 +49,7 @@ kubectl get apiservice v1alpha1.aggregation.coder.com \
   -o jsonpath='{range .status.conditions[*]}{.type}={.status} reason={.reason} message={.message}{"\n"}{end}'
 ```
 
-The APIService should report `Available=True`.
+Make sure that the APIService shows `Available=True`.
 
 ## 5. Check the database and Coder
 
@@ -62,13 +62,14 @@ kubectl -n coder get codercontrolplane coder -o yaml
 
 ## 6. Create the first admin user
 
-Port-forward Coder in a separate terminal and keep it running:
+1. In a different terminal, start a port-forward to Coder. Keep it running:
 
-```bash
-kubectl -n coder port-forward svc/coder 3000:80
-```
+    ```bash
+    kubectl -n coder port-forward svc/coder 3000:80
+    ```
 
-Open `http://127.0.0.1:3000/setup`, create the admin user, and confirm the templates page loads.
+2. Open `http://127.0.0.1:3000/setup` and create the admin user.
+3. Make sure that the templates page opens.
 
 ## 7. Push a template (optional)
 
@@ -89,7 +90,7 @@ kubectl get codertemplates.aggregation.coder.com -A
 kubectl get coderworkspaces.aggregation.coder.com -A
 ```
 
-`starter-scratch` appears as `<organization>.starter-scratch`. Inspect it:
+In Kubernetes, the template `starter-scratch` has the name `<organization>.starter-scratch`. To see all its fields:
 
 ```bash
 TEMPLATE=$(kubectl get codertemplates.aggregation.coder.com -A \
@@ -101,10 +102,10 @@ kubectl -n coder get codertemplates.aggregation.coder.com "$TEMPLATE" -o yaml
 
 | Symptom | Fix |
 | --- | --- |
-| Sync error `metadata.annotations: Too long` on CNPG CRDs | Make sure `ServerSideApply=true` is in `spec.template.spec.syncPolicy.syncOptions` before applying the `ApplicationSet`. |
-| CloudNativePG pod crashes with `no matches for kind "Pooler"` | The CRD apply failed. Fix the sync options and re-sync. |
-| APIService `v1alpha1.aggregation.coder.com` is not Available | Check the `coder-k8s` logs and that Service `coder-k8s-apiserver` exists in `coder-system`. |
-| Coder Deployment does not roll out | Check that `coder-db` is Ready and Secret `coder-db-app` exists. |
+| The sync fails with `metadata.annotations: Too long` on the CloudNativePG CRDs | Make sure that `ServerSideApply=true` is in `spec.template.spec.syncPolicy.syncOptions` before you apply the `ApplicationSet`. |
+| The CloudNativePG pod crashes with `no matches for kind "Pooler"` | The CRDs were not applied. Correct the sync options and sync again. |
+| The APIService `v1alpha1.aggregation.coder.com` is not Available | Examine the `coder-k8s` logs. Make sure that the Service `coder-k8s-apiserver` exists in `coder-system`. |
+| The Coder Deployment does not roll out | Make sure that `coder-db` is Ready and that the Secret `coder-db-app` exists. |
 
 ## Clean up
 
@@ -112,4 +113,4 @@ kubectl -n coder get codertemplates.aggregation.coder.com "$TEMPLATE" -o yaml
 kubectl -n argocd delete applicationset coder-k8s-stack
 ```
 
-The generated `Application` has the resources finalizer, so its managed resources are deleted too.
+The generated `Application` has the resources finalizer. Thus Argo CD also deletes the resources that the `Application` manages.

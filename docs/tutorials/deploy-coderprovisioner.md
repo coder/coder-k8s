@@ -1,14 +1,14 @@
 # Deploy an External Provisioner
 
-Add a `CoderProvisioner` (an external provisioner daemon) to an existing control plane.
+In this tutorial, you add a `CoderProvisioner` to a control plane that already exists. A `CoderProvisioner` runs external provisioner daemons for Coder.
 
-**Time:** 5 minutes.
+Time: 5 minutes.
 
 ## Prerequisites
 
-Finish [Deploy a Coder Control Plane](getting-started.md). You need `codercontrolplane-sample` in namespace `coder`, `Ready`, with operator access ready (the default).
+Complete [Deploy a Coder Control Plane](getting-started.md) first. The control plane `codercontrolplane-sample` in the namespace `coder` must be `Ready`, and its operator access must be ready (the default).
 
-Check:
+Make sure that the phase is `Ready` and that `operatorAccessReady` is `true`:
 
 ```bash
 kubectl get codercontrolplane codercontrolplane-sample -n coder \
@@ -24,15 +24,15 @@ true
 
 ## 1. Check the license entitlement
 
-External provisioners need the matching Coder license entitlement:
+External provisioners require the applicable Coder license entitlement. Show its value:
 
 ```bash
 kubectl get codercontrolplane codercontrolplane-sample -n coder \
   -o jsonpath='{.status.externalProvisionerDaemonsEntitlement}{"\n"}'
 ```
 
-- `entitled` or `grace_period`: continue.
-- `not_entitled`: update the control plane's license first.
+- If the value is `entitled` or `grace_period`, continue to step 2.
+- If the value is `not_entitled`, update the license of the control plane first.
 
 ## 2. Deploy the provisioner
 
@@ -47,9 +47,9 @@ kubectl get coderprovisioner coderprovisioner-sample -n coder \
   -o jsonpath='{.status.phase}{"\n"}{range .status.conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'
 ```
 
-Expected: phase `Ready` and `DeploymentReady=True`.
+Expected result: the phase is `Ready`, and the conditions include `DeploymentReady=True`.
 
-The operator creates these resources in `coder`:
+The operator creates these resources in the `coder` namespace:
 
 | Kind | Name |
 | --- | --- |
@@ -71,4 +71,4 @@ kubectl get secret coderprovisioner-sample-provisioner-key -n coder
 kubectl delete coderprovisioner coderprovisioner-sample -n coder
 ```
 
-To remove everything, follow [the control plane cleanup](getting-started.md#5-clean-up-optional).
+To remove all the other resources, do the steps in [the control plane cleanup](getting-started.md#5-clean-up-optional).
