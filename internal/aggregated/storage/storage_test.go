@@ -2728,8 +2728,8 @@ type mockCoderServerState struct {
 	// versionListNotFound makes GET /templates/{id}/versions return 404 for that template, as if
 	// it was deleted after the template list was read.
 	versionListNotFound uuid.UUID
-	// versionListDelay delays every GET /templates/{id}/versions response, to model a slow Coder.
-	versionListDelay time.Duration
+	// versionReadDelay delays every response of the template version routes, to model a slow Coder.
+	versionReadDelay time.Duration
 
 	templatesByID        map[uuid.UUID]codersdk.Template
 	templateIDsByOrg     map[string]map[string]uuid.UUID
@@ -2998,7 +2998,7 @@ func (s *mockCoderServerState) resetRequests() {
 // handleListTemplateVersions serves GET /templates/{id}/versions, oldest first like Coder.
 func (s *mockCoderServerState) handleListTemplateVersions(w http.ResponseWriter, templateIDSegment string, includeArchived bool) {
 	s.mu.Lock()
-	delay := s.versionListDelay
+	delay := s.versionReadDelay
 	s.mu.Unlock()
 	time.Sleep(delay)
 
@@ -3023,6 +3023,11 @@ func (s *mockCoderServerState) handleListTemplateVersions(w http.ResponseWriter,
 // handleGetTemplateVersionByName serves GET /templates/{id}/versions/{name}. Coder matches version
 // names case-sensitively; caseInsensitiveLeafLookups models a backend that does not.
 func (s *mockCoderServerState) handleGetTemplateVersionByName(w http.ResponseWriter, templateIDSegment, versionName string) {
+	s.mu.Lock()
+	delay := s.versionReadDelay
+	s.mu.Unlock()
+	time.Sleep(delay)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

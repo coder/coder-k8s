@@ -244,13 +244,13 @@ func TestTemplateVersionStorageListStopsAtTimeBudget(t *testing.T) {
 	seedTemplateWithVersions(t, state, "docker", "v1")
 	seedTemplateWithVersions(t, state, "podman", "v1")
 	state.mu.Lock()
-	state.versionListDelay = 300 * time.Millisecond // 3 templates take 900ms in total
+	state.versionReadDelay = 300 * time.Millisecond // 3 templates take 900ms in total
 	state.mu.Unlock()
 	storage := NewTemplateVersionStorage(newTestClientProvider(t, server.URL))
-	if storage.listBudget != TemplateVersionListBudget || TemplateVersionListBudget >= 60*time.Second {
-		t.Fatalf("the default budget %s must apply and stay below kube-apiserver's 60s proxy timeout", storage.listBudget)
+	if storage.readBudget != TemplateVersionReadBudget || TemplateVersionReadBudget >= 60*time.Second {
+		t.Fatalf("the default budget %s must apply and stay below kube-apiserver's 60s proxy timeout", storage.readBudget)
 	}
-	storage.listBudget = 400 * time.Millisecond
+	storage.readBudget = 400 * time.Millisecond
 
 	started := time.Now()
 	list, err := listTemplateVersions(t, storage, nil)

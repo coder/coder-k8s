@@ -175,7 +175,7 @@ The server sends every request to Coder with the one operator token of the contr
 
 | Request | Coder requests | Time limit |
 | --- | --- | --- |
-| `get` | 3 | Request timeout of the API server |
+| `get` | 3, one after another | 25 seconds in total, then `504 Timeout` |
 | `list` | 1, plus 1 for each template, one after another | 25 seconds in total, then `504 Timeout` and no partial list |
 
 - **No paging:** the server ignores `limit`, and the `continue` token in a list is always empty. Every list returns all versions. A client that sends a `continue` token gets `400`.
