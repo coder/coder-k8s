@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 
 	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
+	"github.com/coder/coder-k8s/internal/aggregated/coder"
 	"github.com/coder/coder-k8s/internal/aggregated/convert"
 	"github.com/coder/coder/v2/codersdk"
 )
@@ -233,5 +236,49 @@ func TestTemplateVersionTableTruncatesMessageOnRunes(t *testing.T) {
 	message, _ := table.Rows[0].Cells[7].(string)
 	if message != strings.Repeat("é", 57)+"..." || !utf8.ValidString(message) {
 		t.Fatalf("expected 57 runes plus an ellipsis, got %q", message)
+	}
+}
+
+func TestTemplateVersionStorageListStopsAtTimeBudget(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+	seedTemplateWithVersions(t, state, "docker", "v1")
+	seedTemplateWithVersions(t, state, "podman", "v1")
+	state.mu.Lock()
+	state.versionReadDelay = 300 * time.Millisecond // 3 templates take 900ms in total
+	state.mu.Unlock()
+	storage := NewTemplateVersionStorage(newTestClientProvider(t, server.URL))
+	if storage.readBudget != TemplateVersionReadBudget || TemplateVersionReadBudget >= 60*time.Second {
+		t.Fatalf("the default budget %s must apply and stay below kube-apiserver's 60s proxy timeout", storage.readBudget)
+	}
+	storage.readBudget = 400 * time.Millisecond
+
+	started := time.Now()
+	list, err := listTemplateVersions(t, storage, nil)
+	if !apierrors.IsTimeout(err) || list != nil {
+		t.Fatalf("expected a 504 Timeout and no partial list, got list=%v err=%v", list, err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("the list ran for %s; the budget did not stop it", elapsed)
+	}
+}
+
+// blockingNamespaceProvider models namespace discovery that waits until the request context ends.
+type blockingNamespaceProvider struct{ coder.ClientProvider }
+
+func (blockingNamespaceProvider) EligibleNamespaces(ctx context.Context) ([]string, error) {
+	<-ctx.Done()
+	return nil, fmt.Errorf("list control planes: %w", ctx.Err())
+}
+
+func TestTemplateVersionStorageListBudgetCoversNamespaceDiscovery(t *testing.T) {
+	t.Parallel()
+
+	storage := NewTemplateVersionStorage(blockingNamespaceProvider{})
+	storage.readBudget = 100 * time.Millisecond
+	if _, err := storage.List(namespacedContext(""), nil); !apierrors.IsTimeout(err) {
+		t.Fatalf("expected a 504 Timeout when namespace discovery outlasts the budget, got %v", err)
 	}
 }

@@ -183,3 +183,24 @@ func TestRequireCanonicalVersionSegmentBuildsHintOnlyOnMismatch(t *testing.T) {
 		t.Fatalf("expected a 400 naming the canonical name, got %v", err)
 	}
 }
+
+func TestTemplateVersionStorageGetStopsAtTimeBudget(t *testing.T) {
+	t.Parallel()
+
+	server, state := newMockCoderServer(t)
+	defer server.Close()
+	state.mu.Lock()
+	state.versionReadDelay = 500 * time.Millisecond
+	state.mu.Unlock()
+	storage := NewTemplateVersionStorage(newTestClientProvider(t, server.URL))
+	storage.readBudget = 200 * time.Millisecond
+
+	started := time.Now()
+	got, err := getTemplateVersion(t, storage, "acme.starter-template.starter-template-v1")
+	if !apierrors.IsTimeout(err) || got != nil {
+		t.Fatalf("expected a 504 Timeout, got object=%v err=%v", got, err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("the get ran for %s; the budget did not stop it", elapsed)
+	}
+}

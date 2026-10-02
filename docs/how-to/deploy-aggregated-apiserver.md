@@ -130,7 +130,7 @@ The aggregated API server uses the Kubernetes API to authenticate and authorize 
 | Direct requests with a client certificate signed by the cluster client CA | Certificate subject | SubjectAccessReview |
 | All other requests | None | Rejected with `401`, except exact `/healthz`, `/livez`, `/readyz` |
 
-The server trusts `X-Remote-*` headers only on connections that present a valid front-proxy client certificate. Kubernetes RBAC on `aggregation.coder.com` (`codertemplates`, `coderworkspaces`) controls access to the resources. Read the warning that follows before you give this RBAC.
+The server trusts `X-Remote-*` headers only on connections that present a valid front-proxy client certificate. Kubernetes RBAC on `aggregation.coder.com` (`codertemplates`, `codertemplateversions`, `coderworkspaces`) controls access to the resources. Read the warning that follows before you give this RBAC.
 
 !!! warning "RBAC on these resources is owner access in Coder"
     Treat Kubernetes RBAC on `codertemplates` and `coderworkspaces` as owner-equivalent access in Coder. Give it only to subjects that you trust as Coder owners. Use namespaced Roles, not ClusterRoles, when you can.
@@ -140,7 +140,8 @@ The server does not map Kubernetes users to Coder users. After Kubernetes RBAC a
 Thus a subject with this RBAC in a namespace gets these rights in the Coder deployment of that namespace:
 
 - A subject that can create, update, patch, or delete `codertemplates` or `coderworkspaces` acts as an owner.
-- A subject that can `get`, `list`, or `watch` these resources sees the templates (including their source files) and workspaces as an owner sees them.
+- A subject that can `get`, `list`, or `watch` these resources sees the templates (including their source files), template versions, and workspaces as an owner sees them, in every organization of that Coder deployment.
+- Access to `codertemplates` does not include `codertemplateversions`, and the reverse. Grant each resource separately.
 
 A ClusterRole binding gives this access for each namespace that has a control plane.
 
@@ -158,6 +159,7 @@ The server uses the same Kubernetes API for all of these checks. It uses `KUBECO
 kubectl rollout status deployment/coder-k8s -n coder-system
 kubectl get apiservice v1alpha1.aggregation.coder.com
 kubectl get codertemplates.aggregation.coder.com -A
+kubectl get codertemplateversions.aggregation.coder.com -A
 kubectl get coderworkspaces.aggregation.coder.com -A
 ```
 

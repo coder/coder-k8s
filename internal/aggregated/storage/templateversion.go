@@ -30,11 +30,19 @@ var (
 	_ rest.SingularNameProvider = (*TemplateVersionStorage)(nil)
 )
 
+// TemplateVersionReadBudget bounds the total time of one GET (3 sequential Coder requests) or LIST
+// (1+T sequential requests, T = number of templates). The API server allows reads up to its request
+// timeout (30 minutes), and each Coder request can take up to the SDK timeout, far longer than
+// kube-apiserver waits for a proxied read (60 seconds by default). The budget makes a slow Coder
+// fail the read with 504 instead of holding it open.
+const TemplateVersionReadBudget = 25 * time.Second
+
 // TemplateVersionStorage serves read-only CoderTemplateVersion objects from codersdk. Versions
 // change outside this server (Coder UI and CLI, imports, template updates), so it deliberately
 // implements no watch and no write verbs.
 type TemplateVersionStorage struct {
-	provider coder.ClientProvider
+	provider   coder.ClientProvider
+	readBudget time.Duration
 }
 
 // NewTemplateVersionStorage builds codersdk-backed storage for CoderTemplateVersion resources.
@@ -43,7 +51,7 @@ func NewTemplateVersionStorage(provider coder.ClientProvider) *TemplateVersionSt
 		panic("assertion failed: template version client provider must not be nil")
 	}
 
-	return &TemplateVersionStorage{provider: provider}
+	return &TemplateVersionStorage{provider: provider, readBudget: TemplateVersionReadBudget}
 }
 
 // New returns an empty CoderTemplateVersion object.
@@ -87,6 +95,23 @@ func (s *TemplateVersionStorage) List(ctx context.Context, opts *metainternalver
 		}
 	}
 
+	if s.readBudget <= 0 {
+		return nil, fmt.Errorf("assertion failed: template version read budget must be positive")
+	}
+	budgetCtx, cancel := context.WithTimeout(ctx, s.readBudget)
+	defer cancel()
+	list, err := s.list(budgetCtx, opts)
+	if err != nil && budgetCtx.Err() != nil && ctx.Err() == nil {
+		// Every expiry of the budget, namespace discovery included, gets the same 504.
+		return nil, apierrors.NewTimeoutError(fmt.Sprintf(
+			"listing codertemplateversions took longer than %s: Coder answered too slowly; no partial list is returned",
+			s.readBudget,
+		), 0)
+	}
+	return list, err
+}
+
+func (s *TemplateVersionStorage) list(ctx context.Context, opts *metainternalversion.ListOptions) (runtime.Object, error) {
 	requestNamespace, err := namespaceFromRequestContext(ctx)
 	if err != nil {
 		return nil, err
@@ -253,7 +278,29 @@ func humanAge(t time.Time) string {
 
 // Get fetches a CoderTemplateVersion named <organization>.<template>.<version>. It makes three
 // Coder requests (organization, template, version by name) and never downloads template source.
-func (s *TemplateVersionStorage) Get(ctx context.Context, name string, _ *metav1.GetOptions) (runtime.Object, error) {
+func (s *TemplateVersionStorage) Get(ctx context.Context, name string, opts *metav1.GetOptions) (runtime.Object, error) {
+	if s == nil {
+		return nil, fmt.Errorf("assertion failed: template version storage must not be nil")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("assertion failed: context must not be nil")
+	}
+	if s.readBudget <= 0 {
+		return nil, fmt.Errorf("assertion failed: template version read budget must be positive")
+	}
+
+	budgetCtx, cancel := context.WithTimeout(ctx, s.readBudget)
+	defer cancel()
+	obj, err := s.get(budgetCtx, name, opts)
+	if err != nil && budgetCtx.Err() != nil && ctx.Err() == nil {
+		return nil, apierrors.NewTimeoutError(fmt.Sprintf(
+			"getting codertemplateversion %q took longer than %s: Coder answered too slowly", name, s.readBudget,
+		), 0)
+	}
+	return obj, err
+}
+
+func (s *TemplateVersionStorage) get(ctx context.Context, name string, _ *metav1.GetOptions) (runtime.Object, error) {
 	if s == nil {
 		return nil, fmt.Errorf("assertion failed: template version storage must not be nil")
 	}

@@ -46,6 +46,10 @@ func TestNewSchemeRegistersAggregationKinds(t *testing.T) {
 		aggregationInternalGroupVersion.WithKind("CoderWorkspaceList"),
 		aggregationInternalGroupVersion.WithKind("CoderTemplate"),
 		aggregationInternalGroupVersion.WithKind("CoderTemplateList"),
+		aggregationv1alpha1.SchemeGroupVersion.WithKind("CoderTemplateVersion"),
+		aggregationv1alpha1.SchemeGroupVersion.WithKind("CoderTemplateVersionList"),
+		aggregationInternalGroupVersion.WithKind("CoderTemplateVersion"),
+		aggregationInternalGroupVersion.WithKind("CoderTemplateVersionList"),
 	} {
 		if !scheme.Recognizes(gvk) {
 			t.Fatalf("expected scheme to recognize %s", gvk.String())
