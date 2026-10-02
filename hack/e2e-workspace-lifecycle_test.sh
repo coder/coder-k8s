@@ -67,6 +67,7 @@ case "${pos[0]}:${pos[1]:-}" in
     if [[ $raw == */log* ]]; then # coderworkspaces/log snapshot; log-* scenarios break it
       [[ -f $(wsfile "${raw%/log*}") ]] || err NotFound missing
       [[ $SCENARIO != log-empty ]] || exit 0
+      [[ $SCENARIO != follow-fails || $raw != *follow=true* ]] || err InternalError "stream failed"
       line='2026-10-02T10:00:00Z [info] [provisioner|Planning infrastructure] Terraform 1.14.0 ok'
       if [[ $raw == *limitBytes=64 ]]; then printf '%s\n%s\n' "$line" "$line" | head -c 64; else printf '%s\n%s\n' "$line" "$line"; fi
       exit 0
@@ -363,6 +364,10 @@ check "fails on the empty log; no lifecycle mutation" eval 'failed_with "build l
 echo "TEST log-leak (#148): the server log contains a build log line"
 run_scenario log-leak; summary
 check "fails on the leak; no lifecycle mutation" eval 'failed_with "the server log contains a build log line" && no_mutations_after "$APPLIES"'
+
+echo "TEST follow-fails (#148): the log follow of the stop build fails"
+run_scenario follow-fails; summary
+check "fails on the follow; no mutation after the update" eval 'failed_with "log follow failed" && no_mutations_after "$APPLIES,kubectl replace"'
 
 echo "TEST missing-built-id: BUILT_IMAGE_ID is not a sha256 ID"
 run_scenario missing-built-id BUILT_IMAGE_ID=e2e; summary

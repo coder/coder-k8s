@@ -4,6 +4,7 @@ go 1.26.8
 
 require (
 	github.com/coder/coder/v2 v2.35.8
+	github.com/coder/websocket v1.8.14
 	github.com/google/uuid v1.6.0
 	github.com/lib/pq v1.10.9
 	github.com/modelcontextprotocol/go-sdk v1.4.1
@@ -127,7 +128,6 @@ require (
 	github.com/coder/pretty v0.0.0-20230908205945-e89ba86370e0 // indirect
 	github.com/coder/serpent v0.15.0 // indirect
 	github.com/coder/terraform-provider-coder/v2 v2.18.0 // indirect
-	github.com/coder/websocket v1.8.14 // indirect
 	github.com/coreos/go-oidc/v3 v3.19.0 // indirect
 	github.com/coreos/go-semver v0.3.1 // indirect
 	github.com/coreos/go-systemd/v22 v22.5.0 // indirect

@@ -17,6 +17,9 @@ type CoderWorkspaceLogOptions struct {
 
 	// LimitBytes ends the response after this many bytes. It may cut a line.
 	LimitBytes *int64 `json:"limitBytes,omitempty"`
+
+	// Follow keeps the response open and streams new entries until the build ends.
+	Follow bool `json:"follow,omitempty"`
 }
 
 // convertURLValuesToCoderWorkspaceLogOptions decodes log query parameters. Unknown parameters are
@@ -29,6 +32,12 @@ func convertURLValuesToCoderWorkspaceLogOptions(in *url.Values, out *CoderWorksp
 	if values, ok := (*in)["limitBytes"]; ok {
 		if err := runtime.Convert_Slice_string_To_Pointer_int64(&values, &out.LimitBytes, s); err != nil {
 			return fmt.Errorf("limitBytes: %w", err)
+		}
+	}
+	if values, ok := (*in)["follow"]; ok {
+		// As for Pod logs, a bare "?follow" means true.
+		if err := runtime.Convert_Slice_string_To_bool(&values, &out.Follow, s); err != nil {
+			return fmt.Errorf("follow: %w", err)
 		}
 	}
 	return nil

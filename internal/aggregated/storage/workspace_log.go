@@ -124,6 +124,7 @@ func (s *WorkspaceLogStorage) Get(ctx context.Context, name string, opts runtime
 		user:          caller.GetName(),
 		budget:        budget,
 		callerLimited: callerLimited,
+		follow:        options.Follow,
 	}, nil
 }
 
@@ -135,6 +136,7 @@ type workspaceLogStream struct {
 	user          string
 	budget        int64
 	callerLimited bool
+	follow        bool
 }
 
 var _ rest.ResourceStreamer = (*workspaceLogStream)(nil)
@@ -158,8 +160,12 @@ func (w *workspaceLogStream) InputStream(ctx context.Context, _, _ string) (io.R
 	if err != nil {
 		return nil, false, "", err
 	}
-	// One deadline covers resolution and every read from Coder.
-	logCtx, cancel := context.WithTimeout(ctx, w.storage.limits.duration)
+	// One deadline covers resolution and every read from Coder. A follow stream gets the long one.
+	duration := w.storage.limits.duration
+	if w.follow {
+		duration = w.storage.limits.followDuration
+	}
+	logCtx, cancel := context.WithTimeout(ctx, duration)
 	out := &logReadCloser{cancel: cancel, release: release}
 	// The deferred Close frees the slot on every return except a successful one, which hands
 	// the slot to the response body: StreamObject closes the body after its write loop.
@@ -185,39 +191,57 @@ func (w *workspaceLogStream) InputStream(ctx context.Context, _, _ string) (io.R
 	if workspace.LatestBuild.ID == uuid.Nil {
 		return nil, false, "", fmt.Errorf("assertion failed: workspace %q has no latest build", w.name)
 	}
-	snapshot, warnings, err := w.readSnapshot(logCtx, sdk, workspace.LatestBuild.ID)
+	snapshot, err := w.readSnapshot(logCtx, sdk, workspace.LatestBuild.ID)
 	if err != nil {
 		return nil, false, "", failed(err)
 	}
-	for _, msg := range warnings {
+	for _, msg := range snapshot.warnings {
 		warning.AddWarning(ctx, "", msg)
 	}
-	out.Reader = bytes.NewReader(snapshot)
+	out.Reader = bytes.NewReader(snapshot.data)
+	if !w.follow || snapshot.truncated {
+		handedOff = true
+		return out, false, logContentType, nil
+	}
+	live, err := w.followLog(logCtx, sdk, workspace.LatestBuild.ID, snapshot.lastID, w.budget-int64(len(snapshot.data)))
+	if err != nil {
+		return nil, false, "", failed(err)
+	}
+	out.Reader = io.MultiReader(out.Reader, live)
 	handedOff = true
-	return out, false, logContentType, nil
+	return out, true, logContentType, nil
+}
+
+// logSnapshot is the rendered existing log of a build.
+type logSnapshot struct {
+	data     []byte
+	lastID   int64 // ID of the last rendered entry; follow continues after it
+	warnings []string
+	// truncated is set when the byte budget or the read cap ended the snapshot.
+	truncated bool
 }
 
 // readSnapshot renders the build's existing log entries, bounded by the stream's byte budget
 // and the read cap. It never puts log content into an error or warning.
-func (w *workspaceLogStream) readSnapshot(ctx context.Context, sdk *codersdk.Client, buildID uuid.UUID) ([]byte, []string, error) {
+func (w *workspaceLogStream) readSnapshot(ctx context.Context, sdk *codersdk.Client, buildID uuid.UUID) (logSnapshot, error) {
 	resource := aggregationv1alpha1.Resource("coderworkspaces")
 	res, err := sdk.Request(ctx, http.MethodGet, fmt.Sprintf("/api/v2/workspacebuilds/%s/logs", buildID), nil)
 	if err != nil {
-		return nil, nil, coder.MapCoderError(err, resource, w.name)
+		return logSnapshot{}, coder.MapCoderError(err, resource, w.name)
 	}
 	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusOK {
 		// ReadBodyAsError reads the whole body, so cap what an error response may hold.
 		limited := *res
 		limited.Body = io.NopCloser(io.LimitReader(res.Body, maxLogErrorBodyBytes))
-		return nil, nil, coder.MapCoderError(codersdk.ReadBodyAsError(&limited), resource, w.name)
+		return logSnapshot{}, coder.MapCoderError(codersdk.ReadBodyAsError(&limited), resource, w.name)
 	}
 
 	limits := w.storage.limits
 	scanned := &countingReader{r: io.LimitReader(res.Body, limits.maxScanBytes)}
 	decoder := json.NewDecoder(scanned)
 	var out bytes.Buffer
-	var warnings []string
+	var result logSnapshot
 	scanCapHit := func(err error) bool {
 		return scanned.n >= limits.maxScanBytes && (errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF))
 	}
@@ -241,14 +265,14 @@ func (w *workspaceLogStream) readSnapshot(ctx context.Context, sdk *codersdk.Cli
 	open, err := decoder.Token()
 	switch {
 	case err != nil:
-		return nil, nil, readFailed(err)
+		return logSnapshot{}, readFailed(err)
 	case open == nil: // JSON null: no log entries.
 		if err := endOfLog(decoder); err != nil {
-			return nil, nil, readFailed(err)
+			return logSnapshot{}, readFailed(err)
 		}
-		return nil, nil, nil
+		return logSnapshot{}, nil
 	case open != json.Delim('['):
-		return nil, nil, readFailed(errMalformedLog)
+		return logSnapshot{}, readFailed(errMalformedLog)
 	}
 	scanTruncated := false
 	for decoder.More() {
@@ -259,33 +283,36 @@ func (w *workspaceLogStream) readSnapshot(ctx context.Context, sdk *codersdk.Cli
 				scanTruncated = true
 				break
 			}
-			return nil, nil, readFailed(err)
+			return logSnapshot{}, readFailed(err)
 		}
 		line := entry.Text() + "\n"
 		remaining := w.budget - int64(out.Len())
 		if int64(len(line)) > remaining {
 			out.WriteString(runePrefix(line, remaining))
 			if !w.callerLimited {
-				warnings = append(warnings, fmt.Sprintf("build log truncated at the server limit of %d bytes", limits.maxBytes))
+				result.warnings = append(result.warnings, fmt.Sprintf("build log truncated at the server limit of %d bytes", limits.maxBytes))
 			}
-			return out.Bytes(), warnings, nil
+			result.data, result.truncated = out.Bytes(), true
+			return result, nil
 		}
 		out.WriteString(line)
+		result.lastID = entry.ID
 	}
 	if !scanTruncated {
 		if _, err := decoder.Token(); err != nil {
 			if !scanCapHit(err) {
-				return nil, nil, readFailed(err)
+				return logSnapshot{}, readFailed(err)
 			}
 			scanTruncated = true
 		} else if err := endOfLog(decoder); err != nil {
-			return nil, nil, readFailed(err)
+			return logSnapshot{}, readFailed(err)
 		}
 	}
 	if scanTruncated {
-		warnings = append(warnings, fmt.Sprintf("build log truncated: Coder returned more than the server read limit of %d bytes", limits.maxScanBytes))
+		result.warnings = append(result.warnings, fmt.Sprintf("build log truncated: Coder returned more than the server read limit of %d bytes", limits.maxScanBytes))
 	}
-	return out.Bytes(), warnings, nil
+	result.data, result.truncated = out.Bytes(), scanTruncated
+	return result, nil
 }
 
 // maxLogErrorBodyBytes caps how much of a non-200 Coder response is read.

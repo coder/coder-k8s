@@ -257,10 +257,12 @@ func NewRecommendedConfig(
 	recommendedConfig.EffectiveVersion = apiservercompatibility.DefaultBuildEffectiveVersion()
 	recommendedConfig.SkipOpenAPIInstallation = true
 	recommendedConfig.RequestTimeout = defaultRequestTimeout
-	if err := validateLogResponseLifetime(logResponseLifetime, recommendedConfig.RequestTimeout); err != nil {
-		return nil, err
+	for _, lifetime := range []time.Duration{logResponseLifetime, followLogResponseLifetime} {
+		if err := validateLogResponseLifetime(lifetime, recommendedConfig.RequestTimeout); err != nil {
+			return nil, err
+		}
 	}
-	recommendedConfig.BuildHandlerChainFunc = newLogGuardedHandlerChain(logResponseLifetime)
+	recommendedConfig.BuildHandlerChainFunc = newLogGuardedHandlerChain(logResponseLifetime, followLogResponseLifetime)
 
 	return recommendedConfig, nil
 }

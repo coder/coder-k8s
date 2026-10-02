@@ -40,6 +40,8 @@ type logFakeCoder struct {
 	lookups     atomic.Int32
 	logFetches  atomic.Int32
 	logsHandler atomic.Pointer[http.HandlerFunc]
+	// followHandler serves follow (websocket) log requests.
+	followHandler atomic.Pointer[http.HandlerFunc]
 	// lookupGate, when set, blocks workspace lookups until the request ends.
 	lookupGate atomic.Pointer[chan struct{}]
 }
@@ -80,6 +82,10 @@ func newLogFakeCoder(t testing.TB) *logFakeCoder {
 				writeLogFakeError(w, http.StatusNotFound)
 			}
 		case len(parts) == 5 && parts[2] == "workspacebuilds" && parts[4] == "logs" && parts[3] == f.buildID.String():
+			if r.URL.Query().Has("follow") {
+				(*f.followHandler.Load())(w, r)
+				return
+			}
 			f.logFetches.Add(1)
 			(*f.logsHandler.Load())(w, r)
 		default:

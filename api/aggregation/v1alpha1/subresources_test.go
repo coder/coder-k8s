@@ -21,6 +21,12 @@ func TestCoderWorkspaceLogOptionsQueryDecoding(t *testing.T) {
 	if opts.LimitBytes == nil || *opts.LimitBytes != 64 {
 		t.Fatalf("limitBytes: %v", opts.LimitBytes)
 	}
+	for value, want := range map[string]bool{"": true, "true": true, "false": false} {
+		var follow CoderWorkspaceLogOptions
+		if err := codec.DecodeParameters(url.Values{"follow": {value}}, SchemeGroupVersion, &follow); err != nil || follow.Follow != want {
+			t.Fatalf("follow=%q: err=%v follow=%v", value, err, follow.Follow)
+		}
+	}
 	var empty CoderWorkspaceLogOptions
 	if err := codec.DecodeParameters(url.Values{}, SchemeGroupVersion, &empty); err != nil || empty.LimitBytes != nil {
 		t.Fatalf("no parameters: err=%v limitBytes=%v", err, empty.LimitBytes)

@@ -72,7 +72,7 @@ func newGuardStubFixture(t *testing.T) (*authFixture, *guardStubs) {
 	t.Helper()
 	stubs := &guardStubs{stallDone: make(chan stubResult, 1)}
 	f := newAuthFixture(t, func(k *fakeKubeAPI) { k.setDecide(allowAll) }, func(c *genericapiserver.RecommendedConfig) {
-		chain := newLogGuardedHandlerChain(testLogLifetime)
+		chain := newLogGuardedHandlerChain(testLogLifetime, testLogLifetime)
 		c.BuildHandlerChainFunc = func(h http.Handler, cfg *genericapiserver.Config) http.Handler {
 			return chain(stubs.wrap(h), cfg)
 		}
@@ -236,7 +236,7 @@ func TestLogGuardWiring(t *testing.T) {
 func TestOuterLogGuardFailsClosedWithoutWriteDeadline(t *testing.T) {
 	resolver := &apirequest.RequestInfoFactory{APIPrefixes: sets.NewString("api", "apis"), GrouplessAPIPrefixes: sets.NewString("api")}
 	reached := 0
-	guard := outerLogGuard(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached++ }), resolver, time.Minute)
+	guard := outerLogGuard(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached++ }), resolver, time.Minute, time.Minute)
 
 	rec := httptest.NewRecorder()
 	guard.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "https://example.test"+testLogPath, nil))
@@ -256,6 +256,9 @@ func TestValidateLogResponseLifetime(t *testing.T) {
 	if logResponseLifetime != storage.MaxWorkspaceLogSnapshotDuration+time.Minute || logResponseLifetime > 2*time.Minute {
 		t.Fatalf("log response lifetime %s", logResponseLifetime)
 	}
+	if err := validateLogResponseLifetime(followLogResponseLifetime, defaultRequestTimeout); err != nil {
+		t.Fatalf("follow lifetime rejected: %v", err)
+	}
 	if err := validateLogResponseLifetime(logResponseLifetime, defaultRequestTimeout); err != nil {
 		t.Fatalf("default limits rejected: %v", err)
 	}
@@ -263,6 +266,23 @@ func TestValidateLogResponseLifetime(t *testing.T) {
 		err := validateLogResponseLifetime(lifetime, defaultRequestTimeout)
 		if err == nil || !strings.Contains(err.Error(), "assertion failed") {
 			t.Fatalf("lifetime %s: err=%v, want assertion failure", lifetime, err)
+		}
+	}
+}
+
+func TestLogLifetimeFollowsTheFollowOption(t *testing.T) {
+	for query, want := range map[string]time.Duration{
+		"":                       time.Second,
+		"?limitBytes=10":         time.Second,
+		"?follow=false":          time.Second,
+		"?follow=0":              time.Second,
+		"?follow=true":           time.Hour,
+		"?follow":                time.Hour,
+		"?follow=1&limitBytes=5": time.Hour,
+	} {
+		r := httptest.NewRequest(http.MethodGet, "https://example.test"+testLogPath+query, nil)
+		if got := logLifetime(r, time.Second, time.Hour); got != want {
+			t.Errorf("%q: lifetime %s, want %s", query, got, want)
 		}
 	}
 }

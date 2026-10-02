@@ -232,6 +232,10 @@ UPD=$(k replace --raw "$API/$NAME" -f "$WORK/update.json")
 RV2=$(jq -er '.metadata.resourceVersion' <<<"$UPD") || fail "update response lacks resourceVersion: $UPD"
 BUILD=$(jq -er '.status.latestBuildID' <<<"$UPD") || fail "update response lacks latestBuildID: $UPD"
 [[ $(jq -r '.metadata.uid' <<<"$UPD") == "$UID0" ]] || fail "update response UID changed"
+# #148: follow the log of the stop build; the stream must end on its own when the build ends.
+kubectl --request-timeout="${TIMEOUT}s" get --raw "$API/$NAME/log?follow=true" >"$WORK/follow.log" 2>"$WORK/follow.err" &
+FOLLOW_PID=$!
+BG_PIDS+=("$FOLLOW_PID")
 matching_event() {
   jq -e -R --arg uid "$UID0" --arg rv "$RV2" 'fromjson? | select(.type == "MODIFIED" and
     .object.metadata.uid == $uid and .object.metadata.resourceVersion == $rv)' "$WORK/watch.out" >/dev/null
@@ -239,6 +243,11 @@ matching_event() {
 TIMEOUT=$EVENT_TIMEOUT wait_until "MODIFIED event with resourceVersion $RV2" matching_event
 kill "$WATCH_PID" 2>/dev/null || true
 wait_until "stop build $BUILD" build_done "$NAME" "$BUILD" stopped
+follow_ended() { ! kill -0 "$FOLLOW_PID" 2>/dev/null; }
+TIMEOUT=$EVENT_TIMEOUT wait_until "the log follow of stop build $BUILD to end" follow_ended
+wait "$FOLLOW_PID" || fail "log follow failed: $(head -c 300 "$WORK/follow.err")"
+[[ -s $WORK/follow.log ]] || fail "log follow of stop build $BUILD printed nothing"
+log "log follow: $(wc -l <"$WORK/follow.log") lines"
 
 step "out-of-band Coder rename keeps UID; old name is 404"
 PRE=$(ws_get "$NAME") # genuine pre-rename object of the stopped workspace

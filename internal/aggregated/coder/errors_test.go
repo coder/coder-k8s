@@ -37,6 +37,16 @@ func TestMapCoderError(t *testing.T) {
 			},
 		},
 		{
+			name: "maps a 504 from Coder to a gateway timeout",
+			err:  codersdk.NewTestError(http.StatusGatewayTimeout, http.MethodGet, "https://coder.example.com"),
+			assertMapping: func(t *testing.T, err error) {
+				t.Helper()
+				if !apierrors.IsTimeout(err) || strings.Contains(err.Error(), "coder.example.com") {
+					t.Fatalf("expected a Timeout without the URL, got %v", err)
+				}
+			},
+		},
+		{
 			name: "maps not found",
 			err:  codersdk.NewTestError(http.StatusNotFound, http.MethodGet, "https://coder.example.com"),
 			assertMapping: func(t *testing.T, err error) {

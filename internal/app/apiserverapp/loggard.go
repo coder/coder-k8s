@@ -24,6 +24,10 @@ import (
 // 70 KB/s.
 const logResponseLifetime = storage.MaxWorkspaceLogSnapshotDuration + time.Minute
 
+// followLogResponseLifetime is the same bound for a follow=true response, which reads from Coder
+// for up to MaxWorkspaceLogDuration.
+const followLogResponseLifetime = storage.MaxWorkspaceLogDuration + time.Minute
+
 // newLogGuardedHandlerChain wraps the generic handler chain with the two log guards.
 //
 // The generic timeout filter cannot abort a write that blocks on a stalled client, and the
@@ -32,9 +36,9 @@ const logResponseLifetime = storage.MaxWorkspaceLogSnapshotDuration + time.Minut
 // every generic writer decorator supporting http.ResponseController. innerLogGuard runs
 // after authentication and authorization and refuses upgrades on the log path, because the
 // websocket path of StreamObject hijacks the connection with no deadline.
-func newLogGuardedHandlerChain(lifetime time.Duration) func(http.Handler, *genericapiserver.Config) http.Handler {
-	if lifetime <= 0 {
-		panic("assertion failed: log response lifetime must be positive")
+func newLogGuardedHandlerChain(lifetime, followLifetime time.Duration) func(http.Handler, *genericapiserver.Config) http.Handler {
+	if lifetime <= 0 || followLifetime < lifetime {
+		panic("assertion failed: log response lifetimes must be positive, and the follow lifetime at least the snapshot lifetime")
 	}
 	return func(apiHandler http.Handler, c *genericapiserver.Config) http.Handler {
 		if apiHandler == nil || c == nil {
@@ -44,7 +48,7 @@ func newLogGuardedHandlerChain(lifetime time.Duration) func(http.Handler, *gener
 			panic("assertion failed: completed server config must have a request info resolver and serializer")
 		}
 		inner := innerLogGuard(apiHandler, c.Serializer)
-		return outerLogGuard(genericapiserver.DefaultBuildHandlerChain(inner, c), c.RequestInfoResolver, lifetime)
+		return outerLogGuard(genericapiserver.DefaultBuildHandlerChain(inner, c), c.RequestInfoResolver, lifetime, followLifetime)
 	}
 }
 
@@ -76,7 +80,7 @@ func isWorkspaceLogRequest(info *apirequest.RequestInfo) bool {
 // connection. On HTTP/1 net/http clears it after the response is finished, so a kept-alive
 // connection's next request starts without it. The guard must not clear it itself: the final
 // flush after the handler returns would then run without a deadline.
-func outerLogGuard(next http.Handler, resolver apirequest.RequestInfoResolver, lifetime time.Duration) http.Handler {
+func outerLogGuard(next http.Handler, resolver apirequest.RequestInfoResolver, lifetime, followLifetime time.Duration) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		info, err := resolver.NewRequestInfo(r)
 		if err != nil || !isWorkspaceLogRequest(info) {
@@ -85,7 +89,7 @@ func outerLogGuard(next http.Handler, resolver apirequest.RequestInfoResolver, l
 			return
 		}
 		controller := http.NewResponseController(w)
-		if err := controller.SetWriteDeadline(time.Now().Add(lifetime)); err != nil {
+		if err := controller.SetWriteDeadline(time.Now().Add(logLifetime(r, lifetime, followLifetime))); err != nil {
 			// Fail closed: a log response without a write deadline could hold the connection forever.
 			http.Error(w, "assertion failed: log response writer does not support write deadlines", http.StatusInternalServerError)
 			return
@@ -105,4 +109,19 @@ func innerLogGuard(next http.Handler, serializer runtime.NegotiatedSerializer) h
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// logLifetime returns followLifetime for a follow=true request and lifetime otherwise. It decodes
+// follow with the conversion that the log options use, so the guard and storage agree. If they
+// ever disagreed, a follow stream would end early at the snapshot lifetime, never later.
+func logLifetime(r *http.Request, lifetime, followLifetime time.Duration) time.Duration {
+	values, ok := r.URL.Query()["follow"]
+	if !ok {
+		return lifetime
+	}
+	var follow bool
+	if err := runtime.Convert_Slice_string_To_bool(&values, &follow, nil); err != nil || !follow {
+		return lifetime
+	}
+	return followLifetime
 }
