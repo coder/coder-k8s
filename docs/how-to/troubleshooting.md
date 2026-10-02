@@ -62,7 +62,7 @@ kubectl get svc coder-k8s-apiserver -n coder-system
 kubectl get apiservice v1alpha1.aggregation.coder.com -o yaml
 ```
 
-Do not install CRDs for the same resources (`coderworkspaces.aggregation.coder.com`, `codertemplates.aggregation.coder.com`). They conflict with the aggregated API.
+Do not install CRDs for the same resources (`coderworkspaces.aggregation.coder.com`, `codertemplates.aggregation.coder.com`, `codertemplateversions.aggregation.coder.com`). They conflict with the aggregated API.
 
 ## Proxied requests fail with 503 and an x509 error
 

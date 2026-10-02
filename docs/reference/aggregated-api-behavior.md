@@ -171,17 +171,18 @@ The default Argo CD diff and sync do not send `dryRun=All`, and neither does `--
 
 ### Cost and limits of reads
 
-The server sends every request to Coder with the one operator token of the control plane. All Kubernetes clients therefore share the Coder rate limit of that token: 512 requests per minute for each request path.
+The server sends every request to Coder with the one operator token of the control plane. All Kubernetes clients therefore share the Coder API rate limit of that one user. Coder counts the limit for each user and request path. The default is 512 requests per minute, and the Coder deployment can change it with `CODER_API_RATE_LIMIT`.
 
 | Request | Coder requests | Time limit |
 | --- | --- | --- |
 | `get` | 3, one after another | 25 seconds in total, then `504 Timeout` |
-| `list` | 1, plus 1 for each template, one after another | 25 seconds in total, then `504 Timeout` and no partial list |
+| `list` in one namespace | 1, plus 1 for each template, one after another | 25 seconds in total, then `504 Timeout` and no partial list |
+| `list` in all namespaces (`-A`) | For each control plane: 1, plus 1 for each of its templates, one after another | 25 seconds in total for all control planes, then `504 Timeout` and no partial list |
 
 - **No paging:** the server ignores `limit`, and the `continue` token in a list is always empty. Every list returns all versions. A client that sends a `continue` token gets `400`.
 - **No watch:** `?watch=true` returns `405`. Tools that need `watch` skip the resource. For example, Argo CD does not show or sync it.
 - **No file downloads:** reads of template versions never download template source, so they do not use the file download limit of 12 per minute.
-- **Tools that list everything:** tools that list every API resource also list all template versions. For example, a Velero backup that includes the `aggregation.coder.com` group sends one `list`, which costs 1 plus 1 for each template.
+- **Tools that list everything:** tools that list every API resource also list all template versions. For example, a Velero backup that includes the `aggregation.coder.com` group sends one all-namespaces `list`, which costs 1 plus 1 for each template, for each control plane.
 
 ## Template builds
 
