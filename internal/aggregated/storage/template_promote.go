@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -24,13 +25,16 @@ var (
 	_ rest.NamedCreater = (*TemplatePromoteStorage)(nil)
 )
 
-// TemplatePromoteStorage serves the codertemplates/promote subresource. It evaluates the activation
-// of an existing version of a template and never downloads template source.
-//
-// For now only a dry-run request (a preview) is served; a real request that would change the active
-// version is refused before any write to Coder. The activation itself ships separately.
+// TemplatePromotePatchBudget bounds the activation request to Coder. It leaves time in the API
+// server's request deadline for the confirming re-read, so a slow or timed-out activation still
+// gets a definite answer where possible.
+const TemplatePromotePatchBudget = 10 * time.Second
+
+// TemplatePromoteStorage serves the codertemplates/promote subresource. It activates an existing
+// version of a template. It never downloads template source and never retries the activation.
 type TemplatePromoteStorage struct {
-	provider coder.ClientProvider
+	provider    coder.ClientProvider
+	patchBudget time.Duration
 }
 
 // NewTemplatePromoteStorage builds codersdk-backed storage for the codertemplates/promote subresource.
@@ -39,7 +43,7 @@ func NewTemplatePromoteStorage(provider coder.ClientProvider) *TemplatePromoteSt
 		panic("assertion failed: template promote client provider must not be nil")
 	}
 
-	return &TemplatePromoteStorage{provider: provider}
+	return &TemplatePromoteStorage{provider: provider, patchBudget: TemplatePromotePatchBudget}
 }
 
 // New returns an empty CoderTemplateVersionPromotion object.
@@ -52,9 +56,12 @@ func (s *TemplatePromoteStorage) Destroy() {}
 
 var promotionKind = schema.GroupKind{Group: aggregationv1alpha1.SchemeGroupVersion.Group, Kind: "CoderTemplateVersionPromotion"}
 
-// Create evaluates the activation of spec.versionID on the template named name. Every outcome reports
-// observed state, and no request sends a write to Coder: AlreadyActive needs none, a dry-run request
-// reports WouldPromote, and a real request that needs a change is refused with 400 for now.
+// Create activates spec.versionID on the template named name.
+//
+// Every outcome reports observed state. AlreadyActive and dry-run send no write to Coder. A real
+// activation is confirmed by re-reading the template: it returns 409 when another version became
+// active instead, and 503 when the outcome cannot be confirmed. A 503 has no Retry-After, because
+// the activation may already have been applied.
 func (s *TemplatePromoteStorage) Create(
 	ctx context.Context,
 	name string,
@@ -70,6 +77,9 @@ func (s *TemplatePromoteStorage) Create(
 	}
 	if name == "" {
 		return nil, fmt.Errorf("assertion failed: template name must not be empty")
+	}
+	if s.patchBudget <= 0 {
+		return nil, fmt.Errorf("assertion failed: template promote patch budget must be positive")
 	}
 
 	request, ok := obj.(*aggregationv1alpha1.CoderTemplateVersionPromotion)
@@ -150,9 +160,43 @@ func (s *TemplatePromoteStorage) Create(
 		return result(aggregationv1alpha1.PromotionResultWouldPromote, previous), nil
 	}
 
-	return nil, apierrors.NewBadRequest(fmt.Sprintf(
-		"promotion is not enabled yet; use dryRun=All to preview it: version %s is not active on template %q", versionID, name,
-	))
+	patchCtx, cancel := context.WithTimeout(ctx, s.patchBudget)
+	patchErr := patchActiveTemplateVersion(patchCtx, sdk, template.ID, versionID)
+	cancel()
+	var coderErr *codersdk.Error
+	if errors.As(patchErr, &coderErr) && coderErr.StatusCode() >= 400 && coderErr.StatusCode() < 500 {
+		// Coder answered with a rejection, so nothing was applied. The messages are fixed: Coder's
+		// error text is not passed on.
+		switch coderErr.StatusCode() {
+		case http.StatusNotFound:
+			return nil, notVersionOfTemplateError(name)
+		case http.StatusTooManyRequests:
+			return nil, apierrors.NewTooManyRequests("Coder rate-limited the activation; nothing was changed", 0)
+		default:
+			// A Coder 403 means that the version cannot be promoted, not that the caller lacks access.
+			return nil, apierrors.NewBadRequest(fmt.Sprintf(
+				"Coder refused to activate version %s on template %q (status %d); nothing was changed: check that its import succeeded and that it is not archived",
+				versionID, name, coderErr.StatusCode(),
+			))
+		}
+	}
+
+	// A success, a transport error, a timeout or a 5xx: re-read the template to learn the outcome.
+	confirmed, err := sdk.Template(ctx, template.ID)
+	if err != nil {
+		return nil, couldNotConfirmPromotionError(name, versionID)
+	}
+	switch {
+	case confirmed.ActiveVersionID == versionID:
+		return result(aggregationv1alpha1.PromotionResultPromoted, versionID), nil
+	case patchErr != nil && confirmed.ActiveVersionID == previous:
+		return nil, couldNotConfirmPromotionError(name, versionID)
+	default:
+		return nil, apierrors.NewConflict(resource, name, fmt.Errorf(
+			"the promotion of version %s was superseded by a concurrent change: version %s is active; re-read before retrying",
+			versionID, confirmed.ActiveVersionID,
+		))
+	}
 }
 
 // requirePromotableVersion checks that versionID is a version of template that Coder can activate.
@@ -188,8 +232,31 @@ func (s *TemplatePromoteStorage) requirePromotableVersion(
 	return nil
 }
 
+// patchActiveTemplateVersion activates versionID. Unlike codersdk.UpdateActiveTemplateVersion,
+// which returns nil on a transport error, it returns every transport error and non-200 answer.
+func patchActiveTemplateVersion(ctx context.Context, sdk *codersdk.Client, templateID, versionID uuid.UUID) error {
+	res, err := sdk.Request(ctx, http.MethodPatch, fmt.Sprintf("/api/v2/templates/%s/versions", templateID),
+		codersdk.UpdateActiveTemplateVersion{ID: versionID})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusOK {
+		return codersdk.ReadBodyAsError(res)
+	}
+
+	return nil
+}
+
 func notVersionOfTemplateError(name string) error {
 	return apierrors.NewBadRequest(fmt.Sprintf("spec.versionID is not a version of template %q", name))
+}
+
+func couldNotConfirmPromotionError(name string, versionID uuid.UUID) error {
+	return apierrors.NewServiceUnavailable(fmt.Sprintf(
+		"could not confirm the promotion of version %s on template %q; it may or may not have been applied: re-read the template before retrying",
+		versionID, name,
+	))
 }
 
 func (s *TemplatePromoteStorage) clientForNamespace(ctx context.Context, namespace string) (*codersdk.Client, error) {

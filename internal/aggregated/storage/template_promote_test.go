@@ -3,6 +3,8 @@ package storage
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 
 	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
+	"github.com/coder/coder-k8s/internal/aggregated/coder"
 	"github.com/coder/coder/v2/codersdk"
 )
 
@@ -30,7 +33,13 @@ func newPromoteFixture(t *testing.T) promoteFixture {
 
 	server, state := newMockCoderServer(t)
 	t.Cleanup(server.Close)
-	f := promoteFixture{state: state, storage: NewTemplatePromoteStorage(newTestClientProvider(t, server.URL))}
+	// The production client: the shared Coder transport reuses connections (#183), so the PATCH
+	// travels on the connection that the lookups used.
+	client, err := coder.NewSDKClient(coder.Config{CoderURL: mustParseURL(t, server.URL), SessionToken: "test-session-token"})
+	if err != nil {
+		t.Fatalf("build Coder client: %v", err)
+	}
+	f := promoteFixture{state: state, storage: NewTemplatePromoteStorage(&coder.StaticClientProvider{Client: client, Namespace: "control-plane"})}
 	for id, template := range state.templatesByID {
 		f.templateID, f.v1 = id, template.ActiveVersionID
 	}
@@ -38,6 +47,15 @@ func newPromoteFixture(t *testing.T) promoteFixture {
 	f.v3 = seedTemplateVersion(t, state, "v3").ID
 	state.resetRequests()
 	return f
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse %q: %v", raw, err)
+	}
+	return parsed
 }
 
 func (f promoteFixture) promote(t *testing.T, versionID string, dryRun bool) (*aggregationv1alpha1.CoderTemplateVersionPromotion, error) {
@@ -85,21 +103,35 @@ func requireResult(t *testing.T, got *aggregationv1alpha1.CoderTemplateVersionPr
 	}
 }
 
-func TestTemplatePromotePreview(t *testing.T) {
+func TestTemplatePromoteOutcomes(t *testing.T) {
 	t.Parallel()
 
 	f := newPromoteFixture(t)
-	_, updatedAt := f.active(t)
+	patch := "PATCH /api/v2/templates/" + f.templateID.String() + "/versions"
 
-	got, err := f.promote(t, f.v2.String(), true)
+	got, err := f.promote(t, f.v2.String(), false)
 	if err != nil {
-		t.Fatalf("dry-run promote v2: %v", err)
+		t.Fatalf("promote v2: %v", err)
 	}
-	requireResult(t, got, aggregationv1alpha1.PromotionResultWouldPromote, f.v1, f.v1)
-	// Organization, template and version; no template source download.
-	if requests := f.state.requests(); len(requests) != 3 || strings.Contains(strings.Join(requests, " "), "/files") {
-		t.Fatalf("expected 3 Coder requests and no file download, got %v", requests)
+	requireResult(t, got, aggregationv1alpha1.PromotionResultPromoted, f.v1, f.v2)
+	if active, _ := f.active(t); active != f.v2 {
+		t.Fatalf("Coder active version = %s, want v2", active)
 	}
+	// Organization, template, version, the PATCH and the confirming re-read; no template source.
+	if requests := f.state.requests(); len(requests) != 5 || strings.Contains(strings.Join(requests, " "), "/files") {
+		t.Fatalf("expected 5 Coder requests and no file download, got %v", requests)
+	}
+
+	got, err = f.promote(t, f.v1.String(), false)
+	if err != nil {
+		t.Fatalf("roll back to v1: %v", err)
+	}
+	requireResult(t, got, aggregationv1alpha1.PromotionResultPromoted, f.v2, f.v1)
+	if mutations := f.state.mutations(); len(mutations) != 2 || mutations[0] != patch || mutations[1] != patch {
+		t.Fatalf("expected exactly two PATCHes, got %v", mutations)
+	}
+
+	_, updatedAt := f.active(t)
 	for _, dryRun := range []bool{false, true} {
 		got, err = f.promote(t, f.v1.String(), dryRun)
 		if err != nil {
@@ -107,18 +139,18 @@ func TestTemplatePromotePreview(t *testing.T) {
 		}
 		requireResult(t, got, aggregationv1alpha1.PromotionResultAlreadyActive, f.v1, f.v1)
 	}
-	// Until activation ships, a real request that needs a change is refused with a clear message.
-	if _, err := f.promote(t, f.v2.String(), false); !apierrors.IsBadRequest(err) ||
-		!strings.Contains(err.Error(), "promotion is not enabled yet; use dryRun=All to preview it") {
-		t.Fatalf("expected the not-enabled 400, got %v", err)
+	got, err = f.promote(t, f.v3.String(), true)
+	if err != nil {
+		t.Fatalf("dry-run promote v3: %v", err)
 	}
+	requireResult(t, got, aggregationv1alpha1.PromotionResultWouldPromote, f.v1, f.v1)
 
 	active, updatedAtAfter := f.active(t)
 	if active != f.v1 || !updatedAtAfter.Equal(updatedAt) {
-		t.Fatalf("promote requests changed Coder: active=%s updatedAt %s -> %s", active, updatedAt, updatedAtAfter)
+		t.Fatalf("no-op and dry-run requests changed Coder: active=%s updatedAt %s -> %s", active, updatedAt, updatedAtAfter)
 	}
-	if mutations := f.state.mutations(); len(mutations) != 0 {
-		t.Fatalf("promote requests must send no write yet, got %v", mutations)
+	if mutations := f.state.mutations(); len(mutations) != 2 {
+		t.Fatalf("no-op and dry-run requests must send no write, got %v", mutations)
 	}
 }
 
@@ -241,5 +273,127 @@ func TestTemplatePromoteAdmissionRunsBeforeCoder(t *testing.T) {
 		if requests := f.state.requests(); len(requests) != 0 {
 			t.Fatalf("dryRun=%q: admission denial reached Coder: %v", dryRun, requests)
 		}
+	}
+}
+
+// TestTemplatePromoteConfirmation covers every row of the confirmation table: an activation is
+// reported as Promoted only when the re-read shows the target, and never retried.
+func TestTemplatePromoteConfirmation(t *testing.T) {
+	t.Parallel()
+
+	const third, previous = "third", "previous"
+	cases := []struct {
+		name          string
+		fault         promoteFault
+		activateAfter string
+		patchBudget   time.Duration
+		promoted      bool
+		check         func(error) bool
+		message       string
+		noReread      bool
+	}{
+		{name: "dropped after apply", fault: promoteFault{apply: true}, promoted: true},
+		{name: "5xx after apply", fault: promoteFault{apply: true, status: http.StatusBadGateway}, promoted: true},
+		{name: "timeout after apply", fault: promoteFault{apply: true, delay: 2 * time.Second}, patchBudget: 50 * time.Millisecond, promoted: true},
+		{name: "dropped before apply", fault: promoteFault{}, check: apierrors.IsServiceUnavailable, message: "could not confirm"},
+		{name: "5xx before apply", fault: promoteFault{status: http.StatusInternalServerError}, check: apierrors.IsServiceUnavailable, message: "could not confirm"},
+		{
+			name: "timeout before apply", fault: promoteFault{delay: 2 * time.Second}, patchBudget: 50 * time.Millisecond,
+			check: apierrors.IsServiceUnavailable, message: "could not confirm",
+		},
+		{
+			name: "200 then superseded", fault: promoteFault{apply: true, status: http.StatusOK}, activateAfter: third,
+			check: apierrors.IsConflict, message: "superseded by a concurrent change",
+		},
+		{
+			name: "200 then reverted", fault: promoteFault{apply: true, status: http.StatusOK}, activateAfter: previous,
+			check: apierrors.IsConflict, message: "superseded by a concurrent change",
+		},
+		{
+			name: "ambiguous and a third version", fault: promoteFault{}, activateAfter: third,
+			check: apierrors.IsConflict, message: "superseded by a concurrent change",
+		},
+		{
+			name: "re-read fails", fault: promoteFault{apply: true, status: http.StatusOK, failReread: true},
+			check: apierrors.IsServiceUnavailable, message: "could not confirm",
+		},
+		{name: "Coder rate limit", fault: promoteFault{status: http.StatusTooManyRequests}, check: apierrors.IsTooManyRequests, noReread: true},
+		{
+			name: "Coder 403 is not an RBAC denial", fault: promoteFault{status: http.StatusForbidden}, check: apierrors.IsBadRequest,
+			message: "Coder refused to activate", noReread: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newPromoteFixture(t)
+			if tc.patchBudget > 0 {
+				f.storage.patchBudget = tc.patchBudget
+			}
+			fault := tc.fault
+			switch tc.activateAfter {
+			case third:
+				fault.activateAfter = f.v3
+			case previous:
+				fault.activateAfter = f.v1
+			}
+			f.state.mu.Lock()
+			f.state.promoteFault = &fault
+			f.state.mu.Unlock()
+
+			start := time.Now()
+			got, err := f.promote(t, f.v2.String(), false)
+			// A slow activation is cut at the PATCH budget, so the re-read still fits the request deadline.
+			if elapsed := time.Since(start); tc.patchBudget > 0 && elapsed > time.Second {
+				t.Fatalf("promotion waited %s for a slow activation; the PATCH budget is %s", elapsed, tc.patchBudget)
+			}
+			if tc.promoted {
+				if err != nil {
+					t.Fatalf("expected Promoted, got %v", err)
+				}
+				requireResult(t, got, aggregationv1alpha1.PromotionResultPromoted, f.v1, f.v2)
+			} else if err == nil || !tc.check(err) || !strings.Contains(err.Error(), tc.message) {
+				t.Fatalf("expected an error containing %q, got %v (result %+v)", tc.message, err, got)
+			}
+			// Error messages are fixed: no Coder error text and no Coder URL.
+			if err != nil && (strings.Contains(err.Error(), "injected") || strings.Contains(err.Error(), "127.0.0.1")) {
+				t.Fatalf("error passes on Coder text or the Coder URL: %v", err)
+			}
+			var status apierrors.APIStatus
+			if errors.As(err, &status) && status.Status().Details != nil && status.Status().Details.RetryAfterSeconds != 0 {
+				t.Fatalf("an uncertain promotion must not invite an automatic retry: %+v", status.Status())
+			}
+
+			if mutations := f.state.mutations(); len(mutations) != 1 {
+				t.Fatalf("expected exactly one PATCH and no retry, got %v", mutations)
+			}
+			reread := "GET /api/v2/templates/" + f.templateID.String()
+			if hasReread := strings.Contains(strings.Join(f.state.requests(), "\n")+"\n", reread+"\n"); hasReread == tc.noReread {
+				t.Fatalf("confirming re-read sent = %v, want %v: %v", hasReread, !tc.noReread, f.state.requests())
+			}
+		})
+	}
+}
+
+func TestTemplatePromoteEmitsNoTemplateWatchEvent(t *testing.T) {
+	t.Parallel()
+
+	f := newPromoteFixture(t)
+	templates := NewTemplateStorage(f.storage.provider)
+	t.Cleanup(templates.Destroy)
+	watcher, err := templates.Watch(namespacedContext("control-plane"), nil)
+	if err != nil {
+		t.Fatalf("watch templates: %v", err)
+	}
+	defer watcher.Stop()
+
+	if _, err := f.promote(t, f.v2.String(), false); err != nil {
+		t.Fatalf("promote v2: %v", err)
+	}
+	select {
+	case event := <-watcher.ResultChan():
+		t.Fatalf("promotion emitted a codertemplates watch event: %+v", event)
+	case <-time.After(200 * time.Millisecond):
 	}
 }

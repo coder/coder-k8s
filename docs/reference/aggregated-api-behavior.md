@@ -13,7 +13,7 @@ The aggregated API server serves `coderworkspaces`, `codertemplates` and `codert
 | [Server-side apply](#server-side-apply) | Create-on-update works. The server does not keep field ownership. |
 | [Server-side dry-run](#server-side-dry-run) | Not supported on writes. `kubectl diff` and `--dry-run=server` return `400` and do not change Coder. A promotion with `dryRun=All` is a read-only preview. |
 | [Template versions](#template-versions) | Read-only: `get` and `list`, no watch. Reads never download template source. |
-| [Promote a template version](#promote-a-template-version) | `codertemplates/<name>/promote` (`create`) previews which version would become active. It needs its own RBAC grant. A promotion that changes the active version returns `400` for now. |
+| [Promote a template version](#promote-a-template-version) | `codertemplates/<name>/promote` (`create`) makes a version active. A rollback promotes an older version. It needs its own RBAC grant. `dryRun=All` previews it. An unconfirmed result returns `503`, and a concurrent change returns `409`. |
 | [Template builds](#template-builds) | Create and update with `spec.files` wait until Coder completes the import. The full request must complete within 34 seconds. |
 | [Coder timeouts](#coder-timeouts) | A Coder call that runs out of time returns `504` on every resource. After a `504` on a write, re-read before you retry. |
 | [Workspace build log](#workspace-build-log) | `coderworkspaces/log` returns the latest build log as text. It needs its own RBAC grant and has fixed size, time, and concurrency limits. |
@@ -125,6 +125,7 @@ What this means for clients:
 This section applies to both resources.
 
 - The server sends events only for writes made through this server. There is no replay. Changes made directly in Coder make no events.
+- A promotion (`codertemplates/<name>/promote`) makes no `codertemplates` event. Events come only from create, update, and delete of the template.
 - To start a watch, pass the current `resourceVersion`, and do not set `sendInitialEvents` or `resourceVersionMatch`. After the watch starts, the server ignores the token. It is not a replay cursor.
 
 The server rejects these requests:
@@ -179,6 +180,7 @@ The message does not include the Coder URL.
 
 - After a `504` on a read, try again later.
 - After a `504` on a write (create, update, patch, or delete), the result is not certain. Coder can have applied the change before the call timed out. Re-read the object with `kubectl get` before you retry.
+- A promotion handles this itself. A `504` before the activation means that nothing changed. When the activation itself times out or fails without an answer, the server re-reads the template and answers `Promoted`, `409`, or `503`. See [Promote a template version](#promote-a-template-version).
 
 ## Template versions
 
@@ -211,21 +213,21 @@ The server sends every request to Coder with the one operator token of the contr
 
 The `promote` subresource of `codertemplates` makes one version of a template the active version. A rollback is a promotion of an older version.
 
-!!! note "Preview only for now"
-    This release serves only the preview (`dryRun=All`). A request without `dryRun` that would change the active version returns `400` with the message "promotion is not enabled yet; use dryRun=All to preview it". Nothing changes in Coder. A later release enables the change itself.
-
 Send a `CoderTemplateVersionPromotion` with the ID of the version. `kubectl` has no promote command, so use `kubectl create --raw`:
 
 ```sh
 ID=$(kubectl get codertemplateversion -n coder acme.docker.v1 -o jsonpath='{.status.id}')
 echo '{"spec":{"versionID":"'"$ID"'"}}' | kubectl create --raw \
-  "/apis/aggregation.coder.com/v1alpha1/namespaces/coder/codertemplates/acme.docker/promote?dryRun=All" -f -
+  "/apis/aggregation.coder.com/v1alpha1/namespaces/coder/codertemplates/acme.docker/promote" -f -
 ```
+
+Add `?dryRun=All` to the path to preview the result without a change. To roll back, promote the ID of an older version the same way.
 
 The server answers `201 Created` with the same kind. The status shows what the server observed:
 
 | `status.result` | Meaning |
 | --- | --- |
+| `Promoted` | This request changed the active version. A re-read of the template confirmed it. |
 | `WouldPromote` | Dry-run only. A real promotion would change the active version. |
 | `AlreadyActive` | The version is already active. The server sends no write to Coder, with or without `dryRun`. |
 
@@ -237,6 +239,23 @@ The server answers `201 Created` with the same kind. The status shows what the s
 - **Names:** the template name in the path follows the [template rules](#object-names). Aliases and wrong casing return `400`. `metadata.name` in the body must be empty or equal that name.
 - **Authorization:** promotion needs `create` on `codertemplates/promote`. No verb on `codertemplates` or `codertemplateversions` gives it. `resourceNames` limit the grant to some templates. See [How callers are checked](../how-to/deploy-aggregated-apiserver.md#how-callers-are-checked).
 - **No file downloads:** a promotion reads the organization, the template and the version. It never downloads template source.
+
+**Confirmation.** Coder can apply an activation and still fail to answer, for example after a timeout or a dropped connection. The server never retries the activation. It re-reads the template once and answers with what it sees:
+
+| Activation answer | The re-read shows | Result |
+| --- | --- | --- |
+| Success, or no clear answer (timeout, dropped connection, `5xx`) | The requested version | `201 Promoted` |
+| Success | Another version | `409 Conflict`: a concurrent change superseded the promotion |
+| No clear answer | A third version | `409 Conflict` |
+| No clear answer | The previous version | `503 ServiceUnavailable`: "could not confirm the promotion ..." |
+| Any | The re-read fails | `503 ServiceUnavailable` |
+
+- After a `409` or a `503`, check the active version (`kubectl get codertemplateversions -l aggregation.coder.com/template=<template>`) before you try again. The `503` has no `Retry-After`, so clients do not retry it on their own.
+- If Coder rejects the activation, nothing changed. The server answers `400`, or `429` when Coder rate-limits the operator token. The messages do not pass on the Coder error text.
+- Coder has no compare-and-swap for the active version, so the last writer wins. The re-read detects only a change that lands before it.
+- **Template resourceVersion:** a promotion changes the template in Coder, so the `CoderTemplate` gets a new `resourceVersion`. A client that holds the old one gets `409` on its next update. `AlreadyActive` and dry-run change nothing.
+- **GitOps:** an apply of a `CoderTemplate` manifest with other `spec.files` creates and activates a new version. That undoes a rollback. For a durable rollback, revert the manifest or pause syncing.
+- **Audit:** the Kubernetes audit log records the caller and the template. The Coder audit log, where the deployment has one, records the operator account and the version IDs.
 
 ## Template builds
 
