@@ -11,6 +11,7 @@ The aggregated API server serves `coderworkspaces` and `codertemplates` from a l
 | [Workspace `resourceVersion`](#workspace-resourceversion) | An opaque fingerprint. Compare it only for equality. Workspace activity alone can cause `409`. |
 | [Watch](#watch) | Shows only writes made through this server. No replay, no initial events. |
 | [Server-side apply](#server-side-apply) | Create-on-update works. The server does not keep field ownership. |
+| [Server-side dry-run](#server-side-dry-run) | Not supported. `kubectl diff` and `--dry-run=server` return `400` and do not change Coder. |
 | [Template builds](#template-builds) | Create and update with `spec.files` wait until Coder completes the import. The full request must complete within 34 seconds. |
 
 ## Object names
@@ -140,6 +141,20 @@ This is best-effort only. Coder has no place to store Kubernetes `metadata.manag
     1. Add first-class metadata to Coder templates and workspaces (and `codersdk`), and round-trip Kubernetes metadata there.
     2. Store Kubernetes-only metadata in a shadow Kubernetes resource (ConfigMap or CRD) owned by the aggregated API server.
     3. Keep the fallback and document its limits.
+
+## Server-side dry-run
+
+The server does not support server-side dry-run for `coderworkspaces` and `codertemplates`. Coder has no dry-run mode, so the server cannot preview a write without making it.
+
+These requests send `dryRun=All`. The server rejects them with `400 BadRequest` ("server-side dry-run is not supported ...; nothing was changed"):
+
+- `kubectl diff`
+- `kubectl apply --dry-run=server`, `kubectl create --dry-run=server`, and `kubectl delete --dry-run=server`
+- Argo CD with server-side diff turned on (`ServerSideDiff=true`)
+
+The server rejects the request before it sends anything to Coder. Nothing is uploaded, built, or deleted.
+
+The default Argo CD diff and sync do not send `dryRun=All`, and neither does `--dry-run=client`. They work as before. To preview a change, compare the output of `kubectl get -o yaml` with your manifest.
 
 ## Template builds
 
