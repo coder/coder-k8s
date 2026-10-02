@@ -17,10 +17,12 @@ import (
 	"github.com/coder/coder-k8s/internal/aggregated/storage"
 )
 
-// logResponseLifetime bounds how long one coderworkspaces/log response may hold its
-// connection: storage stops reading from Coder after MaxWorkspaceLogDuration, and the outer
-// guard's write deadline ends a response whose client stopped reading one minute later.
-const logResponseLifetime = storage.MaxWorkspaceLogDuration + time.Minute
+// logResponseLifetime bounds how long one coderworkspaces/log snapshot response may hold its
+// connection and its log slot: storage stops reading from Coder after
+// MaxWorkspaceLogSnapshotDuration, and the outer guard's write deadline ends a response whose
+// client reads too slowly one minute later. Writing the 4 MiB maximum in that minute needs about
+// 70 KB/s.
+const logResponseLifetime = storage.MaxWorkspaceLogSnapshotDuration + time.Minute
 
 // newLogGuardedHandlerChain wraps the generic handler chain with the two log guards.
 //
@@ -47,7 +49,11 @@ func newLogGuardedHandlerChain(lifetime time.Duration) func(http.Handler, *gener
 }
 
 // validateLogResponseLifetime fails startup when a log response could outlive the request
-// deadline, which would let the generic timeout filter answer while the handler still writes.
+// deadline. This server keeps the default LongRunningFunc, which marks only watch requests as
+// long-running. coderworkspaces/log is therefore a normal request here, and the generic request
+// deadline and timeout filter apply to it. If the log lifetime reached the request timeout, the
+// timeout filter could answer the request while the log handler still writes. The kube-apiserver
+// front proxy treats every */log request as long-running, so it adds no shorter limit.
 func validateLogResponseLifetime(lifetime, requestTimeout time.Duration) error {
 	if lifetime <= 0 || lifetime >= requestTimeout {
 		return fmt.Errorf("assertion failed: log response lifetime %s must be positive and below the request timeout %s", lifetime, requestTimeout)

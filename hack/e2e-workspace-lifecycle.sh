@@ -204,6 +204,19 @@ AFTER=$(template_state) || fail "template unreadable after re-apply"
 AFTER=$(ws_state) || fail "workspace unreadable after re-apply"
 [[ $AFTER == "$WS_STATE" ]] || fail "workspace changed after identical re-apply: before=[$WS_STATE] after=[$AFTER]"
 
+step "coderworkspaces/log returns the latest build log; the server log does not contain it (#148)"
+k get --raw "$API/$NAME/log" >"$WORK/build.log" || fail "cannot read coderworkspaces/log of $NAME"
+LOG_BYTES=$(wc -c <"$WORK/build.log")
+((LOG_BYTES > 0)) || fail "build log of $NAME is empty"
+grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^ ]+ \[[a-z]+\] \[provisioner\|' "$WORK/build.log" ||
+  fail "unexpected build log line format ($LOG_BYTES bytes; contents not printed because build logs can contain secrets)"
+k get --raw "$API/$NAME/log?limitBytes=64" >"$WORK/build-64.log" || fail "cannot read coderworkspaces/log?limitBytes=64"
+LIMITED=$(wc -c <"$WORK/build-64.log")
+((LIMITED > 0 && LIMITED <= 64)) || fail "limitBytes=64 returned $LIMITED bytes"
+log "build log: $LOG_BYTES bytes, $(wc -l <"$WORK/build.log") lines"
+k -n "$OP_NS" logs "$POD_NAME" >"$WORK/server.log" || fail "cannot read the server log of $POD_NAME"
+! grep -qF -- "$(tail -n 1 "$WORK/build.log")" "$WORK/server.log" || fail "the server log contains a build log line"
+
 step "watch from current token, update spec.running, require matching MODIFIED"
 OBJ=$(ws_get "$NAME")
 RV1=$(jq -er '.metadata.resourceVersion' <<<"$OBJ")

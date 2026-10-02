@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
@@ -219,23 +221,34 @@ func (w *workspaceLogStream) readSnapshot(ctx context.Context, sdk *codersdk.Cli
 	scanCapHit := func(err error) bool {
 		return scanned.n >= limits.maxScanBytes && (errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF))
 	}
-	// readFailed reports a failed read without log content. InputStream turns it into a 504 when
-	// the log deadline caused it.
-	readFailed := func() error {
-		return apierrors.NewInternalError(errors.New("coder returned a malformed build log"))
+	// readFailed reports a failed read without log content: malformed JSON, or a read that broke
+	// off. InputStream turns it into a 504 when the log deadline caused it.
+	readFailed := func(err error) error {
+		var syntaxErr *json.SyntaxError
+		var typeErr *json.UnmarshalTypeError
+		if errors.Is(err, errMalformedLog) || errors.As(err, &syntaxErr) || errors.As(err, &typeErr) {
+			return apierrors.NewInternalError(errMalformedLog)
+		}
+		// A body read that ran out of time (the client's request timeout) is a 504, as in
+		// coder.MapCoderError.
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return apierrors.NewTimeoutError("the Coder API did not answer in time", 0)
+		}
+		return apierrors.NewInternalError(errors.New("reading the build log from Coder failed"))
 	}
 
 	open, err := decoder.Token()
 	switch {
 	case err != nil:
-		return nil, nil, readFailed()
+		return nil, nil, readFailed(err)
 	case open == nil: // JSON null: no log entries.
-		if !atEnd(decoder) {
-			return nil, nil, readFailed()
+		if err := endOfLog(decoder); err != nil {
+			return nil, nil, readFailed(err)
 		}
 		return nil, nil, nil
 	case open != json.Delim('['):
-		return nil, nil, readFailed()
+		return nil, nil, readFailed(errMalformedLog)
 	}
 	scanTruncated := false
 	for decoder.More() {
@@ -246,12 +259,12 @@ func (w *workspaceLogStream) readSnapshot(ctx context.Context, sdk *codersdk.Cli
 				scanTruncated = true
 				break
 			}
-			return nil, nil, readFailed()
+			return nil, nil, readFailed(err)
 		}
 		line := entry.Text() + "\n"
 		remaining := w.budget - int64(out.Len())
 		if int64(len(line)) > remaining {
-			out.WriteString(line[:remaining])
+			out.WriteString(runePrefix(line, remaining))
 			if !w.callerLimited {
 				warnings = append(warnings, fmt.Sprintf("build log truncated at the server limit of %d bytes", limits.maxBytes))
 			}
@@ -262,11 +275,11 @@ func (w *workspaceLogStream) readSnapshot(ctx context.Context, sdk *codersdk.Cli
 	if !scanTruncated {
 		if _, err := decoder.Token(); err != nil {
 			if !scanCapHit(err) {
-				return nil, nil, readFailed()
+				return nil, nil, readFailed(err)
 			}
 			scanTruncated = true
-		} else if !atEnd(decoder) {
-			return nil, nil, readFailed()
+		} else if err := endOfLog(decoder); err != nil {
+			return nil, nil, readFailed(err)
 		}
 	}
 	if scanTruncated {
@@ -278,11 +291,33 @@ func (w *workspaceLogStream) readSnapshot(ctx context.Context, sdk *codersdk.Cli
 // maxLogErrorBodyBytes caps how much of a non-200 Coder response is read.
 const maxLogErrorBodyBytes = 64 << 10
 
-// atEnd reports whether only whitespace is left after the top-level JSON value, so trailing
+// errMalformedLog reports JSON from Coder that is not a build log. It carries no log content.
+var errMalformedLog = errors.New("coder returned a malformed build log")
+
+// endOfLog returns nil when only whitespace is left after the top-level JSON value, so trailing
 // data after a complete log is rejected instead of silently dropped.
-func atEnd(decoder *json.Decoder) bool {
+func endOfLog(decoder *json.Decoder) error {
 	_, err := decoder.Token()
-	return errors.Is(err, io.EOF)
+	switch {
+	case errors.Is(err, io.EOF):
+		return nil
+	case err == nil:
+		return errMalformedLog
+	default:
+		return err
+	}
+}
+
+// runePrefix returns the longest prefix of s that is at most n bytes and does not split a UTF-8
+// sequence.
+func runePrefix(s string, n int64) string {
+	if n >= int64(len(s)) {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // countingReader counts bytes read through it.

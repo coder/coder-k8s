@@ -55,6 +55,7 @@ case "${pos[0]}:${pos[1]:-}" in
   get:codercontrolplane) echo '{"status":{"operatorTokenSecretRef":{"name":"op-token","key":"token"}}}' ;;
   get:secret) printf '{"data":{"token":"%s"}}\n' "$(printf secret-token-value | base64)" ;;
   port-forward:*) echo $$ >"$S/pf.pid"; exec sleep 300 ;;
+  logs:*) echo "I1002 server started"; [[ $SCENARIO != log-leak ]] || echo "2026-10-02T10:00:00Z [info] [provisioner|Planning infrastructure] Terraform 1.14.0 ok" ;;
   get:)
     if [[ $raw == *watch=1* ]]; then
       echo "$raw" >"$S/watch_url"; echo $$ >"$S/watch.pid"
@@ -62,6 +63,13 @@ case "${pos[0]}:${pos[1]:-}" in
       [[ $SCENARIO == watch-unregistered ]] || echo "I0923 round_trippers.go:553] GET https://127.0.0.1:6443$raw 200 OK in 2 milliseconds" >&2
       [[ $SCENARIO != watch-exits ]] || exit 0
       exec timeout 60 tail -c "+$((off + 1))" -f "$S/events"
+    fi
+    if [[ $raw == */log* ]]; then # coderworkspaces/log snapshot; log-* scenarios break it
+      [[ -f $(wsfile "${raw%/log*}") ]] || err NotFound missing
+      [[ $SCENARIO != log-empty ]] || exit 0
+      line='2026-10-02T10:00:00Z [info] [provisioner|Planning infrastructure] Terraform 1.14.0 ok'
+      if [[ $raw == *limitBytes=64 ]]; then printf '%s\n%s\n' "$line" "$line" | head -c 64; else printf '%s\n%s\n' "$line" "$line"; fi
+      exit 0
     fi
     if [[ $raw == */coderworkspaces ]]; then # LIST; list-* scenarios drop the item or skew its token
       exec jq -s --arg sc "$SCENARIO" '{items: map(select($sc != "list-missing") |
@@ -236,8 +244,8 @@ check "background port-forward and watch stopped" bg_stopped
 check "every non-streaming kubectl request carries --request-timeout=30s" \
   eval '! grep "^kubectl" "$S/calls.log" | grep -v -e "watch=1" -e port-forward | grep -qvE -- "--request-timeout=[0-9]+s "'
 check "recreate only after the delete job succeeded" eval '[[ $(grep -n include_deleted "$S/calls.log" | tail -1 | cut -d: -f1) -lt $(grep -n "^kubectl --request-timeout=30s create" "$S/calls.log" | tail -1 | cut -d: -f1) ]]'
-check "receipt: source, run, version, identity, UIDs, 12 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
-  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 12 ]]'
+check "receipt: source, run, version, identity, UIDs, 13 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
+  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 13 ]]'
 
 echo "TEST image-mismatch: serving image differs from built image"
 run_scenario image-mismatch SERVING_ID="$OTHER"; summary
@@ -347,6 +355,14 @@ check "fails on template state; no lifecycle mutation" eval 'failed_with "templa
 echo "TEST reapply-new-build (#105): identical workspace re-apply creates a build"
 run_scenario reapply-new-build; summary
 check "fails on workspace state; no lifecycle mutation" eval 'failed_with "workspace changed after identical re-apply" && no_mutations_after "$APPLIES"'
+
+echo "TEST log-empty (#148): coderworkspaces/log returns no bytes"
+run_scenario log-empty; summary
+check "fails on the empty log; no lifecycle mutation" eval 'failed_with "build log of coder.coder-k8s-operator.e2e-lifecycle is empty" && no_mutations_after "$APPLIES"'
+
+echo "TEST log-leak (#148): the server log contains a build log line"
+run_scenario log-leak; summary
+check "fails on the leak; no lifecycle mutation" eval 'failed_with "the server log contains a build log line" && no_mutations_after "$APPLIES"'
 
 echo "TEST missing-built-id: BUILT_IMAGE_ID is not a sha256 ID"
 run_scenario missing-built-id BUILT_IMAGE_ID=e2e; summary

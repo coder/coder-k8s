@@ -285,8 +285,10 @@ func NewAPIGroupInfo(
 		parameterCodec,
 		codecs,
 	)
+	workspaces := storage.NewWorkspaceStorage(provider)
 	apiGroupInfo.VersionedResourcesStorageMap[aggregationv1alpha1.SchemeGroupVersion.Version] = map[string]rest.Storage{
-		"coderworkspaces":       storage.NewWorkspaceStorage(provider),
+		"coderworkspaces":       workspaces,
+		"coderworkspaces/log":   storage.NewWorkspaceLogStorage(workspaces),
 		"codertemplates":        storage.NewTemplateStorage(provider),
 		"codertemplateversions": storage.NewTemplateVersionStorage(provider),
 	}

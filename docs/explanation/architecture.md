@@ -52,6 +52,8 @@ For the full rules, see [How callers are checked](../how-to/deploy-aggregated-ap
 
 The server does not map Kubernetes users to Coder users. Thus Kubernetes RBAC on `aggregation.coder.com` in a namespace gives owner-equivalent access in the Coder deployment of the control plane that serves that namespace.
 
+The `coderworkspaces/log` subresource uses the same operator token. Its own RBAC grant is the only check before the server reads a build log.
+
 The server finds its Coder backend in one of two ways:
 
 - `all` mode: `ControlPlaneClientProvider` finds the eligible `CoderControlPlane` resources. For each request, it reads the operator token Secret of the matching control plane.

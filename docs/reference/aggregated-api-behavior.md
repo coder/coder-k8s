@@ -14,6 +14,7 @@ The aggregated API server serves `coderworkspaces`, `codertemplates` and `codert
 | [Server-side dry-run](#server-side-dry-run) | Not supported. `kubectl diff` and `--dry-run=server` return `400` and do not change Coder. |
 | [Template versions](#template-versions) | Read-only: `get` and `list`, no watch. Reads never download template source. |
 | [Template builds](#template-builds) | Create and update with `spec.files` wait until Coder completes the import. The full request must complete within 34 seconds. |
+| [Workspace build log](#workspace-build-log) | `coderworkspaces/log` returns the latest build log as text. It needs its own RBAC grant and has fixed size, time, and concurrency limits. |
 
 ## Object names
 
@@ -228,3 +229,31 @@ The default request timeout of the aggregated API server is `30m`. Neither that 
 The server checks these values on each create or update that uploads files, after it uploads them and creates the template version. If the values are invalid, the request fails before the wait starts, and the file and version stay in Coder. For example, `CODER_K8S_TEMPLATE_BUILD_WAIT_TIMEOUT=1m` with the default `2m` backoff makes every such request fail. When you lower the wait timeout below `2m`, lower `CODER_K8S_TEMPLATE_BUILD_BACKOFF_AFTER` too.
 
 Keep the poll intervals well below 34 seconds. The wait sleeps a full interval between polls, so a long interval can miss an import that finishes within the budget, and the request then returns `504`. The maximum interval matters only when `CODER_K8S_TEMPLATE_BUILD_BACKOFF_AFTER` is greater than `0` and shorter than the budget.
+
+## Workspace build log
+
+`GET …/namespaces/<namespace>/coderworkspaces/<name>/log` returns the log of the latest build of the workspace as `text/plain`:
+
+```bash
+API=/apis/aggregation.coder.com/v1alpha1/namespaces/coder/coderworkspaces
+kubectl get --raw "$API/acme.alice.dev/log"
+kubectl get --raw "$API/acme.alice.dev/log?limitBytes=4096"
+```
+
+Each line has the text format of Coder: `<RFC 3339 time> [<level>] [provisioner|<stage>] <output>`.
+
+- `limitBytes=<n>` ends the response after at most `n` bytes. It can cut a line, but not a UTF-8 character. A value below 1 returns `422`. The server ignores unknown query parameters.
+- The name must be the canonical name (see [Object names](#object-names)). The server checks the name before it reads the log. An alias returns `400`, and a workspace in another organization returns `404`.
+- The `Accept` header must allow JSON or `*/*`. `Accept: text/plain` alone returns `406`. `kubectl get --raw` works.
+- Websocket and other upgrade requests return `400`.
+- Build logs can contain secrets that Terraform printed. Reading a workspace does not give access to its log. See [How callers are checked](../how-to/deploy-aggregated-apiserver.md#how-callers-are-checked).
+
+The server limits each log request:
+
+| Limit | Value | When the limit applies |
+| --- | --- | --- |
+| Response size | 4 MiB | The response ends. A `Warning` header says that the server cut the log. |
+| Data read from Coder | 4 MiB of JSON | The response holds the entries read until then, and a `Warning` header. A capped Coder build log is about 2.4 MB of JSON. |
+| Time to read from Coder | 60 seconds in total. Each Coder call also ends after the Coder request timeout (30 seconds by default). | The request returns `504`. |
+| Time to write the response | 2 minutes after the request arrives | If the client reads too slowly, the server closes the response. |
+| Open log requests | 64 for each server, 4 for each user | The server returns `429` with `Retry-After: 5`. It makes no Coder call. |

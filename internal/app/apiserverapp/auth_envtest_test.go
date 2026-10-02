@@ -165,11 +165,17 @@ func grantTemplateReader(t *testing.T, namespace string, subject rbacv1.Subject,
 // grantReader binds subject to a Role that allows get and list on one aggregation.coder.com resource.
 func grantReader(t *testing.T, namespace string, subject rbacv1.Subject, name, resource string) {
 	t.Helper()
+	grantRole(t, namespace, subject, name, []rbacv1.PolicyRule{{APIGroups: []string{aggGroup}, Resources: []string{resource}, Verbs: []string{"get", "list"}}})
+}
+
+// grantRole creates a Role with rules and binds it to subject, both named name.
+func grantRole(t *testing.T, namespace string, subject rbacv1.Subject, name string, rules []rbacv1.PolicyRule) {
+	t.Helper()
 	ctx := t.Context()
 	mustCreate(t, func() error {
 		_, err := envtestAdmin.RbacV1().Roles(namespace).Create(ctx, &rbacv1.Role{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Rules:      []rbacv1.PolicyRule{{APIGroups: []string{aggGroup}, Resources: []string{resource}, Verbs: []string{"get", "list"}}},
+			Rules:      rules,
 		}, metav1.CreateOptions{})
 		return err
 	})

@@ -1,8 +1,11 @@
 package coder
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -23,6 +26,16 @@ func TestMapCoderError(t *testing.T) {
 		err           error
 		assertMapping func(t *testing.T, err error)
 	}{
+		{
+			name: "maps a timed-out Coder call to a gateway timeout",
+			err:  fmt.Errorf("get workspace: %w", &url.Error{Op: "Get", URL: "https://coder.example.com", Err: context.DeadlineExceeded}),
+			assertMapping: func(t *testing.T, err error) {
+				t.Helper()
+				if !apierrors.IsTimeout(err) || strings.Contains(err.Error(), "coder.example.com") {
+					t.Fatalf("expected a Timeout without the URL, got %v", err)
+				}
+			},
+		},
 		{
 			name: "maps not found",
 			err:  codersdk.NewTestError(http.StatusNotFound, http.MethodGet, "https://coder.example.com"),

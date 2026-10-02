@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -290,6 +291,16 @@ type integrationMockCoderServer struct {
 	mu sync.Mutex
 	// requests records every request the mock receives as "METHOD /path".
 	requests []string
+	// holdLogs, when set, blocks build-log requests until it is closed or the request ends.
+	holdLogs atomic.Pointer[chan struct{}]
+	// heldLogs counts build-log requests currently blocked by holdLogs.
+	heldLogs atomic.Int32
+}
+
+// integrationMockBuildLog is the latest build's log served by the integration mock.
+var integrationMockBuildLog = []codersdk.ProvisionerJobLog{
+	{ID: 1, CreatedAt: time.Date(2024, time.January, 1, 0, 0, 1, 0, time.UTC), Source: codersdk.LogSourceProvisioner, Level: codersdk.LogLevelInfo, Stage: "Planning infrastructure", Output: "plan ok"},
+	{ID: 2, CreatedAt: time.Date(2024, time.January, 1, 0, 0, 2, 0, time.UTC), Source: codersdk.LogSourceProvisioner, Level: codersdk.LogLevelInfo, Stage: "Starting workspace", Output: "apply ok"},
 }
 
 func newIntegrationMockCoderServer(expectedSessionToken string) *integrationMockCoderServer {
@@ -439,6 +450,22 @@ func newIntegrationMockCoderServer(expectedSessionToken string) *integrationMock
 				}
 			}
 			writeCoderError(w, http.StatusNotFound, "template version not found")
+			return
+		case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "workspacebuilds") && len(segments) == 5 && segments[4] == "logs":
+			if segments[3] != workspaceBuildID.String() {
+				writeCoderError(w, http.StatusNotFound, "workspace build not found")
+				return
+			}
+			if hold := mock.holdLogs.Load(); hold != nil {
+				mock.heldLogs.Add(1)
+				defer mock.heldLogs.Add(-1)
+				select {
+				case <-*hold:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			writeJSON(w, http.StatusOK, integrationMockBuildLog)
 			return
 		case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templateversions") && len(segments) == 4:
 			if segments[3] != templateVersion.ID.String() {

@@ -17,6 +17,8 @@
     "clusterrole",
     "clusterrolebinding",
     "rolebinding",
+    "subresource",
+    "subresources",
     "serviceaccount",
     "coder-k8s",
     "cloudnativepg",

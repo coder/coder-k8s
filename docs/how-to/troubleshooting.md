@@ -181,6 +181,17 @@ If that namespace has more than one eligible control plane, the first step does 
 
 `kubectl diff` and `--dry-run=server` send a server-side dry-run request. The server rejects it with `400` for `coderworkspaces` and `codertemplates`, and Coder does not change. To preview a change, compare the output of `kubectl get -o yaml` with your manifest, or use `--dry-run=client`. In Argo CD, keep server-side diff off for these resources. See [Server-side dry-run](../reference/aggregated-api-behavior.md#server-side-dry-run).
 
+## `coderworkspaces/log` returns `403`, `406`, `422`, `429`, or `504`
+
+- `403`: the caller has no `get` grant on `coderworkspaces/log`. Access to `coderworkspaces` alone is not enough. See [How callers are checked](deploy-aggregated-apiserver.md#how-callers-are-checked).
+- `406`: the `Accept` header allows only `text/plain`. Allow `*/*` or JSON, or use `kubectl get --raw`.
+- `422`: `limitBytes` is below 1.
+- `429` that says `for this user`: this user already has 4 open log requests on this server. Close one, or wait and try again.
+- `429` that says `on this server`: the server has 64 open log requests. Wait for the `Retry-After` time and try again.
+- `429` that says `You've been rate limited`: Coder rate-limited the operator token, which every aggregated API call uses. Coder allows 512 requests per minute by default (`CODER_API_RATE_LIMIT`).
+- `504`: Coder did not answer in time: one Coder call took longer than the Coder request timeout (30 seconds by default), or the whole read took longer than 60 seconds. Check that Coder is healthy, then try again.
+- A `Warning` that says the server cut the log: the log is larger than the server limit. See [Workspace build log](../reference/aggregated-api-behavior.md#workspace-build-log).
+
 ## Aggregated requests return `400` or `409`
 
 These errors often come from the rules for names or for `resourceVersion`. See [Aggregated API behavior](../reference/aggregated-api-behavior.md).

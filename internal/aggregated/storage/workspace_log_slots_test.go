@@ -70,6 +70,9 @@ func TestWorkspaceLogLimitsValidate(t *testing.T) {
 	if err := defaultWorkspaceLogLimits().validate(); err != nil {
 		t.Fatal(err)
 	}
+	if got := defaultWorkspaceLogLimits().duration; got != MaxWorkspaceLogSnapshotDuration {
+		t.Fatalf("snapshot duration %s, want %s", got, MaxWorkspaceLogSnapshotDuration)
+	}
 	for name, mutate := range map[string]func(*workspaceLogLimits){
 		"per-user above server": func(l *workspaceLogLimits) { l.maxStreamsPerUser = l.maxStreams + 1 },
 		"zero read cap":         func(l *workspaceLogLimits) { l.maxScanBytes = 0 },

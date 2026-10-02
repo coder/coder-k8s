@@ -3,6 +3,7 @@ package coder
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 
@@ -21,6 +22,13 @@ func MapCoderError(err error, resource schema.GroupResource, name string) error 
 	}
 	if name == "" {
 		return fmt.Errorf("assertion failed: resource name must not be empty")
+	}
+
+	// A Coder call that ran out of time (its context deadline or the client's request timeout) is
+	// a gateway timeout, not a server error. The message leaves out the Coder URL.
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return apierrors.NewTimeoutError("the Coder API did not answer in time", 0)
 	}
 
 	var coderErr *codersdk.Error
