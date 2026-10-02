@@ -14,6 +14,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	genericapiserver "k8s.io/apiserver/pkg/server"
+
+	"github.com/coder/coder-k8s/internal/aggregated/storage"
 )
 
 const (
@@ -198,9 +200,17 @@ func TestLogGuardClearsDeadlineOnKeepAlive(t *testing.T) {
 }
 
 // TestLogGuardWiring runs the production config: authentication still runs before the upgrade
-// refusal, and plain log GETs reach the router.
+// refusal, and plain log GETs are served.
 func TestLogGuardWiring(t *testing.T) {
-	f := newAuthFixture(t, func(k *fakeKubeAPI) { k.setDecide(allowAll) })
+	var longRunning apirequest.LongRunningRequestCheck
+	f := newAuthFixture(t, func(k *fakeKubeAPI) { k.setDecide(allowAll) }, func(c *genericapiserver.RecommendedConfig) {
+		longRunning = c.LongRunningFunc
+	})
+	// validateLogResponseLifetime relies on log requests not being long-running in this server.
+	logInfo := &apirequest.RequestInfo{IsResourceRequest: true, Verb: "get", APIGroup: "aggregation.coder.com", Resource: "coderworkspaces", Subresource: "log"}
+	if longRunning == nil || longRunning(httptest.NewRequest(http.MethodGet, "https://example.test"+testLogPath, nil), logInfo) {
+		t.Fatal("coderworkspaces/log must not be long-running, or the request deadline no longer bounds it")
+	}
 	cert := f.frontProxyCert(t)
 	websocket := map[string]string{"Connection": "Upgrade", "Upgrade": "websocket", "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ=="}
 	spdy := map[string]string{"Connection": "Upgrade", "Upgrade": "SPDY/3.1"}
@@ -214,8 +224,8 @@ func TestLogGuardWiring(t *testing.T) {
 			t.Fatalf("authorized %s upgrade: status=%d body=%.200s", name, status, body)
 		}
 	}
-	if status, body := f.server.do(t, cert, http.MethodGet, testLogPath, remoteUser("alice"), ""); status != http.StatusNotFound {
-		t.Fatalf("plain log GET before the route exists: status=%d body=%.200s", status, body)
+	if status, body := f.server.do(t, cert, http.MethodGet, testLogPath, remoteUser("alice"), ""); status != http.StatusOK {
+		t.Fatalf("plain log GET: status=%d body=%.200s", status, body)
 	}
 	// Upgrades elsewhere are untouched by the guard.
 	if status, body := f.server.do(t, cert, http.MethodGet, workspacesTestNS+"/"+testWorkspaceName, mergeHeaders(remoteUser("alice"), spdy), ""); status == http.StatusBadRequest {
@@ -241,6 +251,11 @@ func TestOuterLogGuardFailsClosedWithoutWriteDeadline(t *testing.T) {
 }
 
 func TestValidateLogResponseLifetime(t *testing.T) {
+	// A snapshot response ends one minute after its Coder reads must end, so a slow reader holds a
+	// slot for at most two minutes.
+	if logResponseLifetime != storage.MaxWorkspaceLogSnapshotDuration+time.Minute || logResponseLifetime > 2*time.Minute {
+		t.Fatalf("log response lifetime %s", logResponseLifetime)
+	}
 	if err := validateLogResponseLifetime(logResponseLifetime, defaultRequestTimeout); err != nil {
 		t.Fatalf("default limits rejected: %v", err)
 	}

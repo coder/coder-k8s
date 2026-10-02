@@ -428,6 +428,21 @@ jobs:
           expect_forbidden kubectl "${reader[@]}" -n default get codertemplates.aggregation.coder.com
           expect_forbidden kubectl "${reader[@]}" -n coder get coderworkspaces.aggregation.coder.com
           expect_forbidden kubectl "${reader[@]}" -n coder delete codertemplates.aggregation.coder.com coder.e2e-authz-probe --dry-run=server
+          # #148: read access to workspaces grants no access to their build logs.
+          kubectl -n coder create role e2e-workspace-viewer --verb=get,list,watch --resource=coderworkspaces.aggregation.coder.com
+          kubectl -n coder create rolebinding e2e-workspace-viewer --role=e2e-workspace-viewer --serviceaccount=coder:e2e-reader
+          kubectl "${reader[@]}" -n coder get coderworkspaces.aggregation.coder.com
+          logpath=/apis/aggregation.coder.com/v1alpha1/namespaces/coder/coderworkspaces/coder.coder-k8s-operator.e2e-authz-missing/log
+          expect_forbidden kubectl "${reader[@]}" get --raw "$logpath"
+          # A log grant reaches storage: the missing workspace is NotFound, not Forbidden.
+          kubectl -n coder create serviceaccount e2e-log-reader
+          kubectl -n coder create role e2e-log-reader --verb=get --resource=coderworkspaces.aggregation.coder.com/log
+          kubectl -n coder create rolebinding e2e-log-reader --role=e2e-log-reader --serviceaccount=coder:e2e-log-reader
+          if out=$(kubectl --as=system:serviceaccount:coder:e2e-log-reader get --raw "$logpath" 2>&1); then
+            echo "expected NotFound for a missing workspace log, got success" >&2
+            exit 1
+          fi
+          grep -q NotFound <<<"$out" || { echo "expected NotFound, got: $out" >&2; exit 1; }
 
           kubectl -n default run e2e-authn-probe --image="$PROBE_IMAGE" --restart=Never --command -- sleep 600
           kubectl -n default wait --for=condition=Ready pod/e2e-authn-probe --timeout=180s

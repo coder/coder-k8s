@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
@@ -43,7 +44,7 @@ type logFakeCoder struct {
 	lookupGate atomic.Pointer[chan struct{}]
 }
 
-func newLogFakeCoder(t *testing.T) *logFakeCoder {
+func newLogFakeCoder(t testing.TB) *logFakeCoder {
 	t.Helper()
 	f := &logFakeCoder{buildID: uuid.New()}
 	orgID, otherOrgID := uuid.New(), uuid.New()
@@ -126,7 +127,7 @@ func renderedLog(entries []codersdk.ProvisionerJobLog) string {
 	return b.String()
 }
 
-func newTestLogStorage(t *testing.T, f *logFakeCoder, tune func(*workspaceLogLimits)) *WorkspaceLogStorage {
+func newTestLogStorage(t testing.TB, f *logFakeCoder, tune func(*workspaceLogLimits)) *WorkspaceLogStorage {
 	t.Helper()
 	serverURL, err := url.Parse(f.server.URL)
 	if err != nil {
@@ -266,6 +267,59 @@ func TestWorkspaceLogServerCapsWarn(t *testing.T) {
 	}
 }
 
+func TestWorkspaceLogTruncatesOnRuneBoundary(t *testing.T) {
+	f := newLogFakeCoder(t)
+	entries := testLogEntries(2)
+	for i := range entries {
+		entries[i].Output = "héllo wörld ✓ " + entries[i].Output
+	}
+	f.setLogs(entries)
+	rendered := renderedLog(entries)
+	s := newTestLogStorage(t, f, nil)
+	for limit := int64(60); limit < 100; limit++ {
+		got, _, err := readLog(t, s, logTestName, &aggregationv1alpha1.CoderWorkspaceLogOptions{LimitBytes: int64Ptr(limit)})
+		if err != nil || !utf8.ValidString(got) || !strings.HasPrefix(rendered, got) || int64(len(got)) > limit || int64(len(got)) < limit-3 {
+			t.Fatalf("limitBytes=%d: err=%v valid=%v len=%d got=%q", limit, err, utf8.ValidString(got), len(got), got)
+		}
+	}
+	firstMultiByte := int64(strings.Index(rendered, "é"))
+	capped := newTestLogStorage(t, f, func(l *workspaceLogLimits) { l.maxBytes = firstMultiByte + 1 })
+	if got, warnings, err := readLog(t, capped, logTestName, nil); err != nil || !utf8.ValidString(got) || int64(len(got)) != firstMultiByte || len(warnings) != 1 {
+		t.Fatalf("server cap: err=%v warnings=%v got=%q", err, warnings, got)
+	}
+}
+
+// TestWorkspaceLogSingleEntryAtReadCap: one entry just below the read cap is served whole, and
+// one just above it is cut at the cap with a warning.
+func TestWorkspaceLogSingleEntryAtReadCap(t *testing.T) {
+	const readCap = 64 << 10
+	f := newLogFakeCoder(t)
+	s := newTestLogStorage(t, f, func(l *workspaceLogLimits) { l.maxScanBytes = readCap })
+	entryOfSize := func(jsonBytes int) []codersdk.ProvisionerJobLog {
+		entries := testLogEntries(1)
+		entries[0].Output = ""
+		base, err := json.Marshal(entries)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries[0].Output = strings.Repeat("ü", (jsonBytes-len(base))/2)
+		return entries
+	}
+	below := entryOfSize(readCap - 16)
+	f.setLogs(below)
+	if got, warnings, err := readLog(t, s, logTestName, nil); err != nil || got != renderedLog(below) || len(warnings) != 0 {
+		t.Fatalf("entry below the read cap: err=%v warnings=%v len=%d", err, warnings, len(got))
+	}
+	f.setLogs(entryOfSize(readCap + 16))
+	got, warnings, err := readLog(t, s, logTestName, nil)
+	if err != nil || got != "" || len(warnings) != 1 || !strings.Contains(warnings[0], "read limit") {
+		t.Fatalf("entry above the read cap: err=%v warnings=%v len=%d", err, warnings, len(got))
+	}
+	if s.slots.inUse() != 0 {
+		t.Fatalf("slots in use: %d", s.slots.inUse())
+	}
+}
+
 func TestWorkspaceLogOptions(t *testing.T) {
 	f := newLogFakeCoder(t)
 	s := newTestLogStorage(t, f, nil)
@@ -360,6 +414,14 @@ func TestWorkspaceLogMapsCoderErrors(t *testing.T) {
 	if got := written.Load(); got >= hugeErrorBody/2 {
 		t.Fatalf("huge error body was read to %d bytes", got)
 	}
+	// A body that ends early is a failed read, not malformed data.
+	f.setLogsHandler(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		_, _ = io.WriteString(w, `[{"id":1,`)
+	})
+	if _, _, err := readLog(t, s, logTestName, nil); !apierrors.IsInternalError(err) || strings.Contains(err.Error(), "malformed") || !strings.Contains(err.Error(), "reading the build log") {
+		t.Fatalf("body ended early: err=%v, want a read failure", err)
+	}
 	if s.slots.inUse() != 0 {
 		t.Fatalf("slots in use after Coder errors: %d", s.slots.inUse())
 	}
@@ -424,5 +486,30 @@ func TestWorkspaceLogReleasesSlotOnStall(t *testing.T) {
 	}
 	if s.slots.inUse() != 0 {
 		t.Fatalf("slot held after client disconnect: %d", s.slots.inUse())
+	}
+}
+
+// BenchmarkWorkspaceLogSingleHugeEntry reports the allocations of one snapshot whose only entry
+// nearly fills the default read cap. Cumulative bytes per request are an upper bound on its peak
+// heap; the fake Coder writes a pre-encoded body, so its share is small.
+func BenchmarkWorkspaceLogSingleHugeEntry(b *testing.B) {
+	f := newLogFakeCoder(b)
+	s := newTestLogStorage(b, f, nil)
+	entries := testLogEntries(1)
+	entries[0].Output = strings.Repeat("x", defaultMaxLogScanBytes-4096)
+	body, err := json.Marshal(entries)
+	if err != nil {
+		b.Fatal(err)
+	}
+	f.setLogsHandler(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) })
+	ctx := logRequestContext(context.Background(), "alice", &recordedWarnings{})
+	b.ReportAllocs()
+	for b.Loop() {
+		rc, _, err := openLog(ctx, s, logTestName, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, rc)
+		_ = rc.Close()
 	}
 }

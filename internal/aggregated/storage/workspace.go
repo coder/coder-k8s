@@ -162,10 +162,7 @@ func (s *WorkspaceStorage) resolveWorkspace(
 	if err := requireFetchedWorkspaceIdentity(ctx, sdk, name, orgName, userName, workspaceName, workspace); err != nil {
 		return nil, codersdk.Workspace{}, err
 	}
-	if sdk == nil {
-		return nil, codersdk.Workspace{}, fmt.Errorf("assertion failed: resolved Coder client must not be nil")
-	}
-
+	// clientForNamespace already asserts that sdk is not nil.
 	return sdk, workspace, nil
 }
 

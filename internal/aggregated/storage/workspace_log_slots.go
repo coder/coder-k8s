@@ -9,16 +9,20 @@ import (
 )
 
 const (
-	// defaultMaxLogStreams caps open log requests per server. A snapshot request buffers at most
-	// defaultMaxLogBytes (4 MiB) of rendered output, so 64 slots bound that buffer memory to 256 MiB.
-	// It also bounds the open Coder connections that log requests hold.
+	// defaultMaxLogStreams caps open log requests per server, and with them the open Coder
+	// connections and the memory that log requests hold. The read and write caps bound input and
+	// output bytes, not heap: decoding one entry that fills the read cap also costs the decoder's
+	// buffer, the decoded strings and the rendered line. BenchmarkWorkspaceLogSingleHugeEntry
+	// measures about 24 MiB allocated per request (6x the 4 MiB read cap), so 64 slots stay below
+	// about 1.5 GiB in that worst case.
 	defaultMaxLogStreams = 64
 	// defaultMaxLogStreamsPerUser caps open log requests per user, so one user (for example a
 	// script that follows many workspaces) can take at most 1/16 of the server's slots.
 	defaultMaxLogStreamsPerUser = 4
 	// defaultMaxLogScanBytes caps how much is read from Coder per request. Coder caps a job's log
-	// output at about 1 MB, and its JSON encoding is about twice the rendered size.
-	defaultMaxLogScanBytes = 16 << 20
+	// output at about 1 MB. In Kind, a capped build's log was 2.41 MB of JSON. A larger response is
+	// cut at this cap with a warning.
+	defaultMaxLogScanBytes = 4 << 20
 	// defaultMaxLogBytes caps how much one response writes.
 	defaultMaxLogBytes = 4 << 20
 	// logSlotRetryAfterSeconds is the Retry-After hint when every log slot is taken.
@@ -41,7 +45,7 @@ func defaultWorkspaceLogLimits() workspaceLogLimits {
 		maxStreamsPerUser: defaultMaxLogStreamsPerUser,
 		maxScanBytes:      defaultMaxLogScanBytes,
 		maxBytes:          defaultMaxLogBytes,
-		duration:          MaxWorkspaceLogDuration,
+		duration:          MaxWorkspaceLogSnapshotDuration,
 	}
 }
 

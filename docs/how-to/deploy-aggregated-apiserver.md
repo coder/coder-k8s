@@ -145,6 +145,27 @@ Thus a subject with this RBAC in a namespace gets these rights in the Coder depl
 
 A ClusterRole binding gives this access for each namespace that has a control plane.
 
+The build log of a workspace (`coderworkspaces/log`) needs its own grant: `get` on `coderworkspaces/log`.
+
+- No verb on `coderworkspaces` gives this access. The server adds it to no default role (`view`, `edit`, `admin`).
+- Build logs can contain secrets. The grant covers the logs of every workspace in every organization of the Coder deployment of that namespace. Add `resourceNames` with canonical names to limit it to some workspaces.
+- Wildcard rules include the subresource, for example `resources: ["*"]` in this group, and `cluster-admin`.
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: coder-workspace-log-reader
+  namespace: coder
+rules:
+  - apiGroups: ["aggregation.coder.com"]
+    resources: ["coderworkspaces/log"]
+    verbs: ["get"]
+    resourceNames: ["acme.alice.dev"] # optional: only these workspaces
+```
+
+To check a subject, run `kubectl auth can-i get coderworkspaces.aggregation.coder.com --subresource=log -n coder --as=<user>`.
+
 The server keeps these Kubernetes defaults:
 
 - Members of `system:masters` are authorized without a SubjectAccessReview, as in kube-apiserver.
