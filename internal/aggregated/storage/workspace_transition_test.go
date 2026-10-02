@@ -18,6 +18,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
 
@@ -483,6 +484,11 @@ func TestWorkspaceTransitionUncertainPost(t *testing.T) {
 			}
 		})
 		s := NewWorkspaceTransitionStorage(newTestWorkspaces(t, f, 300*time.Millisecond), codersdk.WorkspaceTransitionStop)
+		watcher, err := s.workspaces.Watch(transitionContext(t), nil)
+		if err != nil {
+			t.Fatalf("start workspace watch: %v", err)
+		}
+		defer watcher.Stop()
 		result, err := runTransition(t, s, false)
 		if posts, _ := f.recordedPosts(); len(posts) != 1 || f.rereads.Load() != 1 {
 			t.Fatalf("%s: POSTs=%d rereads=%d, want 1 and 1", tc.name, len(posts), f.rereads.Load())
@@ -495,6 +501,9 @@ func TestWorkspaceTransitionUncertainPost(t *testing.T) {
 		}
 		if err != nil || result.Status.Outcome != transitionOutcomeQueued || result.Status.BuildID != queued.ID.String() {
 			t.Fatalf("%s: err=%v result=%+v, want Queued with the new build", tc.name, err, result)
+		}
+		if event := receiveWatchEvent(t, watcher, watchEventTimeout); workspaceFromWatchEvent(t, event).Status.LatestBuildID != queued.ID.String() {
+			t.Fatalf("%s: watch event %s, want the confirmed build", tc.name, event.Type)
 		}
 	}
 
@@ -601,4 +610,40 @@ func TestWorkspaceTransitionRequestChecks(t *testing.T) {
 	if f.rereads.Load() != 0 {
 		t.Fatalf("a definite Coder error was re-read %d times", f.rereads.Load())
 	}
+}
+
+// TestWorkspaceTransitionQueuedSendsWatchEvent: a queued build sends a Modified event for the
+// workspace, as an update of spec.running does. A dry-run and a request that queues nothing send
+// none.
+func TestWorkspaceTransitionQueuedSendsWatchEvent(t *testing.T) {
+	f := newTransitionFakeCoder(t, build(codersdk.WorkspaceTransitionStop, codersdk.ProvisionerJobSucceeded))
+	s := newTestTransitionStorage(t, f, codersdk.WorkspaceTransitionStart)
+	watcher, err := s.workspaces.Watch(transitionContext(t), nil)
+	if err != nil {
+		t.Fatalf("start workspace watch: %v", err)
+	}
+	defer watcher.Stop()
+
+	if _, err := runTransition(t, s, true); err != nil {
+		t.Fatalf("dry-run start: %v", err)
+	}
+	assertNoWatchEvent(t, watcher, 200*time.Millisecond)
+
+	result, err := runTransition(t, s, false)
+	if err != nil || result.Status.Outcome != transitionOutcomeQueued {
+		t.Fatalf("start: err=%v result=%+v, want Queued", err, result)
+	}
+	event := receiveWatchEvent(t, watcher, watchEventTimeout)
+	workspace := workspaceFromWatchEvent(t, event)
+	if event.Type != watch.Modified || workspace.Name != logTestName || workspace.Namespace != logTestNamespace ||
+		workspace.Status.LatestBuildID != result.Status.BuildID {
+		t.Fatalf("event %s %s/%s build %q, want Modified %s/%s build %q", event.Type, workspace.Namespace, workspace.Name,
+			workspace.Status.LatestBuildID, logTestNamespace, logTestName, result.Status.BuildID)
+	}
+
+	stop := NewWorkspaceTransitionStorage(s.workspaces, codersdk.WorkspaceTransitionStop)
+	if result, err := runTransition(t, stop, false); err != nil || result.Status.Outcome != transitionOutcomeUnchanged {
+		t.Fatalf("stop of a stopped workspace: err=%v result=%+v, want Unchanged", err, result)
+	}
+	assertNoWatchEvent(t, watcher, 200*time.Millisecond)
 }

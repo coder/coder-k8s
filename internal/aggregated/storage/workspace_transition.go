@@ -12,11 +12,13 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/apiserver/pkg/registry/rest"
 	"k8s.io/apiserver/pkg/util/dryrun"
 
 	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
 	"github.com/coder/coder-k8s/internal/aggregated/coder"
+	"github.com/coder/coder-k8s/internal/aggregated/convert"
 )
 
 const (
@@ -143,7 +145,7 @@ func (s *WorkspaceTransitionStorage) Create(
 	}
 	newBuild, err := sdk.CreateWorkspaceBuild(callCtx, workspace.ID, req)
 	if err == nil {
-		return s.result(namespace, name, transitionOutcomeQueued, false, &newBuild), nil
+		return s.queued(namespace, name, workspace, newBuild)
 	}
 
 	var coderErr *codersdk.Error
@@ -158,7 +160,7 @@ func (s *WorkspaceTransitionStorage) Create(
 		// The re-read gets the rest of the budget, at least confirmTimeout.
 		current, rereadErr := sdk.Workspace(budgetCtx, workspace.ID)
 		if rereadErr == nil && current.LatestBuild.ID != workspace.LatestBuild.ID && current.LatestBuild.Transition == s.transition {
-			return s.result(namespace, name, transitionOutcomeQueued, false, &current.LatestBuild), nil
+			return s.queued(namespace, name, current, current.LatestBuild)
 		}
 		return nil, apierrors.NewTimeoutError(fmt.Sprintf(
 			"the result is uncertain: the Coder API did not confirm the %s build in time; re-read the workspace's latest build before you retry",
@@ -196,6 +198,18 @@ func (s *WorkspaceTransitionStorage) afterConflict(
 	}
 	return nil, apierrors.NewConflict(aggregationv1alpha1.Resource("coderworkspaces"), name,
 		fmt.Errorf("%s; retry after the active build ends", coderErr.Message))
+}
+
+// queued answers Queued for a build that this request queued. Like an update of spec.running, it
+// sends a Modified watch event for the workspace with that build as the latest build.
+func (s *WorkspaceTransitionStorage) queued(namespace, name string, workspace codersdk.Workspace, build codersdk.WorkspaceBuild) (runtime.Object, error) {
+	workspace.LatestBuild = build
+	obj := convert.WorkspaceToK8s(namespace, workspace)
+	if obj == nil {
+		return nil, fmt.Errorf("assertion failed: converted workspace must not be nil")
+	}
+	s.workspaces.enqueueWatchEvent(watch.Modified, obj)
+	return s.result(namespace, name, transitionOutcomeQueued, false, &build), nil
 }
 
 func (s *WorkspaceTransitionStorage) result(namespace, name, outcome string, isDryRun bool, build *codersdk.WorkspaceBuild) *aggregationv1alpha1.CoderWorkspaceTransition {
