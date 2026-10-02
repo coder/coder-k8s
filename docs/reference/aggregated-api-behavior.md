@@ -161,7 +161,7 @@ The default Argo CD diff and sync do not send `dryRun=All`, and neither does `--
 
 `codertemplateversions` is a read-only view of the versions of each Coder template.
 
-- **Names:** `<organization>.<template>.<version>`, for example `acme.docker.v1.2.3`. The version name can contain `.`. Version names are case-sensitive, so `V1` and `v1` are different objects. Aliases and wrong casing in any segment return `400`, as for templates.
+- **Names:** `<organization>.<template>.<version>`, for example `acme.docker.v1.2.3`. The version name can contain `.`. Version names are case-sensitive, so `V1` and `v1` are different objects, and a version name with the wrong casing returns `404`. An organization alias or a template name with the wrong casing returns `400`, as for templates.
 - **Verbs:** `get` and `list` only. Writes return `405`. To make a new version, change `spec.files` of the `CoderTemplate`.
 - **No watch:** `?watch=true` returns `405`. Coder changes versions outside this server, so a watch that showed only writes made through this server would miss most changes. Tools that need `watch` skip the resource. For example, Argo CD does not show or sync resources whose API has no `watch` verb.
 - **Labels:** `aggregation.coder.com/organization` and `aggregation.coder.com/template`. For example: `kubectl get codertemplateversions -n coder -l aggregation.coder.com/template=docker`.

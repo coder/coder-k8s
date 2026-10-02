@@ -98,10 +98,20 @@ func (s *TemplateVersionStorage) List(ctx context.Context, opts *metainternalver
 	if s.readBudget <= 0 {
 		return nil, fmt.Errorf("assertion failed: template version read budget must be positive")
 	}
-	requestCtx := ctx
-	ctx, cancel := context.WithTimeout(ctx, s.readBudget)
+	budgetCtx, cancel := context.WithTimeout(ctx, s.readBudget)
 	defer cancel()
+	list, err := s.list(budgetCtx, opts)
+	if err != nil && budgetCtx.Err() != nil && ctx.Err() == nil {
+		// Every expiry of the budget, namespace discovery included, gets the same 504.
+		return nil, apierrors.NewTimeoutError(fmt.Sprintf(
+			"listing codertemplateversions took longer than %s: Coder answered too slowly; no partial list is returned",
+			s.readBudget,
+		), 0)
+	}
+	return list, err
+}
 
+func (s *TemplateVersionStorage) list(ctx context.Context, opts *metainternalversion.ListOptions) (runtime.Object, error) {
 	requestNamespace, err := namespaceFromRequestContext(ctx)
 	if err != nil {
 		return nil, err
@@ -136,12 +146,6 @@ func (s *TemplateVersionStorage) List(ctx context.Context, opts *metainternalver
 	for _, namespace := range namespaces {
 		items, err := s.listNamespace(ctx, namespace)
 		if err != nil {
-			if ctx.Err() != nil && requestCtx.Err() == nil {
-				return nil, apierrors.NewTimeoutError(fmt.Sprintf(
-					"listing codertemplateversions took longer than %s: Coder answered too slowly; no partial list is returned",
-					s.readBudget,
-				), 0)
-			}
 			return nil, err
 		}
 		for i := range items {

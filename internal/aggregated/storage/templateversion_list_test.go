@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 
 	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
+	"github.com/coder/coder-k8s/internal/aggregated/coder"
 	"github.com/coder/coder-k8s/internal/aggregated/convert"
 	"github.com/coder/coder/v2/codersdk"
 )
@@ -259,5 +262,23 @@ func TestTemplateVersionStorageListStopsAtTimeBudget(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("the list ran for %s; the budget did not stop it", elapsed)
+	}
+}
+
+// blockingNamespaceProvider models namespace discovery that waits until the request context ends.
+type blockingNamespaceProvider struct{ coder.ClientProvider }
+
+func (blockingNamespaceProvider) EligibleNamespaces(ctx context.Context) ([]string, error) {
+	<-ctx.Done()
+	return nil, fmt.Errorf("list control planes: %w", ctx.Err())
+}
+
+func TestTemplateVersionStorageListBudgetCoversNamespaceDiscovery(t *testing.T) {
+	t.Parallel()
+
+	storage := NewTemplateVersionStorage(blockingNamespaceProvider{})
+	storage.readBudget = 100 * time.Millisecond
+	if _, err := storage.List(namespacedContext(""), nil); !apierrors.IsTimeout(err) {
+		t.Fatalf("expected a 504 Timeout when namespace discovery outlasts the budget, got %v", err)
 	}
 }
