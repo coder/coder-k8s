@@ -139,7 +139,11 @@ func newTestLogStorage(t testing.TB, f *logFakeCoder, tune func(*workspaceLogLim
 	if err != nil {
 		t.Fatal(err)
 	}
-	workspaces := NewWorkspaceStorage(&coder.StaticClientProvider{Client: codersdk.New(serverURL), Namespace: logTestNamespace})
+	client := codersdk.New(serverURL)
+	// As in production (--coder-request-timeout), so the follow handshake gets its own bound and
+	// the tests show that the open stream outlives it.
+	client.HTTPClient.Timeout = 30 * time.Second
+	workspaces := NewWorkspaceStorage(&coder.StaticClientProvider{Client: client, Namespace: logTestNamespace})
 	t.Cleanup(workspaces.Destroy)
 	limits := defaultWorkspaceLogLimits()
 	if tune != nil {

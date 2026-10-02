@@ -268,7 +268,7 @@ The server limits each log request:
 
 | Limit | Value | When the limit applies |
 | --- | --- | --- |
-| Response size | 4 MiB | The response ends. A `Warning` header says that the server cut the log. |
+| Response size | 4 MiB | The response ends. When the snapshot part is cut, a `Warning` header says so. A `follow=true` stream that reaches the limit during the live part ends without a warning, because the headers are already sent. If it ends before the build ends, the server cut it. |
 | Data read from Coder | 4 MiB of JSON | The response holds the entries read until then, and a `Warning` header. A capped Coder build log is about 2.4 MB of JSON. |
 | Time to read from Coder | 60 seconds in total, or 25 minutes with `follow=true`. Each Coder call before the live stream also ends after the Coder request timeout (30 seconds by default). | A snapshot returns `504`. A `follow=true` stream ends. |
 | Time to write the response | 2 minutes after the request arrives, or 26 minutes with `follow=true` | If the client reads too slowly, the server closes the response. |

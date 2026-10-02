@@ -199,7 +199,8 @@ func (w *workspaceLogStream) InputStream(ctx context.Context, _, _ string) (io.R
 		warning.AddWarning(ctx, "", msg)
 	}
 	out.Reader = bytes.NewReader(snapshot.data)
-	if !w.follow || snapshot.truncated {
+	// A snapshot that was cut, or that filled the byte budget exactly, ends the response.
+	if !w.follow || snapshot.truncated || int64(len(snapshot.data)) >= w.budget {
 		handedOff = true
 		return out, false, logContentType, nil
 	}

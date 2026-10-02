@@ -19,7 +19,14 @@ func (w *workspaceLogStream) followLog(ctx context.Context, sdk *codersdk.Client
 	if remaining <= 0 {
 		panic("assertion failed: follow needs a positive byte budget")
 	}
-	entries, stream, err := sdk.WorkspaceBuildLogsAfter(ctx, buildID, afterID)
+	// codersdk drops the client's request timeout for this handshake, so bound it here. The
+	// context bounds only the handshake: the open stream is bounded by ctx below.
+	dialCtx, cancelDial := ctx, context.CancelFunc(func() {})
+	if timeout := sdk.HTTPClient.Timeout; timeout > 0 {
+		dialCtx, cancelDial = context.WithTimeout(ctx, timeout)
+	}
+	entries, stream, err := sdk.WorkspaceBuildLogsAfter(dialCtx, buildID, afterID)
+	cancelDial()
 	if err != nil {
 		// InputStream turns this into a 504 when the log deadline caused it.
 		return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), w.name)

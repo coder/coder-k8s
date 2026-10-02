@@ -191,7 +191,7 @@ If that namespace has more than one eligible control plane, the first step does 
 - `429` that says `You've been rate limited`: Coder rate-limited the operator token, which every aggregated API call uses. Coder allows 512 requests per minute by default (`CODER_API_RATE_LIMIT`).
 - `504`: Coder did not answer in time: one Coder call took longer than the Coder request timeout (30 seconds by default), or the whole read took longer than 60 seconds. Check that Coder is healthy, then try again.
 - A `Warning` that says the server cut the log: the log is larger than the server limit. See [Workspace build log](../reference/aggregated-api-behavior.md#workspace-build-log).
-- A `follow=true` stream ends before the build ends: the stream reached the 4 MiB response limit or the 25-minute time limit. Send a new request with `follow=true`. It sends the existing entries again.
+- A `follow=true` stream ends before the build ends: the stream reached the 4 MiB response limit or the 25-minute time limit. The server sends no `Warning` for a cut in the live part of a stream. Send a new request with `follow=true`. It sends the existing entries again.
 
 ## Aggregated requests return `400` or `409`
 

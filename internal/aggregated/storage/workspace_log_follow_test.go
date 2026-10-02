@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -17,6 +18,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
+	"github.com/coder/coder-k8s/internal/aggregated/coder"
 )
 
 // followFake records what one follow stream saw.
@@ -210,6 +212,35 @@ func TestWorkspaceLogFollowStalledDial(t *testing.T) {
 	}
 }
 
+// TestWorkspaceLogFollowDialHonorsCoderRequestTimeout: codersdk drops the client timeout for the
+// follow handshake, so a stalled handshake must still end after the Coder request timeout, not
+// at the 25-minute follow deadline.
+func TestWorkspaceLogFollowDialHonorsCoderRequestTimeout(t *testing.T) {
+	f := newLogFakeCoder(t)
+	f.setLogs(testLogEntries(1))
+	h := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
+	f.followHandler.Store(&h)
+	serverURL, err := url.Parse(f.server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := codersdk.New(serverURL)
+	client.HTTPClient.Timeout = 300 * time.Millisecond
+	workspaces := NewWorkspaceStorage(&coder.StaticClientProvider{Client: client, Namespace: logTestNamespace})
+	t.Cleanup(workspaces.Destroy)
+	s := newWorkspaceLogStorage(workspaces, defaultWorkspaceLogLimits())
+	start := time.Now()
+	if _, _, err := readLog(t, s, logTestName, followOptions(nil)); !apierrors.IsTimeout(err) {
+		t.Fatalf("stalled follow handshake: err=%v, want 504", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("stalled follow handshake ended after %s", elapsed)
+	}
+	if s.slots.inUse() != 0 {
+		t.Fatalf("slots in use: %d", s.slots.inUse())
+	}
+}
+
 // TestWorkspaceLogFollowSkipsDialWhenSnapshotIsCut: a snapshot that already used the byte
 // budget ends the response without opening a Coder stream.
 func TestWorkspaceLogFollowSkipsDialWhenSnapshotIsCut(t *testing.T) {
@@ -227,5 +258,11 @@ func TestWorkspaceLogFollowSkipsDialWhenSnapshotIsCut(t *testing.T) {
 	got, _, err := readLog(t, s, logTestName, followOptions(&limit))
 	if err != nil || got != renderedLog(entries)[:10] || dials.Load() != 0 {
 		t.Fatalf("cut snapshot with follow: got=%q err=%v dials=%d", got, err, dials.Load())
+	}
+	// A limit that the snapshot fills exactly also ends the response without a stream.
+	exact := int64(len(renderedLog(entries)))
+	got, _, err = readLog(t, s, logTestName, followOptions(&exact))
+	if err != nil || got != renderedLog(entries) || dials.Load() != 0 {
+		t.Fatalf("snapshot that fills limitBytes with follow: got=%q err=%v dials=%d", got, err, dials.Load())
 	}
 }
