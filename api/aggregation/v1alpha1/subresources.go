@@ -22,6 +22,48 @@ type CoderWorkspaceLogOptions struct {
 	Follow bool `json:"follow,omitempty"`
 }
 
+// CoderTemplateVersionPromotionSpec names the template version to activate.
+type CoderTemplateVersionPromotionSpec struct {
+	// VersionID is the Coder ID (a UUID) of the template version to activate. It must be a version of
+	// the template named in the request path.
+	VersionID string `json:"versionID"`
+}
+
+// CoderTemplateVersionPromotionResult is the outcome of a promotion request.
+type CoderTemplateVersionPromotionResult string
+
+const (
+	// PromotionResultPromoted means that this request changed the active version.
+	PromotionResultPromoted CoderTemplateVersionPromotionResult = "Promoted"
+	// PromotionResultAlreadyActive means that the version was already active, so nothing changed.
+	PromotionResultAlreadyActive CoderTemplateVersionPromotionResult = "AlreadyActive"
+	// PromotionResultWouldPromote means that a dry-run request found that a real request would
+	// change the active version. Nothing changed.
+	PromotionResultWouldPromote CoderTemplateVersionPromotionResult = "WouldPromote"
+)
+
+// CoderTemplateVersionPromotionStatus reports the observed outcome of a promotion request.
+type CoderTemplateVersionPromotionStatus struct {
+	// Result is Promoted, AlreadyActive or WouldPromote.
+	Result CoderTemplateVersionPromotionResult `json:"result,omitempty"`
+	// PreviousActiveVersionID is the active version that the request observed before it acted.
+	PreviousActiveVersionID string `json:"previousActiveVersionID,omitempty"`
+	// ActiveVersionID is the active version that the request observed after it acted.
+	ActiveVersionID string `json:"activeVersionID,omitempty"`
+}
+
+// CoderTemplateVersionPromotion is the request and response body of the codertemplates/promote
+// subresource. It activates one version of a template; rollback is a promotion of an older version.
+//
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+type CoderTemplateVersionPromotion struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   CoderTemplateVersionPromotionSpec   `json:"spec"`
+	Status CoderTemplateVersionPromotionStatus `json:"status,omitempty"`
+}
+
 // convertURLValuesToCoderWorkspaceLogOptions decodes log query parameters. Unknown parameters are
 // ignored, as for Pod logs. A malformed number is an error, which the API server answers with 400.
 func convertURLValuesToCoderWorkspaceLogOptions(in *url.Values, out *CoderWorkspaceLogOptions, s conversion.Scope) error {

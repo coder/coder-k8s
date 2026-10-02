@@ -11,8 +11,9 @@ The aggregated API server serves `coderworkspaces`, `codertemplates` and `codert
 | [Workspace `resourceVersion`](#workspace-resourceversion) | An opaque fingerprint. Compare it only for equality. Workspace activity alone can cause `409`. |
 | [Watch](#watch) | Shows only writes made through this server. No replay, no initial events. |
 | [Server-side apply](#server-side-apply) | Create-on-update works. The server does not keep field ownership. |
-| [Server-side dry-run](#server-side-dry-run) | Not supported. `kubectl diff` and `--dry-run=server` return `400` and do not change Coder. |
+| [Server-side dry-run](#server-side-dry-run) | Not supported on writes. `kubectl diff` and `--dry-run=server` return `400` and do not change Coder. A promotion with `dryRun=All` is a read-only preview. |
 | [Template versions](#template-versions) | Read-only: `get` and `list`, no watch. Reads never download template source. |
+| [Promote a template version](#promote-a-template-version) | `codertemplates/<name>/promote` (`create`) previews which version would become active. It needs its own RBAC grant. A promotion that changes the active version returns `400` for now. |
 | [Template builds](#template-builds) | Create and update with `spec.files` wait until Coder completes the import. The full request must complete within 34 seconds. |
 | [Coder timeouts](#coder-timeouts) | A Coder call that runs out of time returns `504` on every resource. After a `504` on a write, re-read before you retry. |
 | [Workspace build log](#workspace-build-log) | `coderworkspaces/log` returns the latest build log as text. It needs its own RBAC grant and has fixed size, time, and concurrency limits. |
@@ -159,6 +160,13 @@ The server rejects the request before it sends anything to Coder. Nothing is upl
 
 The default Argo CD diff and sync do not send `dryRun=All`, and neither does `--dry-run=client`. They work as before. To preview a change, compare the output of `kubectl get -o yaml` with your manifest.
 
+A promotion is different, because the server can evaluate it without a write:
+
+| Request with `dryRun=All` | Result |
+| --- | --- |
+| Create, update, patch, or delete of `coderworkspaces` or `codertemplates` | `400 BadRequest`. Nothing is sent to Coder. |
+| Create of `codertemplates/<name>/promote` | `201` with `WouldPromote` or `AlreadyActive`. The server only reads from Coder. See [Promote a template version](#promote-a-template-version). |
+
 ## Coder timeouts
 
 A Coder call that runs out of time returns `504 Gateway Timeout` on every aggregated resource: workspaces, templates, template versions, and workspace build logs. A call runs out of time when:
@@ -198,6 +206,37 @@ The server sends every request to Coder with the one operator token of the contr
 - **No watch:** `?watch=true` returns `405`. Tools that need `watch` skip the resource. For example, Argo CD does not show or sync it.
 - **No file downloads:** reads of template versions never download template source, so they do not use the file download limit of 12 per minute.
 - **Tools that list everything:** tools that list every API resource also list all template versions. For example, a Velero backup that includes the `aggregation.coder.com` group sends one all-namespaces `list`, which costs 1 plus 1 for each template, for each control plane.
+
+## Promote a template version
+
+The `promote` subresource of `codertemplates` makes one version of a template the active version. A rollback is a promotion of an older version.
+
+!!! note "Preview only for now"
+    This release serves only the preview (`dryRun=All`). A request without `dryRun` that would change the active version returns `400` with the message "promotion is not enabled yet; use dryRun=All to preview it". Nothing changes in Coder. A later release enables the change itself.
+
+Send a `CoderTemplateVersionPromotion` with the ID of the version. `kubectl` has no promote command, so use `kubectl create --raw`:
+
+```sh
+ID=$(kubectl get codertemplateversion -n coder acme.docker.v1 -o jsonpath='{.status.id}')
+echo '{"spec":{"versionID":"'"$ID"'"}}' | kubectl create --raw \
+  "/apis/aggregation.coder.com/v1alpha1/namespaces/coder/codertemplates/acme.docker/promote?dryRun=All" -f -
+```
+
+The server answers `201 Created` with the same kind. The status shows what the server observed:
+
+| `status.result` | Meaning |
+| --- | --- |
+| `WouldPromote` | Dry-run only. A real promotion would change the active version. |
+| `AlreadyActive` | The version is already active. The server sends no write to Coder, with or without `dryRun`. |
+
+`status.previousActiveVersionID` and `status.activeVersionID` show the active version before and after the request.
+
+- **Version ID:** `spec.versionID` must be the UUID in `status.id` of a `codertemplateversion`. Other values return `422 Invalid`.
+- **Membership:** the version must belong to the template in the path. An unknown version and a version of another template return the same `400` ("spec.versionID is not a version of template ..."), so the answer does not show whether a version of another template exists.
+- **Only built versions:** an archived version, or a version whose import job did not succeed, returns `400`.
+- **Names:** the template name in the path follows the [template rules](#object-names). Aliases and wrong casing return `400`. `metadata.name` in the body must be empty or equal that name.
+- **Authorization:** promotion needs `create` on `codertemplates/promote`. No verb on `codertemplates` or `codertemplateversions` gives it. `resourceNames` limit the grant to some templates. See [How callers are checked](../how-to/deploy-aggregated-apiserver.md#how-callers-are-checked).
+- **No file downloads:** a promotion reads the organization, the template and the version. It never downloads template source.
 
 ## Template builds
 

@@ -339,6 +339,7 @@ func newIntegrationMockCoderServer(expectedSessionToken string) *integrationMock
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
+	templateVersion.OrganizationID = organizationID
 	// Version names are case-sensitive in Coder: "V1" and "v1" are different versions.
 	templateVersions := []codersdk.TemplateVersion{templateVersion}
 	for i, name := range []string{"V1", "v1"} {
@@ -468,11 +469,13 @@ func newIntegrationMockCoderServer(expectedSessionToken string) *integrationMock
 			writeJSON(w, http.StatusOK, integrationMockBuildLog)
 			return
 		case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templateversions") && len(segments) == 4:
-			if segments[3] != templateVersion.ID.String() {
-				writeCoderError(w, http.StatusNotFound, "template version not found")
-				return
+			for _, version := range templateVersions {
+				if version.ID.String() == segments[3] {
+					writeJSON(w, http.StatusOK, version)
+					return
+				}
 			}
-			writeJSON(w, http.StatusOK, templateVersion)
+			writeCoderError(w, http.StatusNotFound, "template version not found")
 			return
 		case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "files") && len(segments) == 4:
 			if segments[3] != templateSourceFileID.String() {

@@ -54,6 +54,8 @@ The server does not map Kubernetes users to Coder users. Thus Kubernetes RBAC on
 
 The `coderworkspaces/log` subresource uses the same operator token. Its own RBAC grant is the only check before the server reads a build log.
 
+The `codertemplates/promote` subresource also uses the operator token. Its own RBAC grant (`create`, optionally limited with `resourceNames` to some templates) is the only check before the server evaluates a promotion.
+
 The server finds its Coder backend in one of two ways:
 
 - `all` mode: `ControlPlaneClientProvider` finds the eligible `CoderControlPlane` resources. For each request, it reads the operator token Secret of the matching control plane.
