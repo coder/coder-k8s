@@ -180,6 +180,7 @@ func NewScheme() *runtime.Scheme {
 		&aggregationv1alpha1.CoderTemplateVersion{},
 		&aggregationv1alpha1.CoderTemplateVersionList{},
 		&aggregationv1alpha1.CoderTemplateVersionPromotion{},
+		&aggregationv1alpha1.CoderWorkspaceTransition{},
 	)
 
 	return scheme
@@ -292,6 +293,8 @@ func NewAPIGroupInfo(
 	apiGroupInfo.VersionedResourcesStorageMap[aggregationv1alpha1.SchemeGroupVersion.Version] = map[string]rest.Storage{
 		"coderworkspaces":        workspaces,
 		"coderworkspaces/log":    storage.NewWorkspaceLogStorage(workspaces),
+		"coderworkspaces/start":  storage.NewWorkspaceTransitionStorage(workspaces, codersdk.WorkspaceTransitionStart),
+		"coderworkspaces/stop":   storage.NewWorkspaceTransitionStorage(workspaces, codersdk.WorkspaceTransitionStop),
 		"codertemplates":         storage.NewTemplateStorage(provider),
 		"codertemplates/promote": storage.NewTemplatePromoteStorage(provider),
 		"codertemplateversions":  storage.NewTemplateVersionStorage(provider),
@@ -653,11 +656,27 @@ func getOpenAPIDefinitions(_ openapicommon.ReferenceCallback) map[string]openapi
 		}),
 	})
 	promotionSchema.VendorExtensible = groupVersionKindExtension("CoderTemplateVersionPromotion")
+	int32Schema := spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"integer"}, Format: "int32"}}
+	workspaceTransitionSchema := objectOf(map[string]spec.Schema{
+		"apiVersion": stringSchema,
+		"kind":       stringSchema,
+		"metadata":   objectMetaSchema,
+		"status": objectOf(map[string]spec.Schema{
+			"transition":  stringSchema,
+			"outcome":     stringSchema,
+			"dryRun":      boolSchema,
+			"buildID":     stringSchema,
+			"buildNumber": int32Schema,
+			"jobStatus":   stringSchema,
+		}),
+	})
+	workspaceTransitionSchema.VendorExtensible = groupVersionKindExtension("CoderWorkspaceTransition")
 
 	return map[string]openapicommon.OpenAPIDefinition{
 		openapiutil.GetCanonicalTypeName(&aggregationv1alpha1.CoderTemplateVersion{}):          {Schema: templateVersionSchema},
 		openapiutil.GetCanonicalTypeName(&aggregationv1alpha1.CoderTemplateVersionList{}):      {Schema: templateVersionListSchema},
 		openapiutil.GetCanonicalTypeName(&aggregationv1alpha1.CoderTemplateVersionPromotion{}): {Schema: promotionSchema},
+		openapiutil.GetCanonicalTypeName(&aggregationv1alpha1.CoderWorkspaceTransition{}):      {Schema: workspaceTransitionSchema},
 		workspaceDefinitionName: {
 			Schema: workspaceSchema,
 		},

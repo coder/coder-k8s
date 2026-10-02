@@ -189,6 +189,28 @@ rules:
 
 To check a subject, run `kubectl auth can-i create codertemplates.aggregation.coder.com/acme.docker --subresource=promote -n coder --as=<user>`.
 
+To start and stop workspaces through `coderworkspaces/start` and `coderworkspaces/stop`, a subject needs `create` on that subresource.
+
+- Each subresource is a separate grant. A grant for `start` does not allow `stop`.
+- No verb on `coderworkspaces` gives this access. The server adds it to no default role (`view`, `edit`, `admin`).
+- A subject with `update` or `patch` on `coderworkspaces` can already start and stop workspaces through `spec.running`.
+- Add `resourceNames` with canonical names to limit a grant to some workspaces.
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: coder-workspace-stopper
+  namespace: coder
+rules:
+  - apiGroups: ["aggregation.coder.com"]
+    resources: ["coderworkspaces/stop"]
+    verbs: ["create"]
+    resourceNames: ["acme.alice.dev"] # optional: only these workspaces
+```
+
+To check a subject, run `kubectl auth can-i create coderworkspaces.aggregation.coder.com --subresource=stop -n coder --as=<user>`.
+
 The server keeps these Kubernetes defaults:
 
 - Members of `system:masters` are authorized without a SubjectAccessReview, as in kube-apiserver.

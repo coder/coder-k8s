@@ -24,6 +24,7 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&CoderTemplate{},
 		&CoderTemplateList{},
 		&CoderWorkspaceLogOptions{},
+		&CoderWorkspaceTransition{},
 		&CoderTemplateVersion{},
 		&CoderTemplateVersionList{},
 		&CoderTemplateVersionPromotion{},

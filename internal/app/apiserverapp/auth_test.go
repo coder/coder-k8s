@@ -190,6 +190,8 @@ func TestDelegatedAuthFrontProxyIdentityAndSARAttributes(t *testing.T) {
 		{method: http.MethodDelete, path: workspacesTestNS + "/" + testWorkspaceName, verb: "delete", resource: "coderworkspaces", namespace: "test-ns", name: testWorkspaceName},
 		// Authorization runs before routing, so the subresource is checked even before its route exists.
 		{method: http.MethodGet, path: workspacesTestNS + "/" + testWorkspaceName + "/log", verb: "get", resource: "coderworkspaces", subresource: "log", namespace: "test-ns", name: testWorkspaceName},
+		{method: http.MethodPost, path: workspacesTestNS + "/" + testWorkspaceName + "/start", body: `{}`, verb: "create", resource: "coderworkspaces", subresource: "start", namespace: "test-ns", name: testWorkspaceName},
+		{method: http.MethodPost, path: workspacesTestNS + "/" + testWorkspaceName + "/stop", body: `{}`, verb: "create", resource: "coderworkspaces", subresource: "stop", namespace: "test-ns", name: testWorkspaceName},
 	}
 	for _, d := range denied {
 		f.kube.resetSARs()
