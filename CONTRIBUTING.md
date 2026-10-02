@@ -1,15 +1,15 @@
 # Contributing to coder-k8s
 
-Thanks for contributing to `coder-k8s`.
+Thank you for your contribution to `coder-k8s`.
 
 > [!NOTE]
-> The root [`README.md`](./README.md) is end-user focused. This guide contains local development and contribution workflows.
+> The root [`README.md`](./README.md) is for end users. This guide tells you how to develop locally and how to contribute.
 
 ## Development prerequisites
 
 - Go 1.26.8 or later (`go.mod` declares Go 1.26.8)
-- A Kubernetes cluster (OrbStack, KIND, or any conformant cluster)
-- `kubectl` configured for your target cluster
+- A Kubernetes cluster (OrbStack, KIND, or another conformant cluster)
+- `kubectl`, configured for your target cluster
 
 ## Local development quick start (controller mode)
 
@@ -31,13 +31,13 @@ kubectl get codercontrolplanes -A
 
 ## KIND development cluster (k9s demos)
 
-Bootstrap a KIND cluster and install CRDs/RBAC (**this switches current kubectl context**):
+This command creates a KIND cluster and installs the CRDs and RBAC. It also changes your current `kubectl` context.
 
 ```bash
 make kind-dev-up
 ```
 
-Useful helpers:
+Other helper commands:
 
 ```bash
 make kind-dev-status
@@ -52,19 +52,19 @@ make kind-dev-down
 | Command | Description |
 | --- | --- |
 | `make build` | Build all packages |
-| `make test` | Run unit + integration tests |
-| `make test-integration` | Run focused controller integration tests |
-| `make manifests` | Generate CRD and RBAC manifests |
-| `make codegen` | Run deepcopy generation |
-| `make docs-reference` | Regenerate API reference docs from Go types |
-| `make docs-check` | Build docs in strict mode (CI-equivalent) |
-| `make verify-vendor` | Verify vendored dependency consistency |
-| `make lint` | Run linter + formatting checks |
-| `make vuln` | Run vulnerability scan |
+| `make test` | Run the unit and integration tests |
+| `make test-integration` | Run only the tests in `internal/controller/` (envtest) |
+| `make manifests` | Generate the CRD and RBAC manifests |
+| `make codegen` | Generate the deepcopy code |
+| `make docs-reference` | Generate the API reference docs again from the Go types |
+| `make docs-check` | Build the docs in strict mode, as CI does |
+| `make verify-vendor` | Make sure that the vendored dependencies are consistent |
+| `make lint` | Run the linter and the formatting checks |
+| `make vuln` | Run the vulnerability scan |
 
 ## Before opening a PR
 
-Run at least:
+Run these commands at a minimum:
 
 ```bash
 make verify-vendor
