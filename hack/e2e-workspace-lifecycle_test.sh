@@ -77,12 +77,30 @@ case "${pos[0]}:${pos[1]:-}" in
         if $sc == "list-token-differs" then .metadata.resourceVersion = "skewed" else . end)}' "$S"/ws/*.json
     fi
     f=$(wsfile "$raw"); [[ -f $f ]] || err NotFound "coderworkspaces \"${raw##*/}\" not found"; cat "$f" ;;
-  create:) ws_create && cat "$(wsfile "$(jq -r .metadata.name "$file")")" ;;
+  create:--dry-run=client) # client-side render of the CoderTemplate manifest
+    jq -n '{apiVersion: "aggregation.coder.com/v1alpha1", kind: "CoderTemplate", metadata: {name: "coder.e2e-template", namespace: "coder"},
+      spec: {organization: "coder", files: {"main.tf": "# e2e"}}}' ;;
+  get:codertemplateversions) # $S/template holds "id active-version version-count updated-stamp"
+    read -r _ av n _ <"$S/template"
+    jq -n --arg av "$av" --argjson n "$n" '{items: [range(1; $n + 1) | ("tv-\(.)") as $id | {status: {id: $id, active: ($id == $av)}}]}' ;;
+  create:)
+    if [[ $raw == */codertemplates/*/promote* ]]; then # promote-* scenarios break the activation
+      read -r id av n st <"$S/template"; v=$(jq -r .spec.versionID "$file")
+      if [[ $av == "$v" ]]; then r=AlreadyActive; [[ $SCENARIO != promote-repeat-writes ]] || st=$((st + 1))
+      elif [[ $raw == *dryRun=All ]]; then r=WouldPromote
+      else r=Promoted; [[ $SCENARIO == promote-not-applied ]] || { av=$v; st=$((st + 1)); }; fi
+      echo "$id $av $n $st" >"$S/template"; jq -n --arg r "$r" '{status: {result: $r}}'; exit 0
+    fi
+    ws_create && cat "$(wsfile "$(jq -r .metadata.name "$file")")" ;;
   apply:)
     if [[ $file == *.yaml ]]; then # the CoderTemplate manifest; $S/template holds "id active-version version-count"
       [[ $SCENARIO != template-apply-error ]] || err InternalError "an error on the server has prevented the request from succeeding"
-      [[ -f $S/template ]] || { echo "tpl-1 tv-1 1" >"$S/template"; echo "codertemplate/coder.e2e-template created"; exit 0; }
-      [[ $SCENARIO != reapply-new-version ]] || echo "tpl-1 tv-1 2" >"$S/template"
+      [[ -f $S/template ]] || { echo "tpl-1 tv-1 1 0" >"$S/template"; echo "codertemplate/coder.e2e-template created"; exit 0; }
+      read -r id av n st <"$S/template"
+      [[ $SCENARIO != reapply-new-version ]] || echo "$id $av $((n + 1)) $st" >"$S/template"
+      echo "codertemplate/coder.e2e-template configured"
+    elif [[ $(jq -r .kind "$file") == CoderTemplate ]]; then # changed files: a new active version
+      read -r id _ n st <"$S/template"; echo "$id tv-$((n + 1)) $((n + 1)) $((st + 1))" >"$S/template"
       echo "codertemplate/coder.e2e-template configured"
     else
       f=$(wsfile "$(jq -r .metadata.name "$file")")
@@ -138,8 +156,9 @@ path=/${url#http://*/}
 case "$method $path" in
   "GET /api/v2/buildinfo") printf '{"version":"%s"}\n' "${CODER_VERSION_REPORTED:-v2.37.2+eb69e27}" ;;
   "GET /api/v2/organizations/coder/templates/e2e-template")
-    [[ -f $S/template ]] || exit 22; read -r id av _ <"$S/template"; printf '{"id":"%s","active_version_id":"%s"}\n' "$id" "$av" ;;
-  "GET /api/v2/templates/tpl-1/versions?limit=100") read -r _ _ n <"$S/template"; jq -n --argjson n "$n" '[range($n) | {}]' ;;
+    [[ -f $S/template ]] || exit 22; read -r id av _ st <"$S/template"
+    printf '{"id":"%s","active_version_id":"%s","updated_at":"2026-10-02T00:00:%02dZ"}\n' "$id" "$av" "$st" ;;
+  "GET /api/v2/templates/tpl-1/versions?limit=100") read -r _ _ n _ <"$S/template"; jq -n --argjson n "$n" '[range($n) | {}]' ;;
   "GET /api/v2/templateversions/tv-1") printf '{"job":{"status":"%s"}}\n' "${TEMPLATE_JOB_STATUS:-succeeded}" ;;
   "GET /api/v2/workspaces/"*"?include_deleted=true")
     uid=${path##*/} && uid=${uid%%\?*} && [[ -f $S/deleted-$uid ]] || exit 22
@@ -206,7 +225,8 @@ run_scenario() {
 
 mutations() { grep -E '^kubectl .*((create|replace|delete) --raw|apply -f)|^curl .*-X PATCH' "$S/calls.log" |
   awk '/^kubectl/ {for (i = 2; i <= NF; i++) if ($i ~ /^(create|replace|delete|apply)$/) {print "kubectl " $i; next}} /^curl/ {print "curl PATCH"}' | paste -sd, -; }
-APPLIES="kubectl apply,kubectl apply,kubectl apply,kubectl apply" # template, workspace, identical template and workspace re-apply
+VERSIONS="kubectl apply,kubectl apply,kubectl create,kubectl create,kubectl create" # template, second version, promote v1, repeat, dry-run v2
+APPLIES="$VERSIONS,kubectl apply,kubectl apply,kubectl apply"                       # then workspace, identical template and workspace re-apply
 check() { # <description> <command...>
   local desc=$1
   shift
@@ -234,7 +254,7 @@ check "mutation order: create, update, rename, stale 409 update+delete, wrong-UI
 check "stale requests carry the genuine pre-rename token; rename changed it" eval 'grep -qx "rv_pre_rename=2" "$T/work/receipt.txt" &&
   grep -qx "rv_post_rename=2-renamed" "$T/work/receipt.txt" && jq -e ".metadata.resourceVersion == \"2\"" "$T/work/stale-update.json" >/dev/null'
 check "template applied with the long request timeout, then re-applied before any lifecycle mutation" eval '[[ $(grep -c -- "--request-timeout=600s apply -f config/e2e/codertemplate.yaml" "$S/calls.log") -eq 2 ]]'
-check "receipt: template and workspace state, no apply failure" eval 'grep -qx "template=id=tpl-1 active=tv-1 versions=1" "$T/work/receipt.txt" &&
+check "receipt: template and workspace state, no apply failure" eval 'grep -qx "template=id=tpl-1 active=tv-1 versions=2" "$T/work/receipt.txt" &&
   grep -qx "workspace=uid=uid-1 latest=build-1/build-1 builds=1 status=running" "$T/work/receipt.txt" && grep -qx "apply_failure=none" "$T/work/receipt.txt"'
 check "LIST requested after the stale checks" eval 'grep -q "get --raw /apis/aggregation.coder.com/v1alpha1/namespaces/coder/coderworkspaces$" "$S/calls.log"'
 check "terminating pod ignored; serving pod image tag inspected on node" eval 'grep -q "crictl inspecti -o json ghcr.io/coder/coder-k8s:e2e" "$S/calls.log"'
@@ -245,8 +265,8 @@ check "background port-forward and watch stopped" bg_stopped
 check "every non-streaming kubectl request carries --request-timeout=30s" \
   eval '! grep "^kubectl" "$S/calls.log" | grep -v -e "watch=1" -e port-forward | grep -qvE -- "--request-timeout=[0-9]+s "'
 check "recreate only after the delete job succeeded" eval '[[ $(grep -n include_deleted "$S/calls.log" | tail -1 | cut -d: -f1) -lt $(grep -n "^kubectl --request-timeout=30s create" "$S/calls.log" | tail -1 | cut -d: -f1) ]]'
-check "receipt: source, run, version, identity, UIDs, 13 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
-  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 13 ]]'
+check "receipt: source, run, version, identity, UIDs, 14 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
+  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 14 ]]'
 
 echo "TEST image-mismatch: serving image differs from built image"
 run_scenario image-mismatch SERVING_ID="$OTHER"; summary
@@ -265,7 +285,7 @@ check "fails on version before any mutation; receipt marks the failing case" \
 
 echo "TEST render-fail-create: create body render fails"
 run_scenario render-fail-create; summary
-check "fails at create with zero workspace create/apply calls" eval '[[ $RC -ne 0 ]] && bg_stopped && no_mutations_after "kubectl apply" &&
+check "fails at create with zero workspace create/apply calls" eval '[[ $RC -ne 0 ]] && bg_stopped && no_mutations_after "$VERSIONS" &&
   grep -q "create workspace through the aggregated API = FAILED" "$T/work/receipt.txt"'
 
 echo "TEST endpoint-mismatch: aggregated API service points at the terminating pod"
@@ -278,7 +298,7 @@ check "fails on import status and never creates a workspace" eval 'failed_with "
 
 echo "TEST build-failed: create build fails"
 run_scenario build-failed; summary
-check "fails on build status; no update" eval 'failed_with "ended in status failed" && no_mutations_after "kubectl apply,kubectl apply"'
+check "fails on build status; no update" eval 'failed_with "ended in status failed" && no_mutations_after "$VERSIONS,kubectl apply"'
 
 echo "TEST watch-unregistered: watch never reports 200 OK"
 run_scenario watch-unregistered; summary
@@ -368,6 +388,16 @@ check "fails on the leak; no lifecycle mutation" eval 'failed_with "the server l
 echo "TEST follow-fails (#148): the log follow of the stop build fails"
 run_scenario follow-fails; summary
 check "fails on the follow; no mutation after the update" eval 'failed_with "log follow failed" && no_mutations_after "$APPLIES,kubectl replace"'
+
+echo "TEST promote-not-applied (#149): promote answers Promoted but Coder keeps the old version"
+run_scenario promote-not-applied; summary
+check "fails on the Coder cross-check; no workspace mutation" eval 'failed_with "Coder does not show v1 active after the rollback" &&
+  no_mutations_after "kubectl apply,kubectl apply,kubectl create"'
+
+echo "TEST promote-repeat-writes (#149): a repeated promote changes the template in Coder"
+run_scenario promote-repeat-writes; summary
+check "fails on updated_at; no workspace mutation" eval 'failed_with "repeated promote v1 wrote to Coder" &&
+  no_mutations_after "kubectl apply,kubectl apply,kubectl create,kubectl create"'
 
 echo "TEST missing-built-id: BUILT_IMAGE_ID is not a sha256 ID"
 run_scenario missing-built-id BUILT_IMAGE_ID=e2e; summary

@@ -443,6 +443,12 @@ jobs:
             exit 1
           fi
           grep -q NotFound <<<"$out" || { echo "expected NotFound, got: $out" >&2; exit 1; }
+          # #149: template and workspace read grants cover neither template versions nor promote.
+          expect_forbidden kubectl "${reader[@]}" -n coder get codertemplateversions.aggregation.coder.com
+          echo '{"spec":{"versionID":"00000000-0000-0000-0000-000000000001"}}' >"$RUNNER_TEMP/promote.json"
+          expect_forbidden kubectl "${reader[@]}" create --raw \
+            "/apis/aggregation.coder.com/v1alpha1/namespaces/coder/codertemplates/coder.e2e-template/promote?dryRun=All" \
+            -f "$RUNNER_TEMP/promote.json"
 
           kubectl -n default run e2e-authn-probe --image="$PROBE_IMAGE" --restart=Never --command -- sleep 600
           kubectl -n default wait --for=condition=Ready pod/e2e-authn-probe --timeout=180s
