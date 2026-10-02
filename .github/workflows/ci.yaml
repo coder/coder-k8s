@@ -88,6 +88,8 @@ jobs:
               - 'examples/cloudnativepg/**'
               - 'hack/e2e-workspace-lifecycle*.sh'
               - '.github/workflows/ci.yaml'
+              # Coder SDK bumps change how every aggregated-API call reaches the backend.
+              - 'vendor/github.com/coder/coder/v2/**'
             installer:
               - 'api/**/*.go'
               - 'config/crd/bases/**'
