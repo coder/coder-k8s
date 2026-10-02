@@ -177,6 +177,10 @@ The server expects one eligible control plane for each request scope. If more th
 
 If that namespace has more than one eligible control plane, the first step does not help. Keep only one eligible control plane in that namespace, or use a dedicated aggregated API server.
 
+## `kubectl diff` returns `server-side dry-run is not supported`
+
+`kubectl diff` and `--dry-run=server` send a server-side dry-run request. The server rejects it with `400` for `coderworkspaces` and `codertemplates`, and Coder does not change. To preview a change, compare the output of `kubectl get -o yaml` with your manifest, or use `--dry-run=client`. In Argo CD, keep server-side diff off for these resources. See [Server-side dry-run](../reference/aggregated-api-behavior.md#server-side-dry-run).
+
 ## Aggregated requests return `400` or `409`
 
 These errors often come from the rules for names or for `resourceVersion`. See [Aggregated API behavior](../reference/aggregated-api-behavior.md).

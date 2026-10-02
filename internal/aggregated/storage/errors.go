@@ -12,6 +12,22 @@ import (
 	storageerrors "k8s.io/apiserver/pkg/storage/errors"
 )
 
+// rejectDryRun refuses server-side dry-run writes for resource. Storage calls Coder directly and
+// Coder has no dry-run mode, so a dry-run request (kubectl diff, kubectl apply --dry-run=server,
+// Argo CD server-side diff) would really change Coder. Call it before any Coder request.
+func rejectDryRun(resource string, dryRun []string) error {
+	if resource == "" {
+		return fmt.Errorf("assertion failed: dry-run resource must not be empty")
+	}
+	if len(dryRun) == 0 {
+		return nil
+	}
+
+	return apierrors.NewBadRequest(fmt.Sprintf(
+		"server-side dry-run is not supported for %s; nothing was changed", resource,
+	))
+}
+
 func wrapClientError(err error) error {
 	if err == nil {
 		return nil

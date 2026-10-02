@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -89,6 +90,7 @@ type integrationAggregatedAPIServer struct {
 	baseURL    string
 	httpClient *http.Client
 	errCh      <-chan error
+	mockCoder  *integrationMockCoderServer
 }
 
 // startIntegrationAggregatedAPIServer boots the production server
@@ -219,6 +221,7 @@ func startIntegrationAggregatedAPIServer(t *testing.T) integrationAggregatedAPIS
 		baseURL:    baseURL,
 		httpClient: httpClient,
 		errCh:      errCh,
+		mockCoder:  mockCoder,
 	}
 }
 
@@ -283,6 +286,10 @@ func mustGetJSONWithRetry(t *testing.T, client *http.Client, errCh <-chan error,
 
 type integrationMockCoderServer struct {
 	server *httptest.Server
+
+	mu sync.Mutex
+	// requests records every request the mock receives as "METHOD /path".
+	requests []string
 }
 
 func newIntegrationMockCoderServer(expectedSessionToken string) *integrationMockCoderServer {
@@ -362,7 +369,12 @@ func newIntegrationMockCoderServer(expectedSessionToken string) *integrationMock
 		},
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mock := &integrationMockCoderServer{}
+	mock.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mock.mu.Lock()
+		mock.requests = append(mock.requests, r.Method+" "+r.URL.Path)
+		mock.mu.Unlock()
+
 		if token := r.Header.Get(codersdk.SessionTokenHeader); token != expectedSessionToken {
 			writeCoderError(w, http.StatusUnauthorized, fmt.Sprintf("unexpected session token %q", token))
 			return
@@ -428,7 +440,29 @@ func newIntegrationMockCoderServer(expectedSessionToken string) *integrationMock
 		}
 	}))
 
-	return &integrationMockCoderServer{server: server}
+	return mock
+}
+
+// recordedRequests returns a copy of every request the mock received.
+func (s *integrationMockCoderServer) recordedRequests() []string {
+	if s == nil {
+		panic("assertion failed: integration mock coder server must not be nil")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.requests...)
+}
+
+// resetRecordedRequests forgets every request recorded so far.
+func (s *integrationMockCoderServer) resetRecordedRequests() {
+	if s == nil {
+		panic("assertion failed: integration mock coder server must not be nil")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.requests = nil
 }
 
 func (s *integrationMockCoderServer) URL() string {

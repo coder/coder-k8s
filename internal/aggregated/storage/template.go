@@ -336,7 +336,7 @@ func (s *TemplateStorage) Create(
 	ctx context.Context,
 	obj runtime.Object,
 	createValidation rest.ValidateObjectFunc,
-	_ *metav1.CreateOptions,
+	options *metav1.CreateOptions,
 ) (runtime.Object, error) {
 	if s == nil {
 		return nil, fmt.Errorf("assertion failed: template storage must not be nil")
@@ -349,6 +349,11 @@ func (s *TemplateStorage) Create(
 	}
 	if s.broadcaster == nil {
 		return nil, fmt.Errorf("assertion failed: template broadcaster must not be nil")
+	}
+	if options != nil {
+		if err := rejectDryRun("codertemplates", options.DryRun); err != nil {
+			return nil, err
+		}
 	}
 
 	templateObj, ok := obj.(*aggregationv1alpha1.CoderTemplate)
@@ -476,7 +481,7 @@ func (s *TemplateStorage) Update(
 	createValidation rest.ValidateObjectFunc,
 	updateValidation rest.ValidateObjectUpdateFunc,
 	forceAllowCreate bool,
-	_ *metav1.UpdateOptions,
+	options *metav1.UpdateOptions,
 ) (runtime.Object, bool, error) {
 	if s == nil {
 		return nil, false, fmt.Errorf("assertion failed: template storage must not be nil")
@@ -492,6 +497,11 @@ func (s *TemplateStorage) Update(
 	}
 	if s.broadcaster == nil {
 		return nil, false, fmt.Errorf("assertion failed: template broadcaster must not be nil")
+	}
+	if options != nil {
+		if err := rejectDryRun("codertemplates", options.DryRun); err != nil {
+			return nil, false, err
+		}
 	}
 
 	currentObj, err := s.Get(ctx, name, nil)
@@ -828,6 +838,11 @@ func (s *TemplateStorage) Delete(
 	}
 	if s.broadcaster == nil {
 		return nil, false, fmt.Errorf("assertion failed: template broadcaster must not be nil")
+	}
+	if options != nil {
+		if err := rejectDryRun("codertemplates", options.DryRun); err != nil {
+			return nil, false, err
+		}
 	}
 
 	namespace, badNamespaceErr := requiredNamespaceFromRequestContext(ctx)
