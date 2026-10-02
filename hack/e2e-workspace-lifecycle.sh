@@ -209,7 +209,7 @@ k get --raw "$API/$NAME/log" >"$WORK/build.log" || fail "cannot read coderworksp
 LOG_BYTES=$(wc -c <"$WORK/build.log")
 ((LOG_BYTES > 0)) || fail "build log of $NAME is empty"
 grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^ ]+ \[[a-z]+\] \[provisioner\|' "$WORK/build.log" ||
-  fail "unexpected build log line format: $(head -c 200 "$WORK/build.log")"
+  fail "unexpected build log line format ($LOG_BYTES bytes; contents not printed because build logs can contain secrets)"
 k get --raw "$API/$NAME/log?limitBytes=64" >"$WORK/build-64.log" || fail "cannot read coderworkspaces/log?limitBytes=64"
 LIMITED=$(wc -c <"$WORK/build-64.log")
 ((LIMITED > 0 && LIMITED <= 64)) || fail "limitBytes=64 returned $LIMITED bytes"

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"unicode/utf8"
@@ -227,6 +228,12 @@ func (w *workspaceLogStream) readSnapshot(ctx context.Context, sdk *codersdk.Cli
 		var typeErr *json.UnmarshalTypeError
 		if errors.Is(err, errMalformedLog) || errors.As(err, &syntaxErr) || errors.As(err, &typeErr) {
 			return apierrors.NewInternalError(errMalformedLog)
+		}
+		// A body read that ran out of time (the client's request timeout) is a 504, as in
+		// coder.MapCoderError.
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return apierrors.NewTimeoutError("the Coder API did not answer in time", 0)
 		}
 		return apierrors.NewInternalError(errors.New("reading the build log from Coder failed"))
 	}

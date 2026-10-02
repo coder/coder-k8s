@@ -454,6 +454,15 @@ func TestWorkspaceLogCoderClientTimeoutIs504(t *testing.T) {
 	if _, _, err := readLog(t, s, logTestName, nil); !apierrors.IsTimeout(err) {
 		t.Fatalf("log read past the client timeout: err=%v, want 504", err)
 	}
+	// Coder sends 200 headers, then stalls in the body.
+	f.setLogsHandler(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `[{"id":1,`)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	})
+	if _, _, err := readLog(t, s, logTestName, nil); !apierrors.IsTimeout(err) {
+		t.Fatalf("log body stalled past the client timeout: err=%v, want 504", err)
+	}
 	if s.slots.inUse() != 0 {
 		t.Fatalf("slots in use: %d", s.slots.inUse())
 	}
