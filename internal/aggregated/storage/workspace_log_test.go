@@ -246,6 +246,11 @@ func TestWorkspaceLogServerCapsWarn(t *testing.T) {
 		t.Fatalf("byte cap: err=%v warnings=%v len=%d", err, warnings, len(got))
 	}
 
+	exactFit := newTestLogStorage(t, f, func(l *workspaceLogLimits) { l.maxBytes = int64(len(rendered)) })
+	if got, warnings, err := readLog(t, exactFit, logTestName, nil); err != nil || got != rendered || len(warnings) != 0 {
+		t.Fatalf("a log that exactly fits the cap: err=%v warnings=%v len=%d", err, warnings, len(got))
+	}
+
 	scanCapped := newTestLogStorage(t, f, func(l *workspaceLogLimits) { l.maxScanBytes = 1000 })
 	got, warnings, err = readLog(t, scanCapped, logTestName, nil)
 	if err != nil || got == "" || !strings.HasPrefix(rendered, got) || len(got) >= len(rendered) {
@@ -375,6 +380,24 @@ func TestWorkspaceLogReleasesSlotOnStall(t *testing.T) {
 	}
 	if s.slots.inUse() != 0 {
 		t.Fatalf("slot held after a stalled snapshot: %d", s.slots.inUse())
+	}
+	// Any failure after the log deadline is a 504: a stalled error body, or a stalled lookup.
+	f.setLogsHandler(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	})
+	if _, _, err := readLog(t, s, logTestName, nil); !apierrors.IsTimeout(err) {
+		t.Fatalf("Coder stalled in an error body: err=%v, want 504 timeout", err)
+	}
+	stalledLookup := make(chan struct{})
+	f.lookupGate.Store(&stalledLookup)
+	if _, _, err := readLog(t, s, logTestName, nil); !apierrors.IsTimeout(err) {
+		t.Fatalf("Coder stalled in the workspace lookup: err=%v, want 504 timeout", err)
+	}
+	close(stalledLookup)
+	if s.slots.inUse() != 0 {
+		t.Fatalf("slot held after stalled requests: %d", s.slots.inUse())
 	}
 
 	gate := make(chan struct{})
