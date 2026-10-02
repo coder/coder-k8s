@@ -1,21 +1,21 @@
 # Aggregated API behavior
 
-`coderworkspaces` and `codertemplates` are served from a live Coder instance, not stored in etcd. This page lists where they behave differently from ordinary Kubernetes resources.
+The aggregated API server serves `coderworkspaces` and `codertemplates` from a live Coder instance. Kubernetes does not store them in etcd. This page lists where they behave differently from usual Kubernetes resources.
 
 ## Summary
 
 | Topic | What to know |
 | --- | --- |
-| [Object names](#object-names) | Use Coder's canonical names. Aliases (`default`, `me`) and wrong casing return `400`. |
-| [Delete preconditions](#delete-preconditions) | `uid` and `resourceVersion` are checked. A mismatch returns `409` and leaves Coder untouched. |
-| [Workspace `resourceVersion`](#workspace-resourceversion) | An opaque fingerprint. Compare for equality only. Workspace activity alone can cause `409`. |
-| [Watch](#watch) | Reports only writes made through this server. No replay, no initial events. |
-| [Server-side apply](#server-side-apply) | Create-on-update works. Field ownership is not persisted. |
-| [Template builds](#template-builds) | Create and update with `spec.files` wait for Coder to finish the import. The whole request must finish within 34 seconds. |
+| [Object names](#object-names) | Use the canonical names of Coder. Aliases (`default`, `me`) and wrong casing return `400`. |
+| [Delete preconditions](#delete-preconditions) | The server checks `uid` and `resourceVersion`. A mismatch returns `409` and does not change Coder. |
+| [Workspace `resourceVersion`](#workspace-resourceversion) | An opaque fingerprint. Compare it only for equality. Workspace activity alone can cause `409`. |
+| [Watch](#watch) | Shows only writes made through this server. No replay, no initial events. |
+| [Server-side apply](#server-side-apply) | Create-on-update works. The server does not keep field ownership. |
+| [Template builds](#template-builds) | Create and update with `spec.files` wait until Coder completes the import. The full request must complete within 34 seconds. |
 
 ## Object names
 
-Names are built from Coder's **canonical** names:
+The server makes names from the canonical names in Coder:
 
 | Resource | `metadata.name` |
 | --- | --- |
@@ -24,34 +24,34 @@ Names are built from Coder's **canonical** names:
 
 ### Aliases return `400`
 
-Coder accepts aliases such as the `default` organization, the `me` user, and raw IDs. The aggregated API server rejects any organization or owner segment that resolves to a differently named organization or user.
+Coder accepts aliases, for example the `default` organization, the `me` user, and raw IDs. The aggregated API server rejects an organization or owner segment that resolves to an organization or user with a different name.
 
-- The `400 BadRequest` error names the canonical form.
-- The check runs before any Coder change: no upload, template version, workspace, or build is created.
-- An organization or user that is literally named `default` or `me` is still valid.
+- The `400 BadRequest` error gives the canonical form.
+- The check runs before the server changes Coder. The server creates no upload, template version, workspace, or build.
+- An organization or user with the real name `default` or `me` is still valid.
 
-**Why:** an alias would return an object with a different `metadata.name` than requested. That breaks `kubectl apply`: repeated applies fail name preconditions, and a `NotFound` GET is followed by `AlreadyExists`.
+The reason: if the server accepted an alias, it would return an object with a `metadata.name` that is different from the requested name. That breaks `kubectl apply`. Repeated applies fail the name preconditions, and a GET that returns `NotFound` is followed by `AlreadyExists`.
 
 ### Casing must match exactly
 
-Coder resolves template and workspace names case-insensitively. The aggregated API server does not. For example, if the template is named `starter-template`, requests for `acme.Starter-Template` return `400 BadRequest`.
+Coder resolves template and workspace names without regard to case. The aggregated API server does not. For example, if the name of the template is `starter-template`, requests for `acme.Starter-Template` return `400 BadRequest`.
 
-- This applies to GET, update, patch, delete, and create-on-update of existing objects.
-- The request is rejected before the object is returned, delete preconditions are checked, or Coder is changed.
-- Names that really are mixed-case in Coder work when requested exactly.
+- This rule applies to GET, update, patch, delete, and create-on-update of existing objects.
+- The server rejects the request before it returns the object, checks delete preconditions, or changes Coder.
+- Names that are mixed-case in Coder work when you request them exactly.
 
 When the name also contains an alias:
 
-- **Workspaces:** the error names the fully canonical form, taken from the fetched workspace. For example, `default.me.Dev-Workspace` → `acme.alice.dev-workspace`.
-- **Templates:** the request is rejected before the template lookup. The error corrects only the organization and says the template segment was not checked yet. Retry with the canonical organization and, if needed, the canonical template name.
+- Workspaces: the error gives the fully canonical form, taken from the fetched workspace. For example, `default.me.Dev-Workspace` → `acme.alice.dev-workspace`.
+- Templates: the server rejects the request before the template lookup. The error corrects only the organization, and says that the server did not check the template segment yet. Try again with the canonical organization and, if necessary, the canonical template name.
 
-!!! warning "New templates are not checked against existing names"
-    The no-change guarantee covers requests for existing objects only. Creating a `CoderTemplate` whose name differs from an existing template only by case is a real create. With `spec.files`, the archive is uploaded and a template version is created before Coder reports the collision. Those artifacts stay in Coder.
+!!! warning "The server does not compare new templates with existing names"
+    The no-change guarantee applies only to requests for existing objects. A `CoderTemplate` create with a name that is different from an existing template only in case is a real create. With `spec.files`, the server uploads the archive and creates a template version before Coder reports the collision. Those artifacts stay in Coder.
 
 ### Authorization and privacy
 
-- Kubernetes authorizes the name in the request URL. A `resourceNames` grant for the canonical name does not cover other casings. A grant for another casing lets the request through, and the aggregated server then rejects it.
-- Cross-organization requests reveal nothing. A workspace in another organization returns `NotFound` without its canonical names. A request that names an organization the caller cannot read also returns `NotFound`, so it cannot be used to probe whether a workspace exists.
+- Kubernetes authorizes the name in the request URL. A `resourceNames` grant for the canonical name does not cover other casings. A grant for a different casing lets the request through, and then the aggregated server rejects it.
+- Requests across organizations show nothing. A workspace in a different organization returns `NotFound` without its canonical names. A request that names an organization that the caller cannot read also returns `NotFound`. Thus a caller cannot use such a request to find out if a workspace exists.
 
 ### Find canonical names
 
@@ -62,7 +62,7 @@ kubectl get codertemplates.aggregation.coder.com -A
 kubectl get coderworkspaces.aggregation.coder.com -A
 ```
 
-Before any object exists, ask Coder. Use the operator token the controller stores for the control plane, or any session token with access to the organization:
+If no object exists yet, ask Coder. Use the operator token that the controller stores for the control plane, or a session token with access to the organization:
 
 ```bash
 kubectl -n coder port-forward svc/coder 3000:80 &
@@ -77,64 +77,64 @@ curl -sS -H "Coder-Session-Token: $TOKEN" http://127.0.0.1:3000/api/v2/users/me 
 
 ### Migrate old manifests
 
-Rename objects that use aliases or wrong casing to the canonical form given in the error message. Examples: `default.my-template`, `default.me.my-workspace`, or `acme.My-Template` for a template named `my-template`. Set `spec.organization` to the same canonical organization name.
+Rename objects that use aliases or wrong casing to the canonical form that the error message gives. Examples are `default.my-template`, `default.me.my-workspace`, or `acme.My-Template` for a template with the name `my-template`. Set `spec.organization` to the same canonical organization name.
 
 ## Delete preconditions
 
 `DELETE` accepts `preconditions.uid` and `preconditions.resourceVersion` in an explicit `DeleteOptions` body.
 
 !!! note
-    `kubectl delete -f` does not send preconditions, even when the manifest has `metadata.uid`.
+    `kubectl delete -f` does not send preconditions. This is true also when the manifest has `metadata.uid`.
 
-Each supplied value is compared with the object fetched for that request:
+The server compares each supplied value with the object that it fetched for that request:
 
 | Precondition | Result |
 | --- | --- |
 | Omitted | Not checked. |
 | Supplied and matches | Normal delete. |
-| Supplied and does not match | `409 Conflict`. Coder is not touched. |
+| Supplied and does not match | `409 Conflict`. Coder does not change. |
 
-An explicitly empty `uid` or `resourceVersion` counts as supplied and is compared like any other value. Other `DeleteOptions` handling is unchanged.
+An explicitly empty `uid` or `resourceVersion` counts as supplied. The server compares it like all other values. The precondition checks do not change how the server handles other `DeleteOptions`.
 
 What each precondition protects against:
 
-- **`uid`** is the Coder template or workspace ID (`metadata.uid`). After a match, the delete targets that same ID. It stops you from deleting a *different* object that now has the same name. It does not detect changes to the same object.
-- **`resourceVersion`** is a snapshot check, not compare-and-swap. A backend change between the fetch and the delete is not detected. For templates, the value derives from Coder's `updated_at`, which template metadata updates change. For workspaces, it is the [fingerprint](#workspace-resourceversion), so builds, rename, TTL, and autostart changes are detected. (On Coder 2.37.2 those operations do not advance the workspace's `updated_at`.)
+- `uid` is the ID of the Coder template or workspace (`metadata.uid`). After a match, the delete targets that same ID. It prevents a delete of a different object that now has the same name. It does not find changes to the same object.
+- `resourceVersion` is a snapshot check, not compare-and-swap. The server does not find a backend change between the fetch and the delete. For templates, the value comes from `updated_at` in Coder, which template metadata updates change. For workspaces, it is the [fingerprint](#workspace-resourceversion), so the server detects builds, renames, TTL changes, and autostart changes. (On Coder 2.37.2, those operations do not change the `updated_at` of the workspace.)
 
 Workspace deletion is asynchronous: it requests a delete build.
 
 ## Workspace `resourceVersion`
 
-`CoderWorkspace.metadata.resourceVersion` is an opaque fingerprint: the full hex SHA-256 of the converted object, serialized with `resourceVersion` unset. It covers metadata, spec, and status, including `status.lastUsedAt` and `status.autoShutdown`. Identical representations get the same token.
+`CoderWorkspace.metadata.resourceVersion` is an opaque fingerprint. It is the full hex SHA-256 of the converted object, serialized with `resourceVersion` unset. It covers metadata, spec, and status, including `status.lastUsedAt` and `status.autoShutdown`. Identical representations get the same token.
 
 What this means for clients:
 
-- **Equality only.** It is not a revision counter or history cursor. Changing TTL A → B → A returns the original token, and a change reverted before the fetch goes unnoticed. Do not parse or order tokens.
-- **Activity counts.** If `status.lastUsedAt` or the build status changes between your read and your update or delete, you get `409 Conflict` without anyone editing the workspace. Re-read and retry with the fresh token.
-- **Same conversion everywhere.** GET, LIST, mutation responses, and local watch events share it. A mutation response and the next GET agree only while Coder's state is unchanged; a running build can change it in between.
-- **Checked before any change.** UPDATE always compares the token with the freshly fetched object. DELETE does too when `preconditions.resourceVersion` is supplied. A mismatch returns `409 Conflict` before Coder is touched. For DELETE, `preconditions.uid` still guards identity: a later workspace with the same name has a different `uid`.
-- **Upgrading:** tokens from releases that exposed the numeric `updated_at` no longer match. Re-read before retrying an update or delete.
+- Equality only. The token is not a revision counter or a history cursor. If you change the TTL from A to B and back to A, you get the original token again. A change that is reverted before the fetch is not found. Do not parse or sort tokens.
+- Activity counts. If `status.lastUsedAt` or the build status changes between your read and your update or delete, you get `409 Conflict`, also when nobody edited the workspace. Read the workspace again and try again with the new token.
+- Same conversion everywhere. GET, LIST, mutation responses, and local watch events use the same conversion. A mutation response and the next GET agree only while the state in Coder does not change. A running build can change it between the two.
+- Checked before a change. UPDATE always compares the token with the object that it just fetched. DELETE does too when `preconditions.resourceVersion` is supplied. A mismatch returns `409 Conflict` before Coder changes. For DELETE, `preconditions.uid` still protects identity: a later workspace with the same name has a different `uid`.
+- Upgrades: tokens from releases that showed the numeric `updated_at` no longer match. Read the object again before you try an update or delete again.
 
 ## Watch
 
-Applies to both resources.
+This section applies to both resources.
 
-- Events are sent only for writes made through this server. There is no replay, and changes made directly in Coder produce no events.
-- To start a watch, pass the current `resourceVersion` and omit `sendInitialEvents` and `resourceVersionMatch`. The token is ignored once the watch starts; it is not a replay cursor.
+- The server sends events only for writes made through this server. There is no replay. Changes made directly in Coder make no events.
+- To start a watch, pass the current `resourceVersion`, and do not set `sendInitialEvents` or `resourceVersionMatch`. After the watch starts, the server ignores the token. It is not a replay cursor.
 
-These requests are rejected:
+The server rejects these requests:
 
 | Request | Result |
 | --- | --- |
-| `resourceVersion` omitted or `0` (the API server's WatchList defaulting treats this as a request for initial events) | `400 Bad Request` |
+| `resourceVersion` omitted or `0` (the WatchList defaulting of the API server treats this as a request for initial events) | `400 Bad Request` |
 | `resourceVersionMatch` set | Rejected |
 | `sendInitialEvents=false` without a matching option | `422 Invalid` (rejected upstream) |
 
 ## Server-side apply
 
-`kubectl apply --server-side` can create a resource that does not exist yet. For a missing workspace or template, the update path falls back to create (`forceAllowCreate=true`).
+`kubectl apply --server-side` can create a resource that does not exist yet. For a missing workspace or template, the update path creates the object instead (`forceAllowCreate=true`).
 
-This is **best-effort**. Coder has no place to store Kubernetes `metadata.managedFields`, so SSA field-ownership conflicts are not tracked durably.
+This is best-effort only. Coder has no place to store Kubernetes `metadata.managedFields`. Thus the server does not keep a durable record of SSA field-ownership conflicts.
 
 ??? info "Possible future fixes (in order of preference)"
     1. Add first-class metadata to Coder templates and workspaces (and `codersdk`), and round-trip Kubernetes metadata there.
@@ -149,7 +149,7 @@ For a `CoderTemplate` with `spec.files`, the server waits for Coder to finish im
 - **Update** with changed files waits the same way before making the new version active. Metadata changes in the same request (`displayName`, `description`, `icon`) are applied only after that. If the template changed in Coder during the wait, the Update returns `409 Conflict` and changes nothing.
 - **Create without `spec.files`** does not wait.
 
-If the import fails, times out, or the request is cancelled, Create creates no template and Update changes nothing (neither the source nor the metadata). The uploaded file and template version stay in Coder; they are not deleted or cancelled.
+If the import fails, times out, or the request is cancelled, Create creates no template and Update changes nothing (neither the source nor the metadata). The uploaded file and the template version stay in Coder. The server does not delete or cancel them.
 
 ### The 34-second write budget
 
@@ -159,7 +159,7 @@ The upload, the template version creation, and the import wait all count against
 
 When the budget runs out:
 
-- The client gets `504 Gateway Timeout`. The message is usually `request did not complete within requested timeout - context deadline exceeded`, but it can also be the server's own template import timeout message.
+- The client gets `504 Gateway Timeout`. The message is usually `request did not complete within requested timeout - context deadline exceeded`, but it can also be the template import timeout message of the server.
 - Usually, Create creates no template and Update does not activate the new version. But if the import finishes just before the deadline, Coder can still create the template or activate the version while the client gets the `504`. The final state after a `504` is not certain, so re-read the template with `kubectl get` before you retry.
 - If the upload or the version creation had already finished, the file or the template version stays in Coder. If the request timed out while still waiting for the import, the import keeps running and can still succeed, but nothing uses it.
 
@@ -180,7 +180,7 @@ Set these environment variables on the `coder-k8s` Deployment:
 | `CODER_K8S_TEMPLATE_BUILD_INITIAL_POLL_INTERVAL` | `2s` | Poll interval before backoff. Must be greater than `0`. |
 | `CODER_K8S_TEMPLATE_BUILD_MAX_POLL_INTERVAL` | `10s` | Backoff doubles the interval up to this value. Must be at least the initial poll interval. |
 
-The aggregated API server's request timeout defaults to `30m`. Neither that timeout nor `CODER_K8S_TEMPLATE_BUILD_WAIT_TIMEOUT` can extend a write request beyond the 34-second budget. The wait fails if the version build ends `failed` or `canceled`, or if the budget or the wait timeout runs out.
+The default request timeout of the aggregated API server is `30m`. Neither that timeout nor `CODER_K8S_TEMPLATE_BUILD_WAIT_TIMEOUT` can extend a write request beyond the 34-second budget. The wait fails if the version build ends `failed` or `canceled`, or if the budget or the wait timeout runs out.
 
 The server checks these values on each create or update that uploads files, after it uploads them and creates the template version. If the values are invalid, the request fails before the wait starts, and the file and version stay in Coder. For example, `CODER_K8S_TEMPLATE_BUILD_WAIT_TIMEOUT=1m` with the default `2m` backoff makes every such request fail. When you lower the wait timeout below `2m`, lower `CODER_K8S_TEMPLATE_BUILD_BACKOFF_AFTER` too.
 
