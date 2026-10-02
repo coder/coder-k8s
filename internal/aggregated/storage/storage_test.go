@@ -2722,6 +2722,9 @@ type mockCoderServerState struct {
 	// mutationRequests records "METHOD /path" for every non-GET request so tests can
 	// assert that rejected requests never reached a backend mutation.
 	mutationRequests []string
+	// requestLog records "METHOD /path" for every request, reads included, so tests can assert
+	// exact backend call counts.
+	requestLog []string
 
 	templatesByID        map[uuid.UUID]codersdk.Template
 	templateIDsByOrg     map[string]map[string]uuid.UUID
@@ -2868,6 +2871,9 @@ func (s *mockCoderServerState) handleRequest(t *testing.T, w http.ResponseWriter
 
 	segments := splitPath(r.URL.Path)
 
+	s.mu.Lock()
+	s.requestLog = append(s.requestLog, r.Method+" "+r.URL.Path)
+	s.mu.Unlock()
 	if r.Method != http.MethodGet {
 		s.recordMutation(r)
 	}
@@ -2893,6 +2899,9 @@ func (s *mockCoderServerState) handleRequest(t *testing.T, w http.ResponseWriter
 		return
 	case r.Method == http.MethodPost && hasSegments(segments, "api", "v2", "organizations") && len(segments) == 5 && segments[4] == "templateversions":
 		s.handleCreateTemplateVersion(w, r, segments[3])
+		return
+	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templates") && len(segments) == 6 && segments[4] == "versions":
+		s.handleGetTemplateVersionByName(w, segments[3], segments[5])
 		return
 	case r.Method == http.MethodPatch && hasSegments(segments, "api", "v2", "templates") && len(segments) == 4:
 		s.handleUpdateTemplateMeta(w, r, segments[3])
@@ -2961,6 +2970,40 @@ func (s *mockCoderServerState) recordMutation(r *http.Request) {
 	defer s.mu.Unlock()
 
 	s.mutationRequests = append(s.mutationRequests, r.Method+" "+r.URL.Path)
+}
+
+// requests returns every request the mock has received since the last resetRequests.
+func (s *mockCoderServerState) requests() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return append([]string(nil), s.requestLog...)
+}
+
+func (s *mockCoderServerState) resetRequests() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.requestLog = nil
+}
+
+// handleGetTemplateVersionByName serves GET /templates/{id}/versions/{name}. Coder matches version
+// names case-sensitively; caseInsensitiveLeafLookups models a backend that does not.
+func (s *mockCoderServerState) handleGetTemplateVersionByName(w http.ResponseWriter, templateIDSegment, versionName string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, version := range s.templateVersionsByID {
+		if version.TemplateID == nil || version.TemplateID.String() != templateIDSegment {
+			continue
+		}
+		if version.Name == versionName || (s.caseInsensitiveLeafLookups && strings.EqualFold(version.Name, versionName)) {
+			writeJSON(w, http.StatusOK, version)
+			return
+		}
+	}
+
+	writeCoderError(w, http.StatusNotFound, "template version not found")
 }
 
 // mutations returns every non-GET request the mock has received so far.
