@@ -36,7 +36,8 @@ type workspaceLogLimits struct {
 	maxStreamsPerUser int
 	maxScanBytes      int64
 	maxBytes          int64
-	duration          time.Duration
+	duration          time.Duration // snapshot requests
+	followDuration    time.Duration // follow=true requests
 }
 
 func defaultWorkspaceLogLimits() workspaceLogLimits {
@@ -46,12 +47,13 @@ func defaultWorkspaceLogLimits() workspaceLogLimits {
 		maxScanBytes:      defaultMaxLogScanBytes,
 		maxBytes:          defaultMaxLogBytes,
 		duration:          MaxWorkspaceLogSnapshotDuration,
+		followDuration:    MaxWorkspaceLogDuration,
 	}
 }
 
 func (l workspaceLogLimits) validate() error {
 	if l.maxStreams < 1 || l.maxStreamsPerUser < 1 || l.maxStreamsPerUser > l.maxStreams ||
-		l.maxScanBytes < 1 || l.maxBytes < 1 || l.duration <= 0 || l.duration > MaxWorkspaceLogDuration {
+		l.maxScanBytes < 1 || l.maxBytes < 1 || l.duration <= 0 || l.duration > l.followDuration || l.followDuration > MaxWorkspaceLogDuration {
 		return fmt.Errorf("assertion failed: invalid workspace log limits %+v", l)
 	}
 	return nil

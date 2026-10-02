@@ -14,6 +14,7 @@ The aggregated API server serves `coderworkspaces`, `codertemplates` and `codert
 | [Server-side dry-run](#server-side-dry-run) | Not supported. `kubectl diff` and `--dry-run=server` return `400` and do not change Coder. |
 | [Template versions](#template-versions) | Read-only: `get` and `list`, no watch. Reads never download template source. |
 | [Template builds](#template-builds) | Create and update with `spec.files` wait until Coder completes the import. The full request must complete within 34 seconds. |
+| [Coder timeouts](#coder-timeouts) | A Coder call that runs out of time returns `504` on every resource. After a `504` on a write, re-read before you retry. |
 | [Workspace build log](#workspace-build-log) | `coderworkspaces/log` returns the latest build log as text. It needs its own RBAC grant and has fixed size, time, and concurrency limits. |
 
 ## Object names
@@ -158,6 +159,19 @@ The server rejects the request before it sends anything to Coder. Nothing is upl
 
 The default Argo CD diff and sync do not send `dryRun=All`, and neither does `--dry-run=client`. They work as before. To preview a change, compare the output of `kubectl get -o yaml` with your manifest.
 
+## Coder timeouts
+
+A Coder call that runs out of time returns `504 Gateway Timeout` on every aggregated resource: workspaces, templates, template versions, and workspace build logs. A call runs out of time when:
+
+- it takes longer than the Coder request timeout (`--coder-request-timeout`, 30 seconds by default),
+- the request deadline ends first (see [The 34-second write budget](#the-34-second-write-budget) and the [log limits](#workspace-build-log)), or
+- Coder itself answers `504`.
+
+The message does not include the Coder URL.
+
+- After a `504` on a read, try again later.
+- After a `504` on a write (create, update, patch, or delete), the result is not certain. Coder can have applied the change before the call timed out. Re-read the object with `kubectl get` before you retry.
+
 ## Template versions
 
 `codertemplateversions` is a read-only view of the versions of each Coder template.
@@ -238,11 +252,13 @@ Keep the poll intervals well below 34 seconds. The wait sleeps a full interval b
 API=/apis/aggregation.coder.com/v1alpha1/namespaces/coder/coderworkspaces
 kubectl get --raw "$API/acme.alice.dev/log"
 kubectl get --raw "$API/acme.alice.dev/log?limitBytes=4096"
+kubectl get --raw "$API/acme.alice.dev/log?follow=true"
 ```
 
 Each line has the text format of Coder: `<RFC 3339 time> [<level>] [provisioner|<stage>] <output>`.
 
 - `limitBytes=<n>` ends the response after at most `n` bytes. It can cut a line, but not a UTF-8 character. A value below 1 returns `422`. The server ignores unknown query parameters.
+- `follow=true` (or `follow`) sends the existing entries, then new entries as Coder writes them. The response ends when the build ends, at the byte limit, or at the time limit below. There are no duplicate or missing entries between the two parts. To follow the next build, send a new request: the log is always the latest build at request time.
 - The name must be the canonical name (see [Object names](#object-names)). The server checks the name before it reads the log. An alias returns `400`, and a workspace in another organization returns `404`.
 - The `Accept` header must allow JSON or `*/*`. `Accept: text/plain` alone returns `406`. `kubectl get --raw` works.
 - Websocket and other upgrade requests return `400`.
@@ -252,8 +268,8 @@ The server limits each log request:
 
 | Limit | Value | When the limit applies |
 | --- | --- | --- |
-| Response size | 4 MiB | The response ends. A `Warning` header says that the server cut the log. |
+| Response size | 4 MiB | The response ends. When the snapshot part is cut, a `Warning` header says so. A `follow=true` stream that reaches the limit during the live part ends without a warning, because the headers are already sent. If it ends before the build ends, the server cut it. |
 | Data read from Coder | 4 MiB of JSON | The response holds the entries read until then, and a `Warning` header. A capped Coder build log is about 2.4 MB of JSON. |
-| Time to read from Coder | 60 seconds in total. Each Coder call also ends after the Coder request timeout (30 seconds by default). | The request returns `504`. |
-| Time to write the response | 2 minutes after the request arrives | If the client reads too slowly, the server closes the response. |
+| Time to read from Coder | 60 seconds in total, or 25 minutes with `follow=true`. Each Coder call before the live stream also ends after the Coder request timeout (30 seconds by default). | A snapshot returns `504`. A `follow=true` stream ends. |
+| Time to write the response | 2 minutes after the request arrives, or 26 minutes with `follow=true` | If the client reads too slowly, the server closes the response. |
 | Open log requests | 64 for each server, 4 for each user | The server returns `429` with `Retry-After: 5`. It makes no Coder call. |
