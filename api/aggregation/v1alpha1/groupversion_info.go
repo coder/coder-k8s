@@ -23,9 +23,10 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&CoderWorkspaceList{},
 		&CoderTemplate{},
 		&CoderTemplateList{},
+		&CoderWorkspaceLogOptions{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
-	return nil
+	return addSubresourceConversionFuncs(scheme)
 }
 
 // Resource takes an unqualified resource and returns a Group-qualified GroupResource.
