@@ -429,6 +429,36 @@ func TestWorkspaceLogMapsCoderErrors(t *testing.T) {
 
 // TestWorkspaceLogReleasesSlotOnStall: a Coder call that never answers ends at the log deadline,
 // and a client that disconnects before the first byte frees its slot.
+// TestWorkspaceLogCoderClientTimeoutIs504: when the Coder client's own request timeout ends a
+// stalled call before the log deadline, the request still returns 504.
+func TestWorkspaceLogCoderClientTimeoutIs504(t *testing.T) {
+	f := newLogFakeCoder(t)
+	serverURL, err := url.Parse(f.server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := codersdk.New(serverURL)
+	client.HTTPClient.Timeout = 200 * time.Millisecond
+	workspaces := NewWorkspaceStorage(&coder.StaticClientProvider{Client: client, Namespace: logTestNamespace})
+	t.Cleanup(workspaces.Destroy)
+	s := newWorkspaceLogStorage(workspaces, defaultWorkspaceLogLimits())
+
+	stalled := make(chan struct{})
+	defer close(stalled)
+	f.lookupGate.Store(&stalled)
+	if _, _, err := readLog(t, s, logTestName, nil); !apierrors.IsTimeout(err) {
+		t.Fatalf("lookup past the client timeout: err=%v, want 504", err)
+	}
+	f.lookupGate.Store(nil)
+	f.setLogsHandler(func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
+	if _, _, err := readLog(t, s, logTestName, nil); !apierrors.IsTimeout(err) {
+		t.Fatalf("log read past the client timeout: err=%v, want 504", err)
+	}
+	if s.slots.inUse() != 0 {
+		t.Fatalf("slots in use: %d", s.slots.inUse())
+	}
+}
+
 func TestWorkspaceLogReleasesSlotOnStall(t *testing.T) {
 	f := newLogFakeCoder(t)
 	s := newTestLogStorage(t, f, func(l *workspaceLogLimits) { l.duration = 300 * time.Millisecond })

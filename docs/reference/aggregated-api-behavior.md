@@ -254,6 +254,6 @@ The server limits each log request:
 | --- | --- | --- |
 | Response size | 4 MiB | The response ends. A `Warning` header says that the server cut the log. |
 | Data read from Coder | 4 MiB of JSON | The response holds the entries read until then, and a `Warning` header. A capped Coder build log is about 2.4 MB of JSON. |
-| Time to read from Coder | 60 seconds | The request returns `504`. |
+| Time to read from Coder | 60 seconds in total. Each Coder call also ends after the Coder request timeout (30 seconds by default). | The request returns `504`. |
 | Time to write the response | 2 minutes after the request arrives | If the client reads too slowly, the server closes the response. |
 | Open log requests | 64 for each server, 4 for each user | The server returns `429` with `Retry-After: 5`. It makes no Coder call. |
