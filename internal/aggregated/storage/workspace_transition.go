@@ -173,7 +173,7 @@ func (s *WorkspaceTransitionStorage) Create(
 // confirmsPost reports whether found, the latest build after an uncertain POST, is the build that
 // the POST queued: a new build of the requested transition, of the requested template version when
 // the request named one, started by the user whose token made the POST. A build that someone else
-// queued in the meantime (the Coder UI, the CLI, autostart) does not confirm it. If the operator
+// queued in the meantime (for example in the Coder UI) does not confirm it. If the operator
 // user itself queued a matching build elsewhere in that window, the two cannot be told apart.
 func confirmsPost(ctx context.Context, sdk *codersdk.Client, previousID uuid.UUID, found codersdk.WorkspaceBuild, req codersdk.CreateWorkspaceBuildRequest) bool {
 	if found.ID == previousID || found.Transition != req.Transition {
