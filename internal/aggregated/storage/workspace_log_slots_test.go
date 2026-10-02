@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -10,7 +11,7 @@ import (
 func TestLogSlotsCaps(t *testing.T) {
 	limits := defaultWorkspaceLogLimits()
 	limits.maxStreams, limits.maxStreamsPerUser = 3, 2
-	slots := &logSlots{limits: limits, perUser: map[string]int{}}
+	slots := newLogSlots(limits)
 
 	a1, err := slots.acquire("alice")
 	if err != nil {
@@ -44,6 +45,25 @@ func TestLogSlotsCaps(t *testing.T) {
 	if _, err := slots.acquire("dave"); !apierrors.IsTooManyRequests(err) {
 		t.Fatalf("a double release must not free a second slot: err=%v", err)
 	}
+}
+
+func TestLogSlotsRefuseMisuse(t *testing.T) {
+	if _, err := (&logSlots{}).acquire("alice"); err == nil || !strings.Contains(err.Error(), "assertion failed") {
+		t.Fatalf("zero-value logSlots: err=%v, want assertion failure", err)
+	}
+	slots := newLogSlots(defaultWorkspaceLogLimits())
+	if _, err := slots.acquire(""); err == nil || !strings.Contains(err.Error(), "assertion failed") {
+		t.Fatalf("empty user: err=%v, want assertion failure", err)
+	}
+	if slots.inUse() != 0 {
+		t.Fatalf("refused acquires took slots: %d", slots.inUse())
+	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("newLogSlots must panic on invalid limits")
+		}
+	}()
+	newLogSlots(workspaceLogLimits{})
 }
 
 func TestWorkspaceLogLimitsValidate(t *testing.T) {

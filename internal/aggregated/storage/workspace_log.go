@@ -1,0 +1,292 @@
+package storage
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"sync"
+
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/google/uuid"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/apiserver/pkg/registry/rest"
+	"k8s.io/apiserver/pkg/warning"
+
+	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
+	"github.com/coder/coder-k8s/internal/aggregated/coder"
+)
+
+const logContentType = "text/plain; charset=utf-8"
+
+// WorkspaceLogStorage serves the coderworkspaces/log subresource: the latest build log of a
+// workspace as text/plain, in Coder's own text line format.
+type WorkspaceLogStorage struct {
+	workspaces *WorkspaceStorage
+	limits     workspaceLogLimits
+	slots      *logSlots
+}
+
+var (
+	_ rest.Storage           = (*WorkspaceLogStorage)(nil)
+	_ rest.GetterWithOptions = (*WorkspaceLogStorage)(nil)
+	_ rest.StorageMetadata   = (*WorkspaceLogStorage)(nil)
+)
+
+// NewWorkspaceLogStorage returns log storage that resolves workspaces through workspaces.
+func NewWorkspaceLogStorage(workspaces *WorkspaceStorage) *WorkspaceLogStorage {
+	return newWorkspaceLogStorage(workspaces, defaultWorkspaceLogLimits())
+}
+
+func newWorkspaceLogStorage(workspaces *WorkspaceStorage, limits workspaceLogLimits) *WorkspaceLogStorage {
+	if workspaces == nil {
+		panic("assertion failed: workspace storage must not be nil")
+	}
+	return &WorkspaceLogStorage{
+		workspaces: workspaces,
+		limits:     limits,
+		slots:      newLogSlots(limits), // validates limits
+	}
+}
+
+// New returns a CoderWorkspace, as Pod log storage returns a Pod; it is used only for API
+// metadata.
+func (s *WorkspaceLogStorage) New() runtime.Object {
+	return &aggregationv1alpha1.CoderWorkspace{}
+}
+
+// Destroy implements rest.Storage.
+func (s *WorkspaceLogStorage) Destroy() {}
+
+// NewGetOptions implements rest.GetterWithOptions.
+func (s *WorkspaceLogStorage) NewGetOptions() (runtime.Object, bool, string) {
+	return &aggregationv1alpha1.CoderWorkspaceLogOptions{}, false, ""
+}
+
+// ProducesMIMETypes implements rest.StorageMetadata.
+func (s *WorkspaceLogStorage) ProducesMIMETypes(string) []string {
+	return []string{"text/plain"}
+}
+
+// ProducesObject implements rest.StorageMetadata.
+func (s *WorkspaceLogStorage) ProducesObject(string) interface{} {
+	return ""
+}
+
+// Get validates the request and returns a stream. It makes no Coder call: InputStream takes a
+// slot first, so a request over the slot cap never reaches Coder.
+func (s *WorkspaceLogStorage) Get(ctx context.Context, name string, opts runtime.Object) (runtime.Object, error) {
+	if s == nil || ctx == nil {
+		return nil, fmt.Errorf("assertion failed: log storage and context must not be nil")
+	}
+	options, ok := opts.(*aggregationv1alpha1.CoderWorkspaceLogOptions)
+	if !ok || options == nil {
+		return nil, fmt.Errorf("assertion failed: unexpected log options type %T", opts)
+	}
+	if options.LimitBytes != nil && *options.LimitBytes < 1 {
+		return nil, apierrors.NewInvalid(
+			schema.GroupKind{Group: aggregationv1alpha1.SchemeGroupVersion.Group, Kind: "CoderWorkspaceLogOptions"},
+			name,
+			field.ErrorList{field.Invalid(field.NewPath("limitBytes"), *options.LimitBytes, "must be greater than 0")},
+		)
+	}
+	namespace, err := requiredNamespaceFromRequestContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, _, _, err := coder.ParseWorkspaceName(name); err != nil {
+		return nil, apierrors.NewBadRequest(fmt.Sprintf("invalid workspace name %q: %v", name, err))
+	}
+	caller, ok := request.UserFrom(ctx)
+	if !ok || caller == nil || caller.GetName() == "" {
+		return nil, fmt.Errorf("assertion failed: authenticated log request must carry a user")
+	}
+
+	budget := s.limits.maxBytes
+	callerLimited := options.LimitBytes != nil && *options.LimitBytes <= budget
+	if callerLimited {
+		budget = *options.LimitBytes
+	}
+	// InputStream's context has no namespace value, so the stream captures what it needs here.
+	return &workspaceLogStream{
+		storage:       s,
+		namespace:     namespace,
+		name:          name,
+		user:          caller.GetName(),
+		budget:        budget,
+		callerLimited: callerLimited,
+	}, nil
+}
+
+// workspaceLogStream is the rest.ResourceStreamer for one log request.
+type workspaceLogStream struct {
+	storage       *WorkspaceLogStorage
+	namespace     string
+	name          string
+	user          string
+	budget        int64
+	callerLimited bool
+}
+
+var _ rest.ResourceStreamer = (*workspaceLogStream)(nil)
+
+// GetObjectKind implements runtime.Object.
+func (w *workspaceLogStream) GetObjectKind() schema.ObjectKind { return schema.EmptyObjectKind }
+
+// DeepCopyObject implements runtime.Object.
+func (w *workspaceLogStream) DeepCopyObject() runtime.Object {
+	c := *w
+	return &c
+}
+
+// InputStream takes a slot, starts the log deadline, resolves the workspace and reads its
+// latest build log. Any failure here becomes a Status, because nothing has been written yet.
+func (w *workspaceLogStream) InputStream(ctx context.Context, _, _ string) (io.ReadCloser, bool, string, error) {
+	if w == nil || w.storage == nil || ctx == nil {
+		return nil, false, "", fmt.Errorf("assertion failed: log stream and context must not be nil")
+	}
+	release, err := w.storage.slots.acquire(w.user)
+	if err != nil {
+		return nil, false, "", err
+	}
+	// One deadline covers resolution and every read from Coder.
+	logCtx, cancel := context.WithTimeout(ctx, w.storage.limits.duration)
+	out := &logReadCloser{cancel: cancel, release: release}
+	// The deferred Close frees the slot on every return except a successful one, which hands
+	// the slot to the response body: StreamObject closes the body after its write loop.
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			_ = out.Close()
+		}
+	}()
+
+	sdk, workspace, err := w.storage.workspaces.resolveWorkspace(logCtx, w.namespace, w.name)
+	if err != nil {
+		return nil, false, "", err
+	}
+	if workspace.LatestBuild.ID == uuid.Nil {
+		return nil, false, "", fmt.Errorf("assertion failed: workspace %q has no latest build", w.name)
+	}
+	snapshot, warnings, err := w.readSnapshot(logCtx, sdk, workspace.LatestBuild.ID)
+	if err != nil {
+		return nil, false, "", err
+	}
+	for _, msg := range warnings {
+		warning.AddWarning(ctx, "", msg)
+	}
+	out.Reader = bytes.NewReader(snapshot)
+	handedOff = true
+	return out, false, logContentType, nil
+}
+
+// readSnapshot renders the build's existing log entries, bounded by the stream's byte budget
+// and the read cap. It never puts log content into an error or warning.
+func (w *workspaceLogStream) readSnapshot(ctx context.Context, sdk *codersdk.Client, buildID uuid.UUID) ([]byte, []string, error) {
+	resource := aggregationv1alpha1.Resource("coderworkspaces")
+	res, err := sdk.Request(ctx, http.MethodGet, fmt.Sprintf("/api/v2/workspacebuilds/%s/logs", buildID), nil)
+	if err != nil {
+		return nil, nil, coder.MapCoderError(err, resource, w.name)
+	}
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusOK {
+		return nil, nil, coder.MapCoderError(codersdk.ReadBodyAsError(res), resource, w.name)
+	}
+
+	limits := w.storage.limits
+	scanned := &countingReader{r: io.LimitReader(res.Body, limits.maxScanBytes)}
+	decoder := json.NewDecoder(scanned)
+	var out bytes.Buffer
+	var warnings []string
+	scanCapHit := func(err error) bool {
+		return scanned.n >= limits.maxScanBytes && (errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF))
+	}
+	// readFailed reports a failed read without log content: a timeout, or malformed JSON.
+	readFailed := func() error {
+		if ctx.Err() != nil {
+			return apierrors.NewTimeoutError("reading the build log from Coder timed out", 0)
+		}
+		return apierrors.NewInternalError(errors.New("coder returned a malformed build log"))
+	}
+
+	open, err := decoder.Token()
+	switch {
+	case err != nil:
+		return nil, nil, readFailed()
+	case open == nil:
+		return nil, nil, nil // JSON null: no log entries.
+	case open != json.Delim('['):
+		return nil, nil, readFailed()
+	}
+	scanTruncated := false
+	for decoder.More() {
+		var entry codersdk.ProvisionerJobLog
+		if err := decoder.Decode(&entry); err != nil {
+			if scanCapHit(err) {
+				// A json.Decoder reports no further error after a failed Decode, so record it here.
+				scanTruncated = true
+				break
+			}
+			return nil, nil, readFailed()
+		}
+		line := entry.Text() + "\n"
+		remaining := w.budget - int64(out.Len())
+		if int64(len(line)) >= remaining {
+			out.WriteString(line[:remaining])
+			if !w.callerLimited {
+				warnings = append(warnings, fmt.Sprintf("build log truncated at the server limit of %d bytes", limits.maxBytes))
+			}
+			return out.Bytes(), warnings, nil
+		}
+		out.WriteString(line)
+	}
+	if !scanTruncated {
+		if _, err := decoder.Token(); err != nil {
+			if !scanCapHit(err) {
+				return nil, nil, readFailed()
+			}
+			scanTruncated = true
+		}
+	}
+	if scanTruncated {
+		warnings = append(warnings, fmt.Sprintf("build log truncated: Coder returned more than the server read limit of %d bytes", limits.maxScanBytes))
+	}
+	return out.Bytes(), warnings, nil
+}
+
+// countingReader counts bytes read through it.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// logReadCloser is the response body. Close ends the log deadline and frees the slot exactly
+// once. StreamObject calls Close only after its write loop returns, so a slot is never freed
+// while its response is still being written.
+type logReadCloser struct {
+	io.Reader
+	cancel  context.CancelFunc
+	release func()
+	once    sync.Once
+}
+
+func (l *logReadCloser) Close() error {
+	l.once.Do(func() {
+		l.cancel()
+		l.release()
+	})
+	return nil
+}
