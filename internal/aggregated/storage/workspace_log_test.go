@@ -328,6 +328,33 @@ func TestWorkspaceLogMapsCoderErrors(t *testing.T) {
 	if _, _, err := readLog(t, s, logTestName, nil); !apierrors.IsInternalError(err) || strings.Contains(err.Error(), "secret") {
 		t.Fatalf("malformed log: err=%v", err)
 	}
+	// Trailing data after a complete JSON value is malformed, not silently dropped.
+	for _, body := range []string{`null[{"id":1}]`, `[]x`, `[] []`} {
+		f.setLogsHandler(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, body) })
+		if _, _, err := readLog(t, s, logTestName, nil); !apierrors.IsInternalError(err) {
+			t.Errorf("trailing data %q: err=%v, want 500", body, err)
+		}
+	}
+	// A huge error body is not read to the end.
+	const hugeErrorBody = 64 << 20
+	var written atomic.Int64
+	f.setLogsHandler(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		chunk := []byte(strings.Repeat("x", 32<<10))
+		for written.Load() < hugeErrorBody {
+			n, err := w.Write(chunk)
+			written.Add(int64(n))
+			if err != nil {
+				return
+			}
+		}
+	})
+	if _, _, err := readLog(t, s, logTestName, nil); !apierrors.IsInternalError(err) {
+		t.Fatalf("huge error body: err=%v, want 500", err)
+	}
+	if got := written.Load(); got >= hugeErrorBody/2 {
+		t.Fatalf("huge error body was read to %d bytes", got)
+	}
 	if s.slots.inUse() != 0 {
 		t.Fatalf("slots in use after Coder errors: %d", s.slots.inUse())
 	}
@@ -340,8 +367,8 @@ func TestWorkspaceLogReleasesSlotOnStall(t *testing.T) {
 	s := newTestLogStorage(t, f, func(l *workspaceLogLimits) { l.duration = 300 * time.Millisecond })
 	f.setLogsHandler(func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
 	start := time.Now()
-	if _, _, err := readLog(t, s, logTestName, nil); err == nil {
-		t.Fatal("stalled snapshot must fail")
+	if _, _, err := readLog(t, s, logTestName, nil); !apierrors.IsTimeout(err) {
+		t.Fatalf("Coder stalled before response headers: err=%v, want 504 timeout", err)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("stalled snapshot ended after %s", elapsed)

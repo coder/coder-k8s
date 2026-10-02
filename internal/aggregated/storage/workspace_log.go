@@ -193,11 +193,17 @@ func (w *workspaceLogStream) readSnapshot(ctx context.Context, sdk *codersdk.Cli
 	resource := aggregationv1alpha1.Resource("coderworkspaces")
 	res, err := sdk.Request(ctx, http.MethodGet, fmt.Sprintf("/api/v2/workspacebuilds/%s/logs", buildID), nil)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, logReadTimeout()
+		}
 		return nil, nil, coder.MapCoderError(err, resource, w.name)
 	}
 	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusOK {
-		return nil, nil, coder.MapCoderError(codersdk.ReadBodyAsError(res), resource, w.name)
+		// ReadBodyAsError reads the whole body, so cap what an error response may hold.
+		limited := *res
+		limited.Body = io.NopCloser(io.LimitReader(res.Body, maxLogErrorBodyBytes))
+		return nil, nil, coder.MapCoderError(codersdk.ReadBodyAsError(&limited), resource, w.name)
 	}
 
 	limits := w.storage.limits
@@ -211,7 +217,7 @@ func (w *workspaceLogStream) readSnapshot(ctx context.Context, sdk *codersdk.Cli
 	// readFailed reports a failed read without log content: a timeout, or malformed JSON.
 	readFailed := func() error {
 		if ctx.Err() != nil {
-			return apierrors.NewTimeoutError("reading the build log from Coder timed out", 0)
+			return logReadTimeout()
 		}
 		return apierrors.NewInternalError(errors.New("coder returned a malformed build log"))
 	}
@@ -220,8 +226,11 @@ func (w *workspaceLogStream) readSnapshot(ctx context.Context, sdk *codersdk.Cli
 	switch {
 	case err != nil:
 		return nil, nil, readFailed()
-	case open == nil:
-		return nil, nil, nil // JSON null: no log entries.
+	case open == nil: // JSON null: no log entries.
+		if !atEnd(decoder) {
+			return nil, nil, readFailed()
+		}
+		return nil, nil, nil
 	case open != json.Delim('['):
 		return nil, nil, readFailed()
 	}
@@ -253,12 +262,29 @@ func (w *workspaceLogStream) readSnapshot(ctx context.Context, sdk *codersdk.Cli
 				return nil, nil, readFailed()
 			}
 			scanTruncated = true
+		} else if !atEnd(decoder) {
+			return nil, nil, readFailed()
 		}
 	}
 	if scanTruncated {
 		warnings = append(warnings, fmt.Sprintf("build log truncated: Coder returned more than the server read limit of %d bytes", limits.maxScanBytes))
 	}
 	return out.Bytes(), warnings, nil
+}
+
+// maxLogErrorBodyBytes caps how much of a non-200 Coder response is read.
+const maxLogErrorBodyBytes = 64 << 10
+
+// logReadTimeout is the error for a log read that passed the log deadline.
+func logReadTimeout() error {
+	return apierrors.NewTimeoutError("reading the build log from Coder timed out", 0)
+}
+
+// atEnd reports whether only whitespace is left after the top-level JSON value, so trailing
+// data after a complete log is rejected instead of silently dropped.
+func atEnd(decoder *json.Decoder) bool {
+	_, err := decoder.Token()
+	return errors.Is(err, io.EOF)
 }
 
 // countingReader counts bytes read through it.
