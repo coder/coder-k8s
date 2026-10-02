@@ -1,6 +1,6 @@
 # Deploy the aggregated API server
 
-Serve `CoderWorkspace` and `CoderTemplate` (`aggregation.coder.com/v1alpha1`) through the Kubernetes API. Then you can use `kubectl` to manage Coder workspaces and templates.
+Serve `CoderWorkspace`, `CoderTemplate`, and `CoderTemplateVersion` (`aggregation.coder.com/v1alpha1`) through the Kubernetes API. Then you can use `kubectl` to manage Coder workspaces and templates, and to read template versions.
 
 Run the commands from a clone of this repository.
 

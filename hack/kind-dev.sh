@@ -78,23 +78,22 @@ ensure_cluster_node_image_matches() {
 
 assert_no_aggregation_resource_conflict() {
 	local has_apiservice="false"
-	local has_template_crd="false"
-	local has_workspace_crd="false"
+	local conflicting_crds=()
+	local crd
 
 	if kubectl_ctx get apiservice v1alpha1.aggregation.coder.com >/dev/null 2>&1; then
 		has_apiservice="true"
 	fi
-	if kubectl_ctx get crd codertemplates.aggregation.coder.com >/dev/null 2>&1; then
-		has_template_crd="true"
-	fi
-	if kubectl_ctx get crd coderworkspaces.aggregation.coder.com >/dev/null 2>&1; then
-		has_workspace_crd="true"
-	fi
+	for crd in codertemplates.aggregation.coder.com codertemplateversions.aggregation.coder.com coderworkspaces.aggregation.coder.com; do
+		if kubectl_ctx get crd "${crd}" >/dev/null 2>&1; then
+			conflicting_crds+=("${crd}")
+		fi
+	done
 
-	if [[ "${has_apiservice}" == "true" && ( "${has_template_crd}" == "true" || "${has_workspace_crd}" == "true" ) ]]; then
+	if [[ "${has_apiservice}" == "true" && "${#conflicting_crds[@]}" -gt 0 ]]; then
 		echo "assertion failed: detected aggregation API conflict in ${KUBE_CONTEXT}: APIService v1alpha1.aggregation.coder.com and aggregation.coder.com CRDs are both installed." >&2
 		echo "Delete conflicting CRDs before aggregated API demos:" >&2
-		echo "  kubectl --context ${KUBE_CONTEXT} delete crd codertemplates.aggregation.coder.com coderworkspaces.aggregation.coder.com" >&2
+		echo "  kubectl --context ${KUBE_CONTEXT} delete crd ${conflicting_crds[*]}" >&2
 		exit 1
 	fi
 }

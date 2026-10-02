@@ -2,7 +2,7 @@ You are an experienced, pragmatic software engineering AI agent. Do not over-eng
 
 ## Project Overview
 
-`coder-k8s` is a Go-based Kubernetes control-plane project with two app modes: a controller-runtime operator for `CoderControlPlane` (`coder.com/v1alpha1`) and an aggregated API server for `CoderWorkspace`/`CoderTemplate` (`aggregation.coder.com/v1alpha1`).
+`coder-k8s` is a Go-based Kubernetes control-plane project with two app modes: a controller-runtime operator for `CoderControlPlane` (`coder.com/v1alpha1`) and an aggregated API server for `CoderWorkspace`/`CoderTemplate`/`CoderTemplateVersion` (`aggregation.coder.com/v1alpha1`).
 
 **Tech stack**
 - Go `1.26.8` (`go.mod`)
@@ -56,7 +56,7 @@ You are an experienced, pragmatic software engineering AI agent. Do not over-eng
 ### Architecture notes
 - `main` delegates to `run(...)`, which requires `--app=<controller|aggregated-apiserver>`.
 - `controller` mode registers core Kubernetes + `coder.com/v1alpha1` schemes, starts the controller-runtime manager, and wires health/readiness probes.
-- `aggregated-apiserver` mode builds a generic API server for `aggregation.coder.com/v1alpha1` and installs `coderworkspaces`/`codertemplates` storage.
+- `aggregated-apiserver` mode builds a generic API server for `aggregation.coder.com/v1alpha1` and installs `coderworkspaces`/`codertemplates`/`codertemplateversions` storage (template versions are read-only: get, list).
 - Defensive checks are intentional (`assertion failed: ...`) and used to fail fast during development.
 
 ## Essential Commands
