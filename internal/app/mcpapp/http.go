@@ -31,15 +31,18 @@ const (
 var setupLog = ctrl.Log.WithName("setup")
 
 // newMCPHTTPHandler keeps the production transport options shared with security tests.
-func newMCPHTTPHandler(server *mcp.Server) *mcp.StreamableHTTPHandler {
+func newMCPHTTPHandler(server *mcp.Server) http.Handler {
 	if server == nil {
 		panic("assertion failed: MCP server must not be nil")
 	}
-	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return server
 	}, &mcp.StreamableHTTPOptions{
 		SessionTimeout: streamableHTTPSessionTimeout,
 	})
+	// go-sdk v1.6.0 stopped applying cross-origin protection by default; keep rejecting
+	// cross-origin browser requests (Origin / Sec-Fetch-Site) with 403.
+	return http.NewCrossOriginProtection().Handler(handler)
 }
 
 // newMCPHTTPMux builds the production HTTP routing. Only the exact health paths are unauthenticated;
