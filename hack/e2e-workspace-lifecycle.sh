@@ -186,6 +186,35 @@ TPL_VERSION=$(sed -E 's/.* active=([^ ]+) .*/\1/' <<<"$TPL_STATE")
 IMPORT=$(coder_api GET "/api/v2/templateversions/$TPL_VERSION" | jq -er '.job.status') || fail "cannot read import of $TPL_VERSION"
 [[ $IMPORT == succeeded ]] || fail "template import not ready right after apply: version $TPL_VERSION job status $IMPORT"
 
+step "template versions: a files change adds a version; promote rolls back, repeats as a no-op and previews (#149)"
+GROUP=/apis/aggregation.coder.com/v1alpha1/namespaces/$NS
+template_updated_at() { coder_api GET "/api/v2/organizations/$ORG/templates/$TEMPLATE" | jq -er '.updated_at'; }
+promote() { # <version id> [query] -> status.result of codertemplates/promote
+  jq -n --arg id "$1" '{apiVersion: "aggregation.coder.com/v1alpha1", kind: "CoderTemplateVersionPromotion", spec: {versionID: $id}}' \
+    >"$WORK/promote.json" || return 1
+  k create --raw "$GROUP/codertemplates/$ORG.$TEMPLATE/promote${2:-}" -f "$WORK/promote.json" | jq -er '.status.result'
+}
+k create --dry-run=client -o json -f "$TEMPLATE_MANIFEST" | jq '.spec.files["main.tf"] += "\n# e2e: second version\n"' \
+  >"$WORK/template-v2.json" || fail "cannot render the second template version"
+apply_manifest "$WORK/template-v2.json" "$TEMPLATE_APPLY_TIMEOUT"
+k get codertemplateversions -n "$NS" -l "aggregation.coder.com/template=$TEMPLATE" -o json >"$WORK/versions.json" ||
+  fail "cannot list template versions"
+V2=$(jq -er --arg v1 "$TPL_VERSION" '.items | if length == 2 and any(.status.id == $v1 and (.status.active | not))
+  then map(select(.status.active))[0].status.id else error("unexpected versions") end' "$WORK/versions.json") ||
+  fail "expected v1 inactive and one new active version: $(jq -c '[.items[] | {id: .status.id, active: .status.active}]' "$WORK/versions.json")"
+RESULT_V1=$(promote "$TPL_VERSION") || fail "promote v1 failed"
+[[ $RESULT_V1 == Promoted ]] || fail "promote v1: result $RESULT_V1, want Promoted"
+TPL_STATE=$(template_state) || fail "template unreadable after the rollback"
+[[ $TPL_STATE == *" active=$TPL_VERSION "* ]] || fail "Coder does not show v1 active after the rollback: $TPL_STATE"
+UPDATED_AT=$(template_updated_at) || fail "cannot read the template updated_at"
+RESULT_V1=$(promote "$TPL_VERSION") || fail "repeated promote v1 failed"
+[[ $RESULT_V1 == AlreadyActive ]] || fail "repeated promote v1: result $RESULT_V1, want AlreadyActive"
+[[ $(template_updated_at) == "$UPDATED_AT" ]] || fail "repeated promote v1 wrote to Coder (template updated_at changed)"
+RESULT_V2=$(promote "$V2" "?dryRun=All") || fail "dry-run promote v2 failed"
+[[ $RESULT_V2 == WouldPromote ]] || fail "dry-run promote v2: result $RESULT_V2, want WouldPromote"
+AFTER=$(template_state) || fail "template unreadable after the dry-run"
+[[ $AFTER == "$TPL_STATE" && $(template_updated_at) == "$UPDATED_AT" ]] || fail "dry-run promote changed Coder: before=[$TPL_STATE] after=[$AFTER]"
+
 step "create workspace through the aggregated API"
 NAME=$ORG.$OWNER.$WS_NAME
 ws_manifest "$WS_NAME" || fail "cannot render workspace manifest"
