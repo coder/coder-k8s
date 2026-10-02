@@ -197,7 +197,7 @@ For each type of deployment:
 | Deployment | Runs as | Can read the CA key |
 | --- | --- | --- |
 | `--app=all` ([Option A](#option-a-all-in-one-recommended)) | `coder-k8s` | Yes. Also, the process keeps all Secrets in the cluster in its cache, because the controllers watch Secrets. |
-| Standalone `--app=aggregated-apiserver` ([Option B](#option-b-standalone)) | `coder-k8s-apiserver`, with `config/apiserver-standalone/` | Yes, and no other Secret. It can `get` and `update` only `coder-k8s-apiserver-tls`. It cannot list, watch, or create Secrets. If the `coder-k8s` ServiceAccount exists in the cluster, `coder-k8s` can also read the key. |
+| Standalone `--app=aggregated-apiserver` ([Option B](#option-b-standalone)) | `coder-k8s-apiserver`, with `config/apiserver-standalone/` | Yes, and no other Secret. It can `get` and `update` only `coder-k8s-apiserver-tls`. It cannot list, watch, or create Secrets. If `coder-k8s` is installed with its `manager-role` binding, `coder-k8s` can also read the key. |
 | Controller only (`dist/install.yaml`) | `coder-k8s` | Only if an aggregated API server created the Secret in a namespace of the cluster. This bundle never creates it. |
 
 For `--app=all`, a narrower Role does not change this. One process runs both the controller and the aggregated API server with one ServiceAccount, and the controller needs access to Secrets in all namespaces. The same access also covers the operator token Secrets. These give owner rights in Coder, and are more sensitive than the CA key. Limit who can read Secrets in `coder-system` and in all namespaces. If the Secret was possibly exposed, [replace the CA](#replace-the-ca).
