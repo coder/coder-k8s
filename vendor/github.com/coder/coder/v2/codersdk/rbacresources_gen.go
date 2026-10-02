@@ -17,6 +17,7 @@ const (
 	ResourceBoundaryLog                   RBACResource = "boundary_log"
 	ResourceBoundaryUsage                 RBACResource = "boundary_usage"
 	ResourceChat                          RBACResource = "chat"
+	ResourceChatModelConfig               RBACResource = "chat_model_config"
 	ResourceConnectionLog                 RBACResource = "connection_log"
 	ResourceCryptoKey                     RBACResource = "crypto_key"
 	ResourceDebugInfo                     RBACResource = "debug_info"
@@ -28,6 +29,7 @@ const (
 	ResourceIdpsyncSettings               RBACResource = "idpsync_settings"
 	ResourceInboxNotification             RBACResource = "inbox_notification"
 	ResourceLicense                       RBACResource = "license"
+	ResourceMCPServerConfig               RBACResource = "mcp_server_config"
 	ResourceNotificationMessage           RBACResource = "notification_message"
 	ResourceNotificationPreference        RBACResource = "notification_preference"
 	ResourceNotificationTemplate          RBACResource = "notification_template"
@@ -52,6 +54,7 @@ const (
 	ResourceWorkspace                     RBACResource = "workspace"
 	ResourceWorkspaceAgentDevcontainers   RBACResource = "workspace_agent_devcontainers"
 	ResourceWorkspaceAgentResourceMonitor RBACResource = "workspace_agent_resource_monitor"
+	ResourceWorkspaceBuildOrchestration   RBACResource = "workspace_build_orchestration"
 	ResourceWorkspaceDormant              RBACResource = "workspace_dormant"
 	ResourceWorkspaceProxy                RBACResource = "workspace_proxy"
 )
@@ -95,6 +98,7 @@ var RBACResourceActions = map[RBACResource][]RBACAction{
 	ResourceBoundaryLog:                   {ActionCreate, ActionDelete, ActionRead},
 	ResourceBoundaryUsage:                 {ActionDelete, ActionRead, ActionUpdate},
 	ResourceChat:                          {ActionCreate, ActionDelete, ActionRead, ActionShare, ActionUpdate},
+	ResourceChatModelConfig:               {ActionCreate, ActionDelete, ActionRead, ActionShare, ActionUpdate},
 	ResourceConnectionLog:                 {ActionRead, ActionUpdate},
 	ResourceCryptoKey:                     {ActionCreate, ActionDelete, ActionRead, ActionUpdate},
 	ResourceDebugInfo:                     {ActionRead},
@@ -106,6 +110,7 @@ var RBACResourceActions = map[RBACResource][]RBACAction{
 	ResourceIdpsyncSettings:               {ActionRead, ActionUpdate},
 	ResourceInboxNotification:             {ActionCreate, ActionRead, ActionUpdate},
 	ResourceLicense:                       {ActionCreate, ActionDelete, ActionRead},
+	ResourceMCPServerConfig:               {ActionCreate, ActionDelete, ActionRead, ActionShare, ActionUpdate},
 	ResourceNotificationMessage:           {ActionCreate, ActionDelete, ActionRead, ActionUpdate},
 	ResourceNotificationPreference:        {ActionRead, ActionUpdate},
 	ResourceNotificationTemplate:          {ActionRead, ActionUpdate},
@@ -130,6 +135,7 @@ var RBACResourceActions = map[RBACResource][]RBACAction{
 	ResourceWorkspace:                     {ActionApplicationConnect, ActionCreate, ActionCreateAgent, ActionDelete, ActionDeleteAgent, ActionRead, ActionShare, ActionSSH, ActionWorkspaceStart, ActionWorkspaceStop, ActionUpdate, ActionUpdateAgent},
 	ResourceWorkspaceAgentDevcontainers:   {ActionCreate},
 	ResourceWorkspaceAgentResourceMonitor: {ActionCreate, ActionRead, ActionUpdate},
+	ResourceWorkspaceBuildOrchestration:   {ActionCreate, ActionDelete, ActionRead, ActionUpdate},
 	ResourceWorkspaceDormant:              {ActionApplicationConnect, ActionCreate, ActionCreateAgent, ActionDelete, ActionDeleteAgent, ActionRead, ActionShare, ActionSSH, ActionWorkspaceStart, ActionWorkspaceStop, ActionUpdate, ActionUpdateAgent},
 	ResourceWorkspaceProxy:                {ActionCreate, ActionDelete, ActionRead, ActionUpdate},
 }
