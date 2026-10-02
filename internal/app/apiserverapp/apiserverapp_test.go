@@ -50,6 +50,8 @@ func TestNewSchemeRegistersAggregationKinds(t *testing.T) {
 		aggregationv1alpha1.SchemeGroupVersion.WithKind("CoderTemplateVersionList"),
 		aggregationInternalGroupVersion.WithKind("CoderTemplateVersion"),
 		aggregationInternalGroupVersion.WithKind("CoderTemplateVersionList"),
+		aggregationv1alpha1.SchemeGroupVersion.WithKind("CoderWorkspaceTransition"),
+		aggregationInternalGroupVersion.WithKind("CoderWorkspaceTransition"),
 	} {
 		if !scheme.Recognizes(gvk) {
 			t.Fatalf("expected scheme to recognize %s", gvk.String())
@@ -157,6 +159,18 @@ func TestOpenAPIDefinitionsSupportManagedFieldsTypeConversionForTemplate(t *test
 
 	if _, err := typeConverter.ObjectToTyped(template); err != nil {
 		t.Fatalf("convert template object to structured-merge typed value: %v", err)
+	}
+
+	// The start and stop subresources run their request bodies through the field manager too.
+	transition := &aggregationv1alpha1.CoderWorkspaceTransition{
+		TypeMeta:   metav1.TypeMeta{APIVersion: aggregationv1alpha1.SchemeGroupVersion.String(), Kind: "CoderWorkspaceTransition"},
+		ObjectMeta: metav1.ObjectMeta{Name: "default.testuser.my-workspace", Namespace: "test-ns"},
+		Status: aggregationv1alpha1.CoderWorkspaceTransitionStatus{
+			Transition: "start", Outcome: "Queued", DryRun: true, BuildID: "build-id", BuildNumber: 3, JobStatus: "pending",
+		},
+	}
+	if _, err := typeConverter.ObjectToTyped(transition); err != nil {
+		t.Fatalf("convert workspace transition object to structured-merge typed value: %v", err)
 	}
 }
 

@@ -652,14 +652,15 @@ func (s *WorkspaceStorage) Update(
 		return currentK8sObj, false, nil
 	}
 
-	transition := codersdk.WorkspaceTransitionStop
+	req := codersdk.CreateWorkspaceBuildRequest{Transition: codersdk.WorkspaceTransitionStop}
 	if desiredObj.Spec.Running {
-		transition = codersdk.WorkspaceTransitionStart
+		// Start follows the same version policy as the coderworkspaces/start subresource.
+		if req, err = startBuildRequest(currentWorkspace); err != nil {
+			return nil, false, err
+		}
 	}
 
-	build, err := sdk.CreateWorkspaceBuild(ctx, currentWorkspace.ID, codersdk.CreateWorkspaceBuildRequest{
-		Transition: transition,
-	})
+	build, err := sdk.CreateWorkspaceBuild(ctx, currentWorkspace.ID, req)
 	if err != nil {
 		return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), name)
 	}

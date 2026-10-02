@@ -11,12 +11,13 @@ The aggregated API server serves `coderworkspaces`, `codertemplates` and `codert
 | [Workspace `resourceVersion`](#workspace-resourceversion) | An opaque fingerprint. Compare it only for equality. Workspace activity alone can cause `409`. |
 | [Watch](#watch) | Shows only writes made through this server. No replay, no initial events. |
 | [Server-side apply](#server-side-apply) | Create-on-update works. The server does not keep field ownership. |
-| [Server-side dry-run](#server-side-dry-run) | Not supported on writes. `kubectl diff` and `--dry-run=server` return `400` and do not change Coder. A promotion with `dryRun=All` is a read-only preview. |
+| [Server-side dry-run](#server-side-dry-run) | Not supported for writes to `coderworkspaces` and `codertemplates`. `kubectl diff` and `--dry-run=server` return `400` and do not change Coder. A promotion with `dryRun=All` is a read-only preview. Start and stop accept dry-run too. |
 | [Template versions](#template-versions) | Read-only: `get` and `list`, no watch. Reads never download template source. |
 | [Promote a template version](#promote-a-template-version) | `codertemplates/<name>/promote` (`create`) makes a version active. A rollback promotes an older version. It needs its own RBAC grant. `dryRun=All` previews it. An unconfirmed result returns `503`, and a concurrent change returns `409`. |
 | [Template builds](#template-builds) | Create and update with `spec.files` wait until Coder completes the import. The full request must complete within 34 seconds. |
 | [Coder timeouts](#coder-timeouts) | A Coder call that runs out of time returns `504` on every resource. After a `504` on a write, re-read before you retry. |
 | [Workspace build log](#workspace-build-log) | `coderworkspaces/log` returns the latest build log as text. It needs its own RBAC grant and has fixed size, time, and concurrency limits. |
+| [Start and stop](#start-and-stop) | `coderworkspaces/start` and `coderworkspaces/stop` start or stop a workspace. Each needs its own RBAC grant. A repeated request does not queue a second build while one is active. |
 
 ## Object names
 
@@ -161,19 +162,20 @@ The server rejects the request before it sends anything to Coder. Nothing is upl
 
 The default Argo CD diff and sync do not send `dryRun=All`, and neither does `--dry-run=client`. They work as before. To preview a change, compare the output of `kubectl get -o yaml` with your manifest.
 
-A promotion is different, because the server can evaluate it without a write:
+A promotion, a start, and a stop are different, because the server can evaluate them without a write:
 
 | Request with `dryRun=All` | Result |
 | --- | --- |
 | Create, update, patch, or delete of `coderworkspaces` or `codertemplates` | `400 BadRequest`. Nothing is sent to Coder. |
 | Create of `codertemplates/<name>/promote` | `201` with `WouldPromote` or `AlreadyActive`. The server only reads from Coder. See [Promote a template version](#promote-a-template-version). |
+| Create of `coderworkspaces/<name>/start` or `/stop` | `201` with `status.dryRun: true` and `WouldQueue`, `InProgress`, or `Unchanged`. The server only reads from Coder. See [Dry-run of start and stop](#dry-run-of-start-and-stop). |
 
 ## Coder timeouts
 
-A Coder call that runs out of time returns `504 Gateway Timeout` on every aggregated resource: workspaces, templates, template versions, and workspace build logs. A call runs out of time when:
+A Coder call that runs out of time returns `504 Gateway Timeout` on every aggregated resource: workspaces, templates, template versions, workspace build logs, and workspace start and stop. A call runs out of time when:
 
 - it takes longer than the Coder request timeout (`--coder-request-timeout`, 30 seconds by default),
-- the request deadline ends first (see [The 34-second write budget](#the-34-second-write-budget) and the [log limits](#workspace-build-log)), or
+- the request deadline ends first (see [The 34-second write budget](#the-34-second-write-budget), the [log limits](#workspace-build-log), and the [start and stop budget](#time-limit-and-retries)), or
 - Coder itself answers `504`.
 
 The message does not include the Coder URL.
@@ -181,6 +183,7 @@ The message does not include the Coder URL.
 - After a `504` on a read, try again later.
 - After a `504` on a write (create, update, patch, or delete), the result is not certain. Coder can have applied the change before the call timed out. Re-read the object with `kubectl get` before you retry.
 - A promotion handles this itself. A `504` before the activation means that nothing changed. When the activation itself times out or fails without an answer, the server re-reads the template and answers `Promoted`, `409`, or `503`. See [Promote a template version](#promote-a-template-version).
+- After a `504` on start or stop, re-read the latest build of the workspace before you retry. See [Time limit and retries](#time-limit-and-retries).
 
 ## Template versions
 
@@ -331,3 +334,86 @@ The server limits each log request:
 | Time to read from Coder | 60 seconds in total, or 25 minutes with `follow=true`. Each Coder call before the live stream also ends after the Coder request timeout (30 seconds by default). | A snapshot returns `504`. A `follow=true` stream ends. |
 | Time to write the response | 2 minutes after the request arrives, or 26 minutes with `follow=true` | If the client reads too slowly, the server closes the response. |
 | Open log requests | 64 for each server, 4 for each user | The server returns `429` with `Retry-After: 5`. It makes no Coder call. |
+
+Snapshots and `follow=true` streams use the same open-request slots. A user with 4 open `follow=true` streams gets `429` on a snapshot too.
+
+## Start and stop
+
+`POST …/namespaces/<namespace>/coderworkspaces/<name>/start` starts a workspace. `POST …/coderworkspaces/<name>/stop` stops it:
+
+```bash
+API=/apis/aggregation.coder.com/v1alpha1/namespaces/coder/coderworkspaces
+kubectl create --raw "$API/acme.alice.dev/start" -f - <<<'{}'
+kubectl create --raw "$API/acme.alice.dev/stop" -f - <<<'{}'
+kubectl create --raw "$API/acme.alice.dev/stop?dryRun=All" -f - <<<'{}'
+```
+
+- Each subresource needs its own grant: `create` on `coderworkspaces/start` or `coderworkspaces/stop`. See [How callers are checked](../how-to/deploy-aggregated-apiserver.md#how-callers-are-checked).
+- The body is a `CoderWorkspaceTransition`. `{}` is enough. If the body sets `metadata.name`, it must equal the name in the URL. Otherwise the server returns `400`. The server ignores a `status` in the body.
+- The name must be the canonical name (see [Object names](#object-names)). An alias returns `400`, and a workspace in another organization returns `404`.
+- A success always returns `201`. The response holds `metadata.name`, `metadata.namespace`, and `status`. It holds no workspace spec or status.
+
+| Field | Meaning |
+| --- | --- |
+| `status.transition` | `start` or `stop`. |
+| `status.outcome` | `Queued`, `InProgress`, `Unchanged`, or `WouldQueue`. See the next table. |
+| `status.dryRun` | `true` for a dry-run. |
+| `status.buildID`, `status.buildNumber`, `status.jobStatus` | The build that the outcome refers to. They are empty for `WouldQueue`. |
+
+The server reads the latest build of the workspace and decides from its transition and job status:
+
+| Latest build | `start` | `stop` |
+| --- | --- | --- |
+| start, job `pending` or `running` | `InProgress` | `409` |
+| start, job `succeeded` | `Unchanged` | `Queued` |
+| stop, job `pending` or `running` | `409` | `InProgress` |
+| stop, job `succeeded` | `Queued` | `Unchanged` |
+| delete, job `pending` or `running` | `409` | `409` |
+| any, job `canceling` | `409` | `409` |
+| any, job `failed` or `canceled` | `Queued` | `Queued` |
+
+- `Queued`: the server queued a new build. The build fields name the new build.
+- `InProgress`: a build of the requested kind is already pending or running. The server queued nothing. The build fields name that build.
+- `Unchanged`: the workspace is already started or stopped. The server queued nothing.
+- `409 Conflict`: another build is active. The message names that build. Retry after it ends. `kubectl get --raw "$API/acme.alice.dev/log?follow=true"` ends when the build ends.
+
+Other status codes:
+
+| Code | Cause |
+| --- | --- |
+| `400` | The name is not valid or not canonical, the body name does not match, or Coder rejected the build. For example, the template version needs parameter values that the workspace does not have. |
+| `403` | The caller has no grant on the subresource. |
+| `404` | The workspace does not exist, or it is in another organization. |
+| `504` | Coder did not answer in time. See the next section. |
+
+### Time limit and retries
+
+One time budget of 25 seconds covers every Coder call of a request: the lookup, the build request, the re-read after a Coder `409`, and the confirming re-read after an uncertain build request. The calls before the confirming re-read must end within 20 seconds, so at least 5 seconds stay for it. Each call also ends after the Coder request timeout (`--coder-request-timeout`, 30 seconds by default).
+
+- If Coder answers `409` to the build request, another build started after the lookup. The server re-reads the workspace one time. If the latest build already does what you asked, the outcome is `InProgress` or `Unchanged`. Otherwise the server returns `409` with the message from Coder.
+- If the build request times out, fails on the network, or gets `502`, `503`, or `504` (for example from a proxy in front of Coder), the server cannot know whether Coder queued the build. It re-reads the workspace one time, in the rest of the budget. If the latest build is a new build of the requested kind, the outcome is `Queued`. Otherwise the server returns `504`, and the message says that the result is uncertain.
+- After a `504`, re-read the latest build of the workspace (`status.latestBuildID` and `status.latestBuildStatus` of the `CoderWorkspace`) before you retry.
+- The server never sends a second build request by itself.
+
+A retry is safe while a build of the same kind is pending or running, because the outcome is then `InProgress`. The server decides from the current state, so a request is not exactly-once. For example, if someone stops the workspace between your start and your retry, the retry starts it again.
+
+### Dry-run of start and stop
+
+Unlike writes to `coderworkspaces` and `codertemplates` (see [Server-side dry-run](#server-side-dry-run)), the start and stop subresources accept `dryRun=All`:
+
+- The server makes only read-only Coder calls. It never sends a build request.
+- Admission runs as for a real request.
+- The response is `201` with `status.dryRun: true`.
+- Where a real request would queue a build, the outcome is `WouldQueue`, and the build fields are empty. `InProgress`, `Unchanged`, and the errors are the same as for a real request.
+
+### Template version
+
+- Start sends the active version of the template when the template requires the active version (`require_active_version`), or when the automatic updates of the workspace are `always`. This is what `coder start` does.
+- Otherwise Coder builds the version of the previous build, also when the workspace is outdated.
+- Stop never changes the template version.
+- `spec.running: true` on a `CoderWorkspace` update follows the same rule as start.
+
+### Other effects
+
+- A start clears the dormant state of a dormant workspace in Coder.
+- The Coder audit log shows the operator user of the control plane as the initiator of each build, not the Kubernetes user. The audit log of kube-apiserver records the Kubernetes user.

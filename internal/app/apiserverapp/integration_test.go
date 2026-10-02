@@ -383,8 +383,10 @@ func newIntegrationMockCoderServer(expectedSessionToken string) *integrationMock
 		LastUsedAt:       now,
 		LatestBuild: codersdk.WorkspaceBuild{
 			ID:                workspaceBuildID,
+			BuildNumber:       1,
 			Transition:        codersdk.WorkspaceTransitionStart,
 			Status:            codersdk.WorkspaceStatusRunning,
+			Job:               codersdk.ProvisionerJob{Status: codersdk.ProvisionerJobSucceeded},
 			TemplateVersionID: templateVersionID,
 			CreatedAt:         now,
 			UpdatedAt:         now,
@@ -488,6 +490,22 @@ func newIntegrationMockCoderServer(expectedSessionToken string) *integrationMock
 				}
 			}
 			writeJSON(w, http.StatusOK, integrationMockBuildLog)
+			return
+		case r.Method == http.MethodPost && hasSegments(segments, "api", "v2", "workspaces") && len(segments) == 5 && segments[4] == "builds":
+			// The workspace stays as it is, so every stop is queued again and every start is Unchanged.
+			if segments[3] != workspaceID.String() {
+				writeCoderError(w, http.StatusNotFound, "workspace not found")
+				return
+			}
+			var req codersdk.CreateWorkspaceBuildRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeCoderError(w, http.StatusBadRequest, "invalid build request")
+				return
+			}
+			writeJSON(w, http.StatusCreated, codersdk.WorkspaceBuild{
+				ID: uuid.New(), BuildNumber: 2, Transition: req.Transition,
+				Job: codersdk.ProvisionerJob{Status: codersdk.ProvisionerJobPending},
+			})
 			return
 		case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "templateversions") && len(segments) == 4:
 			for _, version := range templateVersions {

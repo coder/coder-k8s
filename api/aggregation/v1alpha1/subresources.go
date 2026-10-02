@@ -64,6 +64,35 @@ type CoderTemplateVersionPromotion struct {
 	Status CoderTemplateVersionPromotionStatus `json:"status,omitempty"`
 }
 
+// CoderWorkspaceTransition is the request and response body of the coderworkspaces/start and
+// coderworkspaces/stop subresources. A request needs no fields. The server ignores a status in
+// the request.
+//
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+type CoderWorkspaceTransition struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	// Status reports what the request did.
+	Status CoderWorkspaceTransitionStatus `json:"status,omitempty"`
+}
+
+// CoderWorkspaceTransitionStatus reports the outcome of a start or stop request.
+type CoderWorkspaceTransitionStatus struct {
+	// Transition is the requested transition: start or stop.
+	Transition string `json:"transition,omitempty"`
+	// Outcome is Queued, InProgress, Unchanged, or WouldQueue (dry-run only).
+	Outcome string `json:"outcome,omitempty"`
+	// DryRun is true when the request was a server-side dry-run. Nothing was changed.
+	DryRun bool `json:"dryRun,omitempty"`
+	// BuildID is the ID of the workspace build that the outcome refers to.
+	BuildID string `json:"buildID,omitempty"`
+	// BuildNumber is the number of that build.
+	BuildNumber int32 `json:"buildNumber,omitempty"`
+	// JobStatus is the provisioner job status of that build when the server answered.
+	JobStatus string `json:"jobStatus,omitempty"`
+}
+
 // convertURLValuesToCoderWorkspaceLogOptions decodes log query parameters. Unknown parameters are
 // ignored, as for Pod logs. A malformed number is an error, which the API server answers with 400.
 func convertURLValuesToCoderWorkspaceLogOptions(in *url.Values, out *CoderWorkspaceLogOptions, s conversion.Scope) error {

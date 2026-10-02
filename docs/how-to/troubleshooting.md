@@ -199,12 +199,19 @@ See [Promote a template version](../reference/aggregated-api-behavior.md#promote
 - `403`: the caller has no `get` grant on `coderworkspaces/log`. Access to `coderworkspaces` alone is not enough. See [How callers are checked](deploy-aggregated-apiserver.md#how-callers-are-checked).
 - `406`: the `Accept` header allows only `text/plain`. Allow `*/*` or JSON, or use `kubectl get --raw`.
 - `422`: `limitBytes` is below 1.
-- `429` that says `for this user`: this user already has 4 open log requests on this server. Close one, or wait and try again.
+- `429` that says `for this user`: this user already has 4 open log requests on this server. Open `follow=true` streams count too. Close one, or wait and try again.
 - `429` that says `on this server`: the server has 64 open log requests. Wait for the `Retry-After` time and try again.
 - `429` that says `You've been rate limited`: Coder rate-limited the operator token, which every aggregated API call uses. Coder allows 512 requests per minute by default (`CODER_API_RATE_LIMIT`).
-- `504`: Coder did not answer in time: one Coder call took longer than the Coder request timeout (30 seconds by default), or the whole read took longer than 60 seconds. Check that Coder is healthy, then try again.
+- `504`: Coder did not answer in time before the response started. Either one Coder call took longer than the Coder request timeout (30 seconds by default), or the time limit of the request ran out: 60 seconds for a snapshot, or 25 minutes with `follow=true`. Check that Coder is healthy, then try again.
 - A `Warning` that says the server cut the log: the log is larger than the server limit. See [Workspace build log](../reference/aggregated-api-behavior.md#workspace-build-log).
 - A `follow=true` stream ends before the build ends: the stream reached the 4 MiB response limit or the 25-minute time limit. The server sends no `Warning` for a cut in the live part of a stream. Send a new request with `follow=true`. It sends the existing entries again.
+
+## `coderworkspaces/start` or `/stop` returns `400`, `403`, `409`, or `504`
+
+- `400` with a Coder message about parameters: the start used the active template version, because the template requires it or the workspace always updates. That version needs parameter values that the workspace does not have. Set them in Coder, for example with `coder update`, then try again.
+- `403`: the caller has no `create` grant on `coderworkspaces/start` or `coderworkspaces/stop`. Access to `coderworkspaces` or to the log is not enough. See [How callers are checked](deploy-aggregated-apiserver.md#how-callers-are-checked).
+- `409`: another build of the workspace is active, or it is being canceled. The message names the build. Try again after it ends.
+- `504`: Coder did not answer in time, and the result is uncertain. Coder can have queued the build. Re-read the latest build of the workspace (`kubectl get coderworkspace <name> -o yaml`) before you try again. See [Time limit and retries](../reference/aggregated-api-behavior.md#time-limit-and-retries).
 
 ## Aggregated requests return `400` or `409`
 

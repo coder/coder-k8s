@@ -434,6 +434,10 @@ jobs:
           kubectl "${reader[@]}" -n coder get coderworkspaces.aggregation.coder.com
           logpath=/apis/aggregation.coder.com/v1alpha1/namespaces/coder/coderworkspaces/coder.coder-k8s-operator.e2e-authz-missing/log
           expect_forbidden kubectl "${reader[@]}" get --raw "$logpath"
+          # Nor does it grant start or stop.
+          for sub in start stop; do
+            expect_forbidden kubectl "${reader[@]}" create --raw "${logpath%/log}/$sub" -f - <<<'{}'
+          done
           # A log grant reaches storage: the missing workspace is NotFound, not Forbidden.
           kubectl -n coder create serviceaccount e2e-log-reader
           kubectl -n coder create role e2e-log-reader --verb=get --resource=coderworkspaces.aggregation.coder.com/log
