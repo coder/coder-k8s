@@ -43,10 +43,11 @@ func TestControlPlaneClientProviderMarksNamespaceNotServed(t *testing.T) {
 			wantStatus:    apierrors.IsServiceUnavailable,
 		},
 		{
+			// A control plane that exists but is not ready can be in a short outage (for example a
+			// Postgres error during operator access setup). LIST must keep the 503 then.
 			name:          "control plane in namespace is not eligible",
 			controlPlanes: []coderv1alpha1.CoderControlPlane{notReady},
 			namespace:     "team-a",
-			wantNotServed: true,
 			wantStatus:    apierrors.IsServiceUnavailable,
 		},
 		{

@@ -110,8 +110,6 @@ func TestNamespacedListInUnservedNamespaceReturnsEmptyList(t *testing.T) {
 		"no control plane": newControlPlaneProviderForStorageTest(t),
 		"control plane only in another namespace": newControlPlaneProviderForStorageTest(t,
 			storageTestControlPlane("control-plane", "coder", true)),
-		"control plane in namespace is not ready": newControlPlaneProviderForStorageTest(t,
-			storageTestControlPlane("empty-namespace", "coder", false)),
 	}
 
 	for providerName, provider := range providers {
@@ -138,6 +136,17 @@ func TestListKeepsErrorsOtherThanUnservedNamespace(t *testing.T) {
 		if !apierrors.IsServiceUnavailable(err) {
 			t.Fatalf("%s: all-namespaces LIST without a control plane: expected ServiceUnavailable, got %v", resource, err)
 		}
+	}
+
+	// A control plane that exists but is not ready (for example during a short Postgres outage) still
+	// serves the namespace: an empty list would tell watch clients that every object was deleted.
+	notReady := newControlPlaneProviderForStorageTest(t, storageTestControlPlane("team-a", "coder", false))
+	for resource, storage := range listStoragesForTest(notReady) {
+		_, err := storage.List(namespacedContext("team-a"), nil)
+		if !apierrors.IsServiceUnavailable(err) {
+			t.Fatalf("%s: LIST with a control plane that is not ready: expected ServiceUnavailable, got %v", resource, err)
+		}
+		assertTopLevelStatusError(t, err)
 	}
 
 	duplicate := newControlPlaneProviderForStorageTest(t,

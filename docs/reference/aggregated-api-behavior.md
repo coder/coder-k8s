@@ -142,7 +142,7 @@ The server rejects these requests:
 
 A namespace has no Coder backend in these cases:
 
-- `all` mode: the namespace has no eligible `CoderControlPlane`. For the eligibility rules, see [Aggregated reads return `ServiceUnavailable`](../how-to/troubleshooting.md#aggregated-reads-return-serviceunavailable).
+- `all` mode: the namespace contains no `CoderControlPlane` at all.
 - Standalone mode: the namespace is not the one that `--coder-namespace` names.
 
 In such a namespace, the server answers requests as follows:
@@ -154,9 +154,11 @@ In such a namespace, the server answers requests as follows:
 | `watch` | Works as described in [Watch](#watch). It shows no events, because no write can succeed in that namespace. |
 | `list` in all namespaces (`-A`) | Unchanged. In `all` mode, it returns `503` when no `CoderControlPlane` is eligible in any namespace. |
 
-The namespace controller lists every resource type in a namespace before it removes the namespace. An error from a list keeps the namespace in `Terminating` forever, so the empty list lets the deletion finish.
+A namespace that contains a `CoderControlPlane` that is not eligible is not in this group. For example, operator access is not ready, or the name contains a `.` character. For the eligibility rules, see [Aggregated reads return `ServiceUnavailable`](../how-to/troubleshooting.md#aggregated-reads-return-serviceunavailable). In such a namespace, every request returns `503`, `list` included.
 
-An empty list means that no Coder backend serves the namespace now. It does not mean that Coder has no objects. If a control plane stops being eligible for a short time, for example while its operator access is not ready, a list in its namespace is empty during that time. A client that caches a list, such as an informer, then sees all objects as deleted, and sees them again when the control plane is eligible again.
+The namespace controller lists every resource type in a namespace before it removes the namespace. An error from a list keeps the namespace in `Terminating` forever, so the empty list lets the deletion finish. If the namespace still contains a `CoderControlPlane`, the namespace controller deletes it in the same pass. The lists return `503` until the control plane is gone, and then they return empty lists.
+
+A short outage of a control plane does not empty a list. For example, the operator sets `operatorAccessReady=false` after a Postgres error. During that time, a list in its namespace returns `503`, so a client that caches a list, such as an informer, does not see objects as deleted.
 
 ## Server-side apply
 
