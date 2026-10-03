@@ -280,17 +280,9 @@ CAUTION: Delete the workspace in Coder before you remove the finalizer. Otherwis
 ## A namespace stays `Terminating`
 
 1. Tests in the namespace wait for their cleanup. List them with `kubectl get codertemplatetests -n <namespace>`, then see [A `CoderTemplateTest` does not finish deleting](#a-codertemplatetest-does-not-finish-deleting).
-2. With the aggregated API server installed, the namespace controller lists `coderworkspaces` and `codertemplates` before it removes the namespace. A namespace without a Coder backend gets empty lists and finishes deleting. [Namespaces without a Coder backend](../reference/aggregated-api-behavior.md#namespaces-without-a-coder-backend) defines these namespaces for `all` mode and standalone mode. These cases still fail the lists, and the namespace waits:
-
-    - **A control plane that the server cannot use** (`all` mode). The namespace contains a `CoderControlPlane` that is not eligible, or whose operator token Secret lacks the key or holds an empty value. The lists return `503`. The namespace controller deletes the control plane in the same pass, and then the deletion finishes.
-    - **A standalone server without Coder credentials** ([#215](https://github.com/coder/coder-k8s/issues/215)). A server in standalone mode (`--app=aggregated-apiserver`) without both its Coder URL and its session token answers `503` in every namespace. If only one of them is missing, the server does not start. Set the flags, as described in [Aggregated reads return `ServiceUnavailable`](#aggregated-reads-return-serviceunavailable).
-
-    In standalone mode, the namespace that `--coder-namespace` names has a Coder backend. Its lists return what Coder holds, as content of that namespace.
-
-    Read the namespace conditions:
+2. If the namespace condition `NamespaceDeletionContentFailure` is `True`, read its message. It contains the error that the aggregated API returned when the namespace controller listed its resources, for example a `503` or a `400`. For what each error means, see [Namespaces without a Coder backend](../reference/aggregated-api-behavior.md#namespaces-without-a-coder-backend) and [Aggregated reads return `ServiceUnavailable`](#aggregated-reads-return-serviceunavailable). If a `CoderControlPlane` is still in the namespace, check its finalizers, for example `coder.com/workspace-rbac-cleanup`, and the controller logs.
 
     ```bash
     kubectl get namespace <namespace> -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.message}{"\n"}{end}'
+    kubectl get codercontrolplanes -n <namespace> -o jsonpath='{range .items[*]}{.metadata.name}: {.metadata.finalizers}{"\n"}{end}'
     ```
-
-    In both cases, `NamespaceDeletionContentFailure` is `True`, and its message contains the `503` error of the failed list. If `NamespaceContentRemaining` and `NamespaceFinalizersRemaining` are `False`, only these lists hold the namespace.
