@@ -1,11 +1,13 @@
 package controller
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -129,7 +131,7 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, r.writeStatus(ctx, tt, before)
 	}
 
-	step, err := r.resolveInputs(ctx, tt)
+	step, err := r.resolveInputs(ctx, tt, workspaceName)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -150,9 +152,9 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	return ctrl.Result{RequeueAfter: min(templateTestPendingPoll, deadline.Sub(now))}, nil
 }
 
-// resolveInputs runs the Pending lookups. A nil step means every input is
-// resolved. Later changes add owner eligibility and the template lookups.
-func (r *CoderTemplateTestReconciler) resolveInputs(ctx context.Context, tt *coderv1alpha1.CoderTemplateTest) (*templateTestStep, error) {
+// resolveInputs runs the Pending lookups and pins their results in status.
+// A nil step means every input is resolved and the workspace name is free.
+func (r *CoderTemplateTestReconciler) resolveInputs(ctx context.Context, tt *coderv1alpha1.CoderTemplateTest, workspaceName string) (*templateTestStep, error) {
 	sdk, controlPlane, step, err := r.coderClient(ctx, tt)
 	if step != nil || err != nil {
 		return step, err
@@ -164,10 +166,60 @@ func (r *CoderTemplateTestReconciler) resolveInputs(ctx context.Context, tt *cod
 	if err != nil {
 		return templateTestWait("OwnerNotConfigured", "spec.templateTests.ownerUserID on CoderControlPlane %s: %v", controlPlane.Name, err), nil
 	}
-	if _, err := sdk.User(ctx, ownerID.String()); isCoderNotFound(err) {
-		return templateTestWait("OwnerNotEligible", "Coder user %s does not exist.", ownerID), nil
+	owner, step, err := checkTemplateTestOwner(ctx, sdk, ownerID)
+	if step != nil || err != nil {
+		return step, err
+	}
+
+	orgName, templateName, err := coder.ParseTemplateName(tt.Spec.Template)
+	if err != nil {
+		return nil, fmt.Errorf("assertion failed: spec.template %q passed validation but does not parse: %w", tt.Spec.Template, err)
+	}
+	org, err := sdk.OrganizationByName(ctx, orgName)
+	if isCoderNotFound(err) {
+		return templateTestWait("TemplateNotFound", "Coder organization %q does not exist.", orgName), nil
 	} else if err != nil {
-		return coderUnavailable("get owner", err), nil
+		return coderUnavailable("get organization", err), nil
+	}
+	if err := coderAnswerFor("organization", strings.ToLower(orgName), strings.ToLower(org.Name)); err != nil {
+		return nil, err
+	}
+	if !slices.Contains(owner.OrganizationIDs, org.ID) {
+		return templateTestWait("OwnerNotEligible", "Coder user %s is not a member of organization %q.", ownerID, orgName), nil
+	}
+	template, err := sdk.TemplateByName(ctx, org.ID, templateName)
+	if isCoderNotFound(err) {
+		return templateTestWait("TemplateNotFound", "Coder template %q does not exist.", tt.Spec.Template), nil
+	} else if err != nil {
+		return coderUnavailable("get template", err), nil
+	}
+	if err := errors.Join(coderAnswerFor("template", strings.ToLower(templateName), strings.ToLower(template.Name)),
+		coderAnswerFor("template organization", org.ID.String(), template.OrganizationID.String())); err != nil {
+		return nil, err
+	}
+	if template.Deprecated {
+		// Coder v2.37.2 refuses new workspaces for a deprecated template
+		// (coderd/workspaces.go:958). The deprecation message is Coder
+		// detail, so status leaves it out.
+		return templateTestFail("TemplateDeprecated", "Coder template %q is deprecated and accepts no new workspaces.", tt.Spec.Template), nil
+	}
+	version, step, err := resolveTemplateTestVersion(ctx, sdk, tt, template)
+	if step != nil || err != nil {
+		return step, err
+	}
+
+	tt.Status.OrganizationID, tt.Status.TemplateID, tt.Status.OwnerID = org.ID.String(), template.ID.String(), ownerID.String()
+	tt.Status.TemplateVersionID, tt.Status.TemplateVersionName = version.ID.String(), version.Name
+	tt.Status.WorkspaceName = workspaceName
+
+	_, err = sdk.WorkspaceByOwnerAndName(ctx, ownerID.String(), workspaceName, codersdk.WorkspaceOptions{})
+	switch {
+	case err == nil:
+		// Nothing of this test exists yet, so the workspace belongs to
+		// someone else. The controller never touches it.
+		return templateTestFail("WorkspaceNameConflict", "Coder user %s already has a workspace named %s.", ownerID, workspaceName), nil
+	case !isCoderNotFound(err):
+		return coderUnavailable("get workspace by name", err), nil
 	}
 	return nil, nil
 }
@@ -211,6 +263,116 @@ func (r *CoderTemplateTestReconciler) coderClient(ctx context.Context, tt *coder
 		return nil, nil, nil, fmt.Errorf("create Coder client for codercontrolplane %s: %w", key, err)
 	}
 	return sdk, controlPlane, nil, nil
+}
+
+// checkTemplateTestOwner refuses owners whose token is worth more than a plain
+// workspace user's: every start build hands the owner's token to Terraform.
+func checkTemplateTestOwner(ctx context.Context, sdk *codersdk.Client, ownerID uuid.UUID) (codersdk.User, *templateTestStep, error) {
+	refuse := func(format string, args ...any) *templateTestStep {
+		return templateTestWait("OwnerNotEligible", "Coder user %s: %s", ownerID, fmt.Sprintf(format, args...))
+	}
+	user, err := sdk.User(ctx, ownerID.String())
+	if isCoderNotFound(err) {
+		return user, refuse("the user does not exist."), nil
+	} else if err != nil {
+		return user, coderUnavailable("get owner", err), nil
+	}
+	if err := coderAnswerFor("user", ownerID.String(), user.ID.String()); err != nil {
+		return user, nil, err
+	}
+	if user.Status != codersdk.UserStatusActive && user.Status != codersdk.UserStatusDormant {
+		return user, refuse("status %q is not allowed. Only active and dormant users can own test workspaces.", user.Status), nil
+	}
+	// Headless users created before service accounts still have login type none.
+	if !user.IsServiceAccount && user.LoginType != codersdk.LoginTypePassword && user.LoginType != codersdk.LoginTypeNone { //nolint:staticcheck // See above.
+		return user, refuse("login type %q belongs to a person. Use a service account or a password user.", user.LoginType), nil
+	}
+	for _, role := range user.Roles {
+		if role.Name != codersdk.RoleMember {
+			return user, refuse("site role %q is not allowed.", role.Name), nil
+		}
+	}
+	// User.Roles holds site roles only, so read the roles in every
+	// organization: an admin role anywhere makes the token privileged. Coder
+	// also grants each organization's default member roles to every member.
+	allowed := func(role string) bool {
+		return role == codersdk.RoleOrganizationMember || role == codersdk.RoleOrganizationWorkspaceAccess
+	}
+	for _, orgID := range user.OrganizationIDs {
+		org, err := sdk.Organization(ctx, orgID)
+		if err != nil {
+			return user, coderUnavailable("get owner organization", err), nil
+		}
+		if err := coderAnswerFor("organization", orgID.String(), org.ID.String()); err != nil {
+			return user, nil, err
+		}
+		for _, role := range org.DefaultOrgMemberRoles {
+			if !allowed(role) {
+				return user, refuse("default member role %q in organization %s is not allowed.", role, orgID), nil
+			}
+		}
+		member, err := sdk.OrganizationMember(ctx, orgID.String(), ownerID.String())
+		if err != nil {
+			return user, coderUnavailable("get owner membership", err), nil
+		}
+		if err := errors.Join(coderAnswerFor("member user", ownerID.String(), member.UserID.String()),
+			coderAnswerFor("member organization", orgID.String(), member.OrganizationID.String())); err != nil {
+			return user, nil, err
+		}
+		for _, role := range member.Roles {
+			if !allowed(role.Name) {
+				return user, refuse("role %q in organization %s is not allowed.", role.Name, orgID), nil
+			}
+		}
+	}
+	return user, nil, nil
+}
+
+// resolveTemplateTestVersion returns the version under test. Once a version
+// is pinned, the controller reads that version and never resolves again.
+func resolveTemplateTestVersion(ctx context.Context, sdk *codersdk.Client, tt *coderv1alpha1.CoderTemplateTest, template codersdk.Template) (codersdk.TemplateVersion, *templateTestStep, error) {
+	var version codersdk.TemplateVersion
+	var err error
+	var asked func() error // The rule for the answer: it names what was asked for.
+	switch id := cmp.Or(tt.Status.TemplateVersionID, tt.Spec.Version.ID); {
+	case id != "":
+		parsed, parseErr := uuid.Parse(id)
+		if parseErr != nil {
+			// The CRD and this controller store only UUIDs here.
+			return version, nil, fmt.Errorf("assertion failed: version ID %q is not a UUID: %w", id, parseErr)
+		}
+		version, err = sdk.TemplateVersion(ctx, parsed)
+		asked = func() error { return coderAnswerFor("version", parsed.String(), version.ID.String()) }
+	case tt.Spec.Version.Name != "":
+		version, err = sdk.TemplateVersionByName(ctx, template.ID, tt.Spec.Version.Name)
+		asked = func() error { return coderAnswerFor("version", tt.Spec.Version.Name, version.Name) }
+	default:
+		version, err = sdk.TemplateVersion(ctx, template.ActiveVersionID)
+		asked = func() error { return coderAnswerFor("version", template.ActiveVersionID.String(), version.ID.String()) }
+	}
+	switch {
+	case isCoderNotFound(err):
+		return version, templateTestWait("TemplateVersionNotFound", "The version of template %q does not exist.", tt.Spec.Template), nil
+	case err != nil:
+		return version, coderUnavailable("get template version", err), nil
+	}
+	if err := asked(); err != nil {
+		return version, nil, err
+	}
+	switch {
+	case version.TemplateID == nil || *version.TemplateID != template.ID:
+		return version, templateTestFail("TemplateVersionMismatch", "Version %s does not belong to template %q.", version.ID, tt.Spec.Template), nil
+	case version.Archived:
+		return version, templateTestFail("TemplateVersionArchived", "Version %s is archived.", version.Name), nil
+	}
+	switch version.Job.Status {
+	case codersdk.ProvisionerJobSucceeded:
+		return version, nil, nil
+	case codersdk.ProvisionerJobPending, codersdk.ProvisionerJobRunning:
+		return version, templateTestWait("TemplateVersionImporting", "Version %s is still importing.", version.Name), nil
+	default:
+		return version, templateTestFail("TemplateVersionImportFailed", "The import of version %s ended %s.", version.Name, version.Job.Status), nil
+	}
 }
 
 func applyTemplateTestStep(tt *coderv1alpha1.CoderTemplateTest, now time.Time, step *templateTestStep) {
@@ -282,6 +444,16 @@ func templateTestWorkspaceName(uid types.UID) (string, error) {
 		return "", fmt.Errorf("assertion failed: object UID %q needs at least %d lowercase hex characters", uid, templateTestUIDHexLength)
 	}
 	return templateTestWorkspacePrefix + hex[:templateTestUIDHexLength], nil
+}
+
+// coderAnswerFor is the rule for every Coder answer the reconciler trusts:
+// the answer names the ID or name that the controller asked for. Anything else
+// means Coder, a proxy, or the SDK is broken, so it is an assertion failure.
+func coderAnswerFor(kind, asked, answered string) error {
+	if asked == answered {
+		return nil
+	}
+	return fmt.Errorf("assertion failed: Coder answered %s %q when asked for %q", kind, answered, asked)
 }
 
 func templateTestDeadlineExceeded(tt *coderv1alpha1.CoderTemplateTest, lastReason, lastMessage string) *templateTestStep {

@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	clocktesting "k8s.io/utils/clock/testing"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -22,12 +23,17 @@ import (
 )
 
 // templateTestEnv is one namespace with a control plane that talks to a fake
-// Coder. The control plane's test owner is the fake user "tester".
+// Coder. The fake holds organization "default" with template "docker" and its
+// imported version "v1". The control plane's test owner is the fake user
+// "tester", a plain member of "default".
 type templateTestEnv struct {
 	ctx      context.Context
 	fake     *fakeCoder
 	clock    *clocktesting.FakePassiveClock
 	ns       string
+	orgID    uuid.UUID
+	tplID    uuid.UUID
+	v1       uuid.UUID
 	tester   uuid.UUID
 	lastStep ctrl.Result
 }
@@ -38,7 +44,11 @@ func newTemplateTestEnv(t *testing.T) *templateTestEnv {
 	// Status times have second precision, so the fake clock starts on a second.
 	e := &templateTestEnv{ctx: ctx, fake: newFakeCoder(t), clock: clocktesting.NewFakePassiveClock(time.Now().Truncate(time.Second))}
 	e.ns = createTestNamespace(ctx, t, "ktt-ctrl")
+	e.orgID = e.fake.addOrganization("default")
+	e.tplID = e.fake.addTemplate(e.orgID, "docker")
+	e.v1 = e.fake.addVersion(e.tplID, "v1", codersdk.ProvisionerJobSucceeded)
 	e.tester = e.fake.addUser("tester", codersdk.LoginTypePassword)
+	e.fake.addMember(e.orgID, e.tester)
 	createTestControlPlane(ctx, t, e.ns, "coder", e.fake.server.URL)
 	e.setOwner(t, "coder", e.tester.String())
 	return e
@@ -166,6 +176,257 @@ func TestTemplateTestWaitsForControlPlaneAndOwner(t *testing.T) {
 	require.Nil(t, e.reconcile(t, key, 1), "deleting a test that never created a workspace releases it at once")
 }
 
+func TestTemplateTestWaitsForTemplateVersion(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	key := e.createTest(t, "later.docker", coderv1alpha1.CoderTemplateTestVersion{Name: "v1"})
+	requireStep := func(reason, messagePart string) *coderv1alpha1.CoderTemplateTest {
+		t.Helper()
+		tt := e.settle(t, key)
+		requireTemplateTestWaiting(t, tt, reason, messagePart)
+		return tt
+	}
+
+	requireStep("TemplateNotFound", `organization "later"`)
+	orgID := e.fake.addOrganization("later")
+	requireStep("OwnerNotEligible", `not a member of organization "later"`)
+	e.fake.addMember(orgID, e.tester)
+	requireStep("TemplateNotFound", `template "later.docker"`)
+	tplID := e.fake.addTemplate(orgID, "docker")
+	requireStep("TemplateVersionNotFound", "does not exist")
+	v1 := e.fake.addVersion(tplID, "v1", codersdk.ProvisionerJobRunning)
+	tt := requireStep("TemplateVersionImporting", "still importing")
+	require.Empty(t, tt.Status.TemplateVersionID, "nothing is pinned before the version is usable")
+	e.fake.setVersionJob(v1, codersdk.ProvisionerJobSucceeded)
+	tt = requireStep("ReadyToCreate", "Inputs are resolved")
+
+	require.Equal(t, orgID.String(), tt.Status.OrganizationID)
+	require.Equal(t, tplID.String(), tt.Status.TemplateID)
+	require.Equal(t, v1.String(), tt.Status.TemplateVersionID)
+	require.Equal(t, "v1", tt.Status.TemplateVersionName)
+	require.Equal(t, e.tester.String(), tt.Status.OwnerID)
+	require.Regexp(t, `^ktt-[0-9a-f]{28}$`, tt.Status.WorkspaceName)
+	require.Zero(t, e.fake.requestCount(routeCreateWorkspace))
+}
+
+func TestTemplateTestOwnerEligibility(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		setup   func(e *templateTestEnv) uuid.UUID
+		refusal string // Empty: the owner is eligible.
+	}{
+		{name: "extra site role", refusal: `site role "template-admin"`, setup: func(e *templateTestEnv) uuid.UUID {
+			u := e.fake.addUser("t", codersdk.LoginTypePassword, codersdk.RoleTemplateAdmin)
+			e.fake.addMember(e.orgID, u)
+			return u
+		}},
+		{name: "admin role in the template organization", refusal: `role "organization-admin"`, setup: func(e *templateTestEnv) uuid.UUID {
+			u := e.fake.addUser("t", codersdk.LoginTypePassword)
+			e.fake.addMember(e.orgID, u, codersdk.RoleOrganizationAdmin)
+			return u
+		}},
+		{name: "admin role in another organization", refusal: `role "organization-template-admin"`, setup: func(e *templateTestEnv) uuid.UUID {
+			u := e.fake.addUser("t", codersdk.LoginTypePassword)
+			e.fake.addMember(e.orgID, u)
+			e.fake.addMember(e.fake.addOrganization("other"), u, codersdk.RoleOrganizationTemplateAdmin)
+			return u
+		}},
+		{name: "admin role as a default member role of another organization", refusal: `default member role "organization-template-admin"`, setup: func(e *templateTestEnv) uuid.UUID {
+			other := e.fake.addOrganization("other")
+			e.fake.setDefaultMemberRoles(other, codersdk.RoleOrganizationWorkspaceAccess, codersdk.RoleOrganizationTemplateAdmin)
+			e.fake.addMember(other, e.tester)
+			return e.tester
+		}},
+		{name: "unknown organization role", refusal: `role "custom-builder"`, setup: func(e *templateTestEnv) uuid.UUID {
+			u := e.fake.addUser("t", codersdk.LoginTypePassword)
+			e.fake.addMember(e.orgID, u, "custom-builder")
+			return u
+		}},
+		{name: "unknown user status", refusal: `status "disabled"`, setup: func(e *templateTestEnv) uuid.UUID {
+			e.fake.updateUser(e.tester, func(u *codersdk.User) { u.Status = "disabled" })
+			return e.tester
+		}},
+		{name: "suspended user", refusal: `status "suspended"`, setup: func(e *templateTestEnv) uuid.UUID {
+			e.fake.updateUser(e.tester, func(u *codersdk.User) { u.Status = codersdk.UserStatusSuspended })
+			return e.tester
+		}},
+		{name: "OIDC login", refusal: `login type "oidc"`, setup: func(e *templateTestEnv) uuid.UUID {
+			u := e.fake.addUser("t", codersdk.LoginTypeOIDC)
+			e.fake.addMember(e.orgID, u)
+			return u
+		}},
+		{name: "not a member", refusal: `not a member of organization "default"`, setup: func(e *templateTestEnv) uuid.UUID {
+			return e.fake.addUser("t", codersdk.LoginTypePassword)
+		}},
+		{name: "allowed roles of a dormant user", setup: func(e *templateTestEnv) uuid.UUID {
+			u := e.fake.addUser("t", codersdk.LoginTypePassword, codersdk.RoleMember)
+			e.fake.updateUser(u, func(u *codersdk.User) { u.Status = codersdk.UserStatusDormant })
+			e.fake.addMember(e.orgID, u, codersdk.RoleOrganizationMember, codersdk.RoleOrganizationWorkspaceAccess)
+			return u
+		}},
+		{name: "service account", setup: func(e *templateTestEnv) uuid.UUID {
+			u := e.fake.addUser("t", codersdk.LoginTypeNone) //nolint:staticcheck // The controller still accepts it for older headless users.
+			e.fake.updateUser(u, func(u *codersdk.User) { u.IsServiceAccount = true })
+			e.fake.addMember(e.orgID, u)
+			return u
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newTemplateTestEnv(t)
+			e.setOwner(t, "coder", tc.setup(e).String())
+			tt := e.settle(t, e.createTest(t, "default.docker", coderv1alpha1.CoderTemplateTestVersion{Name: "v1"}))
+			if tc.refusal == "" {
+				requireTemplateTestWaiting(t, tt, "ReadyToCreate", "")
+				return
+			}
+			requireTemplateTestWaiting(t, tt, "OwnerNotEligible", tc.refusal)
+			require.Empty(t, tt.Status.OwnerID)
+		})
+	}
+}
+
+func TestTemplateTestPinsActiveVersion(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	// Coder v2.37.2 matches organization and template names case-insensitively.
+	key := e.createTest(t, "Default.Docker", coderv1alpha1.CoderTemplateTestVersion{Active: ptr.To(true)})
+	tt := e.settle(t, key)
+	requireTemplateTestWaiting(t, tt, "ReadyToCreate", "")
+	require.Equal(t, e.v1.String(), tt.Status.TemplateVersionID)
+
+	e.fake.promoteVersion(e.fake.addVersion(e.tplID, "v2", codersdk.ProvisionerJobSucceeded))
+	tt = e.settle(t, key)
+	require.Equal(t, e.v1.String(), tt.Status.TemplateVersionID, "a promotion after pinning does not change the version under test")
+	require.Equal(t, "v1", tt.Status.TemplateVersionName)
+
+	e.fake.archiveVersion(e.v1)
+	requireTemplateTestFailed(t, e.settle(t, key), "TemplateVersionArchived")
+}
+
+func TestTemplateTestVersionFailures(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	otherTemplate := e.fake.addTemplate(e.orgID, "other")
+	cases := map[string]coderv1alpha1.CoderTemplateTestVersion{
+		"TemplateVersionMismatch":     {ID: e.fake.addVersion(otherTemplate, "v1", codersdk.ProvisionerJobSucceeded).String()},
+		"TemplateVersionImportFailed": {Name: "broken"},
+		"TemplateVersionArchived":     {Name: "old"},
+	}
+	e.fake.addVersion(e.tplID, "broken", codersdk.ProvisionerJobFailed)
+	e.fake.archiveVersion(e.fake.addVersion(e.tplID, "old", codersdk.ProvisionerJobSucceeded))
+	for reason, version := range cases {
+		requireTemplateTestFailed(t, e.settle(t, e.createTest(t, "default.docker", version)), reason)
+	}
+
+	// Coder v2.37.2 refuses new workspaces for a deprecated template
+	// (coderd/workspaces.go:958).
+	legacy := e.fake.addTemplate(e.orgID, "legacy")
+	e.fake.addVersion(legacy, "v1", codersdk.ProvisionerJobSucceeded)
+	e.fake.deprecateTemplate(legacy)
+	tt := e.settle(t, e.createTest(t, "default.legacy", coderv1alpha1.CoderTemplateTestVersion{Name: "v1"}))
+	requireTemplateTestFailed(t, tt, "TemplateDeprecated")
+	require.NotContains(t, tt.Status.Message, "Use the new template", "the deprecation message is Coder detail")
+}
+
+// TestTemplateTestRejectsWrongCoderAnswers checks the rule for every Coder
+// answer the reconciler trusts: it names what the controller asked for.
+func TestTemplateTestRejectsWrongCoderAnswers(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	pass := fakeFault{Rewrite: func(a any) any { return a }}
+	cases := []struct {
+		name    string
+		version coderv1alpha1.CoderTemplateTestVersion
+		route   string
+		faults  []fakeFault // The last one rewrites the answer.
+		want    string
+	}{
+		{name: "user", route: routeUser, want: "user", faults: []fakeFault{{Rewrite: func(a any) any {
+			u := a.(codersdk.User)
+			u.ID = uuid.New()
+			return u
+		}}}},
+		{name: "organization by ID", route: routeOrganization, want: "organization", faults: []fakeFault{{Rewrite: func(a any) any {
+			o := a.(codersdk.Organization)
+			o.ID = uuid.New()
+			return o
+		}}}},
+		{name: "member user", route: routeOrgMember, want: "member user", faults: []fakeFault{{Rewrite: func(a any) any {
+			m := a.(codersdk.OrganizationMemberWithUserData)
+			m.UserID = uuid.New()
+			return m
+		}}}},
+		{name: "member organization", route: routeOrgMember, want: "member organization", faults: []fakeFault{{Rewrite: func(a any) any {
+			m := a.(codersdk.OrganizationMemberWithUserData)
+			m.OrganizationID = uuid.New()
+			return m
+		}}}},
+		{name: "organization by name", route: routeOrganization, want: "organization", faults: []fakeFault{pass, {Rewrite: func(a any) any {
+			o := a.(codersdk.Organization)
+			o.Name = "other"
+			return o
+		}}}},
+		{name: "template", route: routeTemplateByName, want: "template", faults: []fakeFault{{Rewrite: func(a any) any {
+			tpl := a.(codersdk.Template)
+			tpl.Name = "other"
+			return tpl
+		}}}},
+		{name: "template organization", route: routeTemplateByName, want: "template organization", faults: []fakeFault{{Rewrite: func(a any) any {
+			tpl := a.(codersdk.Template)
+			tpl.OrganizationID = uuid.New()
+			return tpl
+		}}}},
+		{name: "version by name", route: routeVersionByName, want: "version", faults: []fakeFault{{Rewrite: func(a any) any {
+			v := a.(codersdk.TemplateVersion)
+			v.Name = "v2"
+			return v
+		}}}},
+		{name: "version by ID", version: coderv1alpha1.CoderTemplateTestVersion{ID: e.v1.String()}, route: routeVersion, want: "version", faults: []fakeFault{{Rewrite: func(a any) any {
+			v := a.(codersdk.TemplateVersion)
+			v.ID = uuid.New()
+			return v
+		}}}},
+		{name: "active version", version: coderv1alpha1.CoderTemplateTestVersion{Active: ptr.To(true)}, route: routeVersion, want: "version", faults: []fakeFault{{Rewrite: func(a any) any {
+			v := a.(codersdk.TemplateVersion)
+			v.ID = uuid.New()
+			return v
+		}}}},
+	}
+	for _, tc := range cases {
+		version := tc.version
+		if version == (coderv1alpha1.CoderTemplateTestVersion{}) {
+			version.Name = "v1"
+		}
+		key := e.createTest(t, "default.docker", version)
+		for _, fault := range tc.faults {
+			e.fake.failNext(tc.route, fault)
+		}
+		var err error
+		for range 3 { // Finalizer, initialization, lookups.
+			r := &controller.CoderTemplateTestReconciler{Client: k8sClient, Scheme: scheme, Clock: e.clock}
+			if _, err = r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key}); err != nil {
+				break
+			}
+		}
+		require.ErrorContains(t, err, "assertion failed: Coder answered "+tc.want+" ", tc.name)
+	}
+
+	// A pinned version is read by ID, and the answer must name that ID.
+	key := e.createTest(t, "default.docker", coderv1alpha1.CoderTemplateTestVersion{Active: ptr.To(true)})
+	requireTemplateTestWaiting(t, e.settle(t, key), "ReadyToCreate", "")
+	e.fake.failNext(routeVersion, fakeFault{Rewrite: func(a any) any {
+		v := a.(codersdk.TemplateVersion)
+		v.ID = uuid.New()
+		return v
+	}})
+	r := &controller.CoderTemplateTestReconciler{Client: k8sClient, Scheme: scheme, Clock: e.clock}
+	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+	require.ErrorContains(t, err, "assertion failed: Coder answered version ", "pinned version")
+}
+
 func TestTemplateTestDeadlineWhilePending(t *testing.T) {
 	t.Parallel()
 	e := newTemplateTestEnv(t)
@@ -215,4 +476,24 @@ func TestTemplateTestDeadlineAfterSlowLookup(t *testing.T) {
 	tt = e.settle(t, key)
 	requireTemplateTestFailed(t, tt, "DeadlineExceeded")
 	require.Contains(t, tt.Status.Message, "Last wait: ReadyToCreate")
+}
+
+func TestTemplateTestNameConflict(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	key := e.createTest(t, "default.docker", coderv1alpha1.CoderTemplateTestVersion{Name: "v1"})
+	tt := e.settle(t, key)
+	requireTemplateTestWaiting(t, tt, "ReadyToCreate", "")
+
+	// Someone else takes the test's workspace name before the create step.
+	sdk := e.fake.client(t, 5*time.Second)
+	foreign, err := sdk.CreateUserWorkspace(e.ctx, e.tester.String(), codersdk.CreateWorkspaceRequest{TemplateVersionID: e.v1, Name: tt.Status.WorkspaceName})
+	require.NoError(t, err)
+
+	requireTemplateTestFailed(t, e.settle(t, key), "WorkspaceNameConflict")
+	require.Equal(t, 1, e.fake.requestCount(routeCreateWorkspace), "only the foreign create request")
+	require.Zero(t, e.fake.requestCount(routeCreateBuild)+e.fake.requestCount(routeCancelBuild), "the controller never touches the foreign workspace")
+	got, err := sdk.Workspace(e.ctx, foreign.ID)
+	require.NoError(t, err)
+	require.Equal(t, foreign.LatestBuild.ID, got.LatestBuild.ID)
 }

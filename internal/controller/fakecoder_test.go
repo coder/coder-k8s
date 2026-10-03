@@ -46,6 +46,9 @@ type fakeFault struct {
 	AfterCommit bool // Apply the route's state change before the fault fires.
 	Hang        bool // Block until the client gives up (its own timeout).
 	Reset       bool // Close the TCP connection without an answer.
+	// Rewrite changes a successful answer, to model Coder answering for
+	// something other than what was asked.
+	Rewrite func(answer any) any
 }
 
 type fakeWorkspace struct {
@@ -151,8 +154,11 @@ func (f *fakeCoder) route(mux *http.ServeMux, pattern, route string, h func(*htt
 			fault, f.faults[route] = &queue[0], queue[1:]
 		}
 		status, resp := 0, any(nil)
-		if fault == nil || fault.AfterCommit {
+		if fault == nil || fault.AfterCommit || fault.Rewrite != nil {
 			status, resp = h(r)
+		}
+		if fault != nil && fault.Rewrite != nil {
+			resp, fault = fault.Rewrite(resp), nil
 		}
 		f.mu.Unlock()
 
@@ -228,6 +234,7 @@ func (f *fakeCoder) addOrganization(name string) uuid.UUID {
 	defer f.mu.Unlock()
 	o := codersdk.Organization{}
 	o.ID, o.Name = uuid.New(), name
+	o.DefaultOrgMemberRoles = []string{codersdk.RoleOrganizationWorkspaceAccess} // The v2.37.2 default.
 	f.orgs[o.ID] = o
 	f.orgRoles[o.ID] = map[uuid.UUID][]codersdk.SlimRole{}
 	return o.ID
@@ -285,6 +292,58 @@ func (f *fakeCoder) archiveVersion(versionID uuid.UUID) {
 	require.True(f.t, ok, "assertion failed: unknown version %s", versionID)
 	v.Archived = true
 	f.versions[versionID] = v
+}
+
+// updateUser edits a user, for example to suspend it.
+func (f *fakeCoder) updateUser(userID uuid.UUID, edit func(*codersdk.User)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.users[userID]
+	require.True(f.t, ok, "assertion failed: unknown user %s", userID)
+	edit(&u)
+	f.users[userID] = u
+}
+
+// setDefaultMemberRoles sets the roles Coder grants every member of an
+// organization.
+func (f *fakeCoder) setDefaultMemberRoles(orgID uuid.UUID, roles ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	o, ok := f.orgs[orgID]
+	require.True(f.t, ok, "assertion failed: unknown organization %s", orgID)
+	o.DefaultOrgMemberRoles = roles
+	f.orgs[orgID] = o
+}
+
+// deprecateTemplate marks a template deprecated, which blocks new workspaces.
+func (f *fakeCoder) deprecateTemplate(templateID uuid.UUID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	tpl, ok := f.templates[templateID]
+	require.True(f.t, ok, "assertion failed: unknown template %s", templateID)
+	tpl.Deprecated, tpl.DeprecationMessage = true, "Use the new template."
+	f.templates[templateID] = tpl
+}
+
+// setVersionJob moves a version's import job to status.
+func (f *fakeCoder) setVersionJob(versionID uuid.UUID, status codersdk.ProvisionerJobStatus) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.versions[versionID]
+	require.True(f.t, ok, "assertion failed: unknown version %s", versionID)
+	v.Job.Status = status
+	f.versions[versionID] = v
+}
+
+// promoteVersion makes a version the active version of its template.
+func (f *fakeCoder) promoteVersion(versionID uuid.UUID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.versions[versionID]
+	require.True(f.t, ok, "assertion failed: unknown version %s", versionID)
+	tpl := f.templates[*v.TemplateID]
+	tpl.ActiveVersionID = versionID
+	f.templates[tpl.ID] = tpl
 }
 
 // setBuildJob moves a build's job to status. A succeeded delete build deletes
@@ -349,8 +408,10 @@ func (f *fakeCoder) userByIdent(ident string) (codersdk.User, bool) {
 	return findIn(f.users, func(u codersdk.User) bool { return u.ID.String() == ident || strings.EqualFold(u.Username, ident) })
 }
 
+// orgByIdent matches names case-insensitively, like Coder v2.37.2
+// (GetOrganizationByName compares LOWER(name)).
 func (f *fakeCoder) orgByIdent(ident string) (codersdk.Organization, bool) {
-	return findIn(f.orgs, func(o codersdk.Organization) bool { return o.ID.String() == ident || o.Name == ident })
+	return findIn(f.orgs, func(o codersdk.Organization) bool { return o.ID.String() == ident || strings.EqualFold(o.Name, ident) })
 }
 
 func (f *fakeCoder) findBuild(buildID uuid.UUID) (*fakeWorkspace, *codersdk.WorkspaceBuild) {
