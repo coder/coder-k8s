@@ -96,9 +96,10 @@ func (r *CoderTemplateTestReconciler) cleanupStep(ctx context.Context, tt *coder
 	if policy != "" && policy != "delete" && policy != "retain" {
 		note = fmt.Sprintf(" The controller ignores %s value %q.", templateTestDeletionPolicyAnnotation, policy)
 	}
-	now := r.Clock.Now()
+	// Read the clock when the condition changes: the Coder calls below can
+	// take up to their timeout, and the TTL counts from this time.
 	set := func(status metav1.ConditionStatus, reason, message string) {
-		setTemplateTestCondition(tt, now, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted, status, reason, message+note)
+		setTemplateTestCondition(tt, r.Clock.Now(), coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted, status, reason, message+note)
 	}
 	name := tt.Status.WorkspaceName
 	switch {
@@ -107,7 +108,7 @@ func (r *CoderTemplateTestReconciler) cleanupStep(ctx context.Context, tt *coder
 		set(metav1.ConditionFalse, "Retained", fmt.Sprintf("%s is retain: the controller leaves workspace %s in Coder.", templateTestDeletionPolicyAnnotation, name))
 		return 0, nil
 	case !templateTestMayHaveWorkspace(tt):
-		markTemplateTestNotCreated(tt, now)
+		markTemplateTestNotCreated(tt, r.Clock.Now())
 		return 0, nil
 	}
 	if gone, err := r.controlPlaneGone(ctx, tt); err != nil || gone {

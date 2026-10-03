@@ -54,9 +54,9 @@ func TestTemplateTestRestartReplay(t *testing.T) {
 	require.Zero(t, e.fake.requestCount(routeCancelBuild))
 }
 
-func TestTemplateTestTTLAfterFinished(t *testing.T) {
-	t.Parallel()
-	e := newTemplateTestEnv(t)
+// createTTLTest creates a test with a 60 s TTL after it finishes.
+func (e *templateTestEnv) createTTLTest(t *testing.T) types.NamespacedName {
+	t.Helper()
 	ttl := int32(60)
 	tt := &coderv1alpha1.CoderTemplateTest{
 		ObjectMeta: metav1.ObjectMeta{GenerateName: "test-", Namespace: e.ns},
@@ -66,7 +66,34 @@ func TestTemplateTestTTLAfterFinished(t *testing.T) {
 		},
 	}
 	require.NoError(t, k8sClient.Create(e.ctx, tt))
-	key := types.NamespacedName{Namespace: tt.Namespace, Name: tt.Name}
+	return types.NamespacedName{Namespace: tt.Namespace, Name: tt.Name}
+}
+
+// TestTemplateTestTTLCountsFromCleanupDelete checks that a slow Coder read in
+// cleanup does not shorten the TTL: the deletion time is read after the call.
+func TestTemplateTestTTLCountsFromCleanupDelete(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	key := e.createTTLTest(t)
+	tt := e.reconcile(t, key, 3)
+	requireTemplateTestRunning(t, tt, "WaitingForBuild", "was created")
+	e.fake.setBuildJob(uuid.MustParse(tt.Status.StartBuildID), codersdk.ProvisionerJobFailed)
+	tt = e.settle(t, key)
+	requireTemplateTestFailedWith(t, tt, "BuildFailed", metav1.ConditionFalse, "Deleting")
+
+	e.fake.setBuildJob(uuid.MustParse(tt.Status.DeleteBuildID), codersdk.ProvisionerJobSucceeded)
+	e.fake.failNext(routeWorkspace, fakeFault{Rewrite: func(a any) any {
+		e.clock.SetTime(e.clock.Now().Add(30 * time.Second)) // The read takes 30 s.
+		return a
+	}})
+	requireDeleted(t, e.reconcile(t, key, 1), metav1.ConditionTrue, "Deleted")
+	require.Equal(t, 60*time.Second, e.lastStep.RequeueAfter, "the full TTL after the deletion")
+}
+
+func TestTemplateTestTTLAfterFinished(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	key := e.createTTLTest(t)
 	finished := e.passTest(t, key)
 	require.Equal(t, 60*time.Second, e.lastStep.RequeueAfter, "the controller comes back for the TTL")
 
