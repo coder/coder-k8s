@@ -57,6 +57,7 @@ cleanup() {
     "tester=${TESTER_NAME:-unset}/${TESTER_ID:-unset}" "agent_ready_seconds=${AGENT_READY_SECONDS:-unset}" \
     "template_test_seconds=${TT_SECONDS[*]:-unset}" "tester_api_keys_before=${KEYS_BEFORE:-unset}" \
     "tester_api_keys_after=${KEYS_AFTER:-unset}" "namespace_delete_seconds=${NS_DELETE_SECONDS:-unset}" \
+    "phase_seconds=${PHASES[*]:-unset}" \
     "${CASES[@]}" | tee "$WORK/receipt.txt"
 }
 trap cleanup EXIT
@@ -430,12 +431,13 @@ db_count() {
   pod=$(k -n "$NS" get cluster coder-db -o json | jq -er '.status.currentPrimary') || return 1
   k -n "$NS" exec "$pod" -c postgres -- psql -d coder -XtAc "SELECT count(*) FROM $1 WHERE $2 = '$3'" | grep -Ex '[0-9]+'
 }
-tt_create() { # <name> [startup_delay]: a CoderTemplateTest of the agent template's active version
-  jq -n --arg n "$1" --arg ns "$NS" --arg t "$ORG.$AGENT_TEMPLATE" --arg d "${2:-}" '{apiVersion: "coder.com/v1alpha1",
+tt_create() { # <name> [parameters JSON] [spec JSON] [create flags]: a test of the agent template's active version
+  jq -n --arg n "$1" --arg ns "$NS" --arg t "$ORG.$AGENT_TEMPLATE" --argjson p "${2:-[]}" --argjson x "${3:-"{}"}" '{apiVersion: "coder.com/v1alpha1",
     kind: "CoderTemplateTest", metadata: {name: $n, namespace: $ns}, spec: ({controlPlaneRef: {name: "coder"}, template: $t,
-    version: {active: true}} + if $d == "" then {} else {parameters: [{name: "startup_delay", value: $d}]} end)}' >"$WORK/tt-$1.json" &&
-    k create -f "$WORK/tt-$1.json" >/dev/null
+    version: {active: true}} + (if $p == [] then {} else {parameters: $p} end) + $x)}' >"$WORK/tt-$1.json" &&
+    k create "${@:4}" -f "$WORK/tt-$1.json" -o json >"$WORK/tt-$1.created.json"
 }
+param() { jq -nc --arg n "$1" --arg v "$2" '[{name: $n, value: $v}]'; } # <name> <value>: a parameters JSON list
 TT_SEEN="" TT_S=""
 tt_state() { # <name>: reads the test into $WORK/tt-<name>.state.json; sets TT_S to "phase reason deleted=status/reason"
   k -n "$NS" get codertemplatetest "$1" -o json >"$WORK/tt-$1.state.json" 2>"$WORK/tt.err" || return 1
@@ -476,13 +478,92 @@ ROWS=$(db_count workspaces name "$TT_WS") || fail "cannot count the workspaces r
 [[ $(k -n "$NS" get deploy coder -o json | jq -r '.metadata.generation') == "$CP_GEN" ]] ||
   fail "setting templateTests.ownerUserID rolled deploy/coder (generation was $CP_GEN)" # plan risk R5
 
+PHASES=()
+phase() { PHASES+=("$1=$((SECONDS - T0))s"); } # <label>: records the duration since T0 for the receipt
+tt_final() { # <name> <phase> <reason> <WorkspaceDeleted reason>: true once the test ends so; another final state fails
+  tt_state "$1" || return 1
+  [[ $TT_S == "$2 $3 deleted=True/$4" ]] && return 0
+  [[ $TT_S != Succeeded* && $TT_S != Failed* || $TT_S == "$2 $3 "* ]] ||
+    fail "template test $1 ended $TT_S, want $2 $3 deleted=True/$4: $(jq -r '.status.message' "$WORK/tt-$1.state.json")"
+  return 1
+}
+tt_gone() { ! k -n "$NS" get codertemplatetest "$1" -o name >/dev/null 2>"$WORK/tt.err" && grep -q NotFound "$WORK/tt.err"; }
+ws_rows() { # <test name> <want>: the workspaces rows (deleted included) named by the test's status.workspaceName
+  local ws n
+  ws=$(jq -er '.status.workspaceName' "$WORK/tt-$1.state.json") || fail "template test $1 has no workspaceName"
+  n=$(db_count workspaces name "$ws") || fail "cannot count the workspaces rows named $ws"
+  [[ $n == "$2" ]] || fail "template test $1: expected $2 workspaces rows named $ws (deleted rows included), found $n"
+}
+wait_waiting() { tt_state "$1" && [[ $TT_S == "Running WaitingForAgents "* ]]; }
+
+step "CoderTemplateTest agent failure: fail=true ends Failed/AgentStartError and deletes its workspace"
+T0=$SECONDS
+tt_create e2e-agent-fail "$(param fail true)" || fail "cannot create template test e2e-agent-fail"
+TIMEOUT=$TT_TIMEOUT wait_until "template test e2e-agent-fail to end AgentStartError" tt_final e2e-agent-fail Failed AgentStartError Deleted
+ws_rows e2e-agent-fail 1 && phase agent-failure
+
+step "CoderTemplateTest bad parameter: fail=notabool ends Failed/CreateRejected without a workspace"
+T0=$SECONDS
+tt_create e2e-bad-param "$(param fail notabool)" || fail "cannot create template test e2e-bad-param"
+TIMEOUT=$TT_TIMEOUT wait_until "template test e2e-bad-param to end CreateRejected" tt_final e2e-bad-param Failed CreateRejected NotCreated
+ws_rows e2e-bad-param 0 && phase bad-parameter
+
+step "CoderTemplateTest restart: the operator pod is deleted at WaitingForAgents and the test still succeeds"
+T0=$SECONDS
+tt_create e2e-restart "$(param startup_delay 60)" || fail "cannot create template test e2e-restart"
+wait_until "template test e2e-restart at Running/WaitingForAgents" wait_waiting e2e-restart
+k -n "$OP_NS" delete pod "$POD_NAME" --wait=false >/dev/null || fail "cannot delete operator pod $POD_NAME"
+wait_until "a new Ready operator pod" serving_pod
+TIMEOUT=$TT_TIMEOUT wait_until "template test e2e-restart to succeed after the restart" tt_passed e2e-restart
+ws_rows e2e-restart 1 && phase restart
+
+step "CoderTemplateTest delete mid-run: deleting the test at WaitingForAgents deletes its workspace"
+T0=$SECONDS
+tt_create e2e-midrun "$(param startup_delay 60)" || fail "cannot create template test e2e-midrun"
+wait_until "template test e2e-midrun at Running/WaitingForAgents" wait_waiting e2e-midrun
+MIDRUN_WS=$(jq -er '.status.workspaceID' "$WORK/tt-e2e-midrun.state.json") || fail "template test e2e-midrun has no workspaceID"
+k -n "$NS" delete codertemplatetest e2e-midrun --wait=false >/dev/null || fail "cannot delete template test e2e-midrun"
+TIMEOUT=$TT_TIMEOUT wait_until "template test e2e-midrun to disappear" tt_gone e2e-midrun
+wait_until "delete job of $MIDRUN_WS to succeed" delete_succeeded "$MIDRUN_WS"
+ws_rows e2e-midrun 1 && phase delete-mid-run
+
+step "CoderTemplateTest immutability and dry run: a spec patch is refused; a server dry run creates nothing"
+T0=$SECONDS
+if k -n "$NS" patch codertemplatetest e2e-agent-fail --type=merge -p '{"spec":{"timeoutSeconds":901}}' >/dev/null 2>"$WORK/patch.err"; then
+  fail "a patch of spec.timeoutSeconds succeeded"
+fi
+grep -qF "spec is immutable" "$WORK/patch.err" || fail "spec patch refused without 'spec is immutable': $(head -c 300 "$WORK/patch.err")"
+tt_create e2e-dry-run "[]" "{}" --dry-run=server || fail "server dry run of template test e2e-dry-run failed"
+# The workspace name the object would get: ktt- and the first 28 hex characters of its UID.
+DRY_UID=$(jq -er '.metadata.uid' "$WORK/tt-e2e-dry-run.created.json") || fail "the dry run answered without a UID"
+DRY_WS=ktt-$(tr -d - <<<"$DRY_UID" | cut -c1-28)
+tt_gone e2e-dry-run || fail "the server dry run created template test e2e-dry-run"
+phase immutability-and-dry-run
+
+step "CoderTemplateTest TTL: ttlSecondsAfterFinished=0 removes a passed test"
+T0=$SECONDS
+TTL_URL="/apis/coder.com/v1alpha1/namespaces/$NS/codertemplatetests?watch=1&fieldSelector=metadata.name%3De2e-ttl&timeoutSeconds=$((TT_TIMEOUT + 30))"
+kubectl get --raw "$TTL_URL" -v=6 >"$WORK/ttl-watch.out" 2>"$WORK/ttl-watch.err" &
+BG_PIDS+=("$!")
+ttl_watching() { grep 'watch=1' "$WORK/ttl-watch.err" | grep -q '200 OK'; }
+wait_until "watch of template test e2e-ttl" ttl_watching
+tt_create e2e-ttl "[]" '{"ttlSecondsAfterFinished":0}' || fail "cannot create template test e2e-ttl"
+TIMEOUT=$TT_TIMEOUT wait_until "template test e2e-ttl to be removed" tt_gone e2e-ttl
+ttl_seen() { jq -e -R 'fromjson? | select(.type == $t)' --arg t "$1" "$WORK/ttl-watch.out" >/dev/null; }
+wait_until "the DELETED event of template test e2e-ttl" ttl_seen DELETED
+jq -e -R 'fromjson? | select(.type == "MODIFIED" and .object.status.phase == "Succeeded" and (.object.status.conditions |
+  any(.type == "WorkspaceDeleted" and .status == "True")))' "$WORK/ttl-watch.out" >/dev/null || fail "template test e2e-ttl was removed before it passed"
+DRY_ROWS=$(db_count workspaces name "$DRY_WS") || fail "cannot count the workspaces rows named $DRY_WS"
+[[ $DRY_ROWS == 0 ]] || fail "the server dry run created workspace $DRY_WS"
+phase ttl
+
 step "tester API keys after the template tests (plan A4: recorded, not enforced)"
 KEYS_AFTER=$(db_count api_keys user_id "$TESTER_ID") || fail "cannot count the api_keys rows of the tester after the tests"
 log "tester api_keys: before=$KEYS_BEFORE after=$KEYS_AFTER delta=$((KEYS_AFTER - KEYS_BEFORE))"
 
 # Last: it scales Coder to zero and deletes namespace $NS. Later CI steps must not need either.
 step "namespace deletion releases a running test while Coder is unreachable (plan A1, A13.2)"
-tt_create e2e-ns-delete 120 || fail "cannot create template test e2e-ns-delete"
+tt_create e2e-ns-delete "$(param startup_delay 120)" || fail "cannot create template test e2e-ns-delete"
 tt_waiting() { tt_state e2e-ns-delete && [[ $TT_S == "Running WaitingForAgents "* ]]; }
 wait_until "template test e2e-ns-delete at Running/WaitingForAgents" tt_waiting
 # spec.replicas is the operator's desired state for deploy/coder: the operator keeps it at zero instead of undoing it.

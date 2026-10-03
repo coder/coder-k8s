@@ -52,7 +52,7 @@ side_effect() { # stale-side-effect-* scenarios: a rejected stale DELETE still c
 }
 tt_json() { # <phase> <reason> [conditions]: a CoderTemplateTest object for the TemplateTest phases
   jq -n --arg n "${pos[2]}" --arg p "$1" --arg r "$2" --argjson c "${3:-[]}" \
-    '{metadata: {name: $n}, status: {phase: $p, reason: $r, message: "stub", workspaceName: ("ktt-" + $n), conditions: $c}}'
+    '{metadata: {name: $n}, status: {phase: $p, reason: $r, message: "stub", workspaceName: ("ktt-" + $n), workspaceID: ("ttws-" + $n), conditions: $c}}'
 }
 case "${pos[0]}:${pos[1]:-}" in
   get:pods) cat "$S/pods.json" ;;
@@ -71,6 +71,8 @@ case "${pos[0]}:${pos[1]:-}" in
         n=$(($(cat "$S/key-reads" 2>/dev/null || echo 0) + 1)) && echo "$n" >"$S/key-reads"
         [[ $SCENARIO != keys-count-fails || $n != 1 ]] && [[ $SCENARIO != keys-after-fails || $n != 2 ]] || err InternalError "psql failed"
         [[ $n == 1 ]] && echo 2 || echo 5 ;;
+      *"FROM workspaces"*"ktt-e2e-bad-param"*) [[ $SCENARIO == badparam-created ]] && echo 1 || echo 0 ;;
+      *"FROM workspaces"*"ktt-d0d0"*) echo 0 ;;
       *"FROM workspaces"*) [[ $SCENARIO == ws-rows-2 ]] && echo 2 || echo 1 ;;
       *) echo "stub kubectl: unexpected SQL: $all" >&2; exit 97 ;;
     esac ;;
@@ -83,14 +85,27 @@ case "${pos[0]}:${pos[1]:-}" in
       elif ((n > 1)); then tt_json Running WaitingForAgents
       else tt_json Pending Creating; fi
     elif ((n == 1)); then tt_json Pending Creating
-    elif ((n == 2)); then tt_json Running WaitingForAgents
-    elif [[ $SCENARIO == tt-failed ]]; then tt_json Failed AgentStartError '[{"type":"WorkspaceDeleted","status":"True","reason":"Deleted"}]'
+    elif [[ ${pos[2]} == e2e-bad-param ]]; then tt_json Failed CreateRejected '[{"type":"WorkspaceDeleted","status":"True","reason":"NotCreated"}]'
+    elif ((n == 2)) || [[ ${pos[2]} == e2e-midrun ]]; then tt_json Running WaitingForAgents
+    elif [[ ${pos[2]} == e2e-ttl ]]; then rm "$f"; err NotFound "codertemplatetests \"e2e-ttl\" not found" # expired
+    elif [[ $SCENARIO:${pos[2]} == tt-failed:e2e-pass-1 || $SCENARIO:${pos[2]} == restart-failed:e2e-restart ||
+      ($SCENARIO != fail-ignored && ${pos[2]} == e2e-agent-fail) ]]; then
+      tt_json Failed AgentStartError '[{"type":"WorkspaceDeleted","status":"True","reason":"Deleted"}]'
     else tt_json Succeeded Succeeded '[{"type":"Ready","status":"True","reason":"Succeeded"},{"type":"WorkspaceDeleted","status":"True","reason":"Deleted"}]'
     fi ;;
   get:namespace) # content gone, but the namespace stays Terminating (the aggregated API LIST answers 503)
     jq -n '{status: {phase: "Terminating", conditions: [{type: "NamespaceDeletionContentFailure", status: "True", message: "no eligible CoderControlPlane"},
       {type: "NamespaceContentRemaining", status: "False"}, {type: "NamespaceFinalizersRemaining", status: "False"}]}}' ;;
   delete:namespace) touch "$S/ns-deleted"; echo 'namespace "coder" deleted' ;;
+  delete:pod) echo "pod \"${pos[2]}\" deleted" ;;
+  delete:codertemplatetest) # the controller deletes the workspace, then releases the test
+    rm "$S/tt-${pos[2]}"; st=succeeded && [[ $SCENARIO != midrun-delete-failed ]] || st=failed
+    echo "$st" >"$S/deleted-ttws-${pos[2]}"; echo deleted ;;
+  patch:codertemplatetest) [[ $SCENARIO == immutable-accepted ]] && echo patched ||
+    err Invalid 'CoderTemplateTest.coder.com "e2e-agent-fail" is invalid: spec: Invalid value: "object": spec is immutable, create a new CoderTemplateTest' ;;
+  create:--dry-run=server) # dryrun-persists: the dry run stores the object anyway
+    [[ $SCENARIO != dryrun-persists ]] || echo 0 >"$S/tt-$(jq -r .metadata.name "$file")"
+    jq '.metadata.uid = "d0d0d0d0-d0d0-d0d0-d0d0-d0d0d0d0d0d0"' "$file" ;;
   get:endpointslices) cat "$S/endpoints.json" ;;
   get:codercontrolplane) [[ ! -f $S/ns-deleted || $SCENARIO == ns-delete-stuck ]] || err NotFound 'codercontrolplanes "coder" not found'
     echo '{"status":{"operatorTokenSecretRef":{"name":"op-token","key":"token"}}}' ;;
@@ -98,6 +113,12 @@ case "${pos[0]}:${pos[1]:-}" in
   port-forward:*) echo $$ >"$S/pf.pid"; exec sleep 300 ;;
   logs:*) echo "I1002 server started"; [[ $SCENARIO != log-leak ]] || echo "2026-10-02T10:00:00Z [info] [provisioner|Planning infrastructure] Terraform 1.14.0 ok" ;;
   get:)
+    if [[ $raw == */codertemplatetests?watch=1* ]]; then # the e2e-ttl watch: passed (ttl-failed: failed), then deleted
+      echo "I1003 round_trippers.go:553] GET https://127.0.0.1:6443$raw 200 OK in 2 milliseconds" >&2
+      p=Succeeded && [[ $SCENARIO != ttl-failed ]] || p=Failed
+      jq -nc --arg p "$p" '{type: "MODIFIED", object: {status: {phase: $p, conditions: [{type: "WorkspaceDeleted", status: "True"}]}}}, {type: "DELETED"}'
+      exit 0
+    fi
     if [[ $raw == *watch=1* ]]; then
       echo "$raw" >"$S/watch_url"; echo $$ >"$S/watch.pid"
       off=$(wc -c <"$S/events")
@@ -296,7 +317,7 @@ run_scenario() {
   SECS=$((SECONDS - start))
 }
 
-mutations() { grep -E '^kubectl .*((create|replace|delete) --raw|apply -f|create -f|patch |delete namespace)|^curl .*-X (PATCH|POST|PUT)' "$S/calls.log" |
+mutations() { grep -E '^kubectl .*((create|replace|delete) --raw|apply -f|create -f|patch |delete (namespace|pod|codertemplatetest) )|^curl .*-X (PATCH|POST|PUT)' "$S/calls.log" |
   awk '/^kubectl/ {for (i = 2; i <= NF; i++) if ($i ~ /^(create|replace|delete|apply|patch)$/) {print "kubectl " $i; next}}
     /^curl/ {for (i = 2; i <= NF; i++) if ($i == "-X") {print "curl " $(i + 1); next}}' | paste -sd, -; }
 VERSIONS="kubectl apply,kubectl apply,kubectl create,kubectl create,kubectl create" # template, second version, promote v1, repeat, dry-run v2
@@ -323,12 +344,14 @@ rv=$(jq -r .metadata.resourceVersion "$S/first_update.json")
 check "watch URL uses the current token and only watch/resourceVersion/timeoutSeconds" \
   eval '[[ $(<"$S/watch_url") =~ ^/apis/aggregation\.coder\.com/v1alpha1/namespaces/coder/coderworkspaces\?watch=1\&resourceVersion=${rv}\&timeoutSeconds=[0-9]+$ ]]'
 check "watch URL omits sendInitialEvents and resourceVersionMatch" eval '! grep -qE "sendInitialEvents|resourceVersionMatch" "$S/watch_url"'
-check "update was sent only after watch registration" eval '[[ $(grep -n "watch=1" "$S/calls.log" | cut -d: -f1) -lt $(grep -n "replace --raw" "$S/calls.log" | head -1 | cut -d: -f1) ]]'
+check "update was sent only after watch registration" eval '[[ $(grep -n "watch=1" "$S/calls.log" | head -1 | cut -d: -f1) -lt $(grep -n "replace --raw" "$S/calls.log" | head -1 | cut -d: -f1) ]]'
 LIFECYCLE="$APPLIES,kubectl replace,$TRANS,curl PATCH,kubectl replace,kubectl delete,kubectl delete,kubectl delete,kubectl create,kubectl delete"
 AGENT="$LIFECYCLE,curl POST,curl PUT,kubectl apply,kubectl create,kubectl delete" # then owner patch and three pass tests:
 TESTS="$AGENT,kubectl patch,kubectl create,kubectl create,kubectl create"
+# agent failure, bad parameter, restart (+ pod delete), mid-run (+ test delete), refused spec patch, TTL
+PHASED="$TESTS,kubectl create,kubectl create,kubectl create,kubectl delete,kubectl create,kubectl delete,kubectl patch,kubectl create"
 check "mutation order: lifecycle, tester, agent, owner, three pass tests, namespace test, Coder to zero, namespace delete" \
-  no_mutations_after "$TESTS,kubectl create,kubectl patch,kubectl delete"
+  no_mutations_after "$PHASED,kubectl create,kubectl patch,kubectl delete"
 check "stale requests carry the genuine pre-rename token; rename changed it" eval 'grep -qx "rv_pre_rename=2" "$T/work/receipt.txt" &&
   grep -qx "rv_post_rename=2-renamed" "$T/work/receipt.txt" && jq -e ".metadata.resourceVersion == \"2\"" "$T/work/stale-update.json" >/dev/null'
 check "template applied with the long request timeout, then re-applied before any lifecycle mutation" eval '[[ $(grep -c -- "--request-timeout=600s apply -f config/e2e/codertemplate.yaml" "$S/calls.log") -eq 2 ]]'
@@ -343,12 +366,16 @@ check "background port-forward and watch stopped" bg_stopped
 check "every non-streaming kubectl request carries --request-timeout=30s" \
   eval '! grep "^kubectl" "$S/calls.log" | grep -v -e "watch=1" -e port-forward | grep -qvE -- "--request-timeout=[0-9]+s "'
 check "recreate only after the delete job succeeded" eval '[[ $(grep -n include_deleted "$S/calls.log" | head -1 | cut -d: -f1) -lt $(grep -n "create --raw .*ws-e2e-lifecycle-renamed.json" "$S/calls.log" | cut -d: -f1) ]]'
-check "receipt: source, run, version, identity, UIDs, 22 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
-  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 22 ]]'
+check "receipt: source, run, version, identity, UIDs, 28 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
+  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 28 ]]'
+check "remaining phases: durations recorded; dry run, restart, mid-run, and TTL calls as planned" eval 'grep -Eqx "phase_seconds=agent-failure=[0-9]+s bad-parameter=[0-9]+s restart=[0-9]+s delete-mid-run=[0-9]+s immutability-and-dry-run=[0-9]+s ttl=[0-9]+s" "$T/work/receipt.txt" &&
+  grep -q "create --dry-run=server -f .*tt-e2e-dry-run.json" "$S/calls.log" && grep -q "FROM workspaces WHERE name = .ktt-d0d0d0d0d0d0d0d0d0d0d0d0d0d0." "$S/calls.log" &&
+  grep -q "coder-system delete pod coder-k8s-new" "$S/calls.log" && grep -q "workspaces/ttws-e2e-midrun?include_deleted=true" "$S/calls.log" &&
+  jq -e ".spec.ttlSecondsAfterFinished == 0" "$T/work/tt-e2e-ttl.json" >/dev/null && jq -e ".spec.parameters == [{name: \"fail\", value: \"notabool\"}]" "$T/work/tt-e2e-bad-param.json" >/dev/null'
 check "TemplateTest receipt: three durations, tester key counts, namespace deletion time" eval 'grep -Eqx "template_test_seconds=[0-9]+s [0-9]+s [0-9]+s" "$T/work/receipt.txt" &&
   grep -qx "tester_api_keys_before=2" "$T/work/receipt.txt" && grep -qx "tester_api_keys_after=5" "$T/work/receipt.txt" &&
   grep -Eqx "namespace_delete_seconds=[0-9]+" "$T/work/receipt.txt" && out_has "tester api_keys: before=2 after=5 delta=3"'
-check "psql only counts rows: operator and tester api_keys, the first pass test's workspace name" eval '[[ $(grep -c "^kubectl .* exec " "$S/calls.log") -eq 4 ]] &&
+check "psql only counts rows: operator and tester api_keys, the first pass test's workspace name" eval '[[ $(grep -c "^kubectl .* exec " "$S/calls.log") -eq 9 ]] &&
   ! grep "^kubectl .* exec " "$S/calls.log" | grep -qv "SELECT count(\*) FROM" && grep -q "FROM api_keys WHERE user_id = .user-tester." "$S/calls.log" &&
   grep -q "FROM workspaces WHERE name = .ktt-e2e-pass-1." "$S/calls.log"'
 check "owner patch names the tester; the namespace test waits 120 s for its agent" eval 'grep -qF "\"ownerUserID\":\"user-tester\"" "$S/calls.log" &&
@@ -557,9 +584,16 @@ operator-no-keys|the operator user has no api_keys rows|$AGENT,kubectl patch
 tt-failed|template test e2e-pass-1 failed: Failed AgentStartError|$AGENT,kubectl patch,kubectl create
 ws-rows-2|expected exactly one workspaces row named ktt-e2e-pass-1 (deleted rows included), found 2|$TESTS
 coder-rolls|setting templateTests.ownerUserID rolled deploy/coder|$TESTS
-keys-after-fails|cannot count the api_keys rows of the tester after the tests|$TESTS
-coder-stays-up|timed out after 3s waiting for: deploy/coder without pods|$TESTS,kubectl create,kubectl patch
-ns-delete-stuck|timed out after 2s waiting for: test, control plane, and content of namespace coder deleted|$TESTS,kubectl create,kubectl patch,kubectl delete
+keys-after-fails|cannot count the api_keys rows of the tester after the tests|$PHASED
+coder-stays-up|timed out after 3s waiting for: deploy/coder without pods|$PHASED,kubectl create,kubectl patch
+ns-delete-stuck|timed out after 2s waiting for: test, control plane, and content of namespace coder deleted|$PHASED,kubectl create,kubectl patch,kubectl delete
+fail-ignored|template test e2e-agent-fail ended Succeeded Succeeded deleted=True/Deleted, want Failed AgentStartError|$TESTS,kubectl create
+badparam-created|template test e2e-bad-param: expected 0 workspaces rows named ktt-e2e-bad-param (deleted rows included), found 1|$TESTS,kubectl create,kubectl create
+restart-failed|template test e2e-restart failed: Failed AgentStartError|$TESTS,kubectl create,kubectl create,kubectl create,kubectl delete
+midrun-delete-failed|delete job of ttws-e2e-midrun ended in status failed|$TESTS,kubectl create,kubectl create,kubectl create,kubectl delete,kubectl create,kubectl delete
+immutable-accepted|a patch of spec.timeoutSeconds succeeded|$TESTS,kubectl create,kubectl create,kubectl create,kubectl delete,kubectl create,kubectl delete,kubectl patch
+dryrun-persists|the server dry run created template test e2e-dry-run|$TESTS,kubectl create,kubectl create,kubectl create,kubectl delete,kubectl create,kubectl delete,kubectl patch
+ttl-failed|template test e2e-ttl was removed before it passed|$PHASED
 CASES
 
 echo "TEST missing-built-id: BUILT_IMAGE_ID is not a sha256 ID"
