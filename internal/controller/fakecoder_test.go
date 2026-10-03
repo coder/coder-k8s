@@ -399,6 +399,16 @@ func (f *fakeCoder) requestCount(route string) int {
 	return f.requests[route]
 }
 
+func (f *fakeCoder) totalRequests() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	total := 0
+	for _, n := range f.requests {
+		total += n
+	}
+	return total
+}
+
 func (f *fakeCoder) workspaceCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

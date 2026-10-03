@@ -100,18 +100,12 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if tt.Status.WorkspaceName != "" && tt.Status.WorkspaceName != workspaceName {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: status.workspaceName %q is not %q", tt.Status.WorkspaceName, workspaceName)
 	}
-	cleanedUp := meta.IsStatusConditionTrue(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted)
-	created := templateTestMayHaveWorkspace(tt) && !cleanedUp
+	// Deletion comes first: a test being deleted never starts new work.
 	if !tt.DeletionTimestamp.IsZero() {
-		if created {
-			// The delete steps come with plan PR 5. Until then the finalizer
-			// stays, because the workspace can exist.
-			return ctrl.Result{}, nil
-		}
-		return ctrl.Result{}, r.releaseFinalizer(ctx, tt)
+		return r.cleanup(ctx, tt)
 	}
 	final := isTemplateTestFinal(tt.Status.Phase)
-	if (!final || !cleanedUp) && !controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer) {
+	if (!final || !templateTestCleanupDone(tt)) && !controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer) {
 		// No Coder call happens before the finalizer is stored.
 		controllerutil.AddFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer)
 		if err := r.Update(ctx, tt); err != nil {
@@ -132,18 +126,20 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionStalled, metav1.ConditionFalse, tt.Status.Reason, tt.Status.Message)
 		return ctrl.Result{}, r.writeStatus(ctx, tt, before)
 	case final:
-		switch {
-		case meta.IsStatusConditionTrue(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted):
-			return ctrl.Result{}, r.releaseFinalizer(ctx, tt)
-		case created:
-			return ctrl.Result{}, nil // The delete steps come with plan PR 5.
-		}
-		markTemplateTestNotCreated(tt)
-		return ctrl.Result{}, r.writeStatus(ctx, tt, before)
+		return r.cleanup(ctx, tt)
 	}
 
 	if tt.Status.StartTime == nil {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: template test %s/%s is %s without status.startTime", tt.Namespace, tt.Name, tt.Status.Phase)
+	}
+	if templateTestMayHaveWorkspace(tt) {
+		if gone, err := r.controlPlaneGone(ctx, tt); err != nil || gone {
+			if err == nil {
+				applyTemplateTestStep(tt, now, templateTestControlPlaneGone(tt))
+				err = r.writeStatus(ctx, tt, before)
+			}
+			return ctrl.Result{}, err
+		}
 	}
 	deadline := tt.Status.StartTime.Add(time.Duration(templateTestTimeoutSeconds(tt)) * time.Second)
 	if !now.Before(deadline) {
