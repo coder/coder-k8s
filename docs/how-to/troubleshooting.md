@@ -280,10 +280,15 @@ CAUTION: Delete the workspace in Coder before you remove the finalizer. Otherwis
 ## A namespace stays `Terminating`
 
 1. Tests in the namespace wait for their cleanup. List them with `kubectl get codertemplatetests -n <namespace>`, then see [A `CoderTemplateTest` does not finish deleting](#a-codertemplatetest-does-not-finish-deleting).
-2. With the aggregated API server installed, a namespace without an eligible `CoderControlPlane` never finishes deleting ([#209](https://github.com/coder/coder-k8s/issues/209)). Its condition `NamespaceDeletionContentFailure` is `True` with the message `no eligible CoderControlPlane instances found in namespace "<namespace>"`. The aggregated API answers the namespace controller's LIST with `503`. Read the conditions:
+2. With the aggregated API server installed, the namespace controller lists `coderworkspaces`, `codertemplates`, and `codertemplateversions` before it removes the namespace. A namespace without any `CoderControlPlane` gets empty lists and finishes deleting. See [Namespaces without a Coder backend](../reference/aggregated-api-behavior.md#namespaces-without-a-coder-backend). Two cases still answer these lists with `503`, and the namespace waits:
+
+    - **A control plane that is not eligible.** The namespace contains a `CoderControlPlane`, but its operator access is not ready, for example. The namespace controller deletes the control plane in the same pass. The lists return `503` until the control plane is gone, and then the deletion finishes.
+    - **A standalone server without Coder credentials** ([#215](https://github.com/coder/coder-k8s/issues/215)). A server in standalone mode (`--app=aggregated-apiserver`) without its Coder URL or session token answers `503` in every namespace. Set the flags, as described in [Aggregated reads return `ServiceUnavailable`](#aggregated-reads-return-serviceunavailable).
+
+    Read the namespace conditions:
 
     ```bash
     kubectl get namespace <namespace> -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.message}{"\n"}{end}'
     ```
 
-    If `NamespaceContentRemaining` and `NamespaceFinalizersRemaining` are `False`, nothing is left in the namespace, and only #209 holds it.
+    In both cases, `NamespaceDeletionContentFailure` is `True`, and its message contains the `503` error of the failed list. If `NamespaceContentRemaining` and `NamespaceFinalizersRemaining` are `False`, only these lists hold the namespace.
