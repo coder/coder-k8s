@@ -30,8 +30,10 @@ func (r *CoderTemplateTestReconciler) checkReadiness(
 		return nil, fmt.Errorf("assertion failed: template test %s/%s has workspace ID %q and start build ID %q", tt.Namespace, tt.Name, tt.Status.WorkspaceID, tt.Status.StartBuildID)
 	}
 	workspace, err := sdk.Workspace(ctx, workspaceID)
-	switch status := coderStatus(err); {
-	case status == http.StatusNotFound || status == http.StatusGone:
+	// Only 410 proves deletion: Coder soft-deletes workspaces, and it also
+	// answers 404 when the caller may not read the workspace (plan A9).
+	switch {
+	case coderStatus(err) == http.StatusGone:
 		step := templateTestFail("WorkspaceDeletedExternally", "Workspace %s was deleted by someone else.", name)
 		step.deleted = &metav1.Condition{Status: metav1.ConditionTrue, Reason: "DeletedExternally", Message: step.message}
 		return step, nil
@@ -51,7 +53,10 @@ func (r *CoderTemplateTestReconciler) checkReadiness(
 	case codersdk.ProvisionerJobSucceeded:
 	case codersdk.ProvisionerJobFailed:
 		// Only the error code: Job.Error can hold Terraform output and secrets.
-		return templateTestFail("BuildFailed", "The start build of workspace %s failed (error code %q).", name, build.Job.ErrorCode), nil
+		if build.Job.ErrorCode == "" {
+			return templateTestFail("BuildFailed", "The start build of workspace %s failed.", name), nil
+		}
+		return templateTestFail("BuildFailed", "The start build of workspace %s failed (error code %s).", name, build.Job.ErrorCode), nil
 	case codersdk.ProvisionerJobCanceling, codersdk.ProvisionerJobCanceled:
 		// This controller cancels only during cleanup, which comes with plan PR 5.
 		return templateTestFail("BuildCanceled", "Someone else canceled the start build of workspace %s.", name), nil
@@ -92,6 +97,9 @@ func (r *CoderTemplateTestReconciler) checkReadiness(
 			waiting = agent
 		}
 	}
+	// An agent that was ready and then disconnects makes the test wait, not
+	// fail: disconnects can be short, and the deadline bounds the wait. After
+	// the pass, the controller reads no agents again (plan A10).
 	if waiting != nil {
 		return templateTestWait("WaitingForAgents", "Agent %s is %s and %s.", waiting.ID, waiting.Status, waiting.LifecycleState), nil
 	}

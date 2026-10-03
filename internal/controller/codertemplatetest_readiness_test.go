@@ -8,6 +8,7 @@ import (
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -54,6 +55,7 @@ func TestTemplateTestReadinessPass(t *testing.T) {
 	t.Parallel()
 	e := newTemplateTestEnv(t)
 	key, _, buildID := e.startedTest(t)
+	nameLookups := e.fake.requestCount(routeWorkspaceByName)
 	e.fake.setBuildJob(buildID, codersdk.ProvisionerJobRunning)
 	requireTemplateTestRunning(t, e.settle(t, key), "WaitingForBuild", "is running")
 
@@ -69,6 +71,10 @@ func TestTemplateTestReadinessPass(t *testing.T) {
 	requireTemplateTestRunning(t, e.reconcile(t, key, 1), "WaitingForAgents", "Agent "+starting.ID.String()+" is connected and starting")
 	require.NotContains(t, e.statusText(t, key), agentNamePrefix)
 
+	// A ready agent that disconnects makes the test wait, not fail (plan A10).
+	e.fake.setAgents(buildID, agent("main", codersdk.WorkspaceAgentDisconnected, codersdk.WorkspaceAgentLifecycleReady))
+	requireTemplateTestRunning(t, e.reconcile(t, key, 1), "WaitingForAgents", "is disconnected and ready")
+
 	// A devcontainer sub-agent that never starts does not block the pass.
 	e.fake.setAgents(buildID, agent("main", codersdk.WorkspaceAgentConnected, codersdk.WorkspaceAgentLifecycleReady),
 		subAgent("dev", codersdk.WorkspaceAgentLifecycleCreated))
@@ -79,6 +85,7 @@ func TestTemplateTestReadinessPass(t *testing.T) {
 	reads := e.fake.requestCount(routeWorkspace)
 	requireTemplateTestRunning(t, e.settle(t, key), "AgentsReady", "")
 	require.Equal(t, reads, e.fake.requestCount(routeWorkspace), "a passed test reads no readiness again")
+	require.Equal(t, nameLookups, e.fake.requestCount(routeWorkspaceByName), "the name check runs only before creation")
 }
 
 func TestTemplateTestReadinessFailures(t *testing.T) {
@@ -113,7 +120,6 @@ func TestTemplateTestReadinessFailures(t *testing.T) {
 			require.NoError(t, err)
 		}, reason: "WorkspaceChangedExternally"},
 		{name: "deleted (410)", setup: func(workspaceID, _ uuid.UUID) { e.fake.markDeleted(workspaceID) }, reason: "WorkspaceDeletedExternally", deleted: "DeletedExternally"},
-		{name: "deleted (404)", setup: func(uuid.UUID, uuid.UUID) { e.fake.failNext(routeWorkspace, fakeFault{Status: 404}) }, reason: "WorkspaceDeletedExternally", deleted: "DeletedExternally"},
 	}
 	for _, tc := range cases {
 		key, workspaceID, buildID := e.startedTest(t)
@@ -126,7 +132,21 @@ func TestTemplateTestReadinessFailures(t *testing.T) {
 		requireTemplateTestFailedWith(t, tt, tc.reason, metav1.ConditionFalse, "CleanupPending")
 		require.Nil(t, tt.Status.AgentsReadyTime, tc.name)
 		require.NotContains(t, e.statusText(t, key), agentNamePrefix, tc.name)
+		require.NotContains(t, tt.Status.Message, `""`, "%s: no empty values in the message", tc.name)
 	}
+}
+
+// TestTemplateTestReadiness404 checks plan amendment A9: Coder also answers
+// 404 when the caller may not read the workspace, so only 410 proves deletion.
+func TestTemplateTestReadiness404(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	key, _, _ := e.startedTest(t)
+	e.fake.failNext(routeWorkspace, fakeFault{Status: 404})
+	tt := e.reconcile(t, key, 1)
+	requireTemplateTestRunning(t, tt, "CoderUnavailable", "Coder answered 404")
+	require.Nil(t, meta.FindStatusCondition(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted))
+	requireTemplateTestRunning(t, e.reconcile(t, key, 1), "WaitingForBuild", "is pending")
 }
 
 func TestTemplateTestReadinessWrongAnswers(t *testing.T) {
