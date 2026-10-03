@@ -26,8 +26,11 @@ const (
 // gone (plan amendments A1 and A2).
 func templateTestCleanupDone(tt *coderv1alpha1.CoderTemplateTest) bool {
 	reason := templateTestDeletedReason(tt)
+	// Retained counts only while the annotation still says retain: an admin
+	// can switch back to delete before the finalizer is released.
+	retained := reason == "Retained" && tt.Annotations[templateTestDeletionPolicyAnnotation] == "retain"
 	return meta.IsStatusConditionTrue(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted) ||
-		reason == "Retained" || reason == "ControlPlaneGone"
+		retained || reason == "ControlPlaneGone"
 }
 
 func templateTestDeletedReason(tt *coderv1alpha1.CoderTemplateTest) string {
@@ -71,10 +74,6 @@ func (r *CoderTemplateTestReconciler) cleanupStep(ctx context.Context, tt *coder
 	case !templateTestMayHaveWorkspace(tt):
 		markTemplateTestNotCreated(tt)
 		return 0, nil
-	case templateTestDeletedReason(tt) == "OwnershipUnknown":
-		// Someone else's workspace can hold the name. The controller never
-		// reads or touches it again. Only retain releases the test (A3).
-		return 0, nil
 	}
 	if gone, err := r.controlPlaneGone(ctx, tt); err != nil || gone {
 		if gone {
@@ -82,6 +81,13 @@ func (r *CoderTemplateTestReconciler) cleanupStep(ctx context.Context, tt *coder
 			set(step.deleted.Status, step.deleted.Reason, step.deleted.Message)
 		}
 		return 0, err
+	}
+	if templateTestDeletedReason(tt) == "OwnershipUnknown" {
+		// Someone else's workspace can hold the name. The controller never
+		// reads or touches it again. Only retain releases the test (A3).
+		set(metav1.ConditionUnknown, "OwnershipUnknown", fmt.Sprintf("Workspace %s exists, but nothing proves that this test created it. Only %s: retain releases the test.",
+			name, templateTestDeletionPolicyAnnotation))
+		return 0, nil
 	}
 
 	sdk, _, step, err := r.coderClient(ctx, tt)

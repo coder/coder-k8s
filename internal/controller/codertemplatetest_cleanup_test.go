@@ -37,6 +37,20 @@ func (e *templateTestEnv) failedWithWorkspace(t *testing.T) types.NamespacedName
 	return key
 }
 
+// ownershipUnknown ends a test as OwnershipUnknown: its workspace's builds
+// name another initiator on the confirming read.
+func (e *templateTestEnv) ownershipUnknown(t *testing.T) types.NamespacedName {
+	t.Helper()
+	key := e.uncertainCreate(t, fakeFault{Status: 504, AfterCommit: true})
+	e.fake.failNext(routeWorkspaceBuilds, fakeFault{Rewrite: func(a any) any {
+		builds := a.([]codersdk.WorkspaceBuild)
+		builds[len(builds)-1].InitiatorID = uuid.New()
+		return builds
+	}})
+	requireTemplateTestFailedWith(t, e.settle(t, key), "WorkspaceNameConflict", metav1.ConditionUnknown, "OwnershipUnknown")
+	return key
+}
+
 func requireDeleted(t *testing.T, tt *coderv1alpha1.CoderTemplateTest, status metav1.ConditionStatus, reason string) {
 	t.Helper()
 	c := meta.FindStatusCondition(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted)
@@ -80,13 +94,7 @@ func TestTemplateTestDeletionStates(t *testing.T) {
 	require.True(t, controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer))
 
 	// A live workspace without provenance is never read again.
-	key = e.uncertainCreate(t, fakeFault{Status: 504, AfterCommit: true})
-	e.fake.failNext(routeWorkspaceBuilds, fakeFault{Rewrite: func(a any) any {
-		builds := a.([]codersdk.WorkspaceBuild)
-		builds[len(builds)-1].InitiatorID = uuid.New()
-		return builds
-	}})
-	requireTemplateTestFailedWith(t, e.settle(t, key), "WorkspaceNameConflict", metav1.ConditionUnknown, "OwnershipUnknown")
+	key = e.ownershipUnknown(t)
 	reads := e.fake.totalRequests()
 	e.deleteTest(t, key)
 	tt = e.settle(t, key)
@@ -184,4 +192,46 @@ func TestTemplateTestControlPlaneUnavailable(t *testing.T) {
 	requireDeleted(t, tt, metav1.ConditionFalse, "ControlPlaneUnavailable")
 	require.True(t, controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer), "an unreachable Coder never counts as deleted")
 	require.Equal(t, time.Minute, e.lastStep.RequeueAfter)
+}
+
+func TestTemplateTestCleanupRechecks(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+
+	// Retained was stored, but the finalizer update failed, and the admin
+	// switched back to delete: the finalizer stays.
+	key := e.failedWithWorkspace(t)
+	tt := &coderv1alpha1.CoderTemplateTest{}
+	require.NoError(t, k8sClient.Get(e.ctx, key, tt))
+	meta.SetStatusCondition(&tt.Status.Conditions, metav1.Condition{
+		Type:   coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted,
+		Status: metav1.ConditionFalse, Reason: "Retained", Message: "Stored before the finalizer update failed.",
+	})
+	require.NoError(t, k8sClient.Status().Update(e.ctx, tt))
+	e.annotate(t, key, "delete")
+	tt = e.reconcile(t, key, 1)
+	requireDeleted(t, tt, metav1.ConditionFalse, "CleanupPending")
+	require.True(t, controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer))
+
+	// An ignored value is named for a workspace of unknown ownership too,
+	// without reads and without a message that grows.
+	key = e.ownershipUnknown(t)
+	reads := e.fake.totalRequests()
+	e.annotate(t, key, "keep")
+	tt = e.reconcile(t, key, 1)
+	requireDeleted(t, tt, metav1.ConditionUnknown, "OwnershipUnknown")
+	message := meta.FindStatusCondition(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted).Message
+	require.Contains(t, message, `value "keep"`)
+	require.Contains(t, message, "retain releases the test")
+	tt = e.reconcile(t, key, 1)
+	require.Equal(t, message, meta.FindStatusCondition(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted).Message)
+	require.Equal(t, reads, e.fake.totalRequests())
+
+	// A gone control plane releases it as well (A1).
+	cp := &coderv1alpha1.CoderControlPlane{}
+	require.NoError(t, k8sClient.Get(e.ctx, types.NamespacedName{Namespace: e.ns, Name: "coder"}, cp))
+	require.NoError(t, k8sClient.Delete(e.ctx, cp))
+	tt = e.reconcile(t, key, 1)
+	requireDeleted(t, tt, metav1.ConditionUnknown, "ControlPlaneGone")
+	require.False(t, controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer))
 }
