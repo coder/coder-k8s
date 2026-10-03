@@ -165,9 +165,9 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		tt.Status.Phase = coderv1alpha1.CoderTemplateTestPhasePending
 		tt.Status.StartTime = &metav1.Time{Time: now}
 		tt.Status.Reason, tt.Status.Message = "Initializing", "The controller started the test."
-		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionReconciling, metav1.ConditionTrue, tt.Status.Reason, tt.Status.Message)
-		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionReady, metav1.ConditionFalse, tt.Status.Reason, tt.Status.Message)
-		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionStalled, metav1.ConditionFalse, tt.Status.Reason, tt.Status.Message)
+		setTemplateTestCondition(tt, now, coderv1alpha1.CoderTemplateTestConditionReconciling, metav1.ConditionTrue, tt.Status.Reason, tt.Status.Message)
+		setTemplateTestCondition(tt, now, coderv1alpha1.CoderTemplateTestConditionReady, metav1.ConditionFalse, tt.Status.Reason, tt.Status.Message)
+		setTemplateTestCondition(tt, now, coderv1alpha1.CoderTemplateTestConditionStalled, metav1.ConditionFalse, tt.Status.Reason, tt.Status.Message)
 		return ctrl.Result{}, r.writeStatus(ctx, tt, before)
 	case final:
 		return r.cleanup(ctx, tt)
@@ -479,10 +479,10 @@ func applyTemplateTestStep(tt *coderv1alpha1.CoderTemplateTest, now time.Time, s
 		// Plan 2.3 step 11: Succeeded only after the delete build succeeded.
 		tt.Status.Phase = coderv1alpha1.CoderTemplateTestPhaseSucceeded
 		tt.Status.CompletionTime = &metav1.Time{Time: now}
-		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionReconciling, metav1.ConditionFalse, step.reason, step.message)
-		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionReady, metav1.ConditionTrue, step.reason, step.message)
-		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionStalled, metav1.ConditionFalse, step.reason, step.message)
-		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted, metav1.ConditionTrue, "Deleted", step.message)
+		setTemplateTestCondition(tt, now, coderv1alpha1.CoderTemplateTestConditionReconciling, metav1.ConditionFalse, step.reason, step.message)
+		setTemplateTestCondition(tt, now, coderv1alpha1.CoderTemplateTestConditionReady, metav1.ConditionTrue, step.reason, step.message)
+		setTemplateTestCondition(tt, now, coderv1alpha1.CoderTemplateTestConditionStalled, metav1.ConditionFalse, step.reason, step.message)
+		setTemplateTestCondition(tt, now, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted, metav1.ConditionTrue, "Deleted", step.message)
 		return
 	}
 	if !step.failed {
@@ -490,22 +490,22 @@ func applyTemplateTestStep(tt *coderv1alpha1.CoderTemplateTest, now time.Time, s
 		if templateTestMayHaveWorkspace(tt) {
 			tt.Status.Phase = coderv1alpha1.CoderTemplateTestPhaseRunning
 		}
-		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionReconciling, metav1.ConditionTrue, step.reason, step.message)
+		setTemplateTestCondition(tt, now, coderv1alpha1.CoderTemplateTestConditionReconciling, metav1.ConditionTrue, step.reason, step.message)
 		return
 	}
 	tt.Status.Phase = coderv1alpha1.CoderTemplateTestPhaseFailed
 	tt.Status.CompletionTime = &metav1.Time{Time: now}
-	setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionReconciling, metav1.ConditionFalse, step.reason, step.message)
-	setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionReady, metav1.ConditionFalse, step.reason, step.message)
-	setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionStalled, metav1.ConditionTrue, step.reason, step.message)
+	setTemplateTestCondition(tt, now, coderv1alpha1.CoderTemplateTestConditionReconciling, metav1.ConditionFalse, step.reason, step.message)
+	setTemplateTestCondition(tt, now, coderv1alpha1.CoderTemplateTestConditionReady, metav1.ConditionFalse, step.reason, step.message)
+	setTemplateTestCondition(tt, now, coderv1alpha1.CoderTemplateTestConditionStalled, metav1.ConditionTrue, step.reason, step.message)
 	switch {
 	case step.deleted != nil:
-		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted, step.deleted.Status, step.deleted.Reason, step.deleted.Message)
+		setTemplateTestCondition(tt, now, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted, step.deleted.Status, step.deleted.Reason, step.deleted.Message)
 	case templateTestMayHaveWorkspace(tt):
-		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted, metav1.ConditionFalse,
+		setTemplateTestCondition(tt, now, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted, metav1.ConditionFalse,
 			"CleanupPending", "The workspace can exist. The controller deletes it.")
 	default:
-		markTemplateTestNotCreated(tt)
+		markTemplateTestNotCreated(tt, now)
 	}
 }
 
@@ -516,8 +516,8 @@ func templateTestMayHaveWorkspace(tt *coderv1alpha1.CoderTemplateTest) bool {
 }
 
 // markTemplateTestNotCreated records that no create request was ever sent.
-func markTemplateTestNotCreated(tt *coderv1alpha1.CoderTemplateTest) {
-	setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted, metav1.ConditionTrue,
+func markTemplateTestNotCreated(tt *coderv1alpha1.CoderTemplateTest, now time.Time) {
+	setTemplateTestCondition(tt, now, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted, metav1.ConditionTrue,
 		"NotCreated", "The controller never sent a workspace create request.")
 }
 
@@ -639,9 +639,13 @@ func truncateTemplateTestMessage(message string) string {
 	return strings.ToValidUTF8(message[:templateTestMaxMessageLength], "")
 }
 
-func setTemplateTestCondition(tt *coderv1alpha1.CoderTemplateTest, conditionType string, status metav1.ConditionStatus, reason, message string) {
+// setTemplateTestCondition sets a condition. A status change takes its
+// transition time from now, the controller clock, which the TTL counts from.
+func setTemplateTestCondition(
+	tt *coderv1alpha1.CoderTemplateTest, now time.Time, conditionType string, status metav1.ConditionStatus, reason, message string,
+) {
 	meta.SetStatusCondition(&tt.Status.Conditions, metav1.Condition{
 		Type: conditionType, Status: status, ObservedGeneration: tt.Generation,
-		Reason: reason, Message: truncateTemplateTestMessage(message),
+		Reason: reason, Message: truncateTemplateTestMessage(message), LastTransitionTime: metav1.NewTime(now),
 	})
 }

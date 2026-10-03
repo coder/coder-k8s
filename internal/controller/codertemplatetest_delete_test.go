@@ -105,6 +105,66 @@ func TestTemplateTestFailedDeleteFailsThePass(t *testing.T) {
 	requireTemplateTestFailedWith(t, e.settle(t, key), "DeleteBuildFailed", metav1.ConditionTrue, "Deleted")
 }
 
+// passedAndDeleting runs a test to a pass whose delete build is pending.
+func (e *templateTestEnv) passedAndDeleting(t *testing.T) (types.NamespacedName, *coderv1alpha1.CoderTemplateTest) {
+	t.Helper()
+	key, _, buildID := e.startedTest(t)
+	e.fake.setBuildJob(buildID, codersdk.ProvisionerJobSucceeded)
+	e.fake.setAgents(buildID, agent("main", codersdk.WorkspaceAgentConnected, codersdk.WorkspaceAgentLifecycleReady))
+	tt := e.settle(t, key)
+	requireTemplateTestRunning(t, tt, "DeletingWorkspace", "")
+	require.NotEmpty(t, tt.Status.DeleteBuildID)
+	return key, tt
+}
+
+// TestTemplateTestDeleteAfterPassFailures checks the delete after a pass: a
+// 429 keeps the rate-limit backoff (r4173060957), every failed delete build
+// fails the test (r4173060960), and the deadline still applies.
+func TestTemplateTestDeleteAfterPassFailures(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+
+	// A 429: the jittered 2 s backoff, not the 5 s poll.
+	key, _ := e.passedAndDeleting(t)
+	e.fake.failNext(routeWorkspace, fakeFault{Status: 429})
+	requireTemplateTestRunning(t, e.reconcile(t, key, 1), "CoderUnavailable", "")
+	require.InDelta(t, 2*time.Second, e.lastStep.RequeueAfter, float64(400*time.Millisecond))
+
+	// A status write failed after the delete build was created: the stored
+	// status has no delete build ID, and the build then fails.
+	tt := e.get(t, key)
+	deleteBuildID := uuid.MustParse(tt.Status.DeleteBuildID)
+	tt.Status.DeleteBuildID = ""
+	require.NoError(t, k8sClient.Status().Update(e.ctx, tt))
+	e.fake.setBuildJob(deleteBuildID, codersdk.ProvisionerJobFailed)
+	tt = e.reconcile(t, key, 1)
+	requireTemplateTestFailedWith(t, tt, "DeleteBuildFailed", metav1.ConditionFalse, "DeleteRetrying")
+	require.Equal(t, int32(1), tt.Status.DeleteAttempts, "counted once")
+	tt = e.reconcile(t, key, 2)
+	require.Equal(t, int32(1), tt.Status.DeleteAttempts, "cleanup does not count it again")
+
+	// Someone else's delete build fails after the pass.
+	key, tt = e.passedAndDeleting(t)
+	e.fake.failNext(routeWorkspace, fakeFault{Rewrite: func(a any) any {
+		ws := a.(codersdk.Workspace)
+		ws.LatestBuild.ID, ws.LatestBuild.Job.Status = uuid.New(), codersdk.ProvisionerJobCanceled
+		return ws
+	}})
+	require.NotEqual(t, "", tt.Status.DeleteBuildID)
+	requireTemplateTestFailedWith(t, e.reconcile(t, key, 1), "DeleteBuildFailed", metav1.ConditionFalse, "DeleteRetrying")
+
+	// The deadline passes during the delete after a pass (plan A12.5): the
+	// test fails as DeadlineExceeded, the delete build is never canceled,
+	// and a later success keeps the failure.
+	key, tt = e.passedAndDeleting(t)
+	cancels := e.fake.requestCount(routeCancelBuild)
+	e.clock.SetTime(tt.Status.StartTime.Add(900 * time.Second))
+	requireTemplateTestFailedWith(t, e.settle(t, key), "DeadlineExceeded", metav1.ConditionFalse, "Deleting")
+	require.Equal(t, cancels, e.fake.requestCount(routeCancelBuild), "the controller never cancels a delete build")
+	e.fake.setBuildJob(uuid.MustParse(tt.Status.DeleteBuildID), codersdk.ProvisionerJobSucceeded)
+	requireTemplateTestFailedWith(t, e.settle(t, key), "DeadlineExceeded", metav1.ConditionTrue, "Deleted")
+}
+
 func TestTemplateTestCleanupWrongAnswer(t *testing.T) {
 	t.Parallel()
 	e := newTemplateTestEnv(t)
@@ -129,12 +189,20 @@ func TestTemplateTestSettleNeedsSiteOwner(t *testing.T) {
 	e.fake.updateUser(e.fake.operatorID, func(u *codersdk.User) { u.Roles = []codersdk.SlimRole{{Name: codersdk.RoleMember}} })
 	e.clock.SetTime(e.clock.Now().Add(15 * time.Minute))
 	requireTemplateTestRunning(t, e.settle(t, key), "ConfirmingCreate", "not a site owner")
+	require.Equal(t, time.Minute, e.lastStep.RequeueAfter, "only a role change helps: poll slowly")
 
 	// An organization role named owner is not the site owner role.
 	e.fake.updateUser(e.fake.operatorID, func(u *codersdk.User) {
 		u.Roles = []codersdk.SlimRole{{Name: codersdk.RoleOwner, OrganizationID: e.orgID.String()}}
 	})
 	requireTemplateTestRunning(t, e.settle(t, key), "ConfirmingCreate", "not a site owner")
+
+	// Cleanup has no deadline, so it polls slowly too, not every 5 s.
+	other := e.uncertainCreate(t, fakeFault{Status: 502}, 3600)
+	e.deleteTest(t, other)
+	e.clock.SetTime(e.clock.Now().Add(15 * time.Minute))
+	requireDeleted(t, e.settle(t, other), metav1.ConditionUnknown, "CreateOutcomeUnknown")
+	require.Equal(t, time.Minute, e.lastStep.RequeueAfter)
 
 	e.fake.updateUser(e.fake.operatorID, func(u *codersdk.User) { u.Roles = []codersdk.SlimRole{{Name: codersdk.RoleOwner}} })
 	requireTemplateTestFailed(t, e.settle(t, key), "CreateOutcomeUnknown")

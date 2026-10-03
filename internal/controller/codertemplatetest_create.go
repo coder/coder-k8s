@@ -119,7 +119,8 @@ func templateTestFailNotCreated(reason, format string, args ...any) *templateTes
 // controller. The attempt count lives in memory, so a restart starts over.
 // Reconcile forgets it after any outcome other than a wait after 429.
 func (r *CoderTemplateTestReconciler) retryAfter(key types.NamespacedName, tt *coderv1alpha1.CoderTemplateTest, step *templateTestStep) time.Duration {
-	if step.requeue > 0 {
+	// A 429 backoff wins over a step's own poll (r4173060957).
+	if step.requeue > 0 && !step.rateLimited {
 		return step.requeue
 	}
 	if !step.rateLimited {

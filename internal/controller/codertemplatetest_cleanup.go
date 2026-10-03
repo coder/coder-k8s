@@ -96,8 +96,10 @@ func (r *CoderTemplateTestReconciler) cleanupStep(ctx context.Context, tt *coder
 	if policy != "" && policy != "delete" && policy != "retain" {
 		note = fmt.Sprintf(" The controller ignores %s value %q.", templateTestDeletionPolicyAnnotation, policy)
 	}
+	// Read the clock when the condition changes: the Coder calls below can
+	// take up to their timeout, and the TTL counts from this time.
 	set := func(status metav1.ConditionStatus, reason, message string) {
-		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted, status, reason, message+note)
+		setTemplateTestCondition(tt, r.Clock.Now(), coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted, status, reason, message+note)
 	}
 	name := tt.Status.WorkspaceName
 	switch {
@@ -106,7 +108,7 @@ func (r *CoderTemplateTestReconciler) cleanupStep(ctx context.Context, tt *coder
 		set(metav1.ConditionFalse, "Retained", fmt.Sprintf("%s is retain: the controller leaves workspace %s in Coder.", templateTestDeletionPolicyAnnotation, name))
 		return 0, nil
 	case !templateTestMayHaveWorkspace(tt):
-		markTemplateTestNotCreated(tt)
+		markTemplateTestNotCreated(tt, r.Clock.Now())
 		return 0, nil
 	}
 	if gone, err := r.controlPlaneGone(ctx, tt); err != nil || gone {
@@ -141,7 +143,7 @@ func (r *CoderTemplateTestReconciler) cleanupStep(ctx context.Context, tt *coder
 	}
 	requeue := templateTestUnavailablePoll
 	if step == nil {
-		result, err := r.deleteStep(ctx, sdk, tt, r.Clock.Now())
+		result, err := r.deleteStep(ctx, sdk, tt, r.Clock.Now(), false)
 		if result.wait, err = waitOnWrongAnswer(ctx, result.wait, err); err != nil {
 			return 0, err
 		}
@@ -160,7 +162,7 @@ func (r *CoderTemplateTestReconciler) cleanupStep(ctx context.Context, tt *coder
 		return 0, nil
 	case step.reason == "ConfirmingCreate":
 		set(metav1.ConditionUnknown, "CreateOutcomeUnknown", step.message)
-		return templateTestRunningPoll, nil
+		return cmp.Or(step.requeue, templateTestRunningPoll), nil
 	case step.reason == "Deleting" || step.reason == "DeleteRetrying" || step.reason == "CoderAnswerMismatch":
 		set(metav1.ConditionFalse, step.reason, step.message)
 		return requeue, nil
