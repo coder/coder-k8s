@@ -199,6 +199,13 @@ func TestTemplateTestControlPlaneUnavailable(t *testing.T) {
 	requireDeleted(t, tt, metav1.ConditionFalse, "ControlPlaneUnavailable")
 	require.True(t, controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer), "an unreachable Coder never counts as deleted")
 	require.Equal(t, time.Minute, e.lastStep.RequeueAfter)
+
+	// Namespace teardown while Coder is unreachable: retain releases the
+	// test without a Coder call (A2, A5.3).
+	requests := e.fake.totalRequests()
+	e.annotate(t, key, "retain")
+	require.Nil(t, e.reconcile(t, key, 1))
+	require.Equal(t, requests, e.fake.totalRequests())
 }
 
 func TestTemplateTestCleanupRechecks(t *testing.T) {

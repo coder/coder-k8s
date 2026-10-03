@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 )
@@ -57,7 +58,37 @@ func (r *CoderTemplateTestReconciler) cleanup(ctx context.Context, tt *coderv1al
 			return ctrl.Result{RequeueAfter: requeue}, err
 		}
 	}
-	return ctrl.Result{}, r.releaseFinalizer(ctx, tt)
+	if err := r.releaseFinalizer(ctx, tt); err != nil {
+		return ctrl.Result{}, err
+	}
+	return r.expire(ctx, tt)
+}
+
+// expire deletes a finished test when spec.ttlSecondsAfterFinished has passed
+// since the later of its completion and the workspace's deletion (plan 2.6).
+// The UID precondition keeps it from deleting a newer test with the same name.
+func (r *CoderTemplateTestReconciler) expire(ctx context.Context, tt *coderv1alpha1.CoderTemplateTest) (ctrl.Result, error) {
+	deleted := meta.FindStatusCondition(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted)
+	if tt.Spec.TTLSecondsAfterFinished == nil || !tt.DeletionTimestamp.IsZero() || !isTemplateTestFinal(tt.Status.Phase) ||
+		deleted == nil || deleted.Status != metav1.ConditionTrue {
+		return ctrl.Result{}, nil
+	}
+	if tt.Status.CompletionTime == nil {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: final template test %s/%s has no completionTime", tt.Namespace, tt.Name)
+	}
+	finished := tt.Status.CompletionTime.Time
+	if deleted.LastTransitionTime.After(finished) {
+		finished = deleted.LastTransitionTime.Time
+	}
+	expiry := finished.Add(time.Duration(*tt.Spec.TTLSecondsAfterFinished) * time.Second)
+	if now := r.Clock.Now(); now.Before(expiry) {
+		return ctrl.Result{RequeueAfter: expiry.Sub(now)}, nil
+	}
+	uid := tt.UID
+	if err := r.Delete(ctx, tt, client.Preconditions{UID: &uid}); client.IgnoreNotFound(err) != nil {
+		return ctrl.Result{}, fmt.Errorf("delete expired template test %s/%s: %w", tt.Namespace, tt.Name, err)
+	}
+	return ctrl.Result{}, nil
 }
 
 func (r *CoderTemplateTestReconciler) cleanupStep(ctx context.Context, tt *coderv1alpha1.CoderTemplateTest) (time.Duration, error) {
