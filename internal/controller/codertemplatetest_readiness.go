@@ -71,27 +71,29 @@ func (r *CoderTemplateTestReconciler) checkReadiness(
 		// Coder reports a workspace without agents as healthy: a false pass.
 		return templateTestFail("NoAgents", "Workspace %s has no agents, so nothing proves that it works.", name), nil
 	}
+	// Messages name agents by ID: a template can derive agent names from
+	// parameter values, which never go into status.
 	var waiting *codersdk.WorkspaceAgent
 	for i := range agents {
 		agent := &agents[i]
 		switch agent.LifecycleState {
 		case codersdk.WorkspaceAgentLifecycleStartError:
-			return templateTestFail("AgentStartError", "The startup script of agent %s failed.", agent.Name), nil
+			return templateTestFail("AgentStartError", "The startup script of agent %s failed.", agent.ID), nil
 		case codersdk.WorkspaceAgentLifecycleStartTimeout:
-			return templateTestFail("AgentStartTimeout", "The startup script of agent %s timed out.", agent.Name), nil
+			return templateTestFail("AgentStartTimeout", "The startup script of agent %s timed out.", agent.ID), nil
 		case codersdk.WorkspaceAgentLifecycleShuttingDown, codersdk.WorkspaceAgentLifecycleShutdownTimeout,
 			codersdk.WorkspaceAgentLifecycleShutdownError, codersdk.WorkspaceAgentLifecycleOff:
-			return templateTestFail("AgentStopped", "Agent %s is %s.", agent.Name, agent.LifecycleState), nil
+			return templateTestFail("AgentStopped", "Agent %s is %s.", agent.ID, agent.LifecycleState), nil
 		}
 		switch {
 		case agent.Status == codersdk.WorkspaceAgentTimeout:
-			return templateTestFail("AgentConnectionTimeout", "Agent %s did not connect in time.", agent.Name), nil
+			return templateTestFail("AgentConnectionTimeout", "Agent %s did not connect in time.", agent.ID), nil
 		case waiting == nil && (agent.Status != codersdk.WorkspaceAgentConnected || agent.LifecycleState != codersdk.WorkspaceAgentLifecycleReady):
 			waiting = agent
 		}
 	}
 	if waiting != nil {
-		return templateTestWait("WaitingForAgents", "Agent %s is %s and %s.", waiting.Name, waiting.Status, waiting.LifecycleState), nil
+		return templateTestWait("WaitingForAgents", "Agent %s is %s and %s.", waiting.ID, waiting.Status, waiting.LifecycleState), nil
 	}
 	tt.Status.AgentsReadyTime = &metav1.Time{Time: now}
 	return templateTestWait("AgentsReady", "Every agent of workspace %s is ready. The delete steps are not enabled yet.", name), nil
