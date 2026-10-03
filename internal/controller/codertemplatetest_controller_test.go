@@ -243,7 +243,11 @@ func TestTemplateTestOwnerEligibility(t *testing.T) {
 			e.fake.addMember(e.orgID, u, "custom-builder")
 			return u
 		}},
-		{name: "suspended user", refusal: "suspended", setup: func(e *templateTestEnv) uuid.UUID {
+		{name: "unknown user status", refusal: `status "disabled"`, setup: func(e *templateTestEnv) uuid.UUID {
+			e.fake.updateUser(e.tester, func(u *codersdk.User) { u.Status = "disabled" })
+			return e.tester
+		}},
+		{name: "suspended user", refusal: `status "suspended"`, setup: func(e *templateTestEnv) uuid.UUID {
 			e.fake.updateUser(e.tester, func(u *codersdk.User) { u.Status = codersdk.UserStatusSuspended })
 			return e.tester
 		}},
@@ -316,6 +320,111 @@ func TestTemplateTestVersionFailures(t *testing.T) {
 	for reason, version := range cases {
 		requireTemplateTestFailed(t, e.settle(t, e.createTest(t, "default.docker", version)), reason)
 	}
+
+	// Coder v2.37.2 refuses new workspaces for a deprecated template
+	// (coderd/workspaces.go:958).
+	legacy := e.fake.addTemplate(e.orgID, "legacy")
+	e.fake.addVersion(legacy, "v1", codersdk.ProvisionerJobSucceeded)
+	e.fake.deprecateTemplate(legacy)
+	tt := e.settle(t, e.createTest(t, "default.legacy", coderv1alpha1.CoderTemplateTestVersion{Name: "v1"}))
+	requireTemplateTestFailed(t, tt, "TemplateDeprecated")
+	require.NotContains(t, tt.Status.Message, "Use the new template", "the deprecation message is Coder detail")
+}
+
+// TestTemplateTestRejectsWrongCoderAnswers checks the rule for every Coder
+// answer the reconciler trusts: it names what the controller asked for.
+func TestTemplateTestRejectsWrongCoderAnswers(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	pass := fakeFault{Rewrite: func(a any) any { return a }}
+	cases := []struct {
+		name    string
+		version coderv1alpha1.CoderTemplateTestVersion
+		route   string
+		faults  []fakeFault // The last one rewrites the answer.
+		want    string
+	}{
+		{name: "user", route: routeUser, want: "user", faults: []fakeFault{{Rewrite: func(a any) any {
+			u := a.(codersdk.User)
+			u.ID = uuid.New()
+			return u
+		}}}},
+		{name: "organization by ID", route: routeOrganization, want: "organization", faults: []fakeFault{{Rewrite: func(a any) any {
+			o := a.(codersdk.Organization)
+			o.ID = uuid.New()
+			return o
+		}}}},
+		{name: "member user", route: routeOrgMember, want: "member user", faults: []fakeFault{{Rewrite: func(a any) any {
+			m := a.(codersdk.OrganizationMemberWithUserData)
+			m.UserID = uuid.New()
+			return m
+		}}}},
+		{name: "member organization", route: routeOrgMember, want: "member organization", faults: []fakeFault{{Rewrite: func(a any) any {
+			m := a.(codersdk.OrganizationMemberWithUserData)
+			m.OrganizationID = uuid.New()
+			return m
+		}}}},
+		{name: "organization by name", route: routeOrganization, want: "organization", faults: []fakeFault{pass, {Rewrite: func(a any) any {
+			o := a.(codersdk.Organization)
+			o.Name = "other"
+			return o
+		}}}},
+		{name: "template", route: routeTemplateByName, want: "template", faults: []fakeFault{{Rewrite: func(a any) any {
+			tpl := a.(codersdk.Template)
+			tpl.Name = "other"
+			return tpl
+		}}}},
+		{name: "template organization", route: routeTemplateByName, want: "template organization", faults: []fakeFault{{Rewrite: func(a any) any {
+			tpl := a.(codersdk.Template)
+			tpl.OrganizationID = uuid.New()
+			return tpl
+		}}}},
+		{name: "version by name", route: routeVersionByName, want: "version", faults: []fakeFault{{Rewrite: func(a any) any {
+			v := a.(codersdk.TemplateVersion)
+			v.Name = "v2"
+			return v
+		}}}},
+		{name: "version by ID", version: coderv1alpha1.CoderTemplateTestVersion{ID: e.v1.String()}, route: routeVersion, want: "version", faults: []fakeFault{{Rewrite: func(a any) any {
+			v := a.(codersdk.TemplateVersion)
+			v.ID = uuid.New()
+			return v
+		}}}},
+		{name: "active version", version: coderv1alpha1.CoderTemplateTestVersion{Active: ptr.To(true)}, route: routeVersion, want: "version", faults: []fakeFault{{Rewrite: func(a any) any {
+			v := a.(codersdk.TemplateVersion)
+			v.ID = uuid.New()
+			return v
+		}}}},
+	}
+	for _, tc := range cases {
+		version := tc.version
+		if version == (coderv1alpha1.CoderTemplateTestVersion{}) {
+			version.Name = "v1"
+		}
+		key := e.createTest(t, "default.docker", version)
+		for _, fault := range tc.faults {
+			e.fake.failNext(tc.route, fault)
+		}
+		var err error
+		for range 3 { // Finalizer, initialization, lookups.
+			r := &controller.CoderTemplateTestReconciler{Client: k8sClient, Scheme: scheme, Clock: e.clock}
+			if _, err = r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key}); err != nil {
+				break
+			}
+		}
+		require.ErrorContains(t, err, "assertion failed: Coder answered "+tc.want+" ", tc.name)
+	}
+
+	// A pinned version is read by ID, and the answer must name that ID.
+	key := e.createTest(t, "default.docker", coderv1alpha1.CoderTemplateTestVersion{Active: ptr.To(true)})
+	requireTemplateTestWaiting(t, e.settle(t, key), "ReadyToCreate", "")
+	e.fake.failNext(routeVersion, fakeFault{Rewrite: func(a any) any {
+		v := a.(codersdk.TemplateVersion)
+		v.ID = uuid.New()
+		return v
+	}})
+	r := &controller.CoderTemplateTestReconciler{Client: k8sClient, Scheme: scheme, Clock: e.clock}
+	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+	require.ErrorContains(t, err, "assertion failed: Coder answered version ", "pinned version")
 }
 
 func TestTemplateTestDeadlineWhilePending(t *testing.T) {

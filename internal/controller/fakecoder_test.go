@@ -46,6 +46,9 @@ type fakeFault struct {
 	AfterCommit bool // Apply the route's state change before the fault fires.
 	Hang        bool // Block until the client gives up (its own timeout).
 	Reset       bool // Close the TCP connection without an answer.
+	// Rewrite changes a successful answer, to model Coder answering for
+	// something other than what was asked.
+	Rewrite func(answer any) any
 }
 
 type fakeWorkspace struct {
@@ -151,8 +154,11 @@ func (f *fakeCoder) route(mux *http.ServeMux, pattern, route string, h func(*htt
 			fault, f.faults[route] = &queue[0], queue[1:]
 		}
 		status, resp := 0, any(nil)
-		if fault == nil || fault.AfterCommit {
+		if fault == nil || fault.AfterCommit || fault.Rewrite != nil {
 			status, resp = h(r)
+		}
+		if fault != nil && fault.Rewrite != nil {
+			resp, fault = fault.Rewrite(resp), nil
 		}
 		f.mu.Unlock()
 
@@ -307,6 +313,16 @@ func (f *fakeCoder) setDefaultMemberRoles(orgID uuid.UUID, roles ...string) {
 	require.True(f.t, ok, "assertion failed: unknown organization %s", orgID)
 	o.DefaultOrgMemberRoles = roles
 	f.orgs[orgID] = o
+}
+
+// deprecateTemplate marks a template deprecated, which blocks new workspaces.
+func (f *fakeCoder) deprecateTemplate(templateID uuid.UUID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	tpl, ok := f.templates[templateID]
+	require.True(f.t, ok, "assertion failed: unknown template %s", templateID)
+	tpl.Deprecated, tpl.DeprecationMessage = true, "Use the new template."
+	f.templates[templateID] = tpl
 }
 
 // setVersionJob moves a version's import job to status.

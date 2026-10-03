@@ -181,6 +181,9 @@ func (r *CoderTemplateTestReconciler) resolveInputs(ctx context.Context, tt *cod
 	} else if err != nil {
 		return coderUnavailable("get organization", err), nil
 	}
+	if err := coderAnswerFor("organization", strings.ToLower(orgName), strings.ToLower(org.Name)); err != nil {
+		return nil, err
+	}
 	if !slices.Contains(owner.OrganizationIDs, org.ID) {
 		return templateTestWait("OwnerNotEligible", "Coder user %s is not a member of organization %q.", ownerID, orgName), nil
 	}
@@ -189,6 +192,16 @@ func (r *CoderTemplateTestReconciler) resolveInputs(ctx context.Context, tt *cod
 		return templateTestWait("TemplateNotFound", "Coder template %q does not exist.", tt.Spec.Template), nil
 	} else if err != nil {
 		return coderUnavailable("get template", err), nil
+	}
+	if err := errors.Join(coderAnswerFor("template", strings.ToLower(templateName), strings.ToLower(template.Name)),
+		coderAnswerFor("template organization", org.ID.String(), template.OrganizationID.String())); err != nil {
+		return nil, err
+	}
+	if template.Deprecated {
+		// Coder v2.37.2 refuses new workspaces for a deprecated template
+		// (coderd/workspaces.go:958). The deprecation message is Coder
+		// detail, so status leaves it out.
+		return templateTestFail("TemplateDeprecated", "Coder template %q is deprecated and accepts no new workspaces.", tt.Spec.Template), nil
 	}
 	version, step, err := resolveTemplateTestVersion(ctx, sdk, tt, template)
 	if step != nil || err != nil {
@@ -264,11 +277,11 @@ func checkTemplateTestOwner(ctx context.Context, sdk *codersdk.Client, ownerID u
 	} else if err != nil {
 		return user, coderUnavailable("get owner", err), nil
 	}
-	if user.ID != ownerID {
-		return user, nil, fmt.Errorf("assertion failed: Coder returned user %s for owner %s", user.ID, ownerID)
+	if err := coderAnswerFor("user", ownerID.String(), user.ID.String()); err != nil {
+		return user, nil, err
 	}
-	if user.Status == codersdk.UserStatusSuspended {
-		return user, refuse("the user is suspended."), nil
+	if user.Status != codersdk.UserStatusActive && user.Status != codersdk.UserStatusDormant {
+		return user, refuse("status %q is not allowed. Only active and dormant users can own test workspaces.", user.Status), nil
 	}
 	// Headless users created before service accounts still have login type none.
 	if !user.IsServiceAccount && user.LoginType != codersdk.LoginTypePassword && user.LoginType != codersdk.LoginTypeNone { //nolint:staticcheck // See above.
@@ -290,6 +303,9 @@ func checkTemplateTestOwner(ctx context.Context, sdk *codersdk.Client, ownerID u
 		if err != nil {
 			return user, coderUnavailable("get owner organization", err), nil
 		}
+		if err := coderAnswerFor("organization", orgID.String(), org.ID.String()); err != nil {
+			return user, nil, err
+		}
 		for _, role := range org.DefaultOrgMemberRoles {
 			if !allowed(role) {
 				return user, refuse("default member role %q in organization %s is not allowed.", role, orgID), nil
@@ -298,6 +314,10 @@ func checkTemplateTestOwner(ctx context.Context, sdk *codersdk.Client, ownerID u
 		member, err := sdk.OrganizationMember(ctx, orgID.String(), ownerID.String())
 		if err != nil {
 			return user, coderUnavailable("get owner membership", err), nil
+		}
+		if err := errors.Join(coderAnswerFor("member user", ownerID.String(), member.UserID.String()),
+			coderAnswerFor("member organization", orgID.String(), member.OrganizationID.String())); err != nil {
+			return user, nil, err
 		}
 		for _, role := range member.Roles {
 			if !allowed(role.Name) {
@@ -313,6 +333,7 @@ func checkTemplateTestOwner(ctx context.Context, sdk *codersdk.Client, ownerID u
 func resolveTemplateTestVersion(ctx context.Context, sdk *codersdk.Client, tt *coderv1alpha1.CoderTemplateTest, template codersdk.Template) (codersdk.TemplateVersion, *templateTestStep, error) {
 	var version codersdk.TemplateVersion
 	var err error
+	var asked func() error // The rule for the answer: it names what was asked for.
 	switch id := cmp.Or(tt.Status.TemplateVersionID, tt.Spec.Version.ID); {
 	case id != "":
 		parsed, parseErr := uuid.Parse(id)
@@ -321,16 +342,24 @@ func resolveTemplateTestVersion(ctx context.Context, sdk *codersdk.Client, tt *c
 			return version, nil, fmt.Errorf("assertion failed: version ID %q is not a UUID: %w", id, parseErr)
 		}
 		version, err = sdk.TemplateVersion(ctx, parsed)
+		asked = func() error { return coderAnswerFor("version", parsed.String(), version.ID.String()) }
 	case tt.Spec.Version.Name != "":
 		version, err = sdk.TemplateVersionByName(ctx, template.ID, tt.Spec.Version.Name)
+		asked = func() error { return coderAnswerFor("version", tt.Spec.Version.Name, version.Name) }
 	default:
 		version, err = sdk.TemplateVersion(ctx, template.ActiveVersionID)
+		asked = func() error { return coderAnswerFor("version", template.ActiveVersionID.String(), version.ID.String()) }
 	}
 	switch {
 	case isCoderNotFound(err):
 		return version, templateTestWait("TemplateVersionNotFound", "The version of template %q does not exist.", tt.Spec.Template), nil
 	case err != nil:
 		return version, coderUnavailable("get template version", err), nil
+	}
+	if err := asked(); err != nil {
+		return version, nil, err
+	}
+	switch {
 	case version.TemplateID == nil || *version.TemplateID != template.ID:
 		return version, templateTestFail("TemplateVersionMismatch", "Version %s does not belong to template %q.", version.ID, tt.Spec.Template), nil
 	case version.Archived:
@@ -415,6 +444,16 @@ func templateTestWorkspaceName(uid types.UID) (string, error) {
 		return "", fmt.Errorf("assertion failed: object UID %q needs at least %d lowercase hex characters", uid, templateTestUIDHexLength)
 	}
 	return templateTestWorkspacePrefix + hex[:templateTestUIDHexLength], nil
+}
+
+// coderAnswerFor is the rule for every Coder answer the reconciler trusts:
+// the answer names the ID or name that the controller asked for. Anything else
+// means Coder, a proxy, or the SDK is broken, so it is an assertion failure.
+func coderAnswerFor(kind, asked, answered string) error {
+	if asked == answered {
+		return nil
+	}
+	return fmt.Errorf("assertion failed: Coder answered %s %q when asked for %q", kind, answered, asked)
 }
 
 func templateTestDeadlineExceeded(tt *coderv1alpha1.CoderTemplateTest, lastReason, lastMessage string) *templateTestStep {
