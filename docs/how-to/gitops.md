@@ -1,6 +1,6 @@
 # Gate template promotion with GitOps
 
-This guide shows how to make Argo CD or Flux wait for a [`CoderTemplateTest`](test-templates.md) result, and how to promote a template version only after its test passed. The health rules live in [`config/gitops/`](https://github.com/coder/coder-k8s/tree/main/config/gitops). This page copies them, and a unit test keeps the copies equal to the files.
+This guide shows how to make Argo CD or Flux wait for a [`CoderTemplateTest`](test-templates.md) result, and how to promote a template version only after its test passed. The health rules live in `config/gitops/` in this repository. This page copies them, and a unit test keeps the copies equal to the files.
 
 ## Why custom health rules are needed
 
@@ -91,9 +91,9 @@ Do not set `ttlSecondsAfterFinished` on tests that GitOps manages. The controlle
 
 ### Gate before promotion
 
-1. CI pushes the new version without activating it: `coder templates push --activate=false`.
+1. CI pushes the new version under a fixed name, without activating it and without prompts: `coder templates push docker --directory ./docker --name v2 --activate=false --yes`.
 2. Git holds a test of that version, with `spec.version.name`.
-3. A promotion Job runs only after the test is healthy. It reads `status.templateVersionID` of the test and calls the `codertemplates/promote` subresource of the [aggregated API](../reference/aggregated-api-behavior.md#promote-a-template-version).
+3. A promotion Job waits until the test is final. It promotes only after `Succeeded` and reads `status.templateVersionID` of the test and calls the `codertemplates/promote` subresource of the [aggregated API](../reference/aggregated-api-behavior.md#promote-a-template-version).
 
 The Job needs only `get` on its test and `create` on `codertemplates/promote` for one template:
 
@@ -139,7 +139,8 @@ metadata:
   name: promote-docker-v2
   namespace: coder
 spec:
-  backoffLimit: 4
+  backoffLimit: 2
+  activeDeadlineSeconds: 1500 # longer than the test's timeoutSeconds (900 by default)
   template:
     spec:
       serviceAccountName: promote-docker
@@ -151,7 +152,17 @@ spec:
             - sh
             - -ec
             - |
-              phase=$(kubectl -n coder get codertemplatetest docker-v2 -o jsonpath='{.status.phase}')
+              # Wait for the result: the Job can start before the test of
+              # this revision exists or has finished.
+              phase=""
+              for _ in $(seq 1 240); do
+                phase=$(kubectl -n coder get codertemplatetest docker-v2 -o jsonpath='{.status.phase}' 2>/dev/null || true)
+                case "$phase" in
+                  Succeeded) break ;;
+                  Failed) echo "test docker-v2 failed: not promoting" >&2; exit 1 ;;
+                esac
+                sleep 5
+              done
               test "$phase" = Succeeded
               id=$(kubectl -n coder get codertemplatetest docker-v2 -o jsonpath='{.status.templateVersionID}')
               test -n "$id"
@@ -169,7 +180,7 @@ metadata:
     argocd.argoproj.io/sync-wave: "1"   # "2" on the RBAC objects and the Job
 ```
 
-With **Flux**, use two Kustomizations. Kustomization A applies the test, with `wait: true` and the health check above. Kustomization B applies the RBAC objects and the Job, with `dependsOn` A:
+With **Flux**, use two Kustomizations. Kustomization A applies the test, with `wait: true` and the health check above. Kustomization B applies the RBAC objects and the Job, with `dependsOn` A. A plain `dependsOn` does not wait until A has applied the same Git revision, so B can start the Job while A still reports the previous test. The Job therefore waits for its own test result, as above:
 
 ```yaml
 apiVersion: kustomize.toolkit.fluxcd.io/v1

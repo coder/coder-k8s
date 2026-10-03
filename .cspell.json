@@ -32,6 +32,7 @@
     "codegen",
     "deepcopy",
     "envtest",
+    "esac",
     "hackathon",
     "wsproxy",
     "codercontrolplane",
