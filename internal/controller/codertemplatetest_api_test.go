@@ -84,6 +84,10 @@ func TestCoderTemplateTestAPIValidation(t *testing.T) {
 		{name: "reserved word inside a name", mutate: func(s *coderv1alpha1.CoderTemplateTestSpec) {
 			s.Template = "newco.create-env"
 		}},
+		// Coder v2.37.2 (codersdk.NameValid) reserves only the lowercase words.
+		{name: "reserved word in another case", mutate: func(s *coderv1alpha1.CoderTemplateTestSpec) {
+			s.Template = "New.CREATE"
+		}},
 		{name: "version name with a slash", wantErr: "spec.version.name", mutate: func(s *coderv1alpha1.CoderTemplateTestSpec) {
 			s.Version.Name = "v1/../v2"
 		}},

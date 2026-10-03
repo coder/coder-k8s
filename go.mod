@@ -17,6 +17,7 @@ require (
 	k8s.io/client-go v0.35.0
 	k8s.io/code-generator v0.35.0
 	k8s.io/kube-openapi v0.0.0-20260127142750-a19766b6e2d4
+	k8s.io/utils v0.0.0-20260108192941-914a6e750570
 	sigs.k8s.io/controller-runtime v0.23.1
 	sigs.k8s.io/gateway-api v1.4.1
 	sigs.k8s.io/yaml v1.6.0
@@ -425,7 +426,6 @@ require (
 	k8s.io/gengo/v2 v2.0.0-20250922181213-ec3ebc5fd46b // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/kms v0.35.0 // indirect
-	k8s.io/utils v0.0.0-20260108192941-914a6e750570 // indirect
 	mvdan.cc/gofumpt v0.9.2 // indirect
 	mvdan.cc/unparam v0.0.0-20251027182757-5beb8c8f8f15 // indirect
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.31.2 // indirect
