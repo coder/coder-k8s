@@ -125,8 +125,7 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	deadline := tt.Status.StartTime.Add(time.Duration(templateTestTimeoutSeconds(tt)) * time.Second)
 	if !now.Before(deadline) {
-		applyTemplateTestStep(tt, now, templateTestFail("DeadlineExceeded",
-			"The test did not finish within %ds. Last wait: %s: %s", templateTestTimeoutSeconds(tt), tt.Status.Reason, tt.Status.Message))
+		applyTemplateTestStep(tt, now, templateTestDeadlineExceeded(tt, tt.Status.Reason, tt.Status.Message))
 		return ctrl.Result{}, r.writeStatus(ctx, tt, before)
 	}
 
@@ -136,6 +135,10 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	if step == nil {
 		step = templateTestWait("ReadyToCreate", "Inputs are resolved. Creating workspaces is not enabled yet.")
+	}
+	// Coder calls can take up to their timeout, so check the deadline again.
+	if now = r.Clock.Now(); !step.failed && !now.Before(deadline) {
+		step = templateTestDeadlineExceeded(tt, step.reason, step.message)
 	}
 	applyTemplateTestStep(tt, now, step)
 	if err := r.writeStatus(ctx, tt, before); err != nil {
@@ -199,9 +202,9 @@ func (r *CoderTemplateTestReconciler) coderClient(ctx context.Context, tt *coder
 	if token == "" {
 		return nil, nil, templateTestWait("OperatorAccessNotReady", "The operator token Secret of CoderControlPlane %s has no token yet.", key.Name), nil
 	}
-	coderURL, err := url.Parse(controlPlane.Status.URL)
+	coderURL, err := templateTestCoderURL(controlPlane)
 	if err != nil {
-		return nil, nil, templateTestWait("ControlPlaneNotReady", "CoderControlPlane %s has an invalid status.url: %v", key.Name, err), nil
+		return nil, nil, templateTestWait("ControlPlaneNotReady", "CoderControlPlane %s has no usable Coder URL: %v", key.Name, err), nil
 	}
 	sdk, err := coder.NewSDKClient(coder.Config{CoderURL: coderURL, SessionToken: token, RequestTimeout: templateTestCoderTimeout})
 	if err != nil {
@@ -255,6 +258,21 @@ func (r *CoderTemplateTestReconciler) releaseFinalizer(ctx context.Context, tt *
 	return nil
 }
 
+// templateTestCoderURL returns the URL for Coder calls. With TLS, status.url
+// is HTTPS on the service name, which certificates rarely cover, so the
+// controller uses the internal HTTP URL like the control-plane controller.
+func templateTestCoderURL(controlPlane *coderv1alpha1.CoderControlPlane) (*url.URL, error) {
+	statusURL, err := url.Parse(controlPlane.Status.URL)
+	if err != nil || statusURL.Scheme != "https" {
+		return statusURL, err
+	}
+	internalURL := controlPlaneSDKURL(controlPlane)
+	if internalURL == "" {
+		return nil, errors.New("no internal HTTP URL")
+	}
+	return url.Parse(internalURL)
+}
+
 // templateTestWorkspaceName derives the Coder workspace name from the object
 // UID, so no other test can use it: "ktt-" and 28 hex characters (32 in all,
 // Coder's limit).
@@ -264,6 +282,11 @@ func templateTestWorkspaceName(uid types.UID) (string, error) {
 		return "", fmt.Errorf("assertion failed: object UID %q needs at least %d lowercase hex characters", uid, templateTestUIDHexLength)
 	}
 	return templateTestWorkspacePrefix + hex[:templateTestUIDHexLength], nil
+}
+
+func templateTestDeadlineExceeded(tt *coderv1alpha1.CoderTemplateTest, lastReason, lastMessage string) *templateTestStep {
+	return templateTestFail("DeadlineExceeded", "The test did not finish within %ds. Last wait: %s: %s",
+		templateTestTimeoutSeconds(tt), lastReason, lastMessage)
 }
 
 func templateTestTimeoutSeconds(tt *coderv1alpha1.CoderTemplateTest) int32 {

@@ -183,3 +183,36 @@ func TestTemplateTestDeadlineWhilePending(t *testing.T) {
 	require.Contains(t, tt.Status.Message, "Last wait: OwnerNotConfigured")
 	require.Equal(t, tt.Status.CompletionTime, e.settle(t, key).Status.CompletionTime, "a final test is never evaluated again")
 }
+
+// lateClock answers first on the first call and later afterwards, like a
+// reconcile whose Coder lookup takes a while.
+type lateClock struct {
+	first, later time.Time
+	calls        int
+}
+
+func (c *lateClock) Now() time.Time {
+	c.calls++
+	if c.calls == 1 {
+		return c.first
+	}
+	return c.later
+}
+
+func (c *lateClock) Since(t time.Time) time.Duration { return c.Now().Sub(t) }
+
+func TestTemplateTestDeadlineAfterSlowLookup(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	key := e.createTest(t, "default.docker", coderv1alpha1.CoderTemplateTestVersion{Name: "v1"})
+	tt := e.settle(t, key)
+	requireTemplateTestWaiting(t, tt, "ReadyToCreate", "")
+
+	deadline := tt.Status.StartTime.Add(900 * time.Second)
+	r := &controller.CoderTemplateTestReconciler{Client: k8sClient, Scheme: scheme, Clock: &lateClock{first: deadline.Add(-time.Second), later: deadline}}
+	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+	tt = e.settle(t, key)
+	requireTemplateTestFailed(t, tt, "DeadlineExceeded")
+	require.Contains(t, tt.Status.Message, "Last wait: ReadyToCreate")
+}
