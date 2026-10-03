@@ -16,6 +16,11 @@ TEMPLATE_MANIFEST=${E2E_TEMPLATE_MANIFEST:-config/e2e/codertemplate.yaml} # must
 TEMPLATE_APPLY_TIMEOUT=${E2E_TEMPLATE_APPLY_TIMEOUT:-600s}                  # Create now waits for the import (#105)
 WS_NAME=${E2E_WORKSPACE:-e2e-lifecycle}
 RENAMED=${E2E_RENAMED_WORKSPACE:-e2e-lifecycle-renamed}
+TESTER=${E2E_TESTER:-e2e-tester} # password user created by the driver; owns the agent workspace
+AGENT_TEMPLATE=${E2E_AGENT_TEMPLATE:-e2e-agent}
+AGENT_MANIFEST=${E2E_AGENT_TEMPLATE_MANIFEST:-config/e2e/codertemplate-agent.yaml} # must define $ORG.$AGENT_TEMPLATE
+AGENT_WS=${E2E_AGENT_WORKSPACE:-e2e-agent}
+AGENT_TIMEOUT=${E2E_AGENT_TIMEOUT_SECONDS:-300} # create until every agent is connected and ready
 TIMEOUT=${E2E_TIMEOUT_SECONDS:-300}
 EVENT_TIMEOUT=${E2E_EVENT_TIMEOUT_SECONDS:-60}
 POLL=${E2E_POLL_SECONDS:-3}
@@ -45,6 +50,7 @@ cleanup() {
     "serving_image_id=${SERVING_IMAGE_ID:-unknown}" "pod=${POD_NAME:-unknown}" "uid0=${UID0:-unset}" "uid1=${UID1:-unset}" \
     "rv_pre_rename=${OLD_RV:-unset}" "rv_post_rename=${NEW_RV:-unset}" "template=${TPL_STATE:-unset}" \
     "workspace=${WS_STATE:-unset}" "apply_failure=${APPLY_FAILURE:-none}" \
+    "tester=${TESTER_NAME:-unset}/${TESTER_ID:-unset}" "agent_ready_seconds=${AGENT_READY_SECONDS:-unset}" \
     "${CASES[@]}" | tee "$WORK/receipt.txt"
 }
 trap cleanup EXIT
@@ -168,8 +174,8 @@ ws_state() { # UID, latest build (aggregated/Coder), build count and status of t
   n=$(build_count) || return 1
   jq -er --arg l "$latest" --arg n "$n" '"uid=\(.metadata.uid) latest=\(.status.latestBuildID)/\($l) builds=\($n) status=\(.status.latestBuildStatus)"' <<<"$o"
 }
-ws_manifest() { # <leaf name>: writes $WORK/ws-<leaf>.json, a canonical CoderWorkspace manifest with running=true
-  jq -n --arg n "$ORG.$OWNER.$1" --arg ns "$NS" --arg org "$ORG" --arg t "$TEMPLATE" \
+ws_manifest() { # <leaf name> [owner] [template]: writes $WORK/ws-<leaf>.json, a canonical CoderWorkspace manifest with running=true
+  jq -n --arg n "$ORG.${2:-$OWNER}.$1" --arg ns "$NS" --arg org "$ORG" --arg t "${3:-$TEMPLATE}" \
     '{apiVersion:"aggregation.coder.com/v1alpha1",kind:"CoderWorkspace",metadata:{name:$n,namespace:$ns},
       spec:{organization:$org,templateName:$t,running:true}}' >"$WORK/ws-$1.json" || return 1
   [[ -s $WORK/ws-$1.json ]] || return 1
@@ -342,14 +348,14 @@ jq -e --arg uid "$UID0" --arg b "$BUILD" '.metadata.uid == $uid and .status.late
 step "delete with live UID and token, wait for delete build"
 ws_delete "$NEW_NAME" "$UID0" "$(jq -er '.metadata.resourceVersion' <<<"$OBJ")" >/dev/null
 wait_until "delete build of $NEW_NAME (404)" gone "$NEW_NAME"
-delete_succeeded() { # a 404 proves disappearance; the delete job must also have succeeded
+delete_succeeded() { # <uid>: a 404 proves disappearance; the delete job must also have succeeded
   local st
-  st=$(coder_api GET "/api/v2/workspaces/$UID0?include_deleted=true" |
+  st=$(coder_api GET "/api/v2/workspaces/$1?include_deleted=true" |
     jq -er 'select(.latest_build.transition == "delete") | .latest_build.job.status') || return 1
-  case $st in failed | canceled | canceling) fail "delete job of $UID0 ended in status $st" ;; esac
+  case $st in failed | canceled | canceling) fail "delete job of $1 ended in status $st" ;; esac
   [[ $st == succeeded ]]
 }
-wait_until "delete job of $UID0 to succeed" delete_succeeded
+wait_until "delete job of $UID0 to succeed" delete_succeeded "$UID0"
 
 step "recreate the same name: new UID; prior-UID delete returns 409"
 OBJ=$(create_ws "$RENAMED")
@@ -360,5 +366,49 @@ wait_until "start build $BUILD" build_done "$NEW_NAME" "$BUILD" running
 expect_error Conflict ws_delete "$NEW_NAME" "$UID0"
 jq -e --arg uid "$UID1" --arg b "$BUILD" '.metadata.uid == $uid and .status.latestBuildID == $b and
   .status.latestBuildStatus == "running"' <<<"$(ws_get "$NEW_NAME")" >/dev/null || fail "recreated object changed after prior-UID delete"
+
+step "create the tester user through the Coder API (password login, default organization)"
+ORG_ID=$(coder_api GET /api/v2/organizations | jq -er 'map(select(.is_default)) | if length == 1 then .[0].id else error end') ||
+  fail "cannot read the single default organization"
+TESTER_PASSWORD=$(head -c 24 /dev/urandom | base64) # never logged; only the tester's id and username are recorded
+[[ ${GITHUB_ACTIONS:-} == true ]] && echo "::add-mask::$TESTER_PASSWORD"
+jq -nc --arg u "$TESTER" --arg p "$TESTER_PASSWORD" --arg o "$ORG_ID" '{username: $u, name: "E2E tester", email: ($u + "@e2e.example.com"),
+  password: $p, login_type: "password", organization_ids: [$o]}' >"$WORK/tester.json" || fail "cannot render the tester user request"
+USER_JSON=$(coder_api POST /api/v2/users "$(<"$WORK/tester.json")") || fail "cannot create the tester user $TESTER"
+rm -f "$WORK/tester.json"
+TESTER_ID=$(jq -er --arg u "$TESTER" --arg o "$ORG_ID" 'select(.username == $u and .login_type == "password" and
+  (.organization_ids | index($o))) | .id' <<<"$USER_JSON") || fail "tester user $TESTER has an unexpected shape or organization"
+# New API users start dormant, and Coder refuses agents of workspaces whose owner is not active (401).
+coder_api PUT "/api/v2/users/$TESTER_ID/status/activate" | jq -e '.status == "active"' >/dev/null ||
+  fail "cannot activate the tester user $TESTER"
+TESTER_NAME=$TESTER
+log "tester user: $TESTER_NAME ($TESTER_ID), active"
+
+step "a tester-owned workspace from the agent template gets a connected, ready agent; its delete build succeeds"
+apply_manifest "$AGENT_MANIFEST" "$TEMPLATE_APPLY_TIMEOUT"
+AGENT_NAME=$ORG.$TESTER_NAME.$AGENT_WS
+ws_manifest "$AGENT_WS" "$TESTER_NAME" "$AGENT_TEMPLATE" || fail "cannot render the agent workspace manifest"
+AGENT_START=$SECONDS
+OBJ=$(k create --raw "$API" -f "$WORK/ws-$AGENT_WS.json") || fail "cannot create the agent workspace $AGENT_NAME"
+AGENT_UID=$(jq -er '.metadata.uid' <<<"$OBJ") || fail "agent workspace lacks uid: $OBJ"
+BUILD=$(jq -er '.status.latestBuildID' <<<"$OBJ") || fail "agent workspace lacks latestBuildID: $OBJ"
+wait_until "start build $BUILD" build_done "$AGENT_NAME" "$BUILD" running
+AGENTS_SEEN=""
+agents_ready() { # every agent of build $BUILD is connected and ready; a failed lifecycle fails at once
+  local w seen
+  w=$(coder_api GET "/api/v2/workspaces/$AGENT_UID") || return 1
+  [[ $(jq -r '.latest_build.id' <<<"$w") == "$BUILD" ]] || fail "latest build of $AGENT_NAME changed away from $BUILD"
+  seen=$(jq -r '[.latest_build.resources[]?.agents[]? | "\(.name)=\(.status)/\(.lifecycle_state)"] | join(" ")' <<<"$w") || return 1
+  [[ $seen == "$AGENTS_SEEN" ]] || { AGENTS_SEEN=$seen && log "agents: ${seen:-none}"; }
+  [[ $seen != *"/start_error"* && $seen != *"/start_timeout"* ]] || fail "agent of $AGENT_NAME failed to start: $seen"
+  jq -e '[.latest_build.resources[]?.agents[]?] | length > 0 and all(.status == "connected" and .lifecycle_state == "ready")' \
+    <<<"$w" >/dev/null
+}
+TIMEOUT=$AGENT_TIMEOUT wait_until "agents of $AGENT_NAME connected and ready" agents_ready
+AGENT_READY_SECONDS=$((SECONDS - AGENT_START))
+log "agent time-to-ready: ${AGENT_READY_SECONDS}s from create"
+ws_delete "$AGENT_NAME" "$AGENT_UID" >/dev/null || fail "cannot delete the agent workspace $AGENT_NAME"
+wait_until "delete build of $AGENT_NAME (404)" gone "$AGENT_NAME"
+wait_until "delete job of $AGENT_UID to succeed" delete_succeeded "$AGENT_UID"
 CASES+=("case: $CURRENT = passed") && CURRENT="" && RESULT=PASS
 log "PASS: workspace lifecycle"
