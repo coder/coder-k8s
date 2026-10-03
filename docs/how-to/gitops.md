@@ -81,7 +81,7 @@ Flux v2.5 and later evaluate `healthCheckExprs` of a Kustomization with `spec.wa
 
 Flux evaluates `inProgress`, then `failed`, then `current`, and the first true expression wins. Before the controller writes the first status, the expressions cannot read `status`. Flux then reports the test as `Unknown` and keeps waiting, like `InProgress`.
 
-Set `spec.timeout` of the Kustomization above the test's `timeoutSeconds` (default 900 s), or Flux stops waiting before the test ends.
+Set `spec.timeout` of the Kustomization above the test's `timeoutSeconds` (default 900 s) plus the time that the controller needs to start or recover, or Flux stops waiting before the test ends. The Flux timeout starts with the reconciliation, but the test's clock starts only when the controller starts the test and sets `status.startTime`.
 
 ## Patterns
 
@@ -95,7 +95,7 @@ Do not set `ttlSecondsAfterFinished` on tests that GitOps manages. The controlle
 
 1. CI pushes the new version under a fixed name, without activating it and without prompts: `coder templates push docker --directory ./docker --name v2 --activate=false --yes`.
 2. Git holds a test of that version, with `spec.version.name`.
-3. A promotion step waits until the test is final. Only after `Succeeded`, it reads `status.templateVersionID` of the test and calls the `codertemplates/promote` subresource of the [aggregated API](../reference/aggregated-api-behavior.md#promote-a-template-version). A retry is safe: promoting the active version again answers `AlreadyActive`.
+3. A promotion step waits until the test is final. Only after `Succeeded`, it reads `status.templateVersionID` of the test and calls the `codertemplates/promote` subresource of the [aggregated API](../reference/aggregated-api-behavior.md#promote-a-template-version). Promoting the active version again answers `AlreadyActive`. After a `409` or a `503`, the step must read the active version before it tries again, because another writer can have activated a third version, and the last writer wins. See the confirmation rules of the [promote subresource](../reference/aggregated-api-behavior.md#promote-a-template-version).
 
 With **Argo CD**, put the test in sync wave 1 and the promotion step in wave 2. Argo CD applies wave 2 only after every resource of wave 1 is healthy. With **Flux**, a plain `dependsOn` does not wait until the dependency has applied the same Git revision, so the promotion step can start while the previous test still shows its result.
 
