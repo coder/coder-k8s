@@ -42,6 +42,7 @@ nav:
       - Deploy the aggregated API server: how-to/deploy-aggregated-apiserver.md
       - Start, stop, and read logs of workspaces: how-to/start-stop-workspaces.md
       - Test a template version: how-to/test-templates.md
+      - Gate template promotion with GitOps: how-to/gitops.md
       - Run the MCP server: how-to/mcp-server.md
       - Troubleshooting: how-to/troubleshooting.md
   - Reference:

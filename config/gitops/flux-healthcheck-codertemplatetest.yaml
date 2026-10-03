@@ -1,0 +1,9 @@
+# Flux health check expressions for CoderTemplateTest (coder.com/v1alpha1).
+# Add this entry to spec.healthCheckExprs of a Flux v2.5+ Kustomization
+# with spec.wait: true.
+# docs/how-to/gitops.md copies this file. A test keeps the copy equal.
+- apiVersion: coder.com/v1alpha1
+  kind: CoderTemplateTest
+  inProgress: "!has(status.observedGeneration) || status.observedGeneration != metadata.generation || !has(status.phase) || status.phase in ['Pending', 'Running']"
+  failed: "status.phase == 'Failed'"
+  current: "status.phase == 'Succeeded' && status.conditions.exists(c, c.type == 'Ready' && c.status == 'True')"
