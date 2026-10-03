@@ -148,10 +148,27 @@ func TestFakeCoderCancelAndDelete(t *testing.T) {
 	requireCoderStatus(t, c.CancelWorkspaceBuild(ctx, del.ID, running), 400) // Completed: 400, not 412.
 	_, err = c.Workspace(ctx, ws.ID)
 	requireCoderStatus(t, err, 410)
-	_, err = c.CreateWorkspaceBuild(ctx, ws.ID, deleteReq)
-	requireCoderStatus(t, err, 410)
+	// Coder v2.37.2 accepts a repeated delete build on a deleted workspace.
+	again, err := c.CreateWorkspaceBuild(ctx, ws.ID, deleteReq)
+	require.NoError(t, err)
+	require.NotEqual(t, del.ID, again.ID)
+	require.Equal(t, codersdk.WorkspaceTransitionDelete, again.Transition)
+	gone, err := c.DeletedWorkspace(ctx, ws.ID)
+	require.NoError(t, err)
+	require.Equal(t, again.ID, gone.LatestBuild.ID)
 	_, err = fx.create(ctx, "ktt-a")
 	require.NoError(t, err)
+
+	// A pending job goes straight to canceled, with both timestamps set.
+	pending, err := fx.create(ctx, "ktt-b")
+	require.NoError(t, err)
+	require.NoError(t, c.CancelWorkspaceBuild(ctx, pending.LatestBuild.ID,
+		codersdk.CancelWorkspaceBuildParams{ExpectStatus: codersdk.CancelWorkspaceBuildStatusPending}))
+	got, err := c.Workspace(ctx, pending.ID)
+	require.NoError(t, err)
+	require.Equal(t, codersdk.ProvisionerJobCanceled, got.LatestBuild.Job.Status)
+	require.NotNil(t, got.LatestBuild.Job.CompletedAt)
+	require.NotNil(t, got.LatestBuild.Job.CanceledAt)
 }
 
 func TestFakeCoderWorkspaceLifecycle(t *testing.T) {

@@ -515,7 +515,8 @@ func (f *fakeCoder) listBuilds(r *http.Request) (int, any) {
 }
 
 // createBuild accepts only delete builds and refuses orphan deletes, so a
-// controller that would leak resources fails loudly.
+// controller that would leak resources fails loudly. Like Coder v2.37.2
+// (postWorkspaceBuilds), it accepts a delete build on a deleted workspace.
 func (f *fakeCoder) createBuild(r *http.Request) (int, any) {
 	fw := f.workspaceByID(r)
 	if fw == nil {
@@ -529,8 +530,6 @@ func (f *fakeCoder) createBuild(r *http.Request) (int, any) {
 	switch {
 	case req.Transition != codersdk.WorkspaceTransitionDelete || req.Orphan:
 		return fakeError(http.StatusBadRequest, "fake coder accepts only non-orphan delete builds")
-	case fw.deleted:
-		return fakeError(http.StatusGone, "Workspace was deleted.")
 	case latest.Job.Status.Active():
 		return fakeError(http.StatusConflict, "A build is already active.")
 	}
