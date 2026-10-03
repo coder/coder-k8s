@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
@@ -33,17 +34,34 @@ func (r *CoderTemplateTestReconciler) confirmCreate(
 	if operator.ID == uuid.Nil {
 		return nil, &coderAnswerError{msg: "assertion failed: Coder answered the operator user without an ID"}
 	}
-	workspace, err := sdk.WorkspaceByOwnerAndName(ctx, tt.Status.OwnerID, tt.Status.WorkspaceName, codersdk.WorkspaceOptions{})
-	live := err == nil
-	if isCoderNotFound(err) {
-		workspace, err = sdk.WorkspaceByOwnerAndName(ctx, tt.Status.OwnerID, tt.Status.WorkspaceName, codersdk.WorkspaceOptions{IncludeDeleted: true})
+	// With include_deleted, Coder v2.37.2 answers the live workspace first and
+	// a deleted one only without a live one (workspaceByOwnerAndName).
+	workspace, err := sdk.WorkspaceByOwnerAndName(ctx, tt.Status.OwnerID, tt.Status.WorkspaceName, codersdk.WorkspaceOptions{IncludeDeleted: true})
+	found := err == nil
+	if !found && !isCoderNotFound(err) {
+		return coderUnavailable("get workspace by name", err), nil
 	}
+	live := false
 	var startBuild *codersdk.WorkspaceBuild
-	switch {
-	case err == nil:
+	if found {
 		if err := errors.Join(coderAnswerFor("workspace", tt.Status.WorkspaceName, workspace.Name),
 			coderAnswerFor("workspace owner", tt.Status.OwnerID, workspace.OwnerID.String())); err != nil {
 			return nil, err
+		}
+		if workspace.ID == uuid.Nil {
+			return nil, &coderAnswerError{msg: "assertion failed: Coder answered a workspace without an ID"}
+		}
+		// The answer does not say whether the workspace is deleted, so read
+		// it by ID: Coder answers 410 for a deleted workspace.
+		got, err := sdk.Workspace(ctx, workspace.ID)
+		switch {
+		case err == nil:
+			if err := coderAnswerFor("workspace", workspace.ID.String(), got.ID.String()); err != nil {
+				return nil, err
+			}
+			live = true
+		case coderStatus(err) != http.StatusGone:
+			return coderUnavailable("get workspace", err), nil
 		}
 		startBuild, err = provenance(ctx, sdk, tt, workspace, operator.ID)
 		var answerErr *coderAnswerError
@@ -52,8 +70,6 @@ func (r *CoderTemplateTestReconciler) confirmCreate(
 		} else if err != nil {
 			return coderUnavailable("get workspace builds", err), nil
 		}
-	case !isCoderNotFound(err):
-		return coderUnavailable("get workspace by name", err), nil
 	}
 
 	switch {
@@ -82,9 +98,9 @@ func (r *CoderTemplateTestReconciler) confirmCreate(
 
 // provenance returns the start build that proves this test created the
 // workspace: organization and template match the pinned values, and the
-// operator user started a build of the pinned version. It returns nil without
-// proof. It reads the newest 100 builds: a workspace with more builds
-// stays unproven, which keeps its finalizer.
+// operator user started the first build with the pinned version. It returns
+// nil without proof. It reads the newest 100 builds: a workspace with more
+// builds stays unproven, which keeps its finalizer.
 func provenance(
 	ctx context.Context, sdk *codersdk.Client, tt *coderv1alpha1.CoderTemplateTest, workspace codersdk.Workspace, operatorID uuid.UUID,
 ) (*codersdk.WorkspaceBuild, error) {
@@ -100,8 +116,14 @@ func provenance(
 		if err := coderAnswerFor("build workspace", workspace.ID.String(), b.WorkspaceID.String()); err != nil {
 			return nil, err
 		}
-		if b.Transition == codersdk.WorkspaceTransitionStart && b.InitiatorID == operatorID &&
+		// Only the first build: a later start build by the operator does not
+		// prove who created the workspace. The controller sends no preset,
+		// so Coder never answers with a claimed prebuilt workspace.
+		if b.BuildNumber == 1 && b.Transition == codersdk.WorkspaceTransitionStart && b.InitiatorID == operatorID &&
 			b.TemplateVersionID.String() == tt.Status.TemplateVersionID {
+			if b.ID == uuid.Nil {
+				return nil, &coderAnswerError{msg: "assertion failed: Coder answered a start build without an ID"}
+			}
 			return b, nil
 		}
 	}

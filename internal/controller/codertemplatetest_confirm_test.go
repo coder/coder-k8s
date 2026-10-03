@@ -40,6 +40,15 @@ func TestTemplateTestConfirmWithoutProvenance(t *testing.T) {
 		setup func(t *testing.T, key types.NamespacedName)
 	}{
 		{name: "another version", fault: fakeFault{Status: 502}, setup: foreign(v2)},
+		{name: "a later start build by the operator", fault: fakeFault{Status: 502}, setup: func(t *testing.T, key types.NamespacedName) {
+			foreign(v2)(t, key)
+			e.fake.failNext(routeWorkspaceBuilds, fakeFault{Rewrite: func(a any) any {
+				builds := a.([]codersdk.WorkspaceBuild)
+				later := builds[0]
+				later.ID, later.BuildNumber, later.TemplateVersionID = uuid.New(), builds[0].BuildNumber+1, e.v1
+				return append([]codersdk.WorkspaceBuild{later}, builds...)
+			}})
+		}},
 		{name: "another initiator", fault: fakeFault{Status: 504, AfterCommit: true}, setup: func(*testing.T, types.NamespacedName) {
 			e.fake.failNext(routeWorkspaceBuilds, fakeFault{Rewrite: func(a any) any {
 				builds := a.([]codersdk.WorkspaceBuild)
@@ -105,6 +114,21 @@ func TestTemplateTestConfirmWrongAnswers(t *testing.T) {
 		{name: "build of another workspace", route: routeWorkspaceBuilds, message: "Coder answered build workspace ", rewrite: func(a any) any {
 			builds := a.([]codersdk.WorkspaceBuild)
 			builds[0].WorkspaceID = uuid.New()
+			return builds
+		}},
+		{name: "workspace without an ID", route: routeWorkspaceByName, message: "workspace without an ID", rewrite: func(a any) any {
+			ws := a.(codersdk.Workspace)
+			ws.ID = uuid.Nil
+			return ws
+		}},
+		{name: "workspace by ID", route: routeWorkspace, message: "Coder answered workspace ", rewrite: func(a any) any {
+			ws := a.(codersdk.Workspace)
+			ws.ID = uuid.New()
+			return ws
+		}},
+		{name: "start build without an ID", route: routeWorkspaceBuilds, message: "start build without an ID", rewrite: func(a any) any {
+			builds := a.([]codersdk.WorkspaceBuild)
+			builds[len(builds)-1].ID = uuid.Nil
 			return builds
 		}},
 		{name: "operator without an ID", route: routeUser, message: "operator user without an ID", rewrite: func(a any) any {
