@@ -43,8 +43,8 @@ const (
 
 // CoderTemplateTestReconciler runs CoderTemplateTest objects. It is not
 // registered with the manager yet: the API stays dormant until activation
-// (#152). This version creates the test workspace but does not check
-// readiness or delete it yet.
+// (#152). This version creates the test workspace and checks its readiness,
+// but does not delete it yet.
 type CoderTemplateTestReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -155,8 +155,7 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if err == nil && step == nil {
 		switch {
 		case tt.Status.WorkspaceID != "":
-			// Readiness checks come with the second half of plan PR 4.
-			step = templateTestWait("WaitingForBuild", "Workspace %s exists. Readiness checks are not enabled yet.", tt.Status.WorkspaceName)
+			step, err = r.checkReadiness(ctx, sdk, tt, now)
 		case tt.Status.CreateAttemptTime != nil:
 			// A create request may exist: read Coder, never send it again.
 			step, err = r.confirmCreate(ctx, sdk, tt, now)

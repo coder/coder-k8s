@@ -52,6 +52,17 @@ func TestTemplateTestConfirmWithoutProvenance(t *testing.T) {
 				return append([]codersdk.WorkspaceBuild{later}, builds...)
 			}})
 		}},
+		{name: "a claimed prebuild", fault: fakeFault{Status: 504, AfterCommit: true}, setup: func(*testing.T, types.NamespacedName) {
+			// Build 1 belongs to the prebuilds system user, the claim build to
+			// the operator. Provenance cannot prove this workspace (fail-safe).
+			e.fake.failNext(routeWorkspaceBuilds, fakeFault{Rewrite: func(a any) any {
+				builds := a.([]codersdk.WorkspaceBuild)
+				claim := builds[0]
+				claim.ID, claim.BuildNumber = uuid.New(), builds[0].BuildNumber+1
+				builds[len(builds)-1].InitiatorID = uuid.MustParse(codersdk.PrebuildsSystemUserID)
+				return append([]codersdk.WorkspaceBuild{claim}, builds...)
+			}})
+		}},
 		{name: "another initiator", fault: fakeFault{Status: 504, AfterCommit: true}, setup: func(*testing.T, types.NamespacedName) {
 			e.fake.failNext(routeWorkspaceBuilds, fakeFault{Rewrite: func(a any) any {
 				builds := a.([]codersdk.WorkspaceBuild)
@@ -153,9 +164,14 @@ func TestTemplateTestConfirmWrongAnswers(t *testing.T) {
 func TestTemplateTestConfirmNeedsEveryPin(t *testing.T) {
 	t.Parallel()
 	e := newTemplateTestEnv(t)
+	nilID := uuid.Nil.String()
 	for _, clear := range []func(*coderv1alpha1.CoderTemplateTestStatus){
 		func(s *coderv1alpha1.CoderTemplateTestStatus) { s.OrganizationID = "" },
 		func(s *coderv1alpha1.CoderTemplateTestStatus) { s.TemplateID = "" },
+		func(s *coderv1alpha1.CoderTemplateTestStatus) { s.OwnerID = nilID },
+		func(s *coderv1alpha1.CoderTemplateTestStatus) { s.OrganizationID = nilID },
+		func(s *coderv1alpha1.CoderTemplateTestStatus) { s.TemplateID = nilID },
+		func(s *coderv1alpha1.CoderTemplateTestStatus) { s.TemplateVersionID = nilID },
 	} {
 		key := e.uncertainCreate(t, fakeFault{Status: 504, AfterCommit: true})
 		tt := &coderv1alpha1.CoderTemplateTest{}
