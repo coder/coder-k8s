@@ -98,7 +98,7 @@ A failed test has `Ready=False` and `Stalled=True` with the same reason. It does
 | `TemplateVersionMismatch` | The version in `spec.version.id` belongs to another template. | Fix `spec.version` or `spec.template`. |
 | `CreateRejected` | Coder rejected the create request. The message holds Coder's answer. No workspace exists. | Fix the cause, for example `spec.parameters`, and create a new test. |
 | `CreateOutcomeUnknown` | No workspace from this test appeared after an uncertain create request. | Check Coder, then create a new test. |
-| `WorkspaceNameConflict` | A workspace with the test's name exists, but nothing proves that this test created it. | Check the workspace in Coder. See the escape hatch below. |
+| `WorkspaceNameConflict` | A workspace with the test's name exists, and this test did not create it, or nothing proves that it did. | Read the `WorkspaceDeleted` condition. `NotCreated` means that this test never created a workspace: the test releases its finalizer by itself, and the workspace belongs to someone else, so leave it alone. For `OwnershipUnknown`, see the escape hatch below. |
 | `BuildFailed`, `BuildCanceled` | The start build failed, or someone else canceled it. | Read the build logs in Coder. |
 | `NoAgents` | The workspace has no top-level agents, so nothing proves that it works. Devcontainer sub-agents do not count. | Add a top-level agent to the template. |
 | `AgentConnectionTimeout`, `AgentStartError`, `AgentStartTimeout`, `AgentStopped` | An agent did not connect in time, its startup script failed or timed out, or it stopped. | Read the agent logs in Coder. The message names the agent. |

@@ -235,7 +235,15 @@ Usual causes:
 3. `TemplateNotFound` or `TemplateVersionNotFound`: `spec.template` or `spec.version` names nothing in Coder. The spec is immutable, so create a new test with the right names.
 4. `CoderUnavailable`: a Coder request failed. Check Coder and its logs.
 
-A test without any status means that the controller has not reconciled it. See [The controller runs but nothing reconciles](#the-controller-runs-but-nothing-reconciles). Every wait ends at `spec.timeoutSeconds` with `DeadlineExceeded`. For every reason, see [Read the result](test-templates.md#4-read-the-result).
+A new test has no status for a moment: the first reconcile only adds the finalizer `coder.com/template-test-cleanup`, and the next reconcile writes the status. If the status stays empty, check the finalizer:
+
+```bash
+kubectl get codertemplatetest <name> -n <namespace> -o jsonpath='{.metadata.finalizers}{"\n"}'
+```
+
+Without the finalizer, the controller has not reconciled the test. See [The controller runs but nothing reconciles](#the-controller-runs-but-nothing-reconciles). With the finalizer, the controller reconciled the test once: read the controller logs for errors about the test.
+
+Every wait ends at `spec.timeoutSeconds` with `DeadlineExceeded`. For every reason, see [Read the result](test-templates.md#4-read-the-result).
 
 ## A `CoderTemplateTest` does not finish deleting
 
