@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
@@ -90,6 +91,11 @@ func (r *CoderTemplateTestReconciler) confirmCreate(
 		return step, nil
 	case now.Before(tt.Status.CreateAttemptTime.Add(templateTestSettleWindow)):
 		return templateTestWait("ConfirmingCreate", "No workspace %s from this test found yet. Reading again.", tt.Status.WorkspaceName), nil
+	case !slices.ContainsFunc(operator.Roles, func(role codersdk.SlimRole) bool { return role.Name == codersdk.RoleOwner && role.OrganizationID == "" }):
+		// Coder also answers 404 when the caller may not read the workspace
+		// (coderd/workspaces.go:304, v2.37.2). Only a site owner reads every
+		// workspace, so only then does a 404 prove that none exists.
+		return templateTestWait("ConfirmingCreate", "No workspace %s found, but the operator user is not a site owner, so that proves nothing.", tt.Status.WorkspaceName), nil
 	}
 	// No workspace of this test exists, live or deleted. The name derives
 	// from the object UID, so no other test uses it. A commit after the

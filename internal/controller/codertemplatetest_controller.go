@@ -25,7 +25,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/aggregated/coder"
@@ -53,6 +55,45 @@ type CoderTemplateTestReconciler struct {
 	rateLimited sync.Map // types.NamespacedName -> consecutive HTTP 429 answers.
 }
 
+// templateTestControlPlaneRefIndex indexes tests by the control plane they use.
+const templateTestControlPlaneRefIndex = ".spec.controlPlaneRef.name"
+
+// SetupWithManager wires the reconciler into controller-runtime. Nothing
+// calls it until activation (#152). A change of a control plane requeues the
+// tests that use it, so cleanup that waits for Coder resumes at once.
+func (r *CoderTemplateTestReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if mgr == nil || r.Client == nil || r.Scheme == nil || r.Clock == nil {
+		return fmt.Errorf("assertion failed: template test reconciler needs a manager, a client, a scheme, and a clock")
+	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &coderv1alpha1.CoderTemplateTest{}, templateTestControlPlaneRefIndex,
+		func(obj client.Object) []string {
+			if tt, ok := obj.(*coderv1alpha1.CoderTemplateTest); ok && tt.Spec.ControlPlaneRef.Name != "" {
+				return []string{tt.Spec.ControlPlaneRef.Name}
+			}
+			return nil
+		}); err != nil {
+		return fmt.Errorf("index template tests by control plane: %w", err)
+	}
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&coderv1alpha1.CoderTemplateTest{}).
+		Watches(&coderv1alpha1.CoderControlPlane{}, handler.EnqueueRequestsFromMapFunc(r.testsForControlPlane)).
+		Named("codertemplatetest").
+		Complete(r)
+}
+
+func (r *CoderTemplateTestReconciler) testsForControlPlane(ctx context.Context, obj client.Object) []reconcile.Request {
+	var tests coderv1alpha1.CoderTemplateTestList
+	if err := r.List(ctx, &tests, client.InNamespace(obj.GetNamespace()), client.MatchingFields{templateTestControlPlaneRefIndex: obj.GetName()}); err != nil {
+		log.FromContext(ctx).Error(err, "list template tests of a control plane", "controlPlane", obj.GetName())
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(tests.Items))
+	for _, tt := range tests.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: tt.Namespace, Name: tt.Name}})
+	}
+	return requests
+}
+
 // templateTestStep is the outcome of a reconcile: a wait keeps the phase
 // (Pending, or Running once a create request may exist), a failure makes the
 // test Failed.
@@ -61,6 +102,9 @@ type templateTestStep struct {
 	reason      string
 	message     string
 	rateLimited bool // Coder answered 429: retry with backoff.
+	succeeded   bool // The test passed and its workspace is deleted.
+	// requeue overrides the default poll of a wait.
+	requeue time.Duration
 	// deleted overrides the WorkspaceDeleted condition of a failure.
 	deleted *metav1.Condition
 }
@@ -431,6 +475,16 @@ func resolveTemplateTestVersion(ctx context.Context, sdk *codersdk.Client, tt *c
 
 func applyTemplateTestStep(tt *coderv1alpha1.CoderTemplateTest, now time.Time, step *templateTestStep) {
 	tt.Status.Reason, tt.Status.Message = step.reason, step.message
+	if step.succeeded {
+		// Plan 2.3 step 11: Succeeded only after the delete build succeeded.
+		tt.Status.Phase = coderv1alpha1.CoderTemplateTestPhaseSucceeded
+		tt.Status.CompletionTime = &metav1.Time{Time: now}
+		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionReconciling, metav1.ConditionFalse, step.reason, step.message)
+		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionReady, metav1.ConditionTrue, step.reason, step.message)
+		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionStalled, metav1.ConditionFalse, step.reason, step.message)
+		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted, metav1.ConditionTrue, "Deleted", step.message)
+		return
+	}
 	if !step.failed {
 		tt.Status.Phase = coderv1alpha1.CoderTemplateTestPhasePending
 		if templateTestMayHaveWorkspace(tt) {
@@ -449,7 +503,7 @@ func applyTemplateTestStep(tt *coderv1alpha1.CoderTemplateTest, now time.Time, s
 		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted, step.deleted.Status, step.deleted.Reason, step.deleted.Message)
 	case templateTestMayHaveWorkspace(tt):
 		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted, metav1.ConditionFalse,
-			"CleanupPending", "The workspace can exist. The delete steps are not enabled yet.")
+			"CleanupPending", "The workspace can exist. The controller deletes it.")
 	default:
 		markTemplateTestNotCreated(tt)
 	}

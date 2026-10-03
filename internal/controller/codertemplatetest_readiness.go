@@ -22,8 +22,8 @@ func (r *CoderTemplateTestReconciler) checkReadiness(
 ) (*templateTestStep, error) {
 	name := tt.Status.WorkspaceName
 	if tt.Status.AgentsReadyTime != nil {
-		// The delete steps come with plan PR 5.
-		return templateTestWait("AgentsReady", "Every agent of workspace %s was ready. The delete steps are not enabled yet.", name), nil
+		// The pass is recorded: delete the workspace, then succeed.
+		return r.deleteAfterPass(ctx, sdk, tt, now)
 	}
 	workspaceID, err := uuid.Parse(tt.Status.WorkspaceID)
 	if err != nil || workspaceID == uuid.Nil || tt.Status.StartBuildID == "" {
@@ -104,5 +104,5 @@ func (r *CoderTemplateTestReconciler) checkReadiness(
 		return templateTestWait("WaitingForAgents", "Agent %s is %s and %s.", waiting.ID, waiting.Status, waiting.LifecycleState), nil
 	}
 	tt.Status.AgentsReadyTime = &metav1.Time{Time: now}
-	return templateTestWait("AgentsReady", "Every agent of workspace %s is ready. The delete steps are not enabled yet.", name), nil
+	return templateTestWait("AgentsReady", "Every agent of workspace %s is ready. The controller deletes the workspace next.", name), nil
 }

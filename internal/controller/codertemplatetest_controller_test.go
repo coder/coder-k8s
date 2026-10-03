@@ -44,6 +44,7 @@ func newTemplateTestEnv(t *testing.T) *templateTestEnv {
 	ctx := context.Background()
 	// Status times have second precision, so the fake clock starts on a second.
 	e := &templateTestEnv{ctx: ctx, fake: newFakeCoder(t), clock: clocktesting.NewFakePassiveClock(time.Now().Truncate(time.Second))}
+	e.fake.now = e.clock.Now // Job times follow the test clock, for the delete backoff.
 	e.ns = createTestNamespace(ctx, t, "ktt-ctrl")
 	e.orgID = e.fake.addOrganization("default")
 	e.tplID = e.fake.addTemplate(e.orgID, "docker")

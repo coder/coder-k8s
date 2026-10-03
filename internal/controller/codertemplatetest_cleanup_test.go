@@ -33,7 +33,7 @@ func (e *templateTestEnv) failedWithWorkspace(t *testing.T) types.NamespacedName
 	t.Helper()
 	key, _, buildID := e.startedTest(t)
 	e.fake.setBuildJob(buildID, codersdk.ProvisionerJobFailed)
-	requireTemplateTestFailedWith(t, e.settle(t, key), "BuildFailed", metav1.ConditionFalse, "CleanupPending")
+	requireTemplateTestFailedWith(t, e.settle(t, key), "BuildFailed", metav1.ConditionFalse, "Deleting")
 	return key
 }
 
@@ -90,7 +90,7 @@ func TestTemplateTestDeletionStates(t *testing.T) {
 	e.deleteTest(t, key)
 	tt = e.reconcile(t, key, 2)
 	require.NotEmpty(t, tt.Status.WorkspaceID)
-	requireDeleted(t, tt, metav1.ConditionFalse, "CleanupPending")
+	requireDeleted(t, tt, metav1.ConditionFalse, "Deleting")
 	require.True(t, controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer))
 
 	// A live workspace without provenance is never read again.
@@ -129,11 +129,18 @@ func TestTemplateTestRetain(t *testing.T) {
 	require.NotEmpty(t, tt.Status.WorkspaceID)
 	require.Equal(t, requests, e.fake.totalRequests(), "retain needs no Coder call")
 
+	// Back to delete after the release: the finalizer returns, and cleanup
+	// deletes the workspace.
+	e.annotate(t, key, "delete")
+	tt = e.reconcile(t, key, 2)
+	require.True(t, controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer))
+	requireDeleted(t, tt, metav1.ConditionFalse, "Deleting")
+
 	// Any other value means delete, and the condition names it.
 	key = e.failedWithWorkspace(t)
 	e.annotate(t, key, "keep")
 	tt = e.reconcile(t, key, 1)
-	requireDeleted(t, tt, metav1.ConditionFalse, "CleanupPending")
+	requireDeleted(t, tt, metav1.ConditionFalse, "Deleting")
 	require.Contains(t, meta.FindStatusCondition(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted).Message, `value "keep"`)
 	require.True(t, controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer))
 }
@@ -210,7 +217,7 @@ func TestTemplateTestCleanupRechecks(t *testing.T) {
 	require.NoError(t, k8sClient.Status().Update(e.ctx, tt))
 	e.annotate(t, key, "delete")
 	tt = e.reconcile(t, key, 1)
-	requireDeleted(t, tt, metav1.ConditionFalse, "CleanupPending")
+	requireDeleted(t, tt, metav1.ConditionFalse, "Deleting")
 	require.True(t, controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer))
 
 	// An ignored value is named for a workspace of unknown ownership too,
