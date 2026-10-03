@@ -19,6 +19,7 @@
     "rolebinding",
     "subresource",
     "subresources",
+    "finalizers",
     "configmap",
     "healthcheck",
     "ipairs",

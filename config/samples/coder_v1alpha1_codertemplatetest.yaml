@@ -1,0 +1,26 @@
+# Tests one Coder template version: the controller creates a workspace from
+# it, waits until every top-level agent is ready, records the result, and
+# deletes the workspace. See docs/how-to/test-templates.md.
+#
+# Prerequisites:
+# - CoderControlPlane codercontrolplane-sample with status.operatorAccessReady
+#   true and spec.templateTests.ownerUserID set to the tester's Coder user ID.
+# - The template below exists in Coder.
+#
+# The spec is immutable. To test again, delete this object or use a new name.
+apiVersion: coder.com/v1alpha1
+kind: CoderTemplateTest
+metadata:
+  name: codertemplatetest-sample
+  namespace: coder
+spec:
+  controlPlaneRef:
+    name: codercontrolplane-sample
+  # <organization>.<template>
+  template: "coder.docker"
+  version:
+    # Exactly one of active, name, or id.
+    active: true
+  timeoutSeconds: 900
+  # Optional: delete the test one hour after it finished.
+  # ttlSecondsAfterFinished: 3600

@@ -15,7 +15,7 @@ Use native Kubernetes APIs to run and manage [Coder](https://coder.com).
 
 | Component | Manages | API group |
 | --- | --- | --- |
-| Operator | `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy` (custom resources) | `coder.com/v1alpha1` |
+| Operator | `CoderControlPlane`, `CoderProvisioner`, `CoderTemplateTest`, `CoderWorkspaceProxy` (custom resources) | `coder.com/v1alpha1` |
 | Aggregated API server | `CoderWorkspace`, `CoderTemplate`, `CoderTemplateVersion` (served from a live Coder instance) | `aggregation.coder.com/v1alpha1` |
 | MCP server | Tools that inspect and operate these resources over HTTP | — |
 

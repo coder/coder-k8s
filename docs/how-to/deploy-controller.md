@@ -1,6 +1,6 @@
 # Deploy the controller
 
-Run `coder-k8s` as an operator only (`--app=controller`). The operator reconciles `CoderControlPlane`, `CoderProvisioner`, and `CoderWorkspaceProxy` resources.
+Run `coder-k8s` as an operator only (`--app=controller`). The operator reconciles `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy`, and `CoderTemplateTest` resources.
 
 Run the commands from a clone of this repository.
 
@@ -23,6 +23,9 @@ kubectl -n coder-system patch deployment/coder-k8s --type=json \
 
 !!! tip "Pin the image"
     The manifest uses `ghcr.io/coder/coder-k8s:latest`. To pin a version, change the tag before you apply the manifest.
+
+!!! warning "Upgrades: apply the CRDs and RBAC first"
+    Apply `config/crd/bases/` and `config/rbac/` from the new version before or together with the new image. The operator watches every kind it reconciles. If a kind's CRD is missing, for example `CoderTemplateTest` after an upgrade from an earlier version, the manager cannot start.
 
 ## 3. Verify
 
