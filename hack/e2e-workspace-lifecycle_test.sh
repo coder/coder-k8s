@@ -107,7 +107,8 @@ case "${pos[0]}:${pos[1]:-}" in
     fi
     ws_create && cat "$(wsfile "$(jq -r .metadata.name "$file")")" ;;
   apply:)
-    if [[ $file == *.yaml ]]; then # the CoderTemplate manifest; $S/template holds "id active-version version-count"
+    if [[ $file == *codertemplate-agent.yaml ]]; then echo "codertemplate/coder.e2e-agent created"
+    elif [[ $file == *.yaml ]]; then # the CoderTemplate manifest; $S/template holds "id active-version version-count"
       [[ $SCENARIO != template-apply-error ]] || err InternalError "an error on the server has prevented the request from succeeding"
       [[ -f $S/template ]] || { echo "tpl-1 tv-1 1 0" >"$S/template"; echo "codertemplate/coder.e2e-template created"; exit 0; }
       read -r id av n st <"$S/template"
@@ -145,7 +146,8 @@ case "${pos[0]}:${pos[1]:-}" in
       rv=$(jq -r '.preconditions.resourceVersion // empty' "$file")
       [[ -z $rv || $rv == "$(jq -r .metadata.resourceVersion "$f")" ]] || { side_effect "$f"; err Conflict "Precondition failed: ResourceVersion"; }
     fi
-    echo "${DELETE_JOB_STATUS:-succeeded}" >"$S/deleted-$(jq -r .metadata.uid "$f")"
+    st=${DELETE_JOB_STATUS:-succeeded} && [[ $SCENARIO != agent-delete-failed || $raw != *.e2e-tester.* ]] || st=failed
+    echo "$st" >"$S/deleted-$(jq -r .metadata.uid "$f")"
     rm "$f"; echo '{"kind":"Status","status":"Success"}' ;;
   *) echo "stub kubectl: unexpected call: ${pos[*]}" >&2; exit 97 ;;
 esac
@@ -180,7 +182,15 @@ case "$method $path" in
   "GET /api/v2/workspaces/"*"/builds?limit=100") uid=${path#/api/v2/workspaces/} && jq -R '{id: .}' "$S/builds-${uid%%/*}" | jq -s . ;;
   "GET /api/v2/workspaces/"*)
     uid=${path##*/}; lb=$(cat "$S/latest-$uid" 2>/dev/null || jq -r --arg u "$uid" 'select(.metadata.uid == $u) | .status.latestBuildID' "$S"/ws/*.json)
-    printf '{"id":"%s","latest_build":{"id":"%s"}}\n' "$uid" "$lb" ;;
+    a=connected/ready && case $SCENARIO in agent-start-error) a=connected/start_error ;; agent-never-ready) a=connecting/created ;; esac
+    jq -n --arg u "$uid" --arg lb "$lb" --arg a "$a" '{id: $u, latest_build: {id: $lb,
+      resources: [{agents: [{name: "main", status: ($a | split("/")[0]), lifecycle_state: ($a | split("/")[1])}]}]}}' ;;
+  "GET /api/v2/organizations") echo '[{"id":"org-2","is_default":false},{"id":"org-1","is_default":true}]' ;;
+  "POST /api/v2/users")
+    [[ $SCENARIO != tester-create-fails ]] || { echo "curl: (22) The requested URL returned error: 409" >&2; exit 22; }
+    jq '{id: "user-tester", username, login_type, organization_ids, status: "dormant"}' <<<"$data" ;;
+  "PUT /api/v2/users/user-tester/status/activate")
+    st=active && [[ $SCENARIO != tester-stays-dormant ]] || st=dormant; printf '{"id":"user-tester","status":"%s"}\n' "$st" ;;
   "PATCH /api/v2/workspaces/"*)
     [[ $SCENARIO != rename-rejected ]] || { echo "curl: (22) The requested URL returned error: 400" >&2; exit 22; }
     for f in "$S"/ws/*.json; do
@@ -237,8 +247,9 @@ run_scenario() {
   SECS=$((SECONDS - start))
 }
 
-mutations() { grep -E '^kubectl .*((create|replace|delete) --raw|apply -f)|^curl .*-X PATCH' "$S/calls.log" |
-  awk '/^kubectl/ {for (i = 2; i <= NF; i++) if ($i ~ /^(create|replace|delete|apply)$/) {print "kubectl " $i; next}} /^curl/ {print "curl PATCH"}' | paste -sd, -; }
+mutations() { grep -E '^kubectl .*((create|replace|delete) --raw|apply -f)|^curl .*-X (PATCH|POST|PUT)' "$S/calls.log" |
+  awk '/^kubectl/ {for (i = 2; i <= NF; i++) if ($i ~ /^(create|replace|delete|apply)$/) {print "kubectl " $i; next}}
+    /^curl/ {for (i = 2; i <= NF; i++) if ($i == "-X") {print "curl " $(i + 1); next}}' | paste -sd, -; }
 VERSIONS="kubectl apply,kubectl apply,kubectl create,kubectl create,kubectl create" # template, second version, promote v1, repeat, dry-run v2
 APPLIES="$VERSIONS,kubectl apply,kubectl apply,kubectl apply"                       # then workspace, identical template and workspace re-apply
 TRANS="kubectl create,kubectl create,kubectl create,kubectl create" # #148 start, repeated start, dry-run stop, stop
@@ -264,8 +275,9 @@ check "watch URL uses the current token and only watch/resourceVersion/timeoutSe
   eval '[[ $(<"$S/watch_url") =~ ^/apis/aggregation\.coder\.com/v1alpha1/namespaces/coder/coderworkspaces\?watch=1\&resourceVersion=${rv}\&timeoutSeconds=[0-9]+$ ]]'
 check "watch URL omits sendInitialEvents and resourceVersionMatch" eval '! grep -qE "sendInitialEvents|resourceVersionMatch" "$S/watch_url"'
 check "update was sent only after watch registration" eval '[[ $(grep -n "watch=1" "$S/calls.log" | cut -d: -f1) -lt $(grep -n "replace --raw" "$S/calls.log" | head -1 | cut -d: -f1) ]]'
-check "mutation order: create, update, start/stop, rename, stale 409 update+delete, wrong-UID 409, delete, recreate, 409 delete" \
-  no_mutations_after "$APPLIES,kubectl replace,$TRANS,curl PATCH,kubectl replace,kubectl delete,kubectl delete,kubectl delete,kubectl create,kubectl delete"
+LIFECYCLE="$APPLIES,kubectl replace,$TRANS,curl PATCH,kubectl replace,kubectl delete,kubectl delete,kubectl delete,kubectl create,kubectl delete"
+check "mutation order: create, update, start/stop, rename, stale 409 update+delete, wrong-UID 409, delete, recreate, 409 delete, tester, agent" \
+  no_mutations_after "$LIFECYCLE,curl POST,curl PUT,kubectl apply,kubectl create,kubectl delete"
 check "stale requests carry the genuine pre-rename token; rename changed it" eval 'grep -qx "rv_pre_rename=2" "$T/work/receipt.txt" &&
   grep -qx "rv_post_rename=2-renamed" "$T/work/receipt.txt" && jq -e ".metadata.resourceVersion == \"2\"" "$T/work/stale-update.json" >/dev/null'
 check "template applied with the long request timeout, then re-applied before any lifecycle mutation" eval '[[ $(grep -c -- "--request-timeout=600s apply -f config/e2e/codertemplate.yaml" "$S/calls.log") -eq 2 ]]'
@@ -279,9 +291,18 @@ check "operator token never printed" eval '! out_has secret-token-value'
 check "background port-forward and watch stopped" bg_stopped
 check "every non-streaming kubectl request carries --request-timeout=30s" \
   eval '! grep "^kubectl" "$S/calls.log" | grep -v -e "watch=1" -e port-forward | grep -qvE -- "--request-timeout=[0-9]+s "'
-check "recreate only after the delete job succeeded" eval '[[ $(grep -n include_deleted "$S/calls.log" | tail -1 | cut -d: -f1) -lt $(grep -n "^kubectl --request-timeout=30s create" "$S/calls.log" | tail -1 | cut -d: -f1) ]]'
-check "receipt: source, run, version, identity, UIDs, 15 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
-  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 15 ]]'
+check "recreate only after the delete job succeeded" eval '[[ $(grep -n include_deleted "$S/calls.log" | head -1 | cut -d: -f1) -lt $(grep -n "create --raw .*ws-e2e-lifecycle-renamed.json" "$S/calls.log" | cut -d: -f1) ]]'
+check "receipt: source, run, version, identity, UIDs, 17 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
+  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 17 ]]'
+check "tester: password user in the default organization; receipt records its username and id" eval 'grep -q "POST .*\"login_type\":\"password\".*\"organization_ids\":\[\"org-1\"\]" "$S/calls.log" &&
+  grep -qx "tester=e2e-tester/user-tester" "$T/work/receipt.txt"'
+# shellcheck disable=SC2034 # pw is used by the eval'd check below
+pw=$(grep -o '"password":"[^"]*"' "$S/calls.log" | cut -d'"' -f4)
+check "tester password is random and never printed" eval '[[ ${#pw} -ge 32 ]] && ! out_has "$pw" && ! grep -qF -- "$pw" "$T/work/receipt.txt"'
+check "agent workspace: tester-owned, from the agent template, ready time logged, delete job checked" eval 'grep -q "create --raw .*ws-e2e-agent.json" "$S/calls.log" &&
+  jq -e ".metadata.name == \"coder.e2e-tester.e2e-agent\" and .spec.templateName == \"e2e-agent\"" "$T/work/ws-e2e-agent.json" >/dev/null &&
+  out_has "agent time-to-ready: " && out_has "agents: main=connected/ready" && grep -q "^agent_ready_seconds=[0-9]" "$T/work/receipt.txt" &&
+  grep -q "workspaces/uid-4?include_deleted=true" "$S/calls.log"'
 
 echo "TEST image-mismatch: serving image differs from built image"
 run_scenario image-mismatch SERVING_ID="$OTHER"; summary
@@ -423,6 +444,29 @@ echo "TEST dryrun-queues (#148): a dry-run stop queues a build"
 run_scenario dryrun-queues; summary
 check "fails on the dry-run stop; no real stop and no rename" eval 'failed_with "dry-run stop did not answer WouldQueue" &&
   no_mutations_after "$APPLIES,kubectl replace,kubectl create,kubectl create,kubectl create"'
+
+echo "TEST tester-create-fails: Coder rejects the tester user"
+run_scenario tester-create-fails; summary
+check "fails at the tester; no agent template or workspace" eval 'failed_with "cannot create the tester user e2e-tester" && no_mutations_after "$LIFECYCLE,curl POST"'
+
+echo "TEST tester-stays-dormant: activating the tester does not make it active"
+run_scenario tester-stays-dormant; summary
+check "fails at the tester; no agent template or workspace" eval 'failed_with "cannot activate the tester user e2e-tester" && no_mutations_after "$LIFECYCLE,curl POST,curl PUT"'
+
+echo "TEST agent-start-error: the agent lifecycle ends in start_error"
+run_scenario agent-start-error; summary
+check "fails at once on the lifecycle; no delete" eval 'failed_with "failed to start: main=connected/start_error" &&
+  no_mutations_after "$LIFECYCLE,curl POST,curl PUT,kubectl apply,kubectl create" && ((SECS < 30))'
+
+echo "TEST agent-never-ready: the agent never connects"
+run_scenario agent-never-ready E2E_AGENT_TIMEOUT_SECONDS=2; summary
+check "bounded failure; no delete" eval 'failed_with "timed out after 2s waiting for: agents of coder.e2e-tester.e2e-agent connected and ready" &&
+  no_mutations_after "$LIFECYCLE,curl POST,curl PUT,kubectl apply,kubectl create" && ((SECS < 30))'
+
+echo "TEST agent-delete-failed: the agent workspace is 404 but its delete job failed"
+run_scenario agent-delete-failed; summary
+check "fails on the delete job status" eval 'failed_with "delete job of uid-4 ended in status failed" &&
+  no_mutations_after "$LIFECYCLE,curl POST,curl PUT,kubectl apply,kubectl create,kubectl delete"'
 
 echo "TEST missing-built-id: BUILT_IMAGE_ID is not a sha256 ID"
 run_scenario missing-built-id BUILT_IMAGE_ID=e2e; summary

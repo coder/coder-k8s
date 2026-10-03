@@ -307,6 +307,17 @@ jobs:
           echo "image_id=${image_id}" >> "$GITHUB_OUTPUT"
           kind load docker-image ghcr.io/coder/coder-k8s:e2e --name e2e
 
+      # Workspace pod image of config/e2e/codertemplate-agent.yaml (imagePullPolicy Never): pulled once by
+      # its linux/amd64 manifest digest, so workspace builds never contact a registry.
+      - name: Load the E2E workspace image
+        if: env.E2E_FULL == 'true'
+        env:
+          AGENT_IMAGE: public.ecr.aws/docker/library/alpine@sha256:3e9b4b680bfc9fb5269227cffbd6d42be39fbf7c0b908123913864aa4447e764
+        run: |
+          docker pull "$AGENT_IMAGE"
+          docker tag "$AGENT_IMAGE" e2e.local/alpine:3.22.6
+          kind load docker-image e2e.local/alpine:3.22.6 --name e2e
+
       - name: Apply namespace, CRDs, and RBAC
         if: env.E2E_FULL == 'true'
         run: |
@@ -370,10 +381,13 @@ jobs:
         if: env.E2E_FULL == 'true'
         run: |
           kubectl apply -f examples/cloudnativepg/00-namespace.yaml -f examples/cloudnativepg/cnpg-cluster.yaml
-          # E2E backend fixture: pin the Coder image and allow the out-of-band rename used by the lifecycle driver.
+          # E2E backend fixture: pin the Coder image, allow the out-of-band rename used by the lifecycle driver,
+          # and replace the example's localhost access URL with the Service URL so workspace agents reach Coder.
           kubectl create --dry-run=client -o json -f examples/cloudnativepg/codercontrolplane.yaml |
-            jq --arg image "$CODER_E2E_IMAGE" \
-              '.spec.image = $image | .spec.extraEnv += [{name: "CODER_ALLOW_WORKSPACE_RENAMES", value: "true"}]' |
+            jq -e --arg image "$CODER_E2E_IMAGE" '.spec.image = $image
+              | if [.spec.extraEnv[] | select(.name == "CODER_ACCESS_URL")] | length == 1 then . else error("expected one CODER_ACCESS_URL") end
+              | .spec.extraEnv |= map(if .name == "CODER_ACCESS_URL" then .value = "http://coder.coder.svc.cluster.local" else . end)
+              | .spec.extraEnv += [{name: "CODER_ALLOW_WORKSPACE_RENAMES", value: "true"}]' |
             kubectl apply -f -
 
       - name: Wait for PostgreSQL
@@ -486,8 +500,8 @@ jobs:
           fi
           kubectl -n default delete pod e2e-authn-probe --wait=false
 
-      # The driver creates the CoderTemplate itself (kubectl apply of config/e2e/codertemplate.yaml) after its setup checks.
-      - name: Template and workspace lifecycle (apply, re-apply, watch, rename, delete, recreate)
+      # The driver creates the CoderTemplates itself (kubectl apply of config/e2e/codertemplate*.yaml) after its setup checks.
+      - name: Template and workspace lifecycle (apply, re-apply, watch, rename, delete, recreate, tester, agent)
         if: env.E2E_FULL == 'true'
         env:
           BUILT_IMAGE_ID: ${{ steps.build_image.outputs.image_id }}

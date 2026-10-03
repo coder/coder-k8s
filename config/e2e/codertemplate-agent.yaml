@@ -1,0 +1,96 @@
+# Kind E2E fixture: a workspace pod with a real Coder agent. Needs the alpine image loaded into the
+# Kind node as e2e.local/alpine:3.22.6 (CI: "Load the E2E workspace image") and a CODER_ACCESS_URL
+# that pods can reach. Parameters: fail=true ends the agent in start_error; startup_delay delays ready.
+apiVersion: aggregation.coder.com/v1alpha1
+kind: CoderTemplate
+metadata:
+  name: coder.e2e-agent
+  namespace: coder
+spec:
+  organization: coder
+  displayName: "E2E Agent Template"
+  description: "Created by coder-k8s e2e: a pod with a real agent"
+  files:
+    main.tf: |
+      terraform {
+        required_version = ">= 1.0"
+        required_providers {
+          coder = {
+            source  = "coder/coder"
+            version = "2.19.0"
+          }
+          kubernetes = {
+            source  = "hashicorp/kubernetes"
+            version = "3.2.1"
+          }
+        }
+      }
+
+      # No config: in-cluster config from the Coder pod's ServiceAccount (pods in namespace coder).
+      provider "kubernetes" {}
+
+      data "coder_workspace" "me" {}
+
+      data "coder_parameter" "fail" {
+        name    = "fail"
+        type    = "bool"
+        default = "false"
+        mutable = true
+      }
+
+      data "coder_parameter" "startup_delay" {
+        name    = "startup_delay"
+        type    = "number"
+        default = "0"
+        mutable = true
+        validation {
+          min = 0
+          max = 600
+        }
+      }
+
+      resource "coder_agent" "main" {
+        os   = "linux"
+        arch = "amd64"
+      }
+
+      resource "coder_script" "startup" {
+        agent_id     = coder_agent.main.id
+        display_name = "E2E startup"
+        run_on_start = true
+        script       = <<-SCRIPT
+          #!/bin/sh
+          sleep ${data.coder_parameter.startup_delay.value}
+          if [ "${data.coder_parameter.fail.value}" = "true" ]; then
+            echo "e2e: fail=true, exiting 1"
+            exit 1
+          fi
+        SCRIPT
+      }
+
+      resource "kubernetes_pod_v1" "main" {
+        count = data.coder_workspace.me.start_count
+        metadata {
+          name      = "coder-${data.coder_workspace.me.id}"
+          namespace = "coder"
+          labels = {
+            "app.kubernetes.io/name" = "coder-e2e-agent-workspace"
+          }
+        }
+        spec {
+          termination_grace_period_seconds = 1
+          container {
+            name              = "dev"
+            image             = "e2e.local/alpine:3.22.6" # loaded into the Kind node; never pulled
+            image_pull_policy = "Never"
+            command           = ["sh", "-c", coder_agent.main.init_script]
+            env {
+              name  = "CODER_AGENT_TOKEN"
+              value = coder_agent.main.token
+            }
+          }
+        }
+        timeouts {
+          create = "3m"
+        }
+      }
