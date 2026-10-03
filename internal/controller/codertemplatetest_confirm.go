@@ -24,8 +24,9 @@ const templateTestSettleWindow = 15 * time.Minute
 func (r *CoderTemplateTestReconciler) confirmCreate(
 	ctx context.Context, sdk *codersdk.Client, tt *coderv1alpha1.CoderTemplateTest, now time.Time,
 ) (*templateTestStep, error) {
-	if tt.Status.OwnerID == "" || tt.Status.WorkspaceName == "" || tt.Status.TemplateVersionID == "" {
-		return nil, fmt.Errorf("assertion failed: template test %s/%s has a create marker without pinned owner, name, and version", tt.Namespace, tt.Name)
+	if tt.Status.OwnerID == "" || tt.Status.WorkspaceName == "" || tt.Status.OrganizationID == "" ||
+		tt.Status.TemplateID == "" || tt.Status.TemplateVersionID == "" {
+		return nil, fmt.Errorf("assertion failed: template test %s/%s has a create marker without pinned owner, name, organization, template, and version", tt.Namespace, tt.Name)
 	}
 	operator, err := sdk.User(ctx, codersdk.Me)
 	if err != nil {

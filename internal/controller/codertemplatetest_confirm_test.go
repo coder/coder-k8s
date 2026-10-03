@@ -1,6 +1,7 @@
 package controller_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -9,8 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/controller"
 )
 
 // uncertainCreate runs a test up to a create request that fails with fault,
@@ -144,5 +147,24 @@ func TestTemplateTestConfirmWrongAnswers(t *testing.T) {
 		requireTemplateTestRunning(t, tt, "CoderAnswerMismatch", tc.message)
 		require.Empty(t, tt.Status.WorkspaceID, tc.name)
 		requireTemplateTestRunning(t, e.reconcile(t, key, 1), "WaitingForBuild", "")
+	}
+}
+
+func TestTemplateTestConfirmNeedsEveryPin(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	for _, clear := range []func(*coderv1alpha1.CoderTemplateTestStatus){
+		func(s *coderv1alpha1.CoderTemplateTestStatus) { s.OrganizationID = "" },
+		func(s *coderv1alpha1.CoderTemplateTestStatus) { s.TemplateID = "" },
+	} {
+		key := e.uncertainCreate(t, fakeFault{Status: 504, AfterCommit: true})
+		tt := &coderv1alpha1.CoderTemplateTest{}
+		require.NoError(t, k8sClient.Get(e.ctx, key, tt))
+		clear(&tt.Status)
+		require.NoError(t, k8sClient.Status().Update(e.ctx, tt))
+		r := &controller.CoderTemplateTestReconciler{Client: k8sClient, Scheme: scheme, Clock: e.clock}
+		_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+		require.Error(t, err)
+		require.True(t, strings.HasPrefix(err.Error(), "assertion failed:"), err.Error())
 	}
 }
