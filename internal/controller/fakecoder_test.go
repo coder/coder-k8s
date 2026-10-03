@@ -97,7 +97,7 @@ func newFakeCoder(t *testing.T) *fakeCoder {
 	f.route(mux, "GET /api/v2/organizations/{org}/members/{user}", routeOrgMember, f.getOrgMember)
 	f.route(mux, "GET /api/v2/organizations/{org}/templates/{name}", routeTemplateByName, func(r *http.Request) (int, any) {
 		return found(findIn(f.templates, func(t codersdk.Template) bool {
-			return t.OrganizationID.String() == r.PathValue("org") && t.Name == r.PathValue("name")
+			return t.OrganizationID.String() == r.PathValue("org") && strings.EqualFold(t.Name, r.PathValue("name"))
 		}))
 	})
 	f.route(mux, "GET /api/v2/templates/{id}", routeTemplate, func(r *http.Request) (int, any) {
@@ -537,8 +537,10 @@ func (f *fakeCoder) createBuild(r *http.Request) (int, any) {
 	return http.StatusCreated, f.appendBuild(fw, latest.TemplateVersionID, codersdk.WorkspaceTransitionDelete)
 }
 
-// cancelBuild mirrors Coder: 412 on an expect_status mismatch, a pending job
-// is canceled at once, and a running job moves to canceling.
+// cancelBuild mirrors Coder v2.37.2 (coderd/workspacebuilds.go): a completed
+// or already canceled job answers 400 before the expect_status check, a
+// mismatch answers 412, a pending job is canceled at once, and a running job
+// moves to canceling.
 func (f *fakeCoder) cancelBuild(r *http.Request) (int, any) {
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {

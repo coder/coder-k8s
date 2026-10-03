@@ -66,7 +66,7 @@ func TestFakeCoderLookups(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, codersdk.RoleOrganizationMember, member.Roles[0].Name)
 
-	tpl, err := c.TemplateByName(ctx, org.ID, "docker")
+	tpl, err := c.TemplateByName(ctx, org.ID, "Docker") // Coder matches template names case-insensitively.
 	require.NoError(t, err)
 	require.Equal(t, fx.versionID, tpl.ActiveVersionID)
 	_, err = c.Template(ctx, tpl.ID)
@@ -125,7 +125,7 @@ func TestFakeCoderCancelAndDelete(t *testing.T) {
 	requireCoderStatus(t, c.CancelWorkspaceBuild(ctx, start.ID, running), 412)
 	f.setBuildJob(start.ID, codersdk.ProvisionerJobRunning)
 	require.NoError(t, c.CancelWorkspaceBuild(ctx, start.ID, running))
-	requireCoderStatus(t, c.CancelWorkspaceBuild(ctx, start.ID, codersdk.CancelWorkspaceBuildParams{}), 400)
+	requireCoderStatus(t, c.CancelWorkspaceBuild(ctx, start.ID, running), 400) // Canceling: 400 before the expect_status check.
 
 	// A delete build waits until no build is active, and orphan deletes fail.
 	deleteReq := codersdk.CreateWorkspaceBuildRequest{Transition: codersdk.WorkspaceTransitionDelete}
@@ -145,6 +145,7 @@ func TestFakeCoderCancelAndDelete(t *testing.T) {
 
 	// A succeeded delete build deletes the workspace and frees its name.
 	f.setBuildJob(del.ID, codersdk.ProvisionerJobSucceeded)
+	requireCoderStatus(t, c.CancelWorkspaceBuild(ctx, del.ID, running), 400) // Completed: 400, not 412.
 	_, err = c.Workspace(ctx, ws.ID)
 	requireCoderStatus(t, err, 410)
 	_, err = c.CreateWorkspaceBuild(ctx, ws.ID, deleteReq)
