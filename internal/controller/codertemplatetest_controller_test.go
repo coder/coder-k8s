@@ -509,19 +509,16 @@ func TestTemplateTestDeadlineWhilePending(t *testing.T) {
 	require.Equal(t, tt.Status.CompletionTime, e.settle(t, key).Status.CompletionTime, "a final test is never evaluated again")
 }
 
-// lateClock answers first on the first call and later afterwards, like a
-// reconcile whose Coder lookup takes a while.
+// lateClock answers its times in order and then repeats the last one, like
+// a reconcile whose Coder calls take a while.
 type lateClock struct {
-	first, later time.Time
-	calls        int
+	times []time.Time
+	calls int
 }
 
 func (c *lateClock) Now() time.Time {
 	c.calls++
-	if c.calls == 1 {
-		return c.first
-	}
-	return c.later
+	return c.times[min(c.calls, len(c.times))-1]
 }
 
 func (c *lateClock) Since(t time.Time) time.Duration { return c.Now().Sub(t) }
@@ -534,7 +531,7 @@ func TestTemplateTestDeadlineAfterSlowLookup(t *testing.T) {
 	require.NotNil(t, tt.Status.StartTime)
 
 	deadline := tt.Status.StartTime.Add(900 * time.Second)
-	r := &controller.CoderTemplateTestReconciler{Client: k8sClient, Scheme: scheme, Clock: &lateClock{first: deadline.Add(-time.Second), later: deadline}}
+	r := &controller.CoderTemplateTestReconciler{Client: k8sClient, Scheme: scheme, Clock: &lateClock{times: []time.Time{deadline.Add(-time.Second), deadline}}}
 	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
 	require.NoError(t, err)
 	tt = e.settle(t, key)

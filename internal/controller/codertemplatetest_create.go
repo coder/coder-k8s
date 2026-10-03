@@ -13,6 +13,7 @@ import (
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 )
@@ -52,8 +53,12 @@ func (r *CoderTemplateTestReconciler) createWorkspace(
 	status := coderStatus(err)
 	switch {
 	case err == nil:
+		if workspace.ID == uuid.Nil || workspace.LatestBuild.ID == uuid.Nil {
+			return nil, &coderAnswerError{msg: "assertion failed: Coder answered start build without a workspace or build ID"}
+		}
 		if err := errors.Join(
 			coderAnswerFor("workspace", tt.Status.WorkspaceName, workspace.Name),
+			coderAnswerFor("start build workspace", workspace.ID.String(), workspace.LatestBuild.WorkspaceID.String()),
 			coderAnswerFor("workspace owner", tt.Status.OwnerID, workspace.OwnerID.String()),
 			coderAnswerFor("start build version", tt.Status.TemplateVersionID, workspace.LatestBuild.TemplateVersionID.String()),
 		); err != nil {
@@ -105,19 +110,19 @@ func templateTestFailNotCreated(reason, format string, args ...any) *templateTes
 // retryAfter returns the requeue delay for a step that waits. After HTTP 429
 // it backs off from 2 s to 2 m with 20 % jitter, like the CoderProvisioner
 // controller. The attempt count lives in memory, so a restart starts over.
-func (r *CoderTemplateTestReconciler) retryAfter(tt *coderv1alpha1.CoderTemplateTest, step *templateTestStep) time.Duration {
+// Reconcile forgets it after any outcome other than a wait after 429.
+func (r *CoderTemplateTestReconciler) retryAfter(key types.NamespacedName, tt *coderv1alpha1.CoderTemplateTest, step *templateTestStep) time.Duration {
 	if !step.rateLimited {
-		r.rateLimited.Delete(tt.UID)
 		if templateTestMayHaveWorkspace(tt) {
 			return templateTestRunningPoll
 		}
 		return templateTestPendingPoll
 	}
 	attempts := 0
-	if v, ok := r.rateLimited.Load(tt.UID); ok {
+	if v, ok := r.rateLimited.Load(key); ok {
 		attempts = v.(int)
 	}
-	r.rateLimited.Store(tt.UID, attempts+1)
+	r.rateLimited.Store(key, attempts+1)
 	backoff := templateTestBackoffCap
 	if attempts < 6 { // 2 s * 2^6 passes the cap.
 		backoff = min(templateTestBackoffBase<<attempts, templateTestBackoffCap)

@@ -50,7 +50,7 @@ type CoderTemplateTestReconciler struct {
 	Scheme *runtime.Scheme
 	Clock  clock.PassiveClock
 
-	rateLimited sync.Map // types.UID -> consecutive HTTP 429 answers.
+	rateLimited sync.Map // types.NamespacedName -> consecutive HTTP 429 answers.
 }
 
 // templateTestStep is the outcome of a reconcile: a wait keeps the phase
@@ -78,6 +78,14 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if r.Client == nil || r.Scheme == nil || r.Clock == nil {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: template test reconciler needs a client, a scheme, and a clock")
 	}
+	// Only a wait after HTTP 429 keeps the backoff count. Every other
+	// outcome, including deletion and errors, forgets it.
+	keepBackoff := false
+	defer func() {
+		if !keepBackoff {
+			r.rateLimited.Delete(req.NamespacedName)
+		}
+	}()
 	tt := &coderv1alpha1.CoderTemplateTest{}
 	if err := r.Get(ctx, req.NamespacedName, tt); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -92,7 +100,8 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if tt.Status.WorkspaceName != "" && tt.Status.WorkspaceName != workspaceName {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: status.workspaceName %q is not %q", tt.Status.WorkspaceName, workspaceName)
 	}
-	created := templateTestMayHaveWorkspace(tt)
+	cleanedUp := meta.IsStatusConditionTrue(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted)
+	created := templateTestMayHaveWorkspace(tt) && !cleanedUp
 	if !tt.DeletionTimestamp.IsZero() {
 		if created {
 			// The delete steps come with plan PR 5. Until then the finalizer
@@ -102,8 +111,7 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, r.releaseFinalizer(ctx, tt)
 	}
 	final := isTemplateTestFinal(tt.Status.Phase)
-	cleanedUp := final && meta.IsStatusConditionTrue(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted)
-	if !cleanedUp && !controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer) {
+	if (!final || !cleanedUp) && !controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer) {
 		// No Coder call happens before the finalizer is stored.
 		controllerutil.AddFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer)
 		if err := r.Update(ctx, tt); err != nil {
@@ -171,6 +179,10 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		if step, err = waitOnWrongAnswer(ctx, step, err); err != nil {
 			return ctrl.Result{}, err
 		}
+		// The create request can take up to its timeout.
+		if now = r.Clock.Now(); !step.failed && !now.Before(deadline) {
+			step = templateTestDeadlineExceeded(tt, step.reason, step.message)
+		}
 	}
 	applyTemplateTestStep(tt, now, step)
 	if err := r.writeStatus(ctx, tt, before); err != nil {
@@ -179,7 +191,8 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if step.failed {
 		return ctrl.Result{}, nil
 	}
-	return ctrl.Result{RequeueAfter: min(r.retryAfter(tt, step), deadline.Sub(now))}, nil
+	keepBackoff = step.rateLimited
+	return ctrl.Result{RequeueAfter: min(r.retryAfter(req.NamespacedName, tt, step), deadline.Sub(now))}, nil
 }
 
 // waitOnWrongAnswer turns a wrong Coder answer into a wait. A wrong answer
