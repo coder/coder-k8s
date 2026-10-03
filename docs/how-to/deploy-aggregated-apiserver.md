@@ -235,6 +235,8 @@ If a step fails, examine `kubectl logs -n coder-system deploy/coder-k8s` and see
 
 Coder, not etcd, stores these resources. Thus some Kubernetes behavior is different. Read [Aggregated API behavior](../reference/aggregated-api-behavior.md) before you write manifests. The most important rule: object names must use the canonical names of Coder.
 
+To start and stop workspaces and read their build logs, see [Start, stop, and read logs of workspaces](start-stop-workspaces.md).
+
 ## Serving certificate
 
 In a cluster, the aggregated API server serves a certificate that its own CA signed. The certificate and the CA are in the Secret `coder-k8s-apiserver-tls` in the namespace of the server. The Secret has the type `coder.com/aggregated-apiserver-serving-ca` and the label `app.kubernetes.io/component: aggregated-apiserver-serving-ca`. The certificate is valid for `coder-k8s-apiserver`, `coder-k8s-apiserver.<namespace>`, `coder-k8s-apiserver.<namespace>.svc`, and `coder-k8s-apiserver.<namespace>.svc.cluster.local`.
