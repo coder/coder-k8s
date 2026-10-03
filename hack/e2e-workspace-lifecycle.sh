@@ -3,6 +3,7 @@
 # creates the CoderTemplate. Every wait is bounded; any failure exits before later mutations.
 # Offline tests with stubbed tools: hack/e2e-workspace-lifecycle_test.sh.
 set -euo pipefail
+umask 077 # $WORK holds the Coder token header and request bodies
 shopt -s inherit_errexit
 
 NS=${E2E_NAMESPACE:-coder}
@@ -21,6 +22,8 @@ AGENT_TEMPLATE=${E2E_AGENT_TEMPLATE:-e2e-agent}
 AGENT_MANIFEST=${E2E_AGENT_TEMPLATE_MANIFEST:-config/e2e/codertemplate-agent.yaml} # must define $ORG.$AGENT_TEMPLATE
 AGENT_WS=${E2E_AGENT_WORKSPACE:-e2e-agent}
 AGENT_TIMEOUT=${E2E_AGENT_TIMEOUT_SECONDS:-300} # create until every agent is connected and ready
+TT_TIMEOUT=${E2E_TEMPLATE_TEST_TIMEOUT_SECONDS:-300}      # create until a CoderTemplateTest is final
+NS_DELETE_TIMEOUT=${E2E_NAMESPACE_DELETE_TIMEOUT_SECONDS:-300}
 TIMEOUT=${E2E_TIMEOUT_SECONDS:-300}
 EVENT_TIMEOUT=${E2E_EVENT_TIMEOUT_SECONDS:-60}
 POLL=${E2E_POLL_SECONDS:-3}
@@ -43,6 +46,7 @@ k() { kubectl --request-timeout=30s "$@"; } # every non-streaming kubectl reques
 cleanup() {
   local p
   for p in "${BG_PIDS[@]}"; do kill "$p" 2>/dev/null || true; done
+  rm -f "$WORK/coder.hdr" "$WORK/coder-body.json" "$WORK/tester.json"
   [[ $RESULT == PASS || -z $CURRENT ]] || CASES+=("case: $CURRENT = FAILED")
   # Sanitized evidence receipt: identifiers only, never the token.
   printf '%s\n' "=== RECEIPT ($RESULT) ===" "source_sha=$SOURCE_SHA" "run_id=${GITHUB_RUN_ID:-unset}" \
@@ -51,6 +55,8 @@ cleanup() {
     "rv_pre_rename=${OLD_RV:-unset}" "rv_post_rename=${NEW_RV:-unset}" "template=${TPL_STATE:-unset}" \
     "workspace=${WS_STATE:-unset}" "apply_failure=${APPLY_FAILURE:-none}" \
     "tester=${TESTER_NAME:-unset}/${TESTER_ID:-unset}" "agent_ready_seconds=${AGENT_READY_SECONDS:-unset}" \
+    "template_test_seconds=${TT_SECONDS[*]:-unset}" "tester_api_keys_before=${KEYS_BEFORE:-unset}" \
+    "tester_api_keys_after=${KEYS_AFTER:-unset}" "namespace_delete_seconds=${NS_DELETE_SECONDS:-unset}" \
     "${CASES[@]}" | tee "$WORK/receipt.txt"
 }
 trap cleanup EXIT
@@ -90,9 +96,9 @@ ws_delete() {
   k delete --raw "$API/$1" -f "$WORK/delete.json"
 }
 
-coder_api() { # <method> <path> [json-body]
-  local args=(-fsS --max-time 30 -X "$1" -H "Coder-Session-Token: $TOKEN" -H 'Content-Type: application/json')
-  [[ $# -ge 3 ]] && args+=(--data "$3")
+coder_api() { # <method> <path> [json-body]: the token and the body reach curl through 0600 files, never argv
+  local args=(-fsS --max-time 30 -X "$1" -H @"$WORK/coder.hdr" -H 'Content-Type: application/json')
+  [[ $# -lt 3 ]] || { printf '%s' "$3" >"$WORK/coder-body.json" && args+=(--data @"$WORK/coder-body.json"); }
   curl "${args[@]}" "$CODER_URL$2"
 }
 
@@ -143,6 +149,7 @@ KEY=$(jq -er '.status.operatorTokenSecretRef.key' <<<"$CP") || fail "no operator
 TOKEN=$(k -n "$NS" get secret "$SECRET" -o json | jq -er --arg k "$KEY" '.data[$k]' | base64 -d)
 [[ -n $TOKEN ]] || fail "operator token is empty"
 [[ ${GITHUB_ACTIONS:-} == true ]] && echo "::add-mask::$TOKEN"
+printf 'Coder-Session-Token: %s\n' "$TOKEN" >"$WORK/coder.hdr"
 kubectl -n "$NS" port-forward svc/coder "$PORT:80" >"$WORK/port-forward.log" 2>&1 &
 BG_PIDS+=("$!")
 coder_ready() { coder_api GET /api/v2/buildinfo >/dev/null; }
@@ -374,8 +381,12 @@ TESTER_PASSWORD=$(head -c 24 /dev/urandom | base64) # never logged; only the tes
 [[ ${GITHUB_ACTIONS:-} == true ]] && echo "::add-mask::$TESTER_PASSWORD"
 jq -nc --arg u "$TESTER" --arg p "$TESTER_PASSWORD" --arg o "$ORG_ID" '{username: $u, name: "E2E tester", email: ($u + "@e2e.example.com"),
   password: $p, login_type: "password", organization_ids: [$o]}' >"$WORK/tester.json" || fail "cannot render the tester user request"
-USER_JSON=$(coder_api POST /api/v2/users "$(<"$WORK/tester.json")") || fail "cannot create the tester user $TESTER"
-rm -f "$WORK/tester.json"
+if USER_JSON=$(coder_api POST /api/v2/users "$(<"$WORK/tester.json")" 2>"$WORK/tester.err"); then :
+elif grep -q 'error: 409' "$WORK/tester.err"; then # a local rerun: reuse the tester after the same checks
+  log "tester user $TESTER exists (409): reusing it"
+  USER_JSON=$(coder_api GET "/api/v2/users/$TESTER") || fail "cannot read the existing tester user $TESTER"
+else fail "cannot create the tester user $TESTER: $(head -c 300 "$WORK/tester.err")"; fi
+rm -f "$WORK/tester.json" "$WORK/coder-body.json"
 TESTER_ID=$(jq -er --arg u "$TESTER" --arg o "$ORG_ID" 'select(.username == $u and .login_type == "password" and
   (.organization_ids | index($o))) | .id' <<<"$USER_JSON") || fail "tester user $TESTER has an unexpected shape or organization"
 # New API users start dormant, and Coder refuses agents of workspaces whose owner is not active (401).
@@ -410,5 +421,92 @@ log "agent time-to-ready: ${AGENT_READY_SECONDS}s from create"
 ws_delete "$AGENT_NAME" "$AGENT_UID" >/dev/null || fail "cannot delete the agent workspace $AGENT_NAME"
 wait_until "delete build of $AGENT_NAME (404)" gone "$AGENT_NAME"
 wait_until "delete job of $AGENT_UID to succeed" delete_succeeded "$AGENT_UID"
+
+# db_count <table> <column> <value>: rows of a Coder table (deleted rows included) through psql in the CNPG
+# primary. A read-only count: it never selects key values or hashes.
+db_count() {
+  local pod
+  [[ $3 =~ ^[A-Za-z0-9-]+$ ]] || fail "assertion failed: unsafe value for $1.$2: '$3'"
+  pod=$(k -n "$NS" get cluster coder-db -o json | jq -er '.status.currentPrimary') || return 1
+  k -n "$NS" exec "$pod" -c postgres -- psql -d coder -XtAc "SELECT count(*) FROM $1 WHERE $2 = '$3'" | grep -Ex '[0-9]+'
+}
+tt_create() { # <name> [startup_delay]: a CoderTemplateTest of the agent template's active version
+  jq -n --arg n "$1" --arg ns "$NS" --arg t "$ORG.$AGENT_TEMPLATE" --arg d "${2:-}" '{apiVersion: "coder.com/v1alpha1",
+    kind: "CoderTemplateTest", metadata: {name: $n, namespace: $ns}, spec: ({controlPlaneRef: {name: "coder"}, template: $t,
+    version: {active: true}} + if $d == "" then {} else {parameters: [{name: "startup_delay", value: $d}]} end)}' >"$WORK/tt-$1.json" &&
+    k create -f "$WORK/tt-$1.json" >/dev/null
+}
+TT_SEEN="" TT_S=""
+tt_state() { # <name>: reads the test into $WORK/tt-<name>.state.json; sets TT_S to "phase reason deleted=status/reason"
+  k -n "$NS" get codertemplatetest "$1" -o json >"$WORK/tt-$1.state.json" 2>"$WORK/tt.err" || return 1
+  TT_S=$(jq -r '"\(.status.phase // "-") \(.status.reason // "-") deleted=\([.status.conditions[]? |
+    select(.type == "WorkspaceDeleted") | "\(.status)/\(.reason)"][0] // "-")"' "$WORK/tt-$1.state.json") || return 1
+  [[ "$1 $TT_S" == "$TT_SEEN" ]] || { TT_SEEN="$1 $TT_S" && log "template test $1: $TT_S"; }
+}
+tt_passed() { # Succeeded, Ready=True and WorkspaceDeleted=True (Deleted); Failed fails at once
+  tt_state "$1" || return 1
+  [[ $TT_S != Failed* ]] || fail "template test $1 failed: $TT_S: $(jq -r '.status.message' "$WORK/tt-$1.state.json")"
+  jq -e '.status.phase == "Succeeded" and (.status.conditions | any(.type == "Ready" and .status == "True") and
+    any(.type == "WorkspaceDeleted" and .status == "True" and .reason == "Deleted"))' "$WORK/tt-$1.state.json" >/dev/null
+}
+CP_GEN=$(k -n "$NS" get deploy coder -o json | jq -er '.metadata.generation') || fail "cannot read deploy/coder"
+
+step "configure: CoderControlPlane coder names the active tester in spec.templateTests.ownerUserID"
+k -n "$NS" patch codercontrolplane coder --type=merge -p "$(jq -nc --arg id "$TESTER_ID" '{spec: {templateTests: {ownerUserID: $id}}}')" \
+  >/dev/null || fail "cannot set templateTests.ownerUserID on codercontrolplane coder"
+
+step "tester API keys before the template tests (plan A4)"
+OP_ID=$(coder_api GET /api/v2/users/me | jq -er '.id') || fail "cannot read the operator user"
+OP_KEYS=$(db_count api_keys user_id "$OP_ID") || fail "cannot count the api_keys rows of the operator user"
+((OP_KEYS > 0)) || fail "the operator user has no api_keys rows: the count query does not read Coder's keys"
+KEYS_BEFORE=$(db_count api_keys user_id "$TESTER_ID") || fail "cannot count the api_keys rows of the tester"
+
+step "CoderTemplateTest pass: three sequential tests of the active agent template version succeed and delete their workspaces"
+TT_SECONDS=()
+for i in 1 2 3; do
+  T0=$SECONDS
+  tt_create "e2e-pass-$i" || fail "cannot create template test e2e-pass-$i"
+  TIMEOUT=$TT_TIMEOUT wait_until "template test e2e-pass-$i to succeed" tt_passed "e2e-pass-$i"
+  TT_SECONDS+=("$((SECONDS - T0))s")
+done
+log "template test durations: ${TT_SECONDS[*]}"
+TT_WS=$(jq -er '.status.workspaceName' "$WORK/tt-e2e-pass-1.state.json") || fail "template test e2e-pass-1 has no workspaceName"
+ROWS=$(db_count workspaces name "$TT_WS") || fail "cannot count the workspaces rows named $TT_WS"
+[[ $ROWS == 1 ]] || fail "expected exactly one workspaces row named $TT_WS (deleted rows included), found $ROWS"
+[[ $(k -n "$NS" get deploy coder -o json | jq -r '.metadata.generation') == "$CP_GEN" ]] ||
+  fail "setting templateTests.ownerUserID rolled deploy/coder (generation was $CP_GEN)" # plan risk R5
+
+step "tester API keys after the template tests (plan A4: recorded, not enforced)"
+KEYS_AFTER=$(db_count api_keys user_id "$TESTER_ID") || fail "cannot count the api_keys rows of the tester after the tests"
+log "tester api_keys: before=$KEYS_BEFORE after=$KEYS_AFTER delta=$((KEYS_AFTER - KEYS_BEFORE))"
+
+# Last: it scales Coder to zero and deletes namespace $NS. Later CI steps must not need either.
+step "namespace deletion releases a running test while Coder is unreachable (plan A1, A13.2)"
+tt_create e2e-ns-delete 120 || fail "cannot create template test e2e-ns-delete"
+tt_waiting() { tt_state e2e-ns-delete && [[ $TT_S == "Running WaitingForAgents "* ]]; }
+wait_until "template test e2e-ns-delete at Running/WaitingForAgents" tt_waiting
+# spec.replicas is the operator's desired state for deploy/coder: the operator keeps it at zero instead of undoing it.
+k -n "$NS" patch codercontrolplane coder --type=merge -p '{"spec":{"replicas":0}}' >/dev/null || fail "cannot scale Coder to zero"
+coder_down() { k -n "$NS" get deploy coder -o json | jq -e '.spec.replicas == 0 and (.status.replicas // 0) == 0' >/dev/null; }
+wait_until "deploy/coder without pods" coder_down
+tt_unavailable() { tt_state e2e-ns-delete && [[ $TT_S == "Running CoderUnavailable "* ]]; }
+wait_until "template test e2e-ns-delete to report CoderUnavailable" tt_unavailable
+T0=$SECONDS
+k delete namespace "$NS" --wait=false >/dev/null || fail "cannot delete namespace $NS"
+gone_obj() { ! k -n "$NS" get "$1" "$2" -o name >/dev/null 2>"$WORK/obj.err" && grep -q NotFound "$WORK/obj.err"; }
+ns_released() { # the test and the control plane are gone, and no namespace content or finalizer remains
+  tt_state e2e-ns-delete || true # logs the ControlPlaneGone release while the object still exists
+  gone_obj codertemplatetest e2e-ns-delete && gone_obj codercontrolplane coder || return 1
+  k get namespace "$NS" -o json >"$WORK/ns.json" 2>"$WORK/ns.err" || { grep -q NotFound "$WORK/ns.err"; return; }
+  jq -e '[.status.conditions[]? | select(.type == "NamespaceContentRemaining" or .type == "NamespaceFinalizersRemaining")] |
+    length == 2 and all(.status == "False")' "$WORK/ns.json" >/dev/null
+}
+TIMEOUT=$NS_DELETE_TIMEOUT wait_until "test, control plane, and content of namespace $NS deleted (ControlPlaneGone release)" ns_released
+NS_DELETE_SECONDS=$((SECONDS - T0))
+# Known issue #209: a namespaced aggregated LIST without an eligible control plane answers 503, so the namespace
+# stays Terminating. Once #209 is fixed, this check becomes "the namespace disappears".
+[[ ! -s $WORK/ns.json ]] || log "namespace $NS is $(jq -r '.status.phase' "$WORK/ns.json"), known issue #209: $(jq -r '[.status.conditions[]? |
+  select(.type == "NamespaceDeletionContentFailure" and .status == "True") | .message] | join("; ")' "$WORK/ns.json")"
+log "namespace $NS: test, control plane, and content deleted in ${NS_DELETE_SECONDS}s"
 CASES+=("case: $CURRENT = passed") && CURRENT="" && RESULT=PASS
 log "PASS: workspace lifecycle"

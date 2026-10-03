@@ -298,9 +298,12 @@ func TestTemplateTestOwnerEligibility(t *testing.T) {
 		{name: "not a member", refusal: `not a member of organization "default"`, setup: func(e *templateTestEnv) uuid.UUID {
 			return e.fake.addUser("t", codersdk.LoginTypePassword)
 		}},
-		{name: "allowed roles of a dormant user", setup: func(e *templateTestEnv) uuid.UUID {
+		{name: "dormant user", refusal: `status "dormant"`, setup: func(e *templateTestEnv) uuid.UUID {
+			e.fake.updateUser(e.tester, func(u *codersdk.User) { u.Status = codersdk.UserStatusDormant })
+			return e.tester
+		}},
+		{name: "allowed roles", setup: func(e *templateTestEnv) uuid.UUID {
 			u := e.fake.addUser("t", codersdk.LoginTypePassword, codersdk.RoleMember)
-			e.fake.updateUser(u, func(u *codersdk.User) { u.Status = codersdk.UserStatusDormant })
 			e.fake.addMember(e.orgID, u, codersdk.RoleOrganizationMember, codersdk.RoleOrganizationWorkspaceAccess)
 			return u
 		}},

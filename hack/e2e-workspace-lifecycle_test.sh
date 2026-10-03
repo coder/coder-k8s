@@ -21,13 +21,14 @@ cat >"$STUBS/kubectl" <<'STUB'
 set -euo pipefail
 S=$STUB_STATE
 echo "kubectl $*" >>"$S/calls.log"
-raw="" file="" pos=()
+raw="" file="" patch="" all=$* pos=()
 while (($#)); do
   case $1 in
     --raw) raw=$2; shift 2 ;;
     -f) file=$2; shift 2 ;;
-    -n | -o | -l) shift 2 ;;
-    -v=* | --request-timeout=*) shift ;;
+    -p) patch=$2; shift 2 ;;
+    -n | -o | -l | -c) shift 2 ;;
+    -v=* | --request-timeout=* | --type=* | --wait=*) shift ;;
     *) pos+=("$1"); shift ;;
   esac
 done
@@ -49,10 +50,50 @@ side_effect() { # stale-side-effect-* scenarios: a rejected stale DELETE still c
     stale-side-effect-object) jq '.status.lastUsedAt = "2026-09-23T00:00:00Z"' "$1" >"$1.tmp" && mv "$1.tmp" "$1" ;;
   esac
 }
+tt_json() { # <phase> <reason> [conditions]: a CoderTemplateTest object for the TemplateTest phases
+  jq -n --arg n "${pos[2]}" --arg p "$1" --arg r "$2" --argjson c "${3:-[]}" \
+    '{metadata: {name: $n}, status: {phase: $p, reason: $r, message: "stub", workspaceName: ("ktt-" + $n), conditions: $c}}'
+}
 case "${pos[0]}:${pos[1]:-}" in
   get:pods) cat "$S/pods.json" ;;
+  patch:codercontrolplane) # templateTests.ownerUserID, then spec.replicas=0 in the namespace phase
+    if [[ $patch == *ownerUserID* ]]; then [[ $SCENARIO != owner-patch-fails ]] || err Invalid "bad ownerUserID"; touch "$S/owner"
+    else touch "$S/replicas0"; fi; echo "codercontrolplane.coder.com/coder patched" ;;
+  get:deploy) # coder-rolls: the owner patch changes the pod template; coder-stays-up: replicas=0 never removes the pod
+    r=1 g=1 && [[ ! -f $S/replicas0 ]] || r=0 && [[ $SCENARIO != coder-rolls || ! -f $S/owner ]] || g=2
+    jq -n --argjson r "$r" --argjson g "$g" --arg sc "$SCENARIO" '{metadata: {generation: $g}, spec: {replicas: $r},
+      status: {replicas: (if $sc == "coder-stays-up" then 1 else $r end)}}' ;;
+  get:cluster) echo '{"status":{"currentPrimary":"coder-db-1"}}' ;;
+  exec:coder-db-1) # psql counts: api_keys 2 then 5; workspaces 1 (ws-rows-2: 2)
+    case $all in
+      *"FROM api_keys"*"user-operator"*) [[ $SCENARIO == operator-no-keys ]] && echo 0 || echo 1 ;;
+      *"FROM api_keys"*)
+        n=$(($(cat "$S/key-reads" 2>/dev/null || echo 0) + 1)) && echo "$n" >"$S/key-reads"
+        [[ $SCENARIO != keys-count-fails || $n != 1 ]] && [[ $SCENARIO != keys-after-fails || $n != 2 ]] || err InternalError "psql failed"
+        [[ $n == 1 ]] && echo 2 || echo 5 ;;
+      *"FROM workspaces"*) [[ $SCENARIO == ws-rows-2 ]] && echo 2 || echo 1 ;;
+      *) echo "stub kubectl: unexpected SQL: $all" >&2; exit 97 ;;
+    esac ;;
+  get:codertemplatetest) # e2e-pass-*: Pending, Running, then final; e2e-ns-delete: Running until Coder and the namespace go
+    f=$S/tt-${pos[2]} && [[ -f $f ]] || err NotFound "codertemplatetests \"${pos[2]}\" not found"
+    n=$(($(cat "$f") + 1)) && echo "$n" >"$f"
+    if [[ ${pos[2]} == e2e-ns-delete ]]; then
+      if [[ -f $S/ns-deleted ]]; then rm "$f"; tt_json Failed ControlPlaneGone '[{"type":"WorkspaceDeleted","status":"Unknown","reason":"ControlPlaneGone"}]'
+      elif [[ -f $S/replicas0 && $n -gt 2 ]]; then tt_json Running CoderUnavailable
+      elif ((n > 1)); then tt_json Running WaitingForAgents
+      else tt_json Pending Creating; fi
+    elif ((n == 1)); then tt_json Pending Creating
+    elif ((n == 2)); then tt_json Running WaitingForAgents
+    elif [[ $SCENARIO == tt-failed ]]; then tt_json Failed AgentStartError '[{"type":"WorkspaceDeleted","status":"True","reason":"Deleted"}]'
+    else tt_json Succeeded Succeeded '[{"type":"Ready","status":"True","reason":"Succeeded"},{"type":"WorkspaceDeleted","status":"True","reason":"Deleted"}]'
+    fi ;;
+  get:namespace) # content gone, but the namespace stays Terminating (the aggregated API LIST answers 503)
+    jq -n '{status: {phase: "Terminating", conditions: [{type: "NamespaceDeletionContentFailure", status: "True", message: "no eligible CoderControlPlane"},
+      {type: "NamespaceContentRemaining", status: "False"}, {type: "NamespaceFinalizersRemaining", status: "False"}]}}' ;;
+  delete:namespace) touch "$S/ns-deleted"; echo 'namespace "coder" deleted' ;;
   get:endpointslices) cat "$S/endpoints.json" ;;
-  get:codercontrolplane) echo '{"status":{"operatorTokenSecretRef":{"name":"op-token","key":"token"}}}' ;;
+  get:codercontrolplane) [[ ! -f $S/ns-deleted || $SCENARIO == ns-delete-stuck ]] || err NotFound 'codercontrolplanes "coder" not found'
+    echo '{"status":{"operatorTokenSecretRef":{"name":"op-token","key":"token"}}}' ;;
   get:secret) printf '{"data":{"token":"%s"}}\n' "$(printf secret-token-value | base64)" ;;
   port-forward:*) echo $$ >"$S/pf.pid"; exec sleep 300 ;;
   logs:*) echo "I1002 server started"; [[ $SCENARIO != log-leak ]] || echo "2026-10-02T10:00:00Z [info] [provisioner|Planning infrastructure] Terraform 1.14.0 ok" ;;
@@ -84,6 +125,7 @@ case "${pos[0]}:${pos[1]:-}" in
     read -r _ av n _ <"$S/template"
     jq -n --arg av "$av" --argjson n "$n" '{items: [range(1; $n + 1) | ("tv-\(.)") as $id | {status: {id: $id, active: ($id == $av)}}]}' ;;
   create:)
+    if [[ ${file##*/} == tt-*.json ]]; then echo 0 >"$S/tt-$(jq -r .metadata.name "$file")"; echo created; exit 0; fi
     if [[ $raw == */codertemplates/*/promote* ]]; then # promote-* scenarios break the activation
       read -r id av n st <"$S/template"; v=$(jq -r .spec.versionID "$file")
       if [[ $av == "$v" ]]; then r=AlreadyActive; [[ $SCENARIO != promote-repeat-writes ]] || st=$((st + 1))
@@ -162,8 +204,9 @@ method=GET data="" url=""
 while (($#)); do
   case $1 in
     -X) method=$2; shift 2 ;;
-    -H | --max-time) shift 2 ;;
-    --data) data=$2; shift 2 ;;
+    -H) [[ $2 != @* ]] || stat -c %a "${2#@}" >>"$S/file-modes"; shift 2 ;;
+    --max-time) shift 2 ;;
+    --data) data=$2; [[ $data != @* ]] || { stat -c %a "${data#@}" >>"$S/file-modes"; data=$(<"${data#@}"); }; shift 2 ;;
     -*) shift ;;
     *) url=$1; shift ;;
   esac
@@ -187,8 +230,14 @@ case "$method $path" in
       resources: [{agents: [{name: "main", status: ($a | split("/")[0]), lifecycle_state: ($a | split("/")[1])}]}]}}' ;;
   "GET /api/v2/organizations") echo '[{"id":"org-2","is_default":false},{"id":"org-1","is_default":true}]' ;;
   "POST /api/v2/users")
-    [[ $SCENARIO != tester-create-fails ]] || { echo "curl: (22) The requested URL returned error: 409" >&2; exit 22; }
+    printf '%s' "$data" >"$S/tester-body.json"
+    [[ $SCENARIO != tester-create-fails ]] || { echo "curl: (22) The requested URL returned error: 500" >&2; exit 22; }
+    [[ $SCENARIO != tester-exists* ]] || { echo "curl: (22) The requested URL returned error: 409" >&2; exit 22; }
     jq '{id: "user-tester", username, login_type, organization_ids, status: "dormant"}' <<<"$data" ;;
+  "GET /api/v2/users/me") echo '{"id":"user-operator"}' ;;
+  "GET /api/v2/users/e2e-tester") # tester-exists-oidc: someone else's login under the tester's name
+    lt=password && [[ $SCENARIO != tester-exists-oidc ]] || lt=oidc
+    printf '{"id":"user-tester","username":"e2e-tester","login_type":"%s","organization_ids":["org-1"],"status":"active"}\n' "$lt" ;;
   "PUT /api/v2/users/user-tester/status/activate")
     st=active && [[ $SCENARIO != tester-stays-dormant ]] || st=dormant; printf '{"id":"user-tester","status":"%s"}\n' "$st" ;;
   "PATCH /api/v2/workspaces/"*)
@@ -247,8 +296,8 @@ run_scenario() {
   SECS=$((SECONDS - start))
 }
 
-mutations() { grep -E '^kubectl .*((create|replace|delete) --raw|apply -f)|^curl .*-X (PATCH|POST|PUT)' "$S/calls.log" |
-  awk '/^kubectl/ {for (i = 2; i <= NF; i++) if ($i ~ /^(create|replace|delete|apply)$/) {print "kubectl " $i; next}}
+mutations() { grep -E '^kubectl .*((create|replace|delete) --raw|apply -f|create -f|patch |delete namespace)|^curl .*-X (PATCH|POST|PUT)' "$S/calls.log" |
+  awk '/^kubectl/ {for (i = 2; i <= NF; i++) if ($i ~ /^(create|replace|delete|apply|patch)$/) {print "kubectl " $i; next}}
     /^curl/ {for (i = 2; i <= NF; i++) if ($i == "-X") {print "curl " $(i + 1); next}}' | paste -sd, -; }
 VERSIONS="kubectl apply,kubectl apply,kubectl create,kubectl create,kubectl create" # template, second version, promote v1, repeat, dry-run v2
 APPLIES="$VERSIONS,kubectl apply,kubectl apply,kubectl apply"                       # then workspace, identical template and workspace re-apply
@@ -276,8 +325,10 @@ check "watch URL uses the current token and only watch/resourceVersion/timeoutSe
 check "watch URL omits sendInitialEvents and resourceVersionMatch" eval '! grep -qE "sendInitialEvents|resourceVersionMatch" "$S/watch_url"'
 check "update was sent only after watch registration" eval '[[ $(grep -n "watch=1" "$S/calls.log" | cut -d: -f1) -lt $(grep -n "replace --raw" "$S/calls.log" | head -1 | cut -d: -f1) ]]'
 LIFECYCLE="$APPLIES,kubectl replace,$TRANS,curl PATCH,kubectl replace,kubectl delete,kubectl delete,kubectl delete,kubectl create,kubectl delete"
-check "mutation order: create, update, start/stop, rename, stale 409 update+delete, wrong-UID 409, delete, recreate, 409 delete, tester, agent" \
-  no_mutations_after "$LIFECYCLE,curl POST,curl PUT,kubectl apply,kubectl create,kubectl delete"
+AGENT="$LIFECYCLE,curl POST,curl PUT,kubectl apply,kubectl create,kubectl delete" # then owner patch and three pass tests:
+TESTS="$AGENT,kubectl patch,kubectl create,kubectl create,kubectl create"
+check "mutation order: lifecycle, tester, agent, owner, three pass tests, namespace test, Coder to zero, namespace delete" \
+  no_mutations_after "$TESTS,kubectl create,kubectl patch,kubectl delete"
 check "stale requests carry the genuine pre-rename token; rename changed it" eval 'grep -qx "rv_pre_rename=2" "$T/work/receipt.txt" &&
   grep -qx "rv_post_rename=2-renamed" "$T/work/receipt.txt" && jq -e ".metadata.resourceVersion == \"2\"" "$T/work/stale-update.json" >/dev/null'
 check "template applied with the long request timeout, then re-applied before any lifecycle mutation" eval '[[ $(grep -c -- "--request-timeout=600s apply -f config/e2e/codertemplate.yaml" "$S/calls.log") -eq 2 ]]'
@@ -292,13 +343,28 @@ check "background port-forward and watch stopped" bg_stopped
 check "every non-streaming kubectl request carries --request-timeout=30s" \
   eval '! grep "^kubectl" "$S/calls.log" | grep -v -e "watch=1" -e port-forward | grep -qvE -- "--request-timeout=[0-9]+s "'
 check "recreate only after the delete job succeeded" eval '[[ $(grep -n include_deleted "$S/calls.log" | head -1 | cut -d: -f1) -lt $(grep -n "create --raw .*ws-e2e-lifecycle-renamed.json" "$S/calls.log" | cut -d: -f1) ]]'
-check "receipt: source, run, version, identity, UIDs, 17 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
-  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 17 ]]'
-check "tester: password user in the default organization; receipt records its username and id" eval 'grep -q "POST .*\"login_type\":\"password\".*\"organization_ids\":\[\"org-1\"\]" "$S/calls.log" &&
+check "receipt: source, run, version, identity, UIDs, 22 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
+  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 22 ]]'
+check "TemplateTest receipt: three durations, tester key counts, namespace deletion time" eval 'grep -Eqx "template_test_seconds=[0-9]+s [0-9]+s [0-9]+s" "$T/work/receipt.txt" &&
+  grep -qx "tester_api_keys_before=2" "$T/work/receipt.txt" && grep -qx "tester_api_keys_after=5" "$T/work/receipt.txt" &&
+  grep -Eqx "namespace_delete_seconds=[0-9]+" "$T/work/receipt.txt" && out_has "tester api_keys: before=2 after=5 delta=3"'
+check "psql only counts rows: operator and tester api_keys, the first pass test's workspace name" eval '[[ $(grep -c "^kubectl .* exec " "$S/calls.log") -eq 4 ]] &&
+  ! grep "^kubectl .* exec " "$S/calls.log" | grep -qv "SELECT count(\*) FROM" && grep -q "FROM api_keys WHERE user_id = .user-tester." "$S/calls.log" &&
+  grep -q "FROM workspaces WHERE name = .ktt-e2e-pass-1." "$S/calls.log"'
+check "owner patch names the tester; the namespace test waits 120 s for its agent" eval 'grep -qF "\"ownerUserID\":\"user-tester\"" "$S/calls.log" &&
+  jq -e ".spec.parameters == [{name: \"startup_delay\", value: \"120\"}] and .spec.template == \"coder.e2e-agent\"" "$T/work/tt-e2e-ns-delete.json" >/dev/null &&
+  jq -e ".spec.version.active and (.spec | has(\"parameters\") | not)" "$T/work/tt-e2e-pass-1.json" >/dev/null'
+check "namespace deleted only after CoderUnavailable; the release went through ControlPlaneGone" eval '[[ $(grep -n "e2e-ns-delete: Running CoderUnavailable" "$T/out" | cut -d: -f1) -lt $(grep -n "content deleted in" "$T/out" | cut -d: -f1) ]] &&
+  out_has "e2e-ns-delete: Failed ControlPlaneGone deleted=Unknown/ControlPlaneGone" && grep -q "replicas.:0" "$S/calls.log" &&
+  out_has "namespace coder is Terminating, known issue #209: no eligible CoderControlPlane"'
+check "tester: password user in the default organization; receipt records its username and id" eval 'jq -e ".login_type == \"password\" and .organization_ids == [\"org-1\"]" "$S/tester-body.json" >/dev/null &&
   grep -qx "tester=e2e-tester/user-tester" "$T/work/receipt.txt"'
 # shellcheck disable=SC2034 # pw is used by the eval'd check below
-pw=$(grep -o '"password":"[^"]*"' "$S/calls.log" | cut -d'"' -f4)
-check "tester password is random and never printed" eval '[[ ${#pw} -ge 32 ]] && ! out_has "$pw" && ! grep -qF -- "$pw" "$T/work/receipt.txt"'
+pw=$(jq -r .password "$S/tester-body.json")
+check "tester password is random, never printed, and in no argv" eval '[[ ${#pw} -ge 32 ]] && ! out_has "$pw" && ! grep -qF -- "$pw" "$T/work/receipt.txt" "$S/calls.log"'
+check "token and bodies reach curl through 0600 files that the driver removes" eval '! grep -q secret-token-value "$S/calls.log" &&
+  ! grep "^curl " "$S/calls.log" | grep -vqF -- "-H @$T/work/coder.hdr" && ! grep "^curl " "$S/calls.log" | grep -qE -- "--data [^@]" &&
+  [[ $(sort -u "$S/file-modes") == 600 && ! -e $T/work/coder.hdr && ! -e $T/work/coder-body.json && ! -e $T/work/tester.json ]]'
 check "agent workspace: tester-owned, from the agent template, ready time logged, delete job checked" eval 'grep -q "create --raw .*ws-e2e-agent.json" "$S/calls.log" &&
   jq -e ".metadata.name == \"coder.e2e-tester.e2e-agent\" and .spec.templateName == \"e2e-agent\"" "$T/work/ws-e2e-agent.json" >/dev/null &&
   out_has "agent time-to-ready: " && out_has "agents: main=connected/ready" && grep -q "^agent_ready_seconds=[0-9]" "$T/work/receipt.txt" &&
@@ -447,7 +513,18 @@ check "fails on the dry-run stop; no real stop and no rename" eval 'failed_with 
 
 echo "TEST tester-create-fails: Coder rejects the tester user"
 run_scenario tester-create-fails; summary
-check "fails at the tester; no agent template or workspace" eval 'failed_with "cannot create the tester user e2e-tester" && no_mutations_after "$LIFECYCLE,curl POST"'
+check "fails at the tester; no agent template or workspace" eval 'failed_with "cannot create the tester user e2e-tester: curl: (22) The requested URL returned error: 500" &&
+  no_mutations_after "$LIFECYCLE,curl POST"'
+
+echo "TEST tester-exists: a local rerun finds the tester (409) and reuses it"
+run_scenario tester-exists; summary
+check "reuses the password tester, still activates it, and passes" eval '[[ $RC -eq 0 ]] && out_has "tester user e2e-tester exists (409): reusing it" &&
+  grep -q "PUT .*/api/v2/users/user-tester/status/activate" "$S/calls.log" && grep -qx "tester=e2e-tester/user-tester" "$T/work/receipt.txt"'
+
+echo "TEST tester-exists-oidc: the existing e2e-tester is not a password user"
+run_scenario tester-exists-oidc; summary
+check "fails before activation and the agent template" eval 'failed_with "tester user e2e-tester has an unexpected shape or organization" &&
+  no_mutations_after "$LIFECYCLE,curl POST"'
 
 echo "TEST tester-stays-dormant: activating the tester does not make it active"
 run_scenario tester-stays-dormant; summary
@@ -467,6 +544,23 @@ echo "TEST agent-delete-failed: the agent workspace is 404 but its delete job fa
 run_scenario agent-delete-failed; summary
 check "fails on the delete job status" eval 'failed_with "delete job of uid-4 ended in status failed" &&
   no_mutations_after "$LIFECYCLE,curl POST,curl PUT,kubectl apply,kubectl create,kubectl delete"'
+
+# name|expected message|mutations: each TemplateTest phase failure stops before the next mutation.
+while IFS='|' read -r name msg muts; do
+  echo "TEST $name (CoderTemplateTest phases)"
+  run_scenario "$name" E2E_NAMESPACE_DELETE_TIMEOUT_SECONDS=2 </dev/null; summary
+  check "fails with '$msg'" eval 'failed_with "$msg" && no_mutations_after "$muts"'
+done <<CASES
+owner-patch-fails|cannot set templateTests.ownerUserID on codercontrolplane coder|$AGENT,kubectl patch
+keys-count-fails|cannot count the api_keys rows of the tester|$AGENT,kubectl patch
+operator-no-keys|the operator user has no api_keys rows|$AGENT,kubectl patch
+tt-failed|template test e2e-pass-1 failed: Failed AgentStartError|$AGENT,kubectl patch,kubectl create
+ws-rows-2|expected exactly one workspaces row named ktt-e2e-pass-1 (deleted rows included), found 2|$TESTS
+coder-rolls|setting templateTests.ownerUserID rolled deploy/coder|$TESTS
+keys-after-fails|cannot count the api_keys rows of the tester after the tests|$TESTS
+coder-stays-up|timed out after 3s waiting for: deploy/coder without pods|$TESTS,kubectl create,kubectl patch
+ns-delete-stuck|timed out after 2s waiting for: test, control plane, and content of namespace coder deleted|$TESTS,kubectl create,kubectl patch,kubectl delete
+CASES
 
 echo "TEST missing-built-id: BUILT_IMAGE_ID is not a sha256 ID"
 run_scenario missing-built-id BUILT_IMAGE_ID=e2e; summary

@@ -5,6 +5,7 @@ resources:
   - namespace-coder-system.yaml
   - ../crd/bases/coder.com_codercontrolplanes.yaml
   - ../crd/bases/coder.com_coderprovisioners.yaml
+  - ../crd/bases/coder.com_codertemplatetests.yaml
   - ../crd/bases/coder.com_coderworkspaceproxies.yaml
   - ../rbac/clusterrolebinding.yaml
   - ../rbac/role.yaml
