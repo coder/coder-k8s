@@ -73,14 +73,21 @@ func (p *ControlPlaneClientProvider) ClientForNamespace(ctx context.Context, nam
 		return nil, fmt.Errorf("assertion failed: secret reader must not be nil")
 	}
 
-	eligible, err := p.findEligibleControlPlanes(ctx, namespace)
+	eligible, listed, err := p.findEligibleControlPlanes(ctx, namespace)
 	if err != nil {
 		return nil, err
 	}
 
 	switch len(eligible) {
 	case 0:
-		return nil, apierrors.NewServiceUnavailable(noEligibleControlPlaneMessage(namespace))
+		unavailable := apierrors.NewServiceUnavailable(noEligibleControlPlaneMessage(namespace))
+		// Only a namespace without any CoderControlPlane is "not served". A control plane that exists
+		// but is not eligible can be in a short outage (operator access not ready after a Postgres
+		// error), so a namespaced LIST must keep the 503 instead of reporting every object as gone.
+		if namespace == "" || listed > 0 {
+			return nil, unavailable
+		}
+		return nil, newNamespaceNotServedError(unavailable)
 	case 1:
 		// handled below
 	default:
@@ -189,7 +196,7 @@ func (p *ControlPlaneClientProvider) ClientForNamespace(ctx context.Context, nam
 
 // DefaultNamespace resolves the namespace for all-namespaces LIST requests.
 func (p *ControlPlaneClientProvider) DefaultNamespace(ctx context.Context) (string, error) {
-	eligible, err := p.findEligibleControlPlanes(ctx, "")
+	eligible, _, err := p.findEligibleControlPlanes(ctx, "")
 	if err != nil {
 		return "", err
 	}
@@ -217,7 +224,7 @@ func (p *ControlPlaneClientProvider) EligibleNamespaces(ctx context.Context) ([]
 		return nil, fmt.Errorf("assertion failed: context must not be nil")
 	}
 
-	eligible, err := p.findEligibleControlPlanes(ctx, "")
+	eligible, _, err := p.findEligibleControlPlanes(ctx, "")
 	if err != nil {
 		return nil, err
 	}
@@ -247,18 +254,20 @@ func (p *ControlPlaneClientProvider) EligibleNamespaces(ctx context.Context) ([]
 	return namespaces, nil
 }
 
+// findEligibleControlPlanes returns the eligible CoderControlPlanes in namespace (all namespaces when
+// empty) and the number of CoderControlPlanes listed there, eligible or not.
 func (p *ControlPlaneClientProvider) findEligibleControlPlanes(
 	ctx context.Context,
 	namespace string,
-) ([]coderv1alpha1.CoderControlPlane, error) {
+) (eligible []coderv1alpha1.CoderControlPlane, listed int, err error) {
 	if p == nil {
-		return nil, fmt.Errorf("assertion failed: control plane client provider must not be nil")
+		return nil, 0, fmt.Errorf("assertion failed: control plane client provider must not be nil")
 	}
 	if ctx == nil {
-		return nil, fmt.Errorf("assertion failed: context must not be nil")
+		return nil, 0, fmt.Errorf("assertion failed: context must not be nil")
 	}
 	if p.cpReader == nil {
-		return nil, fmt.Errorf("assertion failed: control plane reader must not be nil")
+		return nil, 0, fmt.Errorf("assertion failed: control plane reader must not be nil")
 	}
 
 	controlPlaneList := &coderv1alpha1.CoderControlPlaneList{}
@@ -266,15 +275,15 @@ func (p *ControlPlaneClientProvider) findEligibleControlPlanes(
 	if namespace != "" {
 		listOptions = append(listOptions, client.InNamespace(namespace))
 	}
-	if err := p.cpReader.List(ctx, controlPlaneList, listOptions...); err != nil {
+	if err = p.cpReader.List(ctx, controlPlaneList, listOptions...); err != nil {
 		if namespace == "" {
-			return nil, fmt.Errorf("list CoderControlPlane resources across all namespaces: %w", err)
+			return nil, 0, fmt.Errorf("list CoderControlPlane resources across all namespaces: %w", err)
 		}
 
-		return nil, fmt.Errorf("list CoderControlPlane resources in namespace %q: %w", namespace, err)
+		return nil, 0, fmt.Errorf("list CoderControlPlane resources in namespace %q: %w", namespace, err)
 	}
 
-	eligible := make([]coderv1alpha1.CoderControlPlane, 0, 1)
+	eligible = make([]coderv1alpha1.CoderControlPlane, 0, 1)
 	for i := range controlPlaneList.Items {
 		controlPlane := controlPlaneList.Items[i]
 		if strings.Contains(controlPlane.Name, ".") {
@@ -301,7 +310,7 @@ func (p *ControlPlaneClientProvider) findEligibleControlPlanes(
 		eligible = append(eligible, controlPlane)
 	}
 
-	return eligible, nil
+	return eligible, len(controlPlaneList.Items), nil
 }
 
 func noEligibleControlPlaneMessage(namespace string) string {

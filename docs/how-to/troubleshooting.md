@@ -166,6 +166,8 @@ This section is about `ServiceUnavailable` errors from the aggregated API server
 - `all` mode: no eligible `CoderControlPlane` exists yet. A control plane is eligible when its operator access is enabled and ready, its status has an operator token reference and a URL, and its name does not contain a `.` character.
 - Standalone mode (`--app=aggregated-apiserver`): set all three flags `--coder-url`, `--coder-session-token`, and `--coder-namespace`.
 
+A `list` in one namespace that contains no `CoderControlPlane` at all does not return this error. It returns an empty list. See [Namespaces without a Coder backend](../reference/aggregated-api-behavior.md#namespaces-without-a-coder-backend).
+
 The logs show which provider configuration the server used.
 
 ## Aggregated reads return `multiple eligible CoderControlPlane ...`

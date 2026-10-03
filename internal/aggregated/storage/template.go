@@ -243,6 +243,15 @@ func (s *TemplateStorage) List(ctx context.Context, _ *metainternalversion.ListO
 	}
 
 	sdk, err := s.clientForNamespace(ctx, namespace)
+	if listsUnservedNamespace(ctx, err) {
+		return &aggregationv1alpha1.CoderTemplateList{
+			TypeMeta: metav1.TypeMeta{
+				Kind:       "CoderTemplateList",
+				APIVersion: aggregationv1alpha1.SchemeGroupVersion.String(),
+			},
+			Items: make([]aggregationv1alpha1.CoderTemplate, 0),
+		}, nil
+	}
 	if err != nil {
 		return nil, wrapClientError(err)
 	}

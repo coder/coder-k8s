@@ -180,6 +180,9 @@ func (s *TemplateVersionStorage) list(ctx context.Context, opts *metainternalver
 func (s *TemplateVersionStorage) listNamespace(ctx context.Context, namespace string) ([]aggregationv1alpha1.CoderTemplateVersion, error) {
 	resource := aggregationv1alpha1.Resource("codertemplateversions")
 	sdk, err := s.clientForNamespace(ctx, namespace)
+	if listsUnservedNamespace(ctx, err) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, wrapClientError(err)
 	}

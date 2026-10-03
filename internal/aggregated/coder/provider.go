@@ -2,6 +2,7 @@ package coder
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -26,6 +27,31 @@ type NamespaceResolver interface {
 // Used to implement all-namespaces LIST by fanning out across instances.
 type NamespaceLister interface {
 	EligibleNamespaces(ctx context.Context) ([]string, error)
+}
+
+// namespaceNotServedError marks a ClientForNamespace error that means no Coder backend serves the
+// request namespace. It unwraps to the status error that GET, CREATE and other verbs return.
+type namespaceNotServedError struct {
+	status *apierrors.StatusError
+}
+
+func (e *namespaceNotServedError) Error() string { return e.status.Error() }
+
+func (e *namespaceNotServedError) Unwrap() error { return e.status }
+
+func newNamespaceNotServedError(status *apierrors.StatusError) error {
+	if status == nil {
+		panic("assertion failed: namespace-not-served status error must not be nil")
+	}
+	return &namespaceNotServedError{status: status}
+}
+
+// IsNamespaceNotServed reports whether err from ClientForNamespace means that no Coder backend
+// serves the named namespace. Nothing can exist there, so a namespaced LIST returns an empty list
+// instead of the error. Otherwise the namespace controller cannot delete the namespace (#209).
+func IsNamespaceNotServed(err error) bool {
+	var target *namespaceNotServedError
+	return errors.As(err, &target)
 }
 
 // StaticClientProvider returns one static client, optionally restricted to one namespace.
@@ -60,13 +86,13 @@ func (p *StaticClientProvider) ClientForNamespace(ctx context.Context, namespace
 		namespace = p.Namespace
 	}
 	if namespace != p.Namespace {
-		return nil, apierrors.NewBadRequest(
+		return nil, newNamespaceNotServedError(apierrors.NewBadRequest(
 			fmt.Sprintf(
 				"namespace %q is not served by this aggregated API server (configured for %q)",
 				namespace,
 				p.Namespace,
 			),
-		)
+		))
 	}
 
 	return p.Client, nil

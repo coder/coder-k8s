@@ -228,6 +228,15 @@ func (s *WorkspaceStorage) List(ctx context.Context, _ *metainternalversion.List
 	}
 
 	sdk, err := s.clientForNamespace(ctx, namespace)
+	if listsUnservedNamespace(ctx, err) {
+		return &aggregationv1alpha1.CoderWorkspaceList{
+			TypeMeta: metav1.TypeMeta{
+				Kind:       "CoderWorkspaceList",
+				APIVersion: aggregationv1alpha1.SchemeGroupVersion.String(),
+			},
+			Items: make([]aggregationv1alpha1.CoderWorkspace, 0),
+		}, nil
+	}
 	if err != nil {
 		return nil, wrapClientError(err)
 	}
@@ -837,6 +846,14 @@ func namespaceFromRequestContext(ctx context.Context) (string, error) {
 	}
 
 	return genericapirequest.NamespaceValue(ctx), nil
+}
+
+// listsUnservedNamespace reports whether a LIST must answer err from clientForNamespace with an
+// empty list: the request names one namespace, and no Coder backend serves that namespace. Nothing
+// can exist there. The namespace controller lists every resource before it deletes a namespace,
+// and it never finishes on an error (#209). An all-namespaces LIST keeps the error.
+func listsUnservedNamespace(ctx context.Context, err error) bool {
+	return genericapirequest.NamespaceValue(ctx) != "" && coder.IsNamespaceNotServed(err)
 }
 
 func requiredNamespaceFromRequestContext(ctx context.Context) (string, error) {

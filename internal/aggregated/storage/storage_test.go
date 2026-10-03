@@ -1197,7 +1197,7 @@ func TestTemplateStorageListNamespacedRequestBypassesFanOut(t *testing.T) {
 	}
 }
 
-func TestTemplateStorageListPreservesProviderStatusErrors(t *testing.T) {
+func TestTemplateStorageGetPreservesProviderStatusErrors(t *testing.T) {
 	t.Parallel()
 
 	server, _ := newMockCoderServer(t)
@@ -1215,7 +1215,8 @@ func TestTemplateStorageListPreservesProviderStatusErrors(t *testing.T) {
 		Namespace: "control-plane",
 	})
 
-	_, err = templateStorage.List(namespacedContext("other-namespace"), nil)
+	// A namespaced LIST in an unserved namespace is empty (#209); GET keeps the provider error.
+	_, err = templateStorage.Get(namespacedContext("other-namespace"), "acme.starter-template", nil)
 	if !apierrors.IsBadRequest(err) {
 		t.Fatalf("expected BadRequest from provider namespace restriction, got %v", err)
 	}
@@ -2626,7 +2627,7 @@ func TestWorkspaceStorageListAggregatesAcrossNamespaces(t *testing.T) {
 	}
 }
 
-func TestWorkspaceStorageListPreservesProviderStatusErrors(t *testing.T) {
+func TestWorkspaceStorageGetPreservesProviderStatusErrors(t *testing.T) {
 	t.Parallel()
 
 	server, _ := newMockCoderServer(t)
@@ -2644,7 +2645,8 @@ func TestWorkspaceStorageListPreservesProviderStatusErrors(t *testing.T) {
 		Namespace: "control-plane",
 	})
 
-	_, err = workspaceStorage.List(namespacedContext("other-namespace"), nil)
+	// A namespaced LIST in an unserved namespace is empty (#209); GET keeps the provider error.
+	_, err = workspaceStorage.Get(namespacedContext("other-namespace"), "acme.alice.dev-workspace", nil)
 	if !apierrors.IsBadRequest(err) {
 		t.Fatalf("expected BadRequest from provider namespace restriction, got %v", err)
 	}
