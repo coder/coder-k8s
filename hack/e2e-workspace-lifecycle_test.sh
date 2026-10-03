@@ -93,7 +93,9 @@ case "${pos[0]}:${pos[1]:-}" in
       tt_json Failed AgentStartError '[{"type":"WorkspaceDeleted","status":"True","reason":"Deleted"}]'
     else tt_json Succeeded Succeeded '[{"type":"Ready","status":"True","reason":"Succeeded"},{"type":"WorkspaceDeleted","status":"True","reason":"Deleted"}]'
     fi ;;
-  get:namespace) # content gone, but the namespace stays Terminating (the aggregated API LIST answers 503)
+  get:namespace) # Terminating on the first read, then gone; ns-stays-terminating: Terminating forever (#209)
+    n=$(($(cat "$S/ns-reads" 2>/dev/null || echo 0) + 1)) && echo "$n" >"$S/ns-reads"
+    [[ $SCENARIO == ns-stays-terminating || $n -lt 2 ]] || err NotFound 'namespaces "coder" not found'
     jq -n '{status: {phase: "Terminating", conditions: [{type: "NamespaceDeletionContentFailure", status: "True", message: "no eligible CoderControlPlane"},
       {type: "NamespaceContentRemaining", status: "False"}, {type: "NamespaceFinalizersRemaining", status: "False"}]}}' ;;
   delete:namespace) touch "$S/ns-deleted"; echo 'namespace "coder" deleted' ;;
@@ -381,9 +383,9 @@ check "psql only counts rows: operator and tester api_keys, the first pass test'
 check "owner patch names the tester; the namespace test waits 120 s for its agent" eval 'grep -qF "\"ownerUserID\":\"user-tester\"" "$S/calls.log" &&
   jq -e ".spec.parameters == [{name: \"startup_delay\", value: \"120\"}] and .spec.template == \"coder.e2e-agent\"" "$T/work/tt-e2e-ns-delete.json" >/dev/null &&
   jq -e ".spec.version.active and (.spec | has(\"parameters\") | not)" "$T/work/tt-e2e-pass-1.json" >/dev/null'
-check "namespace deleted only after CoderUnavailable; the release went through ControlPlaneGone" eval '[[ $(grep -n "e2e-ns-delete: Running CoderUnavailable" "$T/out" | cut -d: -f1) -lt $(grep -n "content deleted in" "$T/out" | cut -d: -f1) ]] &&
+check "namespace deleted only after CoderUnavailable; the release went through ControlPlaneGone; the namespace disappeared" eval '[[ $(grep -n "e2e-ns-delete: Running CoderUnavailable" "$T/out" | cut -d: -f1) -lt $(grep -n "namespace coder deleted in" "$T/out" | cut -d: -f1) ]] &&
   out_has "e2e-ns-delete: Failed ControlPlaneGone deleted=Unknown/ControlPlaneGone" && grep -q "replicas.:0" "$S/calls.log" &&
-  out_has "namespace coder is Terminating, known issue #209: no eligible CoderControlPlane"'
+  out_has "namespace coder still exists: Terminating; NamespaceDeletionContentFailure: no eligible CoderControlPlane" && [[ $(<"$S/ns-reads") == 2 ]]'
 check "tester: password user in the default organization; receipt records its username and id" eval 'jq -e ".login_type == \"password\" and .organization_ids == [\"org-1\"]" "$S/tester-body.json" >/dev/null &&
   grep -qx "tester=e2e-tester/user-tester" "$T/work/receipt.txt"'
 # shellcheck disable=SC2034 # pw is used by the eval'd check below
@@ -586,7 +588,8 @@ ws-rows-2|expected exactly one workspaces row named ktt-e2e-pass-1 (deleted rows
 coder-rolls|setting templateTests.ownerUserID rolled deploy/coder|$TESTS
 keys-after-fails|cannot count the api_keys rows of the tester after the tests|$PHASED
 coder-stays-up|timed out after 3s waiting for: deploy/coder without pods|$PHASED,kubectl create,kubectl patch
-ns-delete-stuck|timed out after 2s waiting for: test, control plane, and content of namespace coder deleted|$PHASED,kubectl create,kubectl patch,kubectl delete
+ns-delete-stuck|timed out after 2s waiting for: test, control plane, and namespace coder deleted|$PHASED,kubectl create,kubectl patch,kubectl delete
+ns-stays-terminating|timed out after 2s waiting for: test, control plane, and namespace coder deleted|$PHASED,kubectl create,kubectl patch,kubectl delete
 fail-ignored|template test e2e-agent-fail ended Succeeded Succeeded deleted=True/Deleted, want Failed AgentStartError|$TESTS,kubectl create
 badparam-created|template test e2e-bad-param: expected 0 workspaces rows named ktt-e2e-bad-param (deleted rows included), found 1|$TESTS,kubectl create,kubectl create
 restart-failed|template test e2e-restart failed: Failed AgentStartError|$TESTS,kubectl create,kubectl create,kubectl create,kubectl delete

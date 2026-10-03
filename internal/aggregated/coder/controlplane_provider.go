@@ -80,7 +80,11 @@ func (p *ControlPlaneClientProvider) ClientForNamespace(ctx context.Context, nam
 
 	switch len(eligible) {
 	case 0:
-		return nil, apierrors.NewServiceUnavailable(noEligibleControlPlaneMessage(namespace))
+		unavailable := apierrors.NewServiceUnavailable(noEligibleControlPlaneMessage(namespace))
+		if namespace == "" {
+			return nil, unavailable
+		}
+		return nil, newNamespaceNotServedError(unavailable)
 	case 1:
 		// handled below
 	default:

@@ -575,19 +575,22 @@ wait_until "template test e2e-ns-delete to report CoderUnavailable" tt_unavailab
 T0=$SECONDS
 k delete namespace "$NS" --wait=false >/dev/null || fail "cannot delete namespace $NS"
 gone_obj() { ! k -n "$NS" get "$1" "$2" -o name >/dev/null 2>"$WORK/obj.err" && grep -q NotFound "$WORK/obj.err"; }
-ns_released() { # the test and the control plane are gone, and no namespace content or finalizer remains
+NS_SEEN=""
+ns_gone() { # the test and the control plane go first, then the namespace itself disappears (#209)
   tt_state e2e-ns-delete || true # logs the ControlPlaneGone release while the object still exists
   gone_obj codertemplatetest e2e-ns-delete && gone_obj codercontrolplane coder || return 1
-  k get namespace "$NS" -o json >"$WORK/ns.json" 2>"$WORK/ns.err" || { grep -q NotFound "$WORK/ns.err"; return; }
-  jq -e '[.status.conditions[]? | select(.type == "NamespaceContentRemaining" or .type == "NamespaceFinalizersRemaining")] |
-    length == 2 and all(.status == "False")' "$WORK/ns.json" >/dev/null
+  if k get namespace "$NS" -o json >"$WORK/ns.json" 2>"$WORK/ns.err"; then
+    local seen # diagnostics: the phase and every True condition, logged when they change
+    seen=$(jq -r '[.status.phase // "unknown"] + [.status.conditions[]? | select(.status == "True") |
+      "\(.type): \(.message)"] | join("; ")' "$WORK/ns.json") || seen="unparsable namespace JSON"
+    [[ $seen == "$NS_SEEN" ]] || log "namespace $NS still exists: $seen"
+    NS_SEEN=$seen
+    return 1
+  fi
+  grep -q NotFound "$WORK/ns.err"
 }
-TIMEOUT=$NS_DELETE_TIMEOUT wait_until "test, control plane, and content of namespace $NS deleted (ControlPlaneGone release)" ns_released
+TIMEOUT=$NS_DELETE_TIMEOUT wait_until "test, control plane, and namespace $NS deleted (ControlPlaneGone release)" ns_gone
 NS_DELETE_SECONDS=$((SECONDS - T0))
-# Known issue #209: a namespaced aggregated LIST without an eligible control plane answers 503, so the namespace
-# stays Terminating. Once #209 is fixed, this check becomes "the namespace disappears".
-[[ ! -s $WORK/ns.json ]] || log "namespace $NS is $(jq -r '.status.phase' "$WORK/ns.json"), known issue #209: $(jq -r '[.status.conditions[]? |
-  select(.type == "NamespaceDeletionContentFailure" and .status == "True") | .message] | join("; ")' "$WORK/ns.json")"
-log "namespace $NS: test, control plane, and content deleted in ${NS_DELETE_SECONDS}s"
+log "namespace $NS deleted in ${NS_DELETE_SECONDS}s, after its test and control plane"
 CASES+=("case: $CURRENT = passed") && CURRENT="" && RESULT=PASS
 log "PASS: workspace lifecycle"

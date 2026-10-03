@@ -10,6 +10,7 @@ The aggregated API server serves `coderworkspaces`, `codertemplates` and `codert
 | [Delete preconditions](#delete-preconditions) | The server checks `uid` and `resourceVersion`. A mismatch returns `409` and does not change Coder. |
 | [Workspace `resourceVersion`](#workspace-resourceversion) | An opaque fingerprint. Compare it only for equality. Workspace activity alone can cause `409`. |
 | [Watch](#watch) | Shows only writes made through this server. No replay, no initial events. |
+| [Namespaces without a Coder backend](#namespaces-without-a-coder-backend) | A `list` in one namespace returns an empty list. Other requests return an error. Thus such a namespace can be deleted. |
 | [Server-side apply](#server-side-apply) | Create-on-update works. The server does not keep field ownership. |
 | [Server-side dry-run](#server-side-dry-run) | Not supported for writes to `coderworkspaces` and `codertemplates`. `kubectl diff` and `--dry-run=server` return `400` and do not change Coder. A promotion with `dryRun=All` is a read-only preview. Start and stop accept dry-run too. |
 | [Template versions](#template-versions) | Read-only: `get` and `list`, no watch. Reads never download template source. |
@@ -136,6 +137,26 @@ The server rejects these requests:
 | `resourceVersion` omitted or `0` (the WatchList defaulting of the API server treats this as a request for initial events) | `400 Bad Request` |
 | `resourceVersionMatch` set | Rejected |
 | `sendInitialEvents=false` without a matching option | `422 Invalid` (rejected upstream) |
+
+## Namespaces without a Coder backend
+
+A namespace has no Coder backend in these cases:
+
+- `all` mode: the namespace has no eligible `CoderControlPlane`. For the eligibility rules, see [Aggregated reads return `ServiceUnavailable`](../how-to/troubleshooting.md#aggregated-reads-return-serviceunavailable).
+- Standalone mode: the namespace is not the one that `--coder-namespace` names.
+
+In such a namespace, the server answers requests as follows:
+
+| Request | Result |
+| --- | --- |
+| `list` of `coderworkspaces`, `codertemplates`, or `codertemplateversions` in that namespace | `200` with an empty list. The server does not call Coder. |
+| `get`, `create`, `update`, `delete`, and the subresources | An error: `503` in `all` mode, `400` in standalone mode |
+| `watch` | Works as described in [Watch](#watch). It shows no events, because no write can succeed in that namespace. |
+| `list` in all namespaces (`-A`) | Unchanged. In `all` mode, it returns `503` when no `CoderControlPlane` is eligible in any namespace. |
+
+The namespace controller lists every resource type in a namespace before it removes the namespace. An error from a list keeps the namespace in `Terminating` forever, so the empty list lets the deletion finish.
+
+An empty list means that no Coder backend serves the namespace now. It does not mean that Coder has no objects. If a control plane stops being eligible for a short time, for example while its operator access is not ready, a list in its namespace is empty during that time. A client that caches a list, such as an informer, then sees all objects as deleted, and sees them again when the control plane is eligible again.
 
 ## Server-side apply
 
