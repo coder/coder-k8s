@@ -106,9 +106,19 @@ func (r *CoderTemplateTestReconciler) confirmCreate(
 
 // provenance returns the start build that proves this test created the
 // workspace: organization and template match the pinned values, and the
-// operator user started the first build with the pinned version. It returns
-// nil without proof. It reads the newest 100 builds: a workspace with more
-// builds stays unproven, which keeps its finalizer.
+// operator user started the workspace's first build with the pinned version.
+// It returns nil without proof. It reads the newest 100 builds: a workspace
+// with more builds stays unproven, which keeps its finalizer.
+//
+// Coder v2.37.2 can answer the create request by claiming a prebuilt
+// workspace when the parameters match a preset (coderd/workspaces.go:670-685).
+// Build 1 is then the prebuild: a start build by the prebuilds system user.
+// Only Coder's prebuilds reconciler starts builds as that user
+// (enterprise/coderd/prebuilds/reconcile.go:1119-1122), and nobody can log in
+// or get an API key as it (coderd/apikey.go:62-66). The claim build is the
+// first build by anyone else: a start build by the operator with the
+// requested version (coderd/workspaces.go:769-785). Any other build between
+// the prebuild and the claim leaves the workspace unproven (fail-safe).
 func provenance(
 	ctx context.Context, sdk *codersdk.Client, tt *coderv1alpha1.CoderTemplateTest, workspace codersdk.Workspace, operatorID uuid.UUID,
 ) (*codersdk.WorkspaceBuild, error) {
@@ -119,24 +129,29 @@ func provenance(
 	if err != nil {
 		return nil, err
 	}
+	prebuildsUser := uuid.MustParse(codersdk.PrebuildsSystemUserID)
+	var first, claim *codersdk.WorkspaceBuild
 	for i := range builds {
 		b := &builds[i]
 		if err := coderAnswerFor("build workspace", workspace.ID.String(), b.WorkspaceID.String()); err != nil {
 			return nil, err
 		}
-		// Only the first build: a later start build by the operator does not
-		// prove who created the workspace. Coder v2.37.2 can claim a prebuilt
-		// workspace without a preset ID in the request, when the parameters
-		// match a preset (coderd/workspaces.go:670-685). Build 1 of a claimed
-		// workspace belongs to the prebuilds system user, so such a workspace
-		// stays unproven: the test fails and keeps its finalizer.
-		if b.BuildNumber == 1 && b.Transition == codersdk.WorkspaceTransitionStart && b.InitiatorID == operatorID &&
-			b.TemplateVersionID.String() == tt.Status.TemplateVersionID {
-			if b.ID == uuid.Nil {
-				return nil, &coderAnswerError{msg: "assertion failed: Coder answered a start build without an ID"}
-			}
-			return b, nil
+		if b.BuildNumber == 1 {
+			first = b
+		}
+		if b.InitiatorID != prebuildsUser && (claim == nil || b.BuildNumber < claim.BuildNumber) {
+			claim = b
 		}
 	}
-	return nil, nil
+	// Without build 1 the answer proves nothing. Without a prebuild, claim is
+	// build 1: a later start build by the operator does not prove who created
+	// the workspace.
+	if first == nil || claim == nil || claim.Transition != codersdk.WorkspaceTransitionStart || claim.InitiatorID != operatorID ||
+		claim.TemplateVersionID.String() != tt.Status.TemplateVersionID {
+		return nil, nil
+	}
+	if claim.ID == uuid.Nil {
+		return nil, &coderAnswerError{msg: "assertion failed: Coder answered a start build without an ID"}
+	}
+	return claim, nil
 }

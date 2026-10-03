@@ -52,15 +52,29 @@ func TestTemplateTestConfirmWithoutProvenance(t *testing.T) {
 				return append([]codersdk.WorkspaceBuild{later}, builds...)
 			}})
 		}},
-		{name: "a claimed prebuild", fault: fakeFault{Status: 504, AfterCommit: true}, setup: func(*testing.T, types.NamespacedName) {
-			// Build 1 belongs to the prebuilds system user, the claim build to
-			// the operator. Provenance cannot prove this workspace (fail-safe).
+		// A prebuild that is not claimed, a stop build before the claim, and a
+		// claim of another version prove nothing (fail-safe).
+		{name: "an unclaimed prebuild", fault: fakeFault{Status: 504, AfterCommit: true}, setup: func(*testing.T, types.NamespacedName) {
 			e.fake.failNext(routeWorkspaceBuilds, fakeFault{Rewrite: func(a any) any {
 				builds := a.([]codersdk.WorkspaceBuild)
-				claim := builds[0]
-				claim.ID, claim.BuildNumber = uuid.New(), builds[0].BuildNumber+1
-				builds[len(builds)-1].InitiatorID = uuid.MustParse(codersdk.PrebuildsSystemUserID)
-				return append([]codersdk.WorkspaceBuild{claim}, builds...)
+				for i := range builds {
+					builds[i].InitiatorID = uuid.MustParse(codersdk.PrebuildsSystemUserID)
+				}
+				return builds
+			}})
+		}},
+		{name: "a stop build before the claim", fault: fakeFault{Status: 504, AfterCommit: true}, setup: func(*testing.T, types.NamespacedName) {
+			e.fake.failNext(routeWorkspaceBuilds, claimedWith(codersdk.WorkspaceTransitionStop, e.v1))
+		}},
+		{name: "a claim of another version", fault: fakeFault{Status: 504, AfterCommit: true}, setup: func(*testing.T, types.NamespacedName) {
+			e.fake.failNext(routeWorkspaceBuilds, claimedWith(codersdk.WorkspaceTransitionStart, v2))
+		}},
+		// More than 100 builds: the newest page has no build 1.
+		{name: "no build 1 in the answer", fault: fakeFault{Status: 504, AfterCommit: true}, setup: func(*testing.T, types.NamespacedName) {
+			e.fake.failNext(routeWorkspaceBuilds, fakeFault{Rewrite: func(a any) any {
+				builds := a.([]codersdk.WorkspaceBuild)
+				builds[0].BuildNumber = 101
+				return builds
 			}})
 		}},
 		{name: "another initiator", fault: fakeFault{Status: 504, AfterCommit: true}, setup: func(*testing.T, types.NamespacedName) {
@@ -82,6 +96,37 @@ func TestTemplateTestConfirmWithoutProvenance(t *testing.T) {
 		require.Empty(t, tt.Status.WorkspaceID, tc.name)
 		require.Equal(t, changes, e.fake.requestCount(routeCreateBuild)+e.fake.requestCount(routeCancelBuild), "%s: the controller never touches the workspace", tc.name)
 	}
+}
+
+// claimedWith answers the builds of a prebuild, then an operator build with
+// the given transition and version, then a matching claim build. Only the
+// first build after the prebuild counts as the claim.
+func claimedWith(transition codersdk.WorkspaceTransition, versionID uuid.UUID) fakeFault {
+	return fakeFault{Rewrite: func(a any) any {
+		builds := a.([]codersdk.WorkspaceBuild)
+		claim := builds[0] // The operator's start build, the only build so far.
+		prebuild, first := claim, claim
+		prebuild.InitiatorID = uuid.MustParse(codersdk.PrebuildsSystemUserID)
+		first.ID, first.BuildNumber, first.Transition, first.TemplateVersionID = uuid.New(), 2, transition, versionID
+		claim.ID, claim.BuildNumber = uuid.New(), 3
+		return []codersdk.WorkspaceBuild{claim, first, prebuild}
+	}}
+}
+
+func TestTemplateTestConfirmClaimedPrebuild(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	key := e.uncertainCreate(t, fakeFault{Status: 504, AfterCommit: true})
+	ws, err := e.fake.client(t, 5*time.Second).WorkspaceByOwnerAndName(e.ctx, e.tester.String(), e.workspaceName(t, key), codersdk.WorkspaceOptions{})
+	require.NoError(t, err)
+	claim := e.fake.claimPrebuild(ws.ID)
+
+	tt := e.settle(t, key)
+	requireTemplateTestRunning(t, tt, "WaitingForBuild", "")
+	require.Equal(t, claim.ID.String(), tt.Status.StartBuildID, "the claim build, not the prebuild")
+	require.Equal(t, ws.ID.String(), tt.Status.WorkspaceID)
+	e.passTest(t, key)
+	require.Equal(t, 1, e.fake.requestCount(routeCreateWorkspace))
 }
 
 func TestTemplateTestConfirmDeletedExternally(t *testing.T) {

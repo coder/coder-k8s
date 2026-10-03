@@ -386,6 +386,20 @@ func (f *fakeCoder) markDeleted(workspaceID uuid.UUID) {
 	fw.deleted = true
 }
 
+// claimPrebuild turns a workspace into a claimed prebuild, as Coder v2.37.2
+// leaves it: build 1 is the prebuilds system user's succeeded start build,
+// and the claim is a new start build by the operator with build 1's version.
+func (f *fakeCoder) claimPrebuild(workspaceID uuid.UUID) codersdk.WorkspaceBuild {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fw, ok := f.workspaces[workspaceID]
+	require.True(f.t, ok, "assertion failed: unknown workspace %s", workspaceID)
+	prebuild := &fw.builds[0]
+	prebuild.InitiatorID = uuid.MustParse(codersdk.PrebuildsSystemUserID)
+	f.setJob(prebuild, codersdk.ProvisionerJobSucceeded)
+	return f.appendBuild(fw, prebuild.TemplateVersionID, codersdk.WorkspaceTransitionStart)
+}
+
 // failNext queues fault for the next authenticated request on route.
 func (f *fakeCoder) failNext(route string, fault fakeFault) {
 	f.mu.Lock()
