@@ -173,8 +173,11 @@ done
 #   more Running/Completed rows, fixed "About Codex" footer). The card may also
 #   carry one "### Security findings" section with one "#### Advisory findings
 #   (N)" list of exactly N links to review threads on this PR; it only counts
-#   as a non-finding when every linked thread is a resolved thread that the bot
-#   started. An unresolved or missing thread keeps the card blocking.
+#   as a non-finding when every finding is cleared. Codex appends
+#   " · **Resolved**" to a finding it considers resolved, which clears it.
+#   An unmarked finding is cleared only when its linked thread is a resolved
+#   thread that the bot started; an unresolved or missing thread keeps the
+#   card blocking. Unresolved bot threads also block on their own below.
 # - the explicit clean security verdict ("No security issues were found")
 # Recognition is structural and line-anchored: the summary and security shapes
 # must match line for line, so a marker alone, a quoted marker, or a summary
@@ -226,14 +229,15 @@ def advisory_heading_regex: "^#### Advisory findings \\((?<n>[1-9][0-9]{0,2})\\)
 # The link label may contain brackets (e.g. `args[0]` or escaped `\[`); only "](" ends it.
 def finding_regex:
   "^- [^ ]{1,4} \\[(?:[^\\]]|\\](?!\\())+\\]\\(https://github\\.com/(?<owner>[^/()]+)/(?<repo>[^/()]+)/pull/(?<pr>[0-9]+)"
-  + "#discussion_r(?<id>[0-9]+)\\) · \\*\\*(Critical|High|Medium|Low)\\*\\*$";
+  + "#discussion_r(?<id>[0-9]+)\\) · \\*\\*(Critical|High|Medium|Low)\\*\\*(?<mark> · \\*\\*Resolved\\*\\*)?$";
 
-# True when the finding line links to a resolved, bot-started thread on this PR.
+# True when the finding line links to this PR and either Codex marked it
+# " · **Resolved**" or it links to a resolved, bot-started thread.
 def is_resolved_finding:
   (capture(finding_regex) // null) as $m
   | $m != null
     and $m.owner == $owner and $m.repo == $repo and $m.pr == $pr
-    and ($resolved | any(. == $m.id));
+    and ($m.mark == " · **Resolved**" or ($resolved | any(. == $m.id)));
 
 # Input: the card lines between the status table's blank lines and the About
 # footer. Valid when empty, or when it is exactly one security findings section

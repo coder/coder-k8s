@@ -1,0 +1,29 @@
+<!-- codex-pull-request-review-summary -->
+<!-- codex-security-review:v1 {"blockingSeverityThreshold":"P0","headSha":"a4bf9f1180438d6ef9bcb91aa5449ca81b2829c8","mergeGateEnabled":false,"pullRequestNumber":212,"repository":"coder/coder-k8s","status":"completed"} -->
+## Codex Review Summary
+
+This comment shows the latest Codex review activity on this pull request.
+
+| Review | Status | Commit | Review trigger |
+| --- | --- | --- | --- |
+| 📝 **Code Review** | ✅ **Completed** <relative-time datetime="2026-10-03T16:42:03.042488Z">2026-10-03T16:42:03.042488Z</relative-time> | `a4bf9f1` | Manual request |
+| 🔒 **Security Review** | ✅ **Completed** <relative-time datetime="2026-10-03T16:44:14.113174Z">2026-10-03T16:44:14.113174Z</relative-time> | `a4bf9f1` | Manual request |
+
+### Security findings
+
+#### Advisory findings (2)
+
+- 🟡 [Example advisory finding](https://github.com/coder/coder-k8s/pull/212#discussion_r4173840086) · **Medium** · **Resolved**
+- 🟡 [Second example advisory finding](https://github.com/coder/coder-k8s/pull/212#discussion_r4173883868) · **Medium**
+
+<details> <summary>ℹ️ About Codex in GitHub</summary>
+<br/>
+
+[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you
+- Open a pull request for review
+- Mark a draft as ready
+- Comment "@codex review" or "@codex security review".
+
+Codex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 once all reviews finish with no findings.
+
+</details>
