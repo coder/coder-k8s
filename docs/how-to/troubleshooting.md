@@ -250,12 +250,20 @@ kubectl get codertemplatetest <name> -n <namespace> \
 - `ControlPlaneUnavailable` or `CoderAnswerMismatch`: Coder is not usable. Fix Coder, and the controller continues.
 - `OwnershipUnknown`: a workspace with the test's name exists, but nothing proves that the test created it. The controller never touches it.
 
-If the controller cannot finish, use the [escape hatch](test-templates.md#cleanup-and-the-escape-hatch). As a last resort, check Coder for a workspace named `status.workspaceName`, then remove the finalizer:
+If the controller cannot finish, use the [escape hatch](test-templates.md#cleanup-and-the-escape-hatch). As a last resort, check Coder for a workspace named `status.workspaceName`, then remove only the controller's finalizer. Other controllers can have their own finalizers on the test, so do not remove the whole list:
 
-```bash
-kubectl patch codertemplatetest <name> -n <namespace> --type json \
-  -p '[{"op":"remove","path":"/metadata/finalizers"}]'
-```
+1. Find the position of `coder.com/template-test-cleanup` in the list. The first entry has position 0.
+
+    ```bash
+    kubectl get codertemplatetest <name> -n <namespace> -o jsonpath='{.metadata.finalizers}'
+    ```
+
+2. Remove the entry at that position. The `test` operation makes the patch fail if the entry at `<position>` is a different finalizer.
+
+    ```bash
+    kubectl patch codertemplatetest <name> -n <namespace> --type json -p \
+      '[{"op":"test","path":"/metadata/finalizers/<position>","value":"coder.com/template-test-cleanup"},{"op":"remove","path":"/metadata/finalizers/<position>"}]'
+    ```
 
 CAUTION: Delete the workspace in Coder before you remove the finalizer. Otherwise the workspace, and the tester's session key, stay in Coder.
 

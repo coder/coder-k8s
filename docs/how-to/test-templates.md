@@ -1,6 +1,6 @@
 # Test a template version with CoderTemplateTest
 
-This guide shows how to check that a Coder template version can start a workspace whose agents become ready. A `CoderTemplateTest` creates a throwaway workspace from one template version, waits until every agent is `connected` and `ready`, records `Succeeded` or `Failed`, and deletes the workspace. For every field, see the [`CoderTemplateTest` reference](../reference/api/codertemplatetest.md).
+This guide shows how to check that a Coder template version can start a workspace whose agents become ready. A `CoderTemplateTest` creates a throwaway workspace from one template version, waits until every top-level agent is `connected` and `ready`, records `Succeeded` or `Failed`, and deletes the workspace. For every field, see the [`CoderTemplateTest` reference](../reference/api/codertemplatetest.md).
 
 You need:
 
@@ -72,8 +72,8 @@ While the test waits, the condition `Reconciling` is `True` with the same reason
 | Reason | Meaning | What to do |
 | --- | --- | --- |
 | `Initializing` | The controller started the test. | Nothing. |
-| `ControlPlaneNotReady` | The `CoderControlPlane` does not exist, is being deleted, has no usable `status.url`, or its operator token Secret has no token yet. | Check `spec.controlPlaneRef` and the control plane status. |
-| `OperatorAccessNotReady` | `status.operatorAccessReady` of the control plane is not `true`. | See [Deploy the controller](deploy-controller.md). |
+| `ControlPlaneNotReady` | The `CoderControlPlane` does not exist, is being deleted, or has no usable `status.url`. | Check `spec.controlPlaneRef` and the control plane status. |
+| `OperatorAccessNotReady` | `status.operatorAccessReady` of the control plane is not `true`, or its operator token Secret is missing or has no token. | See [Deploy the controller](deploy-controller.md), and check the Secret in `status.operatorTokenSecretRef` of the control plane. |
 | `OwnerNotConfigured` | The control plane has no `spec.templateTests.ownerUserID`. | Set it, as in step 1. |
 | `OwnerNotEligible` | The tester does not exist, is not `active`, has a person's login type, has a role that is not allowed, or is not a member of the template's organization. | Fix the tester as described in step 1. The message names the problem. |
 | `TemplateNotFound` | The organization or the template in `spec.template` does not exist. | Check `spec.template` (`<organization>.<template>`). |
@@ -82,7 +82,7 @@ While the test waits, the condition `Reconciling` is `True` with the same reason
 | `CreatingWorkspace`, `CreateRetrying` | The controller sends the create request, or sends it again after a request that had no effect. | Wait. |
 | `ConfirmingCreate` | The answer to the create request was lost. The controller reads Coder until the workspace appears. | Wait. |
 | `WaitingForBuild`, `WaitingForAgents` | The start build runs, or an agent is not yet `connected` and `ready`. | Wait. The message names the agent. |
-| `AgentsReady`, `DeletingWorkspace` | Every agent was ready. The controller deletes the workspace. | Wait. |
+| `AgentsReady`, `DeletingWorkspace` | Every top-level agent was ready. The controller does not check devcontainer sub-agents. The controller deletes the workspace. | Wait. |
 | `CoderUnavailable` | A Coder request failed. After HTTP 429, the controller retries with backoff. | Check Coder and its logs. |
 | `CoderAnswerMismatch` | Coder answered about another object than the one asked for. The controller logs it and retries. | Check proxies between the controller and Coder. |
 
@@ -103,7 +103,7 @@ A failed test has `Ready=False` and `Stalled=True` with the same reason. It does
 | `NoAgents` | The workspace has no agents, so nothing proves that it works. | Add an agent to the template. |
 | `AgentConnectionTimeout`, `AgentStartError`, `AgentStartTimeout`, `AgentStopped` | An agent did not connect in time, its startup script failed or timed out, or it stopped. | Read the agent logs in Coder. The message names the agent. |
 | `WorkspaceChangedExternally`, `WorkspaceDeletedExternally` | Someone else started a build of the workspace, or deleted it. | Leave test workspaces alone, and create a new test. |
-| `DeleteBuildFailed` | Every agent was ready, but the delete build failed. The controller retries the delete. | Read the delete build logs in Coder. |
+| `DeleteBuildFailed` | Every top-level agent was ready, but the delete build failed. The controller retries the delete. | Read the delete build logs in Coder. |
 | `ControlPlaneGone` | The `CoderControlPlane` was deleted while the workspace could exist. | Look for the workspace in Coder and delete it there. |
 
 ### `WorkspaceDeleted` reasons
