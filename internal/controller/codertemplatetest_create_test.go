@@ -29,6 +29,9 @@ func TestTemplateTestCreateResults(t *testing.T) {
 		phase   string
 		reason  string
 		message string
+		// confirmed is the reason once confirming reads ran after an
+		// uncertain result.
+		confirmed string
 	}{
 		{name: "created", phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "WaitingForBuild"},
 		{name: "429", fault: &fakeFault{Status: 429}, phase: coderv1alpha1.CoderTemplateTestPhasePending, reason: "CreateRetrying", message: "Coder answered 429"},
@@ -36,24 +39,29 @@ func TestTemplateTestCreateResults(t *testing.T) {
 		{name: "406", fault: &fakeFault{Status: 406}, phase: coderv1alpha1.CoderTemplateTestPhasePending, reason: "TemplateVersionImporting"},
 		{name: "409", fault: &fakeFault{Status: 409}, phase: coderv1alpha1.CoderTemplateTestPhaseFailed, reason: "WorkspaceNameConflict"},
 		{name: "400", fault: &fakeFault{Status: 400}, phase: coderv1alpha1.CoderTemplateTestPhaseFailed, reason: "CreateRejected", message: "Coder answered 400: fake fault 400"},
-		{name: "502 before commit", fault: &fakeFault{Status: 502}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "ConfirmingCreate", message: "Coder answered 502"},
-		{name: "504 after commit", fault: &fakeFault{Status: 504, AfterCommit: true}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "ConfirmingCreate"},
-		{name: "connection reset", fault: &fakeFault{Reset: true}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "ConfirmingCreate"},
+		{name: "502 before commit", fault: &fakeFault{Status: 502}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "ConfirmingCreate", message: "Coder answered 502", confirmed: "ConfirmingCreate"},
+		{name: "504 after commit", fault: &fakeFault{Status: 504, AfterCommit: true}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "ConfirmingCreate", confirmed: "WaitingForBuild"},
+		{name: "connection reset", fault: &fakeFault{Reset: true}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "ConfirmingCreate", confirmed: "ConfirmingCreate"},
 		{name: "wrong workspace in the answer", fault: &fakeFault{Rewrite: func(a any) any {
 			ws := a.(codersdk.Workspace)
 			ws.Name = "other"
 			return ws
-		}}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "CoderAnswerMismatch", message: "Coder answered workspace "},
+		}}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "CoderAnswerMismatch", message: "Coder answered workspace ", confirmed: "WaitingForBuild"},
 		{name: "answer without a build ID", fault: &fakeFault{Rewrite: func(a any) any {
 			ws := a.(codersdk.Workspace)
 			ws.LatestBuild.ID = uuid.Nil
 			return ws
-		}}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "CoderAnswerMismatch", message: "Coder answered start build "},
+		}}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "CoderAnswerMismatch", message: "Coder answered start build ", confirmed: "WaitingForBuild"},
 		{name: "answer with another workspace's build", fault: &fakeFault{Rewrite: func(a any) any {
 			ws := a.(codersdk.Workspace)
 			ws.LatestBuild.WorkspaceID = uuid.New()
 			return ws
-		}}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "CoderAnswerMismatch", message: "Coder answered start build workspace "},
+		}}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "CoderAnswerMismatch", message: "Coder answered start build workspace ", confirmed: "WaitingForBuild"},
+		{name: "answer with a delete build", fault: &fakeFault{Rewrite: func(a any) any {
+			ws := a.(codersdk.Workspace)
+			ws.LatestBuild.Transition = codersdk.WorkspaceTransitionDelete
+			return ws
+		}}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "CoderAnswerMismatch", message: "Coder answered start build transition ", confirmed: "WaitingForBuild"},
 	}
 	for _, tc := range cases {
 		creates := e.fake.requestCount(routeCreateWorkspace)
@@ -88,9 +96,13 @@ func TestTemplateTestCreateResults(t *testing.T) {
 			require.NotNil(t, tt.Status.CreateAttemptTime, tc.name)
 			if tc.reason != "WaitingForBuild" {
 				require.Empty(t, tt.Status.WorkspaceID, tc.name)
-				requireTemplateTestRunning(t, e.settle(t, key), "ConfirmingCreate", "")
+				tt = e.settle(t, key)
+				requireTemplateTestRunning(t, tt, tc.confirmed, "")
 				require.Equal(t, creates+1, e.fake.requestCount(routeCreateWorkspace), "%s: never a second create request", tc.name)
-				continue
+				if tc.confirmed == "ConfirmingCreate" {
+					require.Empty(t, tt.Status.WorkspaceID, tc.name)
+					continue
+				}
 			}
 			ws, err := e.fake.client(t, 5*time.Second).Workspace(e.ctx, uuid.MustParse(tt.Status.WorkspaceID))
 			require.NoError(t, err)
@@ -141,7 +153,7 @@ func TestTemplateTestDeadlineAfterCreate(t *testing.T) {
 	deadline := tt.Status.StartTime.Add(900 * time.Second)
 
 	// The create request returns after the deadline.
-	clock := &lateClock{times: []time.Time{deadline.Add(-2 * time.Second), deadline.Add(-time.Second), deadline}}
+	clock := &lateClock{times: []time.Time{deadline.Add(-3 * time.Second), deadline.Add(-2 * time.Second), deadline.Add(-time.Second), deadline}}
 	r := &controller.CoderTemplateTestReconciler{Client: k8sClient, Scheme: scheme, Clock: clock}
 	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
 	require.NoError(t, err)
@@ -149,6 +161,25 @@ func TestTemplateTestDeadlineAfterCreate(t *testing.T) {
 	requireTemplateTestFailedWith(t, tt, "DeadlineExceeded", metav1.ConditionFalse, "CleanupPending")
 	require.Contains(t, tt.Status.Message, "Last wait: WaitingForBuild")
 	require.Equal(t, 1, e.fake.requestCount(routeCreateWorkspace))
+}
+
+func TestTemplateTestDeadlineAfterMarkerWrite(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	key := e.createTest(t, "default.docker", coderv1alpha1.CoderTemplateTestVersion{Name: "v1"})
+	tt := e.reconcile(t, key, 2) // Finalizer and initialization only.
+	deadline := tt.Status.StartTime.Add(900 * time.Second)
+
+	// The marker write returns at the deadline: no request leaves.
+	clock := &lateClock{times: []time.Time{deadline.Add(-2 * time.Second), deadline.Add(-time.Second), deadline}}
+	r := &controller.CoderTemplateTestReconciler{Client: k8sClient, Scheme: scheme, Clock: clock}
+	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+	require.Zero(t, e.fake.requestCount(routeCreateWorkspace), "no create request after the deadline")
+	tt = e.settle(t, key)
+	requireTemplateTestFailed(t, tt, "DeadlineExceeded")
+	require.Nil(t, tt.Status.CreateAttemptTime, "an unsent request leaves no marker")
+	require.Contains(t, tt.Status.Message, "Last wait: CreatingWorkspace")
 }
 
 func TestTemplateTestBackoffForgetsDeletedTests(t *testing.T) {
