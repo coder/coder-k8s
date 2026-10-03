@@ -7,7 +7,11 @@
 # (human requester logins in the full-page fixture are replaced by "alice"),
 # except summary-security-advisory-finding-pr89.txt: the PR #89 summary card
 # (comment 5812405711) with its finding title replaced by "Example advisory
-# finding". Its link, severity and layout are unchanged.
+# finding". Its link, severity and layout are unchanged. And
+# summary-security-advisory-findings-resolved-pr212.txt: the PR #212 summary
+# card (comment 5970636463) with its two finding titles replaced by "Example
+# advisory finding" and "Second example advisory finding". Codex marked the
+# first finding " · **Resolved**"; links, severities and layout are unchanged.
 #
 # Usage: ./scripts/check_codex_comments_test.sh
 set -euo pipefail
@@ -22,6 +26,12 @@ BOT="chatgpt-codex-connector"
 PRIMARY_SUMMARY_SHA256="cb7624eb0869f631aca6e3efde64656369924c9e5741020e78fa11287a36af2e"
 # sha256 of the PR #89 summary card with one advisory finding (see above).
 FINDING_SUMMARY_SHA256="d46fcf1cc41042be58dd18b514e14e8e2fd6c6a57957d5b20ce2e90aac1733ee"
+# sha256 of the PR #212 summary card with one finding marked Resolved (see above).
+RESOLVED_SUMMARY_SHA256="c5a0153b7193277d220854109050d6d38100a1421a088a1447eefafe4f1f9363"
+# Review comment IDs the PR #212 card's findings link to: the first is marked
+# Resolved in the card, the second is not.
+PR212_MARKED_ID=4173840086
+PR212_UNMARKED_ID=4173883868
 # Review comment ID the PR #89 card's finding links to (discussion_r<ID>).
 FINDING_ID=4092909628
 # 2^53 + 1: the smallest integer a JSON number cannot carry exactly through jq.
@@ -170,11 +180,27 @@ if [ "$actual_sha" != "$FINDING_SUMMARY_SHA256" ]; then
   echo "❌ Assertion failed: summary-security-advisory-finding-pr89.txt sha256 ${actual_sha} != ${FINDING_SUMMARY_SHA256}"
   exit 1
 fi
+actual_sha=$(sha256sum "${BODIES}/summary-security-advisory-findings-resolved-pr212.txt" | cut -d' ' -f1)
+if [ "$actual_sha" != "$RESOLVED_SUMMARY_SHA256" ]; then
+  echo "❌ Assertion failed: summary-security-advisory-findings-resolved-pr212.txt sha256 ${actual_sha} != ${RESOLVED_SUMMARY_SHA256}"
+  exit 1
+fi
 
 # finding_card [sed-script]  -> comments page holding the PR #89 card, optionally edited
 finding_card() {
   page comments "$(comment_node "$BOT" "$(body summary-security-advisory-finding-pr89 | sed -e "${1:-}")")"
 }
+
+# resolved_card [sed-script]  -> comments page holding the PR #212 card, optionally edited
+resolved_card() {
+  page comments "$(comment_node "$BOT" "$(body summary-security-advisory-findings-resolved-pr212 | sed -e "${1:-}")")"
+}
+
+# Appends a suffix to the PR #89 card's finding line (after its severity).
+mark_finding_sed() {
+  printf '/discussion_r%s/s/$/%s/' "$FINDING_ID" "$1"
+}
+RESOLVED_SUFFIX=' · **Resolved**'
 
 # Second finding line and count, for the two-finding cases.
 TWO_FINDINGS_SED="s/^#### Advisory findings (1)\$/#### Advisory findings (2)/;/discussion_r${FINDING_ID}/{p;s/discussion_r${FINDING_ID}/discussion_r$((FINDING_ID + 1))/}"
@@ -241,6 +267,20 @@ CASE_PR=89 run_case summary_finding_full_id_number_resolved 0 "$CLEAN_MSG" \
 CASE_PR=89 run_case summary_finding_full_id_string_above_2p53_resolved 0 "$CLEAN_MSG" \
   "$(finding_card "s/discussion_r${FINDING_ID}/discussion_r${BIG_ID}/")" \
   "$(page reviewThreads "$(thread_node "$BOT" true "$BIG_ID")")"
+
+# Codex appends " · **Resolved**" to a finding once its thread is resolved
+# (PR #212). Every linked thread is resolved here.
+CASE_PR=212 run_case summary_findings_marked_resolved_pr212 0 "$CLEAN_MSG" \
+  "$(resolved_card)" \
+  "$(page reviewThreads "$(thread_node "$BOT" true "$PR212_MARKED_ID")" "$(thread_node "$BOT" true "$PR212_UNMARKED_ID")")"
+
+CASE_PR=89 run_case summary_finding_marked_resolved_thread_resolved 0 "$CLEAN_MSG" \
+  "$(finding_card "$(mark_finding_sed "$RESOLVED_SUFFIX")")" \
+  "$(page reviewThreads "$(thread_node "$BOT" true "$FINDING_ID")")"
+
+# The Resolved mark alone clears a finding, even when its thread is not listed.
+CASE_PR=89 run_case summary_finding_marked_resolved_thread_missing 0 "$CLEAN_MSG" \
+  "$(finding_card "$(mark_finding_sed "$RESOLVED_SUFFIX")")" "$NO_THREADS"
 
 # --- Findings and lookalikes (must stay blocking) --------------------------
 
@@ -362,6 +402,35 @@ CASE_PR=89 run_case summary_unknown_findings_section 1 "Found 1 unminimized regu
 CASE_PR=89 run_case summary_finding_with_extra_text 1 "Found 1 unminimized regular comment(s) from bot" \
   "$(finding_card "/discussion_r${FINDING_ID}/a **P1** Missing bounds check.")" \
   "$(page reviewThreads "$(thread_node "$BOT" true "$FINDING_ID")")"
+
+# The unmarked PR #212 finding still needs its own resolved thread.
+CASE_PR=212 run_case summary_pr212_unmarked_finding_thread_unresolved 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(resolved_card)" \
+  "$(page reviewThreads "$(thread_node "$BOT" true "$PR212_MARKED_ID")" "$(thread_node "$BOT" false "$PR212_UNMARKED_ID")")"
+
+CASE_PR=212 run_case summary_pr212_unmarked_finding_thread_missing 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(resolved_card)" "$(page reviewThreads "$(thread_node "$BOT" true "$PR212_MARKED_ID")")"
+
+# A Resolved mark clears the card, but an unresolved thread still blocks on its own.
+CASE_PR=89 run_case summary_finding_marked_resolved_thread_unresolved 1 "Found 1 unresolved review thread(s) from bot" \
+  "$(finding_card "$(mark_finding_sed "$RESOLVED_SUFFIX")")" \
+  "$(page reviewThreads "$(thread_node "$BOT" false "$FINDING_ID")")"
+
+# The mark only counts on a finding that links to this PR.
+run_case summary_finding_marked_resolved_links_other_pr 1 "Found 1 unminimized regular comment(s) from bot" \
+  "$(finding_card "$(mark_finding_sed "$RESOLVED_SUFFIX")")" "$NO_THREADS"
+
+# Only the exact " · **Resolved**" suffix is a mark.
+for case_suffix in \
+  'unresolved| · **Unresolved**' \
+  'lowercase| · **resolved**' \
+  'unbolded| · Resolved' \
+  'repeated| · **Resolved** · **Resolved**' \
+  'trailing_text| · **Resolved** **P1** Missing bounds check.'; do
+  CASE_PR=89 run_case "summary_finding_lookalike_mark_${case_suffix%%|*}" 1 \
+    "Found 1 unminimized regular comment(s) from bot" \
+    "$(finding_card "$(mark_finding_sed "${case_suffix#*|}")")" "$NO_THREADS"
+done
 
 run_case summary_plus_finding_comment 1 "Found 1 unminimized regular comment(s) from bot" \
   "$(page comments "$(comment_node "$BOT" "$(body summary-completed-both)")" "$(comment_node "$BOT" "**P2** Unused parameter.")")" "$NO_THREADS"
