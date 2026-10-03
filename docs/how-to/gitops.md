@@ -87,7 +87,7 @@ Set `spec.timeout` of the Kustomization above the test's `timeoutSeconds` (defau
 
 ### One test per version
 
-Create one test per template version, and name it after the version, for example `docker-v2` for version `v2`. The spec is immutable, so a new version needs a new object anyway, and the name shows which version a result belongs to.
+Create one test per template version, and name it after the version, for example `docker-v2` for version `v2`. The spec is immutable, so a new version needs a new object anyway, and the name shows which version a result belongs to. Object names allow only lowercase letters, digits, `-`, and `.`, but a version name can also hold uppercase letters and `_`. Map such a version to a safe name, for example `docker-v2-0-rc1` for `V2.0_rc1`.
 
 Do not set `ttlSecondsAfterFinished` on tests that GitOps manages. The controller deletes the finished test, GitOps creates it again, and a new workspace starts, forever.
 
@@ -95,113 +95,16 @@ Do not set `ttlSecondsAfterFinished` on tests that GitOps manages. The controlle
 
 1. CI pushes the new version under a fixed name, without activating it and without prompts: `coder templates push docker --directory ./docker --name v2 --activate=false --yes`.
 2. Git holds a test of that version, with `spec.version.name`.
-3. A promotion Job waits until the test is final. It first checks that the test's `spec.controlPlaneRef.name`, `spec.template`, and `spec.version.name` have the expected values, because anyone who can create tests can create `docker-v2` first with another spec. It promotes only after `Succeeded` and reads `status.templateVersionID` of the test and calls the `codertemplates/promote` subresource of the [aggregated API](../reference/aggregated-api-behavior.md#promote-a-template-version).
+3. A promotion step waits until the test is final. Only after `Succeeded`, it reads `status.templateVersionID` of the test and calls the `codertemplates/promote` subresource of the [aggregated API](../reference/aggregated-api-behavior.md#promote-a-template-version). A retry is safe: promoting the active version again answers `AlreadyActive`.
 
-The Job needs only `get` on its test and `create` on `codertemplates/promote` for one template:
+With **Argo CD**, put the test in sync wave 1 and the promotion step in wave 2. Argo CD applies wave 2 only after every resource of wave 1 is healthy. With **Flux**, a plain `dependsOn` does not wait until the dependency has applied the same Git revision, so the promotion step can start while the previous test still shows its result.
 
-```yaml
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: promote-docker
-  namespace: coder
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: promote-docker
-  namespace: coder
-rules:
-  - apiGroups: ["coder.com"]
-    resources: ["codertemplatetests"]
-    resourceNames: ["docker-v2"]
-    verbs: ["get"]
-  - apiGroups: ["aggregation.coder.com"]
-    resources: ["codertemplates/promote"]
-    resourceNames: ["default.docker"]
-    verbs: ["create"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: promote-docker
-  namespace: coder
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: promote-docker
-subjects:
-  - kind: ServiceAccount
-    name: promote-docker
-    namespace: coder
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: promote-docker-v2
-  namespace: coder
-spec:
-  backoffLimit: 2
-  activeDeadlineSeconds: 1500 # longer than the test's timeoutSeconds (900 by default)
-  template:
-    spec:
-      serviceAccountName: promote-docker
-      restartPolicy: Never
-      containers:
-        - name: promote
-          image: <an image with sh and kubectl>
-          command:
-            - sh
-            - -ec
-            - |
-              # Wait for the result: the Job can start before the test of
-              # this revision exists or has finished. One get reads spec and
-              # status, and the spec must test version v2 of default.docker.
-              want="coder,default.docker,v2"
-              id=""
-              for _ in $(seq 1 240); do
-                out=$(kubectl -n coder get codertemplatetest docker-v2 -o jsonpath='{.spec.controlPlaneRef.name},{.spec.template},{.spec.version.name},{.status.phase},{.status.templateVersionID}' 2>/dev/null || true)
-                case "$out" in
-                  "$want,Succeeded,"?*) id=${out##*,}; break ;;
-                  "$want,Failed,"*) echo "test docker-v2 failed: not promoting" >&2; exit 1 ;;
-                  "$want,"* | "") ;;
-                  *) echo "test docker-v2 does not test $want: not promoting" >&2; exit 1 ;;
-                esac
-                sleep 5
-              done
-              test -n "$id"
-              echo '{"spec":{"versionID":"'"$id"'"}}' | kubectl create --raw \
-                /apis/aggregation.coder.com/v1alpha1/namespaces/coder/codertemplates/default.docker/promote -f -
-```
+This page has no runnable promotion example yet ([#216](https://github.com/coder/coder-k8s/issues/216)). Any promotion step must check these points:
 
-A retry is safe: promoting the active version again answers `AlreadyActive`. Name the Job after the version too, because the spec of a Job is immutable.
-
-With **Argo CD**, put the test in sync wave 1 and the promotion resources in wave 2. Argo CD applies wave 2 only after every resource of wave 1 is healthy:
-
-```yaml
-metadata:
-  annotations:
-    argocd.argoproj.io/sync-wave: "1"   # "2" on the RBAC objects and the Job
-```
-
-With **Flux**, use two Kustomizations. Kustomization A applies the test, with `wait: true` and the health check above. Kustomization B applies the RBAC objects and the Job, with `dependsOn` A. A plain `dependsOn` does not wait until A has applied the same Git revision, so B can start the Job while A still reports the previous test. The Job therefore waits for its own test result, as above:
-
-```yaml
-apiVersion: kustomize.toolkit.fluxcd.io/v1
-kind: Kustomization
-metadata:
-  name: docker-promote
-  namespace: flux-system
-spec:
-  dependsOn:
-    - name: docker-test   # Kustomization A
-  interval: 10m
-  path: ./templates/docker/promote
-  prune: true
-  sourceRef:
-    kind: GitRepository
-    name: flux-system
-```
+- **Full spec.** The test's whole `spec`, including `spec.parameters`, equals the spec in Git. Read spec and status with one `get`, so both come from the same object. Anyone who can create tests can create the test name first with another spec.
+- **Timeout.** The wait and the deadline of the step cover the test's `timeoutSeconds` (900 s by default, at most 7200 s) and the workspace delete.
+- **Names.** Test names and the names of promotion objects, such as a Job per version, are Kubernetes-safe, as described in [One test per version](#one-test-per-version).
+- **Result.** The pipeline waits for the promotion result and shows a failed promotion as a failure. With Flux, set `wait: true` and a `timeout` above the step's deadline on the Kustomization that runs the step.
 
 ### Check after promotion
 
