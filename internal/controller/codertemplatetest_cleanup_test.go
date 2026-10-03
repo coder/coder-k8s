@@ -28,6 +28,16 @@ func (e *templateTestEnv) annotate(t *testing.T, key types.NamespacedName, polic
 	require.NoError(t, k8sClient.Update(e.ctx, tt))
 }
 
+// allowRetain sets spec.templateTests.allowRetain on control plane coder.
+func (e *templateTestEnv) allowRetain(t *testing.T) {
+	t.Helper()
+	cp := &coderv1alpha1.CoderControlPlane{}
+	require.NoError(t, k8sClient.Get(e.ctx, types.NamespacedName{Namespace: e.ns, Name: "coder"}, cp))
+	require.NotNil(t, cp.Spec.TemplateTests, "assertion failed: control plane coder has no templateTests")
+	cp.Spec.TemplateTests.AllowRetain = true
+	require.NoError(t, k8sClient.Update(e.ctx, cp))
+}
+
 // failedWithWorkspace ends a test as BuildFailed while its workspace exists.
 func (e *templateTestEnv) failedWithWorkspace(t *testing.T) types.NamespacedName {
 	t.Helper()
@@ -102,6 +112,7 @@ func TestTemplateTestDeletionStates(t *testing.T) {
 	require.Equal(t, reads, e.fake.totalRequests(), "no reads for a workspace of unknown ownership")
 
 	// Only retain releases it, without a Coder call (A2).
+	e.allowRetain(t)
 	e.annotate(t, key, "retain")
 	require.Nil(t, e.reconcile(t, key, 1))
 	require.Equal(t, reads, e.fake.totalRequests())
@@ -118,7 +129,18 @@ func TestTemplateTestRetain(t *testing.T) {
 	requireTemplateTestRunning(t, tt, "WaitingForBuild", "")
 	require.Nil(t, meta.FindStatusCondition(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted))
 
-	// A final test with a workspace: released without a Coder call, IDs kept.
+	// Without the control plane's opt-in, retain is ignored: cleanup
+	// deletes the workspace and keeps the finalizer until it is gone.
+	key = e.failedWithWorkspace(t)
+	e.annotate(t, key, "retain")
+	tt = e.reconcile(t, key, 1)
+	requireDeleted(t, tt, metav1.ConditionFalse, "Deleting")
+	require.Contains(t, meta.FindStatusCondition(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted).Message, "allowRetain")
+	require.True(t, controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer))
+
+	// With the opt-in, a final test with a workspace is released without a
+	// Coder call, and its IDs stay.
+	e.allowRetain(t)
 	key = e.failedWithWorkspace(t)
 	requests := e.fake.totalRequests()
 	e.annotate(t, key, "retain")
@@ -200,10 +222,16 @@ func TestTemplateTestControlPlaneUnavailable(t *testing.T) {
 	require.True(t, controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer), "an unreachable Coder never counts as deleted")
 	require.Equal(t, time.Minute, e.lastStep.RequeueAfter)
 
-	// Namespace teardown while Coder is unreachable: retain releases the
-	// test without a Coder call (A2, A5.3).
-	requests := e.fake.totalRequests()
+	// Without the opt-in, retain keeps the finalizer while Coder is
+	// unreachable.
 	e.annotate(t, key, "retain")
+	tt = e.reconcile(t, key, 1)
+	require.True(t, controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer), "retain needs the control plane's opt-in")
+
+	// Namespace teardown while Coder is unreachable: with the opt-in, retain
+	// releases the test without a Coder call (A2, A5.3).
+	e.allowRetain(t)
+	requests := e.fake.totalRequests()
 	require.Nil(t, e.reconcile(t, key, 1))
 	require.Equal(t, requests, e.fake.totalRequests())
 }
@@ -236,7 +264,7 @@ func TestTemplateTestCleanupRechecks(t *testing.T) {
 	requireDeleted(t, tt, metav1.ConditionUnknown, "OwnershipUnknown")
 	message := meta.FindStatusCondition(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted).Message
 	require.Contains(t, message, `value "keep"`)
-	require.Contains(t, message, "retain releases the test")
+	require.Contains(t, message, "removing the finalizer releases the test")
 	tt = e.reconcile(t, key, 1)
 	require.Equal(t, message, meta.FindStatusCondition(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted).Message)
 	require.Equal(t, reads, e.fake.totalRequests())

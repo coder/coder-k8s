@@ -2052,13 +2052,21 @@ spec:
                 description: TemplateTests configures CoderTemplateTest runs against
                   this control plane.
                 properties:
+                  allowRetain:
+                    description: |-
+                      AllowRetain lets the annotation coder.com/deletion-policy: retain on a
+                      CoderTemplateTest release the test without deleting its workspace.
+                      This delegates that power to everyone who can create tests against
+                      this control plane: they can leave workspaces, and their owner's
+                      session keys, in Coder. When false (the default), the controller
+                      ignores retain and deletes the workspace.
+                    type: boolean
                   ownerUserID:
                     description: |-
                       OwnerUserID is the UUID of the Coder user that owns every test
                       workspace. Use a dedicated low-privilege tester user: each start build
                       gives the owner's API token to the template's Terraform. Tests stay
-                      pending until this is set. The CoderTemplateTest controller is not
-                      enabled yet, so this field has no effect today.
+                      pending until this is set.
                     format: uuid
                     maxLength: 36
                     type: string
@@ -4966,7 +4974,7 @@ spec:
                 x-kubernetes-list-type: map
               template:
                 description: |-
-                  Template is the Coder template as <organization>.<template>, the same
+                  Template is the Coder template as `<organization>.<template>`, the same
                   format as aggregated CoderTemplate names. Each name has at most 32
                   characters and is not one of Coder's reserved names new or create.
                 maxLength: 65

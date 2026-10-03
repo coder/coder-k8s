@@ -65,9 +65,10 @@ The operator's own RBAC comes with the install. People who run tests need `creat
 
 The controller keeps a finalizer on each test until it has deleted the workspace or proved that none exists. These cases need an admin:
 
-- **A test stuck as `ControlPlaneUnavailable` or `CoderUnavailable`.** Coder is unreachable, so the finalizer stays and the controller retries every 60 s. To release the test, set the annotation `coder.com/deletion-policy: retain`, or remove the finalizer by hand. Either way, check Coder for a workspace named `status.workspaceName` and delete it there.
-- **A test with `WorkspaceDeleted=Unknown` and reason `OwnershipUnknown`.** A workspace with the test's name exists, but nothing proves that the test created it, so the controller never touches it. Only `coder.com/deletion-policy: retain` releases the test.
-- **Back to `delete`.** If you switch a retained final test back to `coder.com/deletion-policy: delete`, the controller adds the finalizer again and deletes the workspace.
+- **A test stuck as `ControlPlaneUnavailable` or `CoderUnavailable`.** Coder is unreachable, so the finalizer stays and the controller retries every 60 s. To release the test, remove the finalizer by hand, or use `retain` as described below. Either way, check Coder for a workspace named `status.workspaceName` and delete it there.
+- **A test with `WorkspaceDeleted=Unknown` and reason `OwnershipUnknown`.** A workspace with the test's name exists, but nothing proves that the test created it, so the controller never touches it. Only removing the finalizer or `retain` releases the test.
+
+The annotation `coder.com/deletion-policy: retain` releases a finished or deleted test without deleting its workspace. Anyone who can create a test can set this annotation, so it works only when the control plane opts in with `spec.templateTests.allowRetain: true`. Opting in gives that power to everyone who can create tests against the control plane: they can leave workspaces, and the tester's session keys, in Coder. Without the opt-in, the controller ignores `retain`, says so in the `WorkspaceDeleted` message, and deletes the workspace. If you switch a retained final test back to `coder.com/deletion-policy: delete`, the controller adds the finalizer again and deletes the workspace.
 
 ## Known limits
 

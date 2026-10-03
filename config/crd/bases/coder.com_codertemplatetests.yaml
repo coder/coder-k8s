@@ -100,7 +100,7 @@ spec:
                 x-kubernetes-list-type: map
               template:
                 description: |-
-                  Template is the Coder template as <organization>.<template>, the same
+                  Template is the Coder template as `<organization>.<template>`, the same
                   format as aggregated CoderTemplate names. Each name has at most 32
                   characters and is not one of Coder's reserved names new or create.
                 maxLength: 65

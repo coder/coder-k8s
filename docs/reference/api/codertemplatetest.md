@@ -14,7 +14,7 @@
 | Field | Type | Description |
 | --- | --- | --- |
 | `controlPlaneRef` | [CoderControlPlaneReference](#codercontrolplanereference) | ControlPlaneRef names the CoderControlPlane in the same namespace. The controller calls Coder with that control plane's operator token. |
-| `template` | string | Template is the Coder template as <organization>.<template>, the same format as aggregated CoderTemplate names. Each name has at most 32 characters and is not one of Coder's reserved names new or create. |
+| `template` | string | Template is the Coder template as `<organization>.<template>`, the same format as aggregated CoderTemplate names. Each name has at most 32 characters and is not one of Coder's reserved names new or create. |
 | `version` | [CoderTemplateTestVersion](#codertemplatetestversion) | Version selects the template version under test. |
 | `parameters` | [CoderTemplateTestParameter](#codertemplatetestparameter) array | Parameters are rich parameter values for the start build. |
 | `timeoutSeconds` | integer | TimeoutSeconds bounds the whole run: waiting for inputs, the start build, agent readiness, and the delete build. Cleanup continues after the deadline. |
