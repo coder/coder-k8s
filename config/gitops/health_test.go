@@ -73,6 +73,9 @@ type healthCase struct {
 	argoStatus  string
 	argoMessage string
 	fluxStatus  string
+	// argoDeletion is the deletionMessage, which Argo CD shows instead of
+	// the message while the object is being deleted.
+	argoDeletion string
 }
 
 func healthCases() []healthCase {
@@ -86,17 +89,17 @@ func healthCases() []healthCase {
 	return []healthCase{
 		// Flux reports a CEL error, which kstatus turns into Unknown: the
 		// wait continues, like InProgress.
-		{"no status", testObject(nil), "Progressing", "Waiting for the controller", "Unknown"},
-		{"no observedGeneration", testObject(noGeneration), "Progressing", "Waiting for the controller", "InProgress"},
-		{"stale observedGeneration", testObject(stale), "Progressing", "Waiting for the controller", "InProgress"},
-		{"pending", testObject(status("Pending", "OwnerNotEligible", notReady)), "Progressing", "OwnerNotEligible: details", "InProgress"},
-		{"running", testObject(status("Running", "WaitingForBuild", notReady)), "Progressing", "WaitingForBuild: details", "InProgress"},
-		{"succeeded and ready", testObject(status("Succeeded", "Succeeded", readyTrue("Succeeded"))), "Healthy", "Succeeded: details", "Current"},
-		{"succeeded without ready", testObject(status("Succeeded", "Succeeded", notReady)), "Progressing", "Succeeded: details", "InProgress"},
-		{"succeeded with empty conditions", testObject(status("Succeeded", "Succeeded")), "Progressing", "Succeeded: details", "InProgress"},
-		{"failed", testObject(status("Failed", "BuildFailed", notReady)), "Degraded", "BuildFailed: details", "Failed"},
+		{"no status", testObject(nil), "Progressing", "Waiting for the controller", "Unknown", ""},
+		{"no observedGeneration", testObject(noGeneration), "Progressing", "Waiting for the controller", "InProgress", ""},
+		{"stale observedGeneration", testObject(stale), "Progressing", "Waiting for the controller", "InProgress", ""},
+		{"pending", testObject(status("Pending", "OwnerNotEligible", notReady)), "Progressing", "OwnerNotEligible: details", "InProgress", ""},
+		{"running", testObject(status("Running", "WaitingForBuild", notReady)), "Progressing", "WaitingForBuild: details", "InProgress", ""},
+		{"succeeded and ready", testObject(status("Succeeded", "Succeeded", readyTrue("Succeeded"))), "Healthy", "Succeeded: details", "Current", ""},
+		{"succeeded without ready", testObject(status("Succeeded", "Succeeded", notReady)), "Progressing", "Succeeded: details", "InProgress", ""},
+		{"succeeded with empty conditions", testObject(status("Succeeded", "Succeeded")), "Progressing", "Succeeded: details", "InProgress", ""},
+		{"failed", testObject(status("Failed", "BuildFailed", notReady)), "Degraded", "BuildFailed: details", "Failed", ""},
 		// Flux has no deletion rule: it waits for pruned objects separately.
-		{"being deleted", deleting, "Progressing", "Deleting the test workspace", "Current"},
+		{"being deleted", deleting, "Progressing", "Deleting the test workspace", "Current", "Deleting the test workspace"},
 	}
 }
 
@@ -106,9 +109,9 @@ func TestArgoCDHealth(t *testing.T) {
 	for _, tc := range healthCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			gotStatus, gotMessage := argoHealth(t, script, tc.obj)
-			if gotStatus != tc.argoStatus || gotMessage != tc.argoMessage {
-				t.Fatalf("got %q %q, want %q %q", gotStatus, gotMessage, tc.argoStatus, tc.argoMessage)
+			gotStatus, gotMessage, gotDeletion := argoHealth(t, script, tc.obj)
+			if gotStatus != tc.argoStatus || gotMessage != tc.argoMessage || gotDeletion != tc.argoDeletion {
+				t.Fatalf("got %q %q %q, want %q %q %q", gotStatus, gotMessage, gotDeletion, tc.argoStatus, tc.argoMessage, tc.argoDeletion)
 			}
 		})
 	}
@@ -147,8 +150,8 @@ func TestDocCopiesRules(t *testing.T) {
 }
 
 // argoHealth runs the script like Argo CD: the object is the global obj, and
-// the script returns a table with status and message.
-func argoHealth(t *testing.T, script string, obj map[string]any) (string, string) {
+// the script returns a table with status, message, and deletionMessage.
+func argoHealth(t *testing.T, script string, obj map[string]any) (string, string, string) {
 	t.Helper()
 	l := lua.NewState(lua.Options{SkipOpenLibs: true})
 	defer l.Close()
@@ -168,7 +171,7 @@ func argoHealth(t *testing.T, script string, obj map[string]any) (string, string
 	if !ok {
 		t.Fatalf("health script returned %s, want a table", l.Get(-1).Type())
 	}
-	return lua.LVAsString(hs.RawGetString("status")), lua.LVAsString(hs.RawGetString("message"))
+	return lua.LVAsString(hs.RawGetString("status")), lua.LVAsString(hs.RawGetString("message")), lua.LVAsString(hs.RawGetString("deletionMessage"))
 }
 
 func toLua(t *testing.T, l *lua.LState, value any) lua.LValue {

@@ -4,7 +4,9 @@
 -- docs/how-to/gitops.md copies this file. A test keeps the copy equal.
 local hs = { status = "Progressing", message = "Waiting for the controller" }
 if obj.metadata.deletionTimestamp ~= nil then
-  hs.message = "Deleting the test workspace"
+  -- Argo CD shows deletionMessage, not message, for a resource being deleted.
+  hs.deletionMessage = "Deleting the test workspace"
+  hs.message = hs.deletionMessage
   return hs
 end
 local st = obj.status

@@ -18,7 +18,7 @@ Both rules below wait until `status.observedGeneration` equals `metadata.generat
 | `Succeeded` with condition `Ready=True` | `Healthy` | `Current` |
 | `Failed` | `Degraded` | `Failed` |
 
-The controller sets `Succeeded` only after the test workspace is deleted, and always together with `Ready=True`. While a test is being deleted, Argo CD shows `Progressing` with the message `Deleting the test workspace`. Otherwise its message is `<status.reason>: <status.message>`.
+The controller sets `Succeeded` only after the test workspace is deleted, and always together with `Ready=True`. While a test is being deleted, Argo CD shows `Progressing` with the message `Deleting the test workspace`, which the script returns as `deletionMessage`. Argo CD versions without `deletionMessage` support show their default deletion message instead. Otherwise its message is `<status.reason>: <status.message>`.
 
 ## Install the Argo CD health check
 
@@ -39,7 +39,9 @@ The script (`config/gitops/argocd-health-codertemplatetest.lua`):
 -- docs/how-to/gitops.md copies this file. A test keeps the copy equal.
 local hs = { status = "Progressing", message = "Waiting for the controller" }
 if obj.metadata.deletionTimestamp ~= nil then
-  hs.message = "Deleting the test workspace"
+  -- Argo CD shows deletionMessage, not message, for a resource being deleted.
+  hs.deletionMessage = "Deleting the test workspace"
+  hs.message = hs.deletionMessage
   return hs
 end
 local st = obj.status
@@ -93,7 +95,7 @@ Do not set `ttlSecondsAfterFinished` on tests that GitOps manages. The controlle
 
 1. CI pushes the new version under a fixed name, without activating it and without prompts: `coder templates push docker --directory ./docker --name v2 --activate=false --yes`.
 2. Git holds a test of that version, with `spec.version.name`.
-3. A promotion Job waits until the test is final. It promotes only after `Succeeded` and reads `status.templateVersionID` of the test and calls the `codertemplates/promote` subresource of the [aggregated API](../reference/aggregated-api-behavior.md#promote-a-template-version).
+3. A promotion Job waits until the test is final. It first checks that the test's `spec.controlPlaneRef.name`, `spec.template`, and `spec.version.name` have the expected values, because anyone who can create tests can create `docker-v2` first with another spec. It promotes only after `Succeeded` and reads `status.templateVersionID` of the test and calls the `codertemplates/promote` subresource of the [aggregated API](../reference/aggregated-api-behavior.md#promote-a-template-version).
 
 The Job needs only `get` on its test and `create` on `codertemplates/promote` for one template:
 
@@ -153,18 +155,20 @@ spec:
             - -ec
             - |
               # Wait for the result: the Job can start before the test of
-              # this revision exists or has finished.
-              phase=""
+              # this revision exists or has finished. One get reads spec and
+              # status, and the spec must test version v2 of default.docker.
+              want="coder,default.docker,v2"
+              id=""
               for _ in $(seq 1 240); do
-                phase=$(kubectl -n coder get codertemplatetest docker-v2 -o jsonpath='{.status.phase}' 2>/dev/null || true)
-                case "$phase" in
-                  Succeeded) break ;;
-                  Failed) echo "test docker-v2 failed: not promoting" >&2; exit 1 ;;
+                out=$(kubectl -n coder get codertemplatetest docker-v2 -o jsonpath='{.spec.controlPlaneRef.name},{.spec.template},{.spec.version.name},{.status.phase},{.status.templateVersionID}' 2>/dev/null || true)
+                case "$out" in
+                  "$want,Succeeded,"?*) id=${out##*,}; break ;;
+                  "$want,Failed,"*) echo "test docker-v2 failed: not promoting" >&2; exit 1 ;;
+                  "$want,"* | "") ;;
+                  *) echo "test docker-v2 does not test $want: not promoting" >&2; exit 1 ;;
                 esac
                 sleep 5
               done
-              test "$phase" = Succeeded
-              id=$(kubectl -n coder get codertemplatetest docker-v2 -o jsonpath='{.status.templateVersionID}')
               test -n "$id"
               echo '{"spec":{"versionID":"'"$id"'"}}' | kubectl create --raw \
                 /apis/aggregation.coder.com/v1alpha1/namespaces/coder/codertemplates/default.docker/promote -f -
