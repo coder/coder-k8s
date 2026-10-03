@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
@@ -24,6 +25,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/aggregated/coder"
@@ -34,26 +36,33 @@ const (
 	templateTestUIDHexLength     = 28
 	templateTestCoderTimeout     = 30 * time.Second
 	templateTestPendingPoll      = 15 * time.Second
+	templateTestRunningPoll      = 5 * time.Second
 	templateTestDefaultTimeout   = int32(900)
 	templateTestMaxMessageLength = 256
 )
 
 // CoderTemplateTestReconciler runs CoderTemplateTest objects. It is not
 // registered with the manager yet: the API stays dormant until activation
-// (#152). This version resolves the inputs of a test and never creates a
-// workspace.
+// (#152). This version creates the test workspace but does not check
+// readiness or delete it yet.
 type CoderTemplateTestReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	Clock  clock.PassiveClock
+
+	rateLimited sync.Map // types.NamespacedName -> consecutive HTTP 429 answers.
 }
 
-// templateTestStep is the outcome of a step that cannot continue: a wait
-// keeps the test Pending, a failure makes it Failed.
+// templateTestStep is the outcome of a reconcile: a wait keeps the phase
+// (Pending, or Running once a create request may exist), a failure makes the
+// test Failed.
 type templateTestStep struct {
-	failed  bool
-	reason  string
-	message string
+	failed      bool
+	reason      string
+	message     string
+	rateLimited bool // Coder answered 429: retry with backoff.
+	// deleted overrides the WorkspaceDeleted condition of a failure.
+	deleted *metav1.Condition
 }
 
 func templateTestWait(reason, format string, args ...any) *templateTestStep {
@@ -69,6 +78,14 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if r.Client == nil || r.Scheme == nil || r.Clock == nil {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: template test reconciler needs a client, a scheme, and a clock")
 	}
+	// Only a wait after HTTP 429 keeps the backoff count. Every other
+	// outcome, including deletion and errors, forgets it.
+	keepBackoff := false
+	defer func() {
+		if !keepBackoff {
+			r.rateLimited.Delete(req.NamespacedName)
+		}
+	}()
 	tt := &coderv1alpha1.CoderTemplateTest{}
 	if err := r.Get(ctx, req.NamespacedName, tt); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -83,18 +100,18 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if tt.Status.WorkspaceName != "" && tt.Status.WorkspaceName != workspaceName {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: status.workspaceName %q is not %q", tt.Status.WorkspaceName, workspaceName)
 	}
-	// Later changes add the create request. Until then no test can have a
-	// workspace, so every cleanup below is the "never created" case.
-	if tt.Status.CreateAttemptTime != nil || tt.Status.WorkspaceID != "" {
-		return ctrl.Result{}, fmt.Errorf("assertion failed: template test %s/%s has a create marker, but this controller never creates workspaces", tt.Namespace, tt.Name)
-	}
-
+	cleanedUp := meta.IsStatusConditionTrue(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted)
+	created := templateTestMayHaveWorkspace(tt) && !cleanedUp
 	if !tt.DeletionTimestamp.IsZero() {
+		if created {
+			// The delete steps come with plan PR 5. Until then the finalizer
+			// stays, because the workspace can exist.
+			return ctrl.Result{}, nil
+		}
 		return ctrl.Result{}, r.releaseFinalizer(ctx, tt)
 	}
 	final := isTemplateTestFinal(tt.Status.Phase)
-	cleanedUp := final && meta.IsStatusConditionTrue(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted)
-	if !cleanedUp && !controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer) {
+	if (!final || !cleanedUp) && !controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer) {
 		// No Coder call happens before the finalizer is stored.
 		controllerutil.AddFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer)
 		if err := r.Update(ctx, tt); err != nil {
@@ -115,11 +132,14 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionStalled, metav1.ConditionFalse, tt.Status.Reason, tt.Status.Message)
 		return ctrl.Result{}, r.writeStatus(ctx, tt, before)
 	case final:
-		if !meta.IsStatusConditionTrue(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted) {
-			markTemplateTestNotCreated(tt)
-			return ctrl.Result{}, r.writeStatus(ctx, tt, before)
+		switch {
+		case meta.IsStatusConditionTrue(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted):
+			return ctrl.Result{}, r.releaseFinalizer(ctx, tt)
+		case created:
+			return ctrl.Result{}, nil // The delete steps come with plan PR 5.
 		}
-		return ctrl.Result{}, r.releaseFinalizer(ctx, tt)
+		markTemplateTestNotCreated(tt)
+		return ctrl.Result{}, r.writeStatus(ctx, tt, before)
 	}
 
 	if tt.Status.StartTime == nil {
@@ -131,16 +151,38 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, r.writeStatus(ctx, tt, before)
 	}
 
-	step, err := r.resolveInputs(ctx, tt, workspaceName)
-	if err != nil {
+	sdk, controlPlane, step, err := r.coderClient(ctx, tt)
+	if err == nil && step == nil {
+		switch {
+		case tt.Status.WorkspaceID != "":
+			// Readiness checks come with the second half of plan PR 4.
+			step = templateTestWait("WaitingForBuild", "Workspace %s exists. Readiness checks are not enabled yet.", tt.Status.WorkspaceName)
+		case tt.Status.CreateAttemptTime != nil:
+			// A create request may exist. The confirming reads come with the
+			// next change. Until then the test never sends a second request.
+			step = templateTestWait("ConfirmingCreate", "Workspace %s may exist. Confirming reads are not enabled yet.", tt.Status.WorkspaceName)
+		default:
+			step, err = r.resolveInputs(ctx, sdk, controlPlane, tt, workspaceName)
+		}
+	}
+	if step, err = waitOnWrongAnswer(ctx, step, err); err != nil {
 		return ctrl.Result{}, err
 	}
-	if step == nil {
-		step = templateTestWait("ReadyToCreate", "Inputs are resolved. Creating workspaces is not enabled yet.")
-	}
 	// Coder calls can take up to their timeout, so check the deadline again.
-	if now = r.Clock.Now(); !step.failed && !now.Before(deadline) {
-		step = templateTestDeadlineExceeded(tt, step.reason, step.message)
+	if now = r.Clock.Now(); !now.Before(deadline) && (step == nil || !step.failed) {
+		last := cmp.Or(step, &templateTestStep{reason: tt.Status.Reason, message: tt.Status.Message})
+		step = templateTestDeadlineExceeded(tt, last.reason, last.message)
+	}
+	if step == nil {
+		// Every input is resolved and pinned: write the marker, then create.
+		step, err = r.createWorkspace(ctx, sdk, tt, before, now)
+		if step, err = waitOnWrongAnswer(ctx, step, err); err != nil {
+			return ctrl.Result{}, err
+		}
+		// The create request can take up to its timeout.
+		if now = r.Clock.Now(); !step.failed && !now.Before(deadline) {
+			step = templateTestDeadlineExceeded(tt, step.reason, step.message)
+		}
 	}
 	applyTemplateTestStep(tt, now, step)
 	if err := r.writeStatus(ctx, tt, before); err != nil {
@@ -149,16 +191,28 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if step.failed {
 		return ctrl.Result{}, nil
 	}
-	return ctrl.Result{RequeueAfter: min(templateTestPendingPoll, deadline.Sub(now))}, nil
+	keepBackoff = step.rateLimited
+	return ctrl.Result{RequeueAfter: min(r.retryAfter(req.NamespacedName, tt, step), deadline.Sub(now))}, nil
+}
+
+// waitOnWrongAnswer turns a wrong Coder answer into a wait. A wrong answer
+// means Coder, a proxy, or the SDK is broken. The controller logs it as an
+// error and keeps the test waiting, so the test's deadline ends it instead of
+// the work queue's backoff, which grows to about 17 minutes.
+func waitOnWrongAnswer(ctx context.Context, step *templateTestStep, err error) (*templateTestStep, error) {
+	var answerErr *coderAnswerError
+	if !errors.As(err, &answerErr) {
+		return step, err
+	}
+	log.FromContext(ctx).Error(err, "Coder answered something other than the controller asked for")
+	return templateTestWait("CoderAnswerMismatch", "%v", answerErr), nil
 }
 
 // resolveInputs runs the Pending lookups and pins their results in status.
 // A nil step means every input is resolved and the workspace name is free.
-func (r *CoderTemplateTestReconciler) resolveInputs(ctx context.Context, tt *coderv1alpha1.CoderTemplateTest, workspaceName string) (*templateTestStep, error) {
-	sdk, controlPlane, step, err := r.coderClient(ctx, tt)
-	if step != nil || err != nil {
-		return step, err
-	}
+func (r *CoderTemplateTestReconciler) resolveInputs(
+	ctx context.Context, sdk *codersdk.Client, controlPlane *coderv1alpha1.CoderControlPlane, tt *coderv1alpha1.CoderTemplateTest, workspaceName string,
+) (*templateTestStep, error) {
 	if controlPlane.Spec.TemplateTests == nil || controlPlane.Spec.TemplateTests.OwnerUserID == "" {
 		return templateTestWait("OwnerNotConfigured", "Set spec.templateTests.ownerUserID on CoderControlPlane %s.", controlPlane.Name), nil
 	}
@@ -208,8 +262,10 @@ func (r *CoderTemplateTestReconciler) resolveInputs(ctx context.Context, tt *cod
 		return step, err
 	}
 
+	if version.ID.String() != tt.Status.TemplateVersionID {
+		return nil, fmt.Errorf("assertion failed: resolved version %s is not the pinned version %s", version.ID, tt.Status.TemplateVersionID)
+	}
 	tt.Status.OrganizationID, tt.Status.TemplateID, tt.Status.OwnerID = org.ID.String(), template.ID.String(), ownerID.String()
-	tt.Status.TemplateVersionID, tt.Status.TemplateVersionName = version.ID.String(), version.Name
 	tt.Status.WorkspaceName = workspaceName
 
 	_, err = sdk.WorkspaceByOwnerAndName(ctx, ownerID.String(), workspaceName, codersdk.WorkspaceOptions{})
@@ -359,9 +415,13 @@ func resolveTemplateTestVersion(ctx context.Context, sdk *codersdk.Client, tt *c
 	if err := asked(); err != nil {
 		return version, nil, err
 	}
-	switch {
-	case version.TemplateID == nil || *version.TemplateID != template.ID:
+	if version.TemplateID == nil || *version.TemplateID != template.ID {
 		return version, templateTestFail("TemplateVersionMismatch", "Version %s does not belong to template %q.", version.ID, tt.Spec.Template), nil
+	}
+	// Pin the version as soon as Coder names it, even while it imports, so a
+	// later promotion never changes the version under test.
+	tt.Status.TemplateVersionID, tt.Status.TemplateVersionName = version.ID.String(), version.Name
+	switch {
 	case version.Archived:
 		return version, templateTestFail("TemplateVersionArchived", "Version %s is archived.", version.Name), nil
 	}
@@ -379,6 +439,9 @@ func applyTemplateTestStep(tt *coderv1alpha1.CoderTemplateTest, now time.Time, s
 	tt.Status.Reason, tt.Status.Message = step.reason, step.message
 	if !step.failed {
 		tt.Status.Phase = coderv1alpha1.CoderTemplateTestPhasePending
+		if templateTestMayHaveWorkspace(tt) {
+			tt.Status.Phase = coderv1alpha1.CoderTemplateTestPhaseRunning
+		}
 		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionReconciling, metav1.ConditionTrue, step.reason, step.message)
 		return
 	}
@@ -387,7 +450,21 @@ func applyTemplateTestStep(tt *coderv1alpha1.CoderTemplateTest, now time.Time, s
 	setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionReconciling, metav1.ConditionFalse, step.reason, step.message)
 	setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionReady, metav1.ConditionFalse, step.reason, step.message)
 	setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionStalled, metav1.ConditionTrue, step.reason, step.message)
-	markTemplateTestNotCreated(tt)
+	switch {
+	case step.deleted != nil:
+		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted, step.deleted.Status, step.deleted.Reason, step.deleted.Message)
+	case templateTestMayHaveWorkspace(tt):
+		setTemplateTestCondition(tt, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted, metav1.ConditionFalse,
+			"CleanupPending", "The workspace can exist. The delete steps are not enabled yet.")
+	default:
+		markTemplateTestNotCreated(tt)
+	}
+}
+
+// templateTestMayHaveWorkspace reports whether a create request was possibly
+// sent, so a workspace of this test can exist in Coder.
+func templateTestMayHaveWorkspace(tt *coderv1alpha1.CoderTemplateTest) bool {
+	return tt.Status.CreateAttemptTime != nil || tt.Status.WorkspaceID != ""
 }
 
 // markTemplateTestNotCreated records that no create request was ever sent.
@@ -453,8 +530,12 @@ func coderAnswerFor(kind, asked, answered string) error {
 	if asked == answered {
 		return nil
 	}
-	return fmt.Errorf("assertion failed: Coder answered %s %q when asked for %q", kind, answered, asked)
+	return &coderAnswerError{msg: fmt.Sprintf("assertion failed: Coder answered %s %q when asked for %q", kind, answered, asked)}
 }
+
+type coderAnswerError struct{ msg string }
+
+func (e *coderAnswerError) Error() string { return e.msg }
 
 func templateTestDeadlineExceeded(tt *coderv1alpha1.CoderTemplateTest, lastReason, lastMessage string) *templateTestStep {
 	return templateTestFail("DeadlineExceeded", "The test did not finish within %ds. Last wait: %s: %s",
@@ -473,18 +554,34 @@ func isTemplateTestFinal(phase string) bool {
 }
 
 func isCoderNotFound(err error) bool {
-	var sdkErr *codersdk.Error
-	return errors.As(err, &sdkErr) && sdkErr.StatusCode() == http.StatusNotFound
+	return coderStatus(err) == http.StatusNotFound
 }
 
 // coderUnavailable keeps the test waiting after a failed Coder call. The
 // message holds the status and Coder's short message only, never details.
 func coderUnavailable(action string, err error) *templateTestStep {
+	step := templateTestWait("CoderUnavailable", "%s: %s", action, coderErrorSummary(err))
+	step.rateLimited = coderStatus(err) == http.StatusTooManyRequests
+	return step
+}
+
+// coderErrorSummary holds the status and Coder's short message only, never
+// details, validation errors, or job logs.
+func coderErrorSummary(err error) string {
 	var sdkErr *codersdk.Error
 	if errors.As(err, &sdkErr) {
-		return templateTestWait("CoderUnavailable", "%s: Coder answered %d: %s", action, sdkErr.StatusCode(), sdkErr.Message)
+		return fmt.Sprintf("Coder answered %d: %s", sdkErr.StatusCode(), sdkErr.Message)
 	}
-	return templateTestWait("CoderUnavailable", "%s: %v", action, err)
+	return err.Error()
+}
+
+// coderStatus returns the HTTP status of a Coder answer, or 0 without one.
+func coderStatus(err error) int {
+	var sdkErr *codersdk.Error
+	if errors.As(err, &sdkErr) {
+		return sdkErr.StatusCode()
+	}
+	return 0
 }
 
 func truncateTemplateTestMessage(message string) string {

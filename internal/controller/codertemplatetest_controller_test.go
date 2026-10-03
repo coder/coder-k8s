@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,7 +66,7 @@ func (e *templateTestEnv) setOwner(t *testing.T, controlPlane, ownerID string) {
 	require.NoError(t, k8sClient.Update(e.ctx, cp))
 }
 
-func (e *templateTestEnv) createTest(t *testing.T, template string, version coderv1alpha1.CoderTemplateTestVersion) types.NamespacedName {
+func (e *templateTestEnv) createTest(t *testing.T, template string, version coderv1alpha1.CoderTemplateTestVersion, timeoutSeconds ...int32) types.NamespacedName {
 	t.Helper()
 	tt := &coderv1alpha1.CoderTemplateTest{
 		ObjectMeta: metav1.ObjectMeta{GenerateName: "test-", Namespace: e.ns},
@@ -73,6 +74,9 @@ func (e *templateTestEnv) createTest(t *testing.T, template string, version code
 			ControlPlaneRef: coderv1alpha1.CoderControlPlaneReference{Name: "coder"},
 			Template:        template, Version: version,
 		},
+	}
+	if len(timeoutSeconds) > 0 {
+		tt.Spec.TimeoutSeconds = &timeoutSeconds[0]
 	}
 	require.NoError(t, k8sClient.Create(e.ctx, tt))
 	return types.NamespacedName{Namespace: tt.Namespace, Name: tt.Name}
@@ -97,6 +101,14 @@ func (e *templateTestEnv) reconcile(t *testing.T, key types.NamespacedName, n in
 	return tt
 }
 
+// workspaceName is the deterministic Coder workspace name of a test.
+func (e *templateTestEnv) workspaceName(t *testing.T, key types.NamespacedName) string {
+	t.Helper()
+	tt := &coderv1alpha1.CoderTemplateTest{}
+	require.NoError(t, k8sClient.Get(e.ctx, key, tt))
+	return "ktt-" + strings.ReplaceAll(string(tt.UID), "-", "")[:28]
+}
+
 // settle reconciles until a waiting test is stable and a failed test has
 // released its finalizer.
 func (e *templateTestEnv) settle(t *testing.T, key types.NamespacedName) *coderv1alpha1.CoderTemplateTest {
@@ -106,7 +118,19 @@ func (e *templateTestEnv) settle(t *testing.T, key types.NamespacedName) *coderv
 
 func requireTemplateTestWaiting(t *testing.T, tt *coderv1alpha1.CoderTemplateTest, reason, messagePart string) {
 	t.Helper()
-	require.Equal(t, coderv1alpha1.CoderTemplateTestPhasePending, tt.Status.Phase, tt.Status.Message)
+	requireTemplateTestPhase(t, tt, coderv1alpha1.CoderTemplateTestPhasePending, reason, messagePart)
+}
+
+// requireTemplateTestRunning checks a test that may have a workspace.
+func requireTemplateTestRunning(t *testing.T, tt *coderv1alpha1.CoderTemplateTest, reason, messagePart string) {
+	t.Helper()
+	requireTemplateTestPhase(t, tt, coderv1alpha1.CoderTemplateTestPhaseRunning, reason, messagePart)
+	require.NotNil(t, tt.Status.CreateAttemptTime, "Running means a create request may exist")
+}
+
+func requireTemplateTestPhase(t *testing.T, tt *coderv1alpha1.CoderTemplateTest, phase, reason, messagePart string) {
+	t.Helper()
+	require.Equal(t, phase, tt.Status.Phase, tt.Status.Message)
 	require.Equal(t, reason, tt.Status.Reason, tt.Status.Message)
 	require.Contains(t, tt.Status.Message, messagePart)
 	require.True(t, meta.IsStatusConditionTrue(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionReconciling))
@@ -114,6 +138,13 @@ func requireTemplateTestWaiting(t *testing.T, tt *coderv1alpha1.CoderTemplateTes
 }
 
 func requireTemplateTestFailed(t *testing.T, tt *coderv1alpha1.CoderTemplateTest, reason string) {
+	t.Helper()
+	requireTemplateTestFailedWith(t, tt, reason, metav1.ConditionTrue, "NotCreated")
+}
+
+// requireTemplateTestFailedWith checks a failed test and its WorkspaceDeleted
+// condition. The finalizer stays until the workspace is proven gone.
+func requireTemplateTestFailedWith(t *testing.T, tt *coderv1alpha1.CoderTemplateTest, reason string, deletedStatus metav1.ConditionStatus, deletedReason string) {
 	t.Helper()
 	require.Equal(t, coderv1alpha1.CoderTemplateTestPhaseFailed, tt.Status.Phase, tt.Status.Message)
 	require.Equal(t, reason, tt.Status.Reason, tt.Status.Message)
@@ -123,9 +154,10 @@ func requireTemplateTestFailed(t *testing.T, tt *coderv1alpha1.CoderTemplateTest
 	require.True(t, meta.IsStatusConditionFalse(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionReconciling))
 	deleted := meta.FindStatusCondition(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted)
 	require.NotNil(t, deleted)
-	require.Equal(t, metav1.ConditionTrue, deleted.Status)
-	require.Equal(t, "NotCreated", deleted.Reason)
-	require.False(t, controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer), "a finished test without a workspace keeps no finalizer")
+	require.Equal(t, deletedStatus, deleted.Status)
+	require.Equal(t, deletedReason, deleted.Reason)
+	require.Equal(t, deletedStatus != metav1.ConditionTrue, controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer),
+		"the finalizer stays exactly while the workspace can exist")
 }
 
 func TestTemplateTestWaitsForControlPlaneAndOwner(t *testing.T) {
@@ -169,11 +201,15 @@ func TestTemplateTestWaitsForControlPlaneAndOwner(t *testing.T) {
 	e.setOwner(t, "coder", e.tester.String())
 	e.fake.failNext(routeUser, fakeFault{Status: 503})
 	requireTemplateTestWaiting(t, e.reconcile(t, key, 1), "CoderUnavailable", "get owner: Coder answered 503")
-	requireStep("ReadyToCreate", "Inputs are resolved")
-	require.Zero(t, e.fake.requestCount(routeCreateWorkspace))
+	requireTemplateTestRunning(t, e.settle(t, key), "WaitingForBuild", "")
+	require.Equal(t, 1, e.fake.requestCount(routeCreateWorkspace))
 
-	require.NoError(t, k8sClient.Delete(e.ctx, tt))
-	require.Nil(t, e.reconcile(t, key, 1), "deleting a test that never created a workspace releases it at once")
+	// Deleting a test that never sent a create request releases it at once.
+	e.setOwner(t, "coder", "")
+	other := e.createTest(t, "default.docker", coderv1alpha1.CoderTemplateTestVersion{Name: "v1"})
+	requireTemplateTestWaiting(t, e.settle(t, other), "OwnerNotConfigured", "")
+	require.NoError(t, k8sClient.Delete(e.ctx, &coderv1alpha1.CoderTemplateTest{ObjectMeta: metav1.ObjectMeta{Namespace: other.Namespace, Name: other.Name}}))
+	require.Nil(t, e.reconcile(t, other, 1))
 }
 
 func TestTemplateTestWaitsForTemplateVersion(t *testing.T) {
@@ -196,9 +232,11 @@ func TestTemplateTestWaitsForTemplateVersion(t *testing.T) {
 	requireStep("TemplateVersionNotFound", "does not exist")
 	v1 := e.fake.addVersion(tplID, "v1", codersdk.ProvisionerJobRunning)
 	tt := requireStep("TemplateVersionImporting", "still importing")
-	require.Empty(t, tt.Status.TemplateVersionID, "nothing is pinned before the version is usable")
+	require.Equal(t, v1.String(), tt.Status.TemplateVersionID, "the version is pinned while it imports")
+	require.Empty(t, tt.Status.OwnerID, "the other inputs are pinned once the version is usable")
 	e.fake.setVersionJob(v1, codersdk.ProvisionerJobSucceeded)
-	tt = requireStep("ReadyToCreate", "Inputs are resolved")
+	tt = e.settle(t, key)
+	requireTemplateTestRunning(t, tt, "WaitingForBuild", "")
 
 	require.Equal(t, orgID.String(), tt.Status.OrganizationID)
 	require.Equal(t, tplID.String(), tt.Status.TemplateID)
@@ -206,7 +244,7 @@ func TestTemplateTestWaitsForTemplateVersion(t *testing.T) {
 	require.Equal(t, "v1", tt.Status.TemplateVersionName)
 	require.Equal(t, e.tester.String(), tt.Status.OwnerID)
 	require.Regexp(t, `^ktt-[0-9a-f]{28}$`, tt.Status.WorkspaceName)
-	require.Zero(t, e.fake.requestCount(routeCreateWorkspace))
+	require.Equal(t, 1, e.fake.requestCount(routeCreateWorkspace))
 }
 
 func TestTemplateTestOwnerEligibility(t *testing.T) {
@@ -279,7 +317,7 @@ func TestTemplateTestOwnerEligibility(t *testing.T) {
 			e.setOwner(t, "coder", tc.setup(e).String())
 			tt := e.settle(t, e.createTest(t, "default.docker", coderv1alpha1.CoderTemplateTestVersion{Name: "v1"}))
 			if tc.refusal == "" {
-				requireTemplateTestWaiting(t, tt, "ReadyToCreate", "")
+				requireTemplateTestRunning(t, tt, "WaitingForBuild", "")
 				return
 			}
 			requireTemplateTestWaiting(t, tt, "OwnerNotEligible", tc.refusal)
@@ -291,19 +329,27 @@ func TestTemplateTestOwnerEligibility(t *testing.T) {
 func TestTemplateTestPinsActiveVersion(t *testing.T) {
 	t.Parallel()
 	e := newTemplateTestEnv(t)
+	slow := e.fake.addTemplate(e.orgID, "slow")
+	first := e.fake.addVersion(slow, "first", codersdk.ProvisionerJobRunning)
 	// Coder v2.37.2 matches organization and template names case-insensitively.
-	key := e.createTest(t, "Default.Docker", coderv1alpha1.CoderTemplateTestVersion{Active: ptr.To(true)})
+	key := e.createTest(t, "Default.Slow", coderv1alpha1.CoderTemplateTestVersion{Active: ptr.To(true)})
 	tt := e.settle(t, key)
-	requireTemplateTestWaiting(t, tt, "ReadyToCreate", "")
-	require.Equal(t, e.v1.String(), tt.Status.TemplateVersionID)
+	requireTemplateTestWaiting(t, tt, "TemplateVersionImporting", "first")
+	require.Equal(t, first.String(), tt.Status.TemplateVersionID, "the active version is pinned before its import ends")
 
-	e.fake.promoteVersion(e.fake.addVersion(e.tplID, "v2", codersdk.ProvisionerJobSucceeded))
+	// Another version is promoted while the pinned one still imports.
+	e.fake.promoteVersion(e.fake.addVersion(slow, "second", codersdk.ProvisionerJobSucceeded))
 	tt = e.settle(t, key)
-	require.Equal(t, e.v1.String(), tt.Status.TemplateVersionID, "a promotion after pinning does not change the version under test")
-	require.Equal(t, "v1", tt.Status.TemplateVersionName)
+	requireTemplateTestWaiting(t, tt, "TemplateVersionImporting", "first")
+	require.Equal(t, first.String(), tt.Status.TemplateVersionID, "a promotion after pinning does not change the version under test")
 
-	e.fake.archiveVersion(e.v1)
-	requireTemplateTestFailed(t, e.settle(t, key), "TemplateVersionArchived")
+	e.fake.setVersionJob(first, codersdk.ProvisionerJobSucceeded)
+	tt = e.settle(t, key)
+	requireTemplateTestRunning(t, tt, "WaitingForBuild", "")
+	require.Equal(t, "first", tt.Status.TemplateVersionName)
+	ws, err := e.fake.client(t, 5*time.Second).Workspace(e.ctx, uuid.MustParse(tt.Status.WorkspaceID))
+	require.NoError(t, err)
+	require.Equal(t, first, ws.LatestBuild.TemplateVersionID, "the start build uses the pinned version")
 }
 
 func TestTemplateTestVersionFailures(t *testing.T) {
@@ -404,27 +450,45 @@ func TestTemplateTestRejectsWrongCoderAnswers(t *testing.T) {
 		for _, fault := range tc.faults {
 			e.fake.failNext(tc.route, fault)
 		}
-		var err error
-		for range 3 { // Finalizer, initialization, lookups.
-			r := &controller.CoderTemplateTestReconciler{Client: k8sClient, Scheme: scheme, Clock: e.clock}
-			if _, err = r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key}); err != nil {
-				break
-			}
-		}
-		require.ErrorContains(t, err, "assertion failed: Coder answered "+tc.want+" ", tc.name)
+		// Finalizer, initialization, then the lookups that get the wrong answer.
+		requireTemplateTestWaiting(t, e.reconcile(t, key, 3), "CoderAnswerMismatch", "assertion failed: Coder answered "+tc.want+" ")
+		require.Zero(t, e.fake.requestCount(routeCreateWorkspace), tc.name)
 	}
 
 	// A pinned version is read by ID, and the answer must name that ID.
-	key := e.createTest(t, "default.docker", coderv1alpha1.CoderTemplateTestVersion{Active: ptr.To(true)})
-	requireTemplateTestWaiting(t, e.settle(t, key), "ReadyToCreate", "")
+	slow := e.fake.addTemplate(e.orgID, "slow")
+	e.fake.addVersion(slow, "first", codersdk.ProvisionerJobRunning)
+	key := e.createTest(t, "default.slow", coderv1alpha1.CoderTemplateTestVersion{Active: ptr.To(true)})
+	requireTemplateTestWaiting(t, e.settle(t, key), "TemplateVersionImporting", "")
 	e.fake.failNext(routeVersion, fakeFault{Rewrite: func(a any) any {
 		v := a.(codersdk.TemplateVersion)
 		v.ID = uuid.New()
 		return v
 	}})
-	r := &controller.CoderTemplateTestReconciler{Client: k8sClient, Scheme: scheme, Clock: e.clock}
-	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
-	require.ErrorContains(t, err, "assertion failed: Coder answered version ", "pinned version")
+	requireTemplateTestWaiting(t, e.reconcile(t, key, 1), "CoderAnswerMismatch", "assertion failed: Coder answered version ")
+}
+
+// TestTemplateTestWrongAnswerEndsAtDeadline checks that a Coder that keeps
+// answering wrong ends the test at its deadline, not after the work queue's
+// backoff.
+func TestTemplateTestWrongAnswerEndsAtDeadline(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	for range 20 {
+		e.fake.failNext(routeUser, fakeFault{Rewrite: func(a any) any {
+			u := a.(codersdk.User)
+			u.ID = uuid.New()
+			return u
+		}})
+	}
+	key := e.createTest(t, "default.docker", coderv1alpha1.CoderTemplateTestVersion{Name: "v1"})
+	requireTemplateTestWaiting(t, e.settle(t, key), "CoderAnswerMismatch", "")
+	require.Equal(t, 15*time.Second, e.lastStep.RequeueAfter, "a wrong answer requeues like any wait, without an error")
+
+	e.clock.SetTime(e.clock.Now().Add(900 * time.Second))
+	tt := e.settle(t, key)
+	requireTemplateTestFailed(t, tt, "DeadlineExceeded")
+	require.Contains(t, tt.Status.Message, "Last wait: CoderAnswerMismatch")
 }
 
 func TestTemplateTestDeadlineWhilePending(t *testing.T) {
@@ -445,19 +509,16 @@ func TestTemplateTestDeadlineWhilePending(t *testing.T) {
 	require.Equal(t, tt.Status.CompletionTime, e.settle(t, key).Status.CompletionTime, "a final test is never evaluated again")
 }
 
-// lateClock answers first on the first call and later afterwards, like a
-// reconcile whose Coder lookup takes a while.
+// lateClock answers its times in order and then repeats the last one, like
+// a reconcile whose Coder calls take a while.
 type lateClock struct {
-	first, later time.Time
-	calls        int
+	times []time.Time
+	calls int
 }
 
 func (c *lateClock) Now() time.Time {
 	c.calls++
-	if c.calls == 1 {
-		return c.first
-	}
-	return c.later
+	return c.times[min(c.calls, len(c.times))-1]
 }
 
 func (c *lateClock) Since(t time.Time) time.Duration { return c.Now().Sub(t) }
@@ -466,28 +527,26 @@ func TestTemplateTestDeadlineAfterSlowLookup(t *testing.T) {
 	t.Parallel()
 	e := newTemplateTestEnv(t)
 	key := e.createTest(t, "default.docker", coderv1alpha1.CoderTemplateTestVersion{Name: "v1"})
-	tt := e.settle(t, key)
-	requireTemplateTestWaiting(t, tt, "ReadyToCreate", "")
+	tt := e.reconcile(t, key, 2) // Finalizer and initialization only.
+	require.NotNil(t, tt.Status.StartTime)
 
 	deadline := tt.Status.StartTime.Add(900 * time.Second)
-	r := &controller.CoderTemplateTestReconciler{Client: k8sClient, Scheme: scheme, Clock: &lateClock{first: deadline.Add(-time.Second), later: deadline}}
+	r := &controller.CoderTemplateTestReconciler{Client: k8sClient, Scheme: scheme, Clock: &lateClock{times: []time.Time{deadline.Add(-time.Second), deadline}}}
 	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
 	require.NoError(t, err)
 	tt = e.settle(t, key)
 	requireTemplateTestFailed(t, tt, "DeadlineExceeded")
-	require.Contains(t, tt.Status.Message, "Last wait: ReadyToCreate")
+	require.Zero(t, e.fake.requestCount(routeCreateWorkspace), "no create request after the deadline")
 }
 
 func TestTemplateTestNameConflict(t *testing.T) {
 	t.Parallel()
 	e := newTemplateTestEnv(t)
 	key := e.createTest(t, "default.docker", coderv1alpha1.CoderTemplateTestVersion{Name: "v1"})
-	tt := e.settle(t, key)
-	requireTemplateTestWaiting(t, tt, "ReadyToCreate", "")
 
 	// Someone else takes the test's workspace name before the create step.
 	sdk := e.fake.client(t, 5*time.Second)
-	foreign, err := sdk.CreateUserWorkspace(e.ctx, e.tester.String(), codersdk.CreateWorkspaceRequest{TemplateVersionID: e.v1, Name: tt.Status.WorkspaceName})
+	foreign, err := sdk.CreateUserWorkspace(e.ctx, e.tester.String(), codersdk.CreateWorkspaceRequest{TemplateVersionID: e.v1, Name: e.workspaceName(t, key)})
 	require.NoError(t, err)
 
 	requireTemplateTestFailed(t, e.settle(t, key), "WorkspaceNameConflict")
