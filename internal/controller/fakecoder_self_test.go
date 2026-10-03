@@ -125,6 +125,11 @@ func TestFakeCoderCancelAndDelete(t *testing.T) {
 	requireCoderStatus(t, c.CancelWorkspaceBuild(ctx, start.ID, running), 412)
 	f.setBuildJob(start.ID, codersdk.ProvisionerJobRunning)
 	require.NoError(t, c.CancelWorkspaceBuild(ctx, start.ID, running))
+	canceling, err := c.Workspace(ctx, ws.ID)
+	require.NoError(t, err)
+	require.Equal(t, codersdk.ProvisionerJobCanceling, canceling.LatestBuild.Job.Status)
+	require.NotNil(t, canceling.LatestBuild.Job.CanceledAt)                    // Coder sets it on every cancel.
+	require.Nil(t, canceling.LatestBuild.Job.CompletedAt)                      // The worker still holds the job.
 	requireCoderStatus(t, c.CancelWorkspaceBuild(ctx, start.ID, running), 400) // Canceling: 400 before the expect_status check.
 
 	// A delete build waits until no build is active, and orphan deletes fail.

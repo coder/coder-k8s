@@ -369,7 +369,9 @@ func (f *fakeCoder) setJob(b *codersdk.WorkspaceBuild, status codersdk.Provision
 	if !status.Active() {
 		b.Job.CompletedAt = &now
 	}
-	if status == codersdk.ProvisionerJobCanceled {
+	// Coder v2.37.2 sets CanceledAt on every cancel. CompletedAt waits until
+	// the worker releases a running job (patchCancelWorkspaceBuild).
+	if status == codersdk.ProvisionerJobCanceling || (status == codersdk.ProvisionerJobCanceled && b.Job.CanceledAt == nil) {
 		b.Job.CanceledAt = &now
 	}
 }
