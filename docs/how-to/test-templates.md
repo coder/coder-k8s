@@ -100,7 +100,7 @@ A failed test has `Ready=False` and `Stalled=True` with the same reason. It does
 | `CreateOutcomeUnknown` | No workspace from this test appeared after an uncertain create request. | Check Coder, then create a new test. |
 | `WorkspaceNameConflict` | A workspace with the test's name exists, but nothing proves that this test created it. | Check the workspace in Coder. See the escape hatch below. |
 | `BuildFailed`, `BuildCanceled` | The start build failed, or someone else canceled it. | Read the build logs in Coder. |
-| `NoAgents` | The workspace has no agents, so nothing proves that it works. | Add an agent to the template. |
+| `NoAgents` | The workspace has no top-level agents, so nothing proves that it works. Devcontainer sub-agents do not count. | Add a top-level agent to the template. |
 | `AgentConnectionTimeout`, `AgentStartError`, `AgentStartTimeout`, `AgentStopped` | An agent did not connect in time, its startup script failed or timed out, or it stopped. | Read the agent logs in Coder. The message names the agent. |
 | `WorkspaceChangedExternally`, `WorkspaceDeletedExternally` | Someone else started a build of the workspace, or deleted it. | Leave test workspaces alone, and create a new test. |
 | `DeleteBuildFailed` | Every top-level agent was ready, but the delete build failed. The controller retries the delete. | Read the delete build logs in Coder. |
@@ -179,6 +179,7 @@ spec:
   concurrencyPolicy: Forbid
   jobTemplate:
     spec:
+      backoffLimit: 0 # a retry after a lost create response makes a second test
       template:
         spec:
           serviceAccountName: nightly-template-test

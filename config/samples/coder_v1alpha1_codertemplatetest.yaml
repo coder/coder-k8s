@@ -1,6 +1,6 @@
 # Tests one Coder template version: the controller creates a workspace from
-# it, waits until every agent is ready, records the result, and deletes the
-# workspace. See docs/how-to/test-templates.md.
+# it, waits until every top-level agent is ready, records the result, and
+# deletes the workspace. See docs/how-to/test-templates.md.
 #
 # Prerequisites:
 # - CoderControlPlane codercontrolplane-sample with status.operatorAccessReady
