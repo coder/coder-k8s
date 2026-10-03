@@ -67,23 +67,23 @@ func (r *CoderTemplateTestReconciler) deleteStep(
 		// Any initiator: a delete build by someone else also deletes it.
 		tt.Status.DeleteBuildID = build.ID.String()
 		return wait(templateTestRunningPoll, "Deleting", "The delete build of workspace %s is %s.", name, status)
+	case build.Transition == codersdk.WorkspaceTransitionDelete && status != codersdk.ProvisionerJobFailed && status != codersdk.ProvisionerJobCanceled:
+		// An unknown status proves no failure: wait.
+		return wait(templateTestRunningPoll, "Deleting", "The delete build of workspace %s is %s.", name, status)
 	case build.Transition == codersdk.WorkspaceTransitionDelete && build.ID.String() == tt.Status.DeleteBuildID:
 		// Count each failed delete build once. The status write stores the
 		// count before any new delete build.
 		tt.Status.DeleteAttempts++
 		tt.Status.DeleteBuildID = ""
-		backoff := templateTestDeleteBackoff(tt.Status.DeleteAttempts)
-		result, _ := wait(backoff, "DeleteRetrying", "Delete build %d of workspace %s ended %s. The controller retries in %s.", tt.Status.DeleteAttempts, name, status, backoff)
+		retryAt := templateTestDeleteRetryAt(build, tt.Status.DeleteAttempts, now)
+		// At least 1 s: the count must be stored before the next delete build.
+		result, _ := wait(max(retryAt.Sub(now), time.Second), "DeleteRetrying", "Delete build %d of workspace %s ended %s. The controller retries at %s.",
+			tt.Status.DeleteAttempts, name, status, retryAt.UTC().Format(time.RFC3339))
 		result.failedBuild = true
 		return result, nil
 	case build.Transition == codersdk.WorkspaceTransitionDelete:
 		// Already counted, or someone else's: retry after the backoff.
-		retryAt := now
-		if build.Job.CompletedAt != nil {
-			retryAt = *build.Job.CompletedAt
-		}
-		retryAt = retryAt.Add(templateTestDeleteBackoff(tt.Status.DeleteAttempts))
-		if now.Before(retryAt) {
+		if retryAt := templateTestDeleteRetryAt(build, tt.Status.DeleteAttempts, now); now.Before(retryAt) {
 			return wait(retryAt.Sub(now), "DeleteRetrying", "The last delete build of workspace %s ended %s. The controller retries at %s.", name, status, retryAt.UTC().Format(time.RFC3339))
 		}
 	case status == codersdk.ProvisionerJobPending || status == codersdk.ProvisionerJobRunning:
@@ -139,6 +139,16 @@ func (r *CoderTemplateTestReconciler) deleteAfterPass(
 	}
 	step.requeue = result.requeue
 	return step, nil
+}
+
+// templateTestDeleteRetryAt is when the controller may replace a failed delete
+// build: its completion plus the backoff.
+func templateTestDeleteRetryAt(build codersdk.WorkspaceBuild, attempts int32, now time.Time) time.Time {
+	completedAt := now
+	if build.Job.CompletedAt != nil {
+		completedAt = *build.Job.CompletedAt
+	}
+	return completedAt.Add(templateTestDeleteBackoff(attempts))
 }
 
 // templateTestDeleteBackoff is the wait after the given number of failed

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"time"
@@ -117,7 +118,10 @@ func (r *CoderTemplateTestReconciler) cleanupStep(ctx context.Context, tt *coder
 			set(metav1.ConditionTrue, "Deleted", fmt.Sprintf("The delete build of workspace %s succeeded.", name))
 			return 0, nil
 		}
-		step, requeue = result.wait, max(result.requeue, templateTestRunningPoll)
+		step, requeue = result.wait, cmp.Or(result.requeue, templateTestRunningPoll)
+		if step.reason == "CoderUnavailable" {
+			requeue = templateTestUnavailablePoll // Cleanup has no deadline: poll slowly.
+		}
 	}
 	switch {
 	case step.deleted != nil:

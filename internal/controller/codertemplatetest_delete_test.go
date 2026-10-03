@@ -165,3 +165,38 @@ func TestTemplateTestWatchesControlPlane(t *testing.T) {
 	// The Pending poll is 15 s, so only the watch is this fast.
 	require.Eventually(t, func() bool { return e.get(t, key).Status.WorkspaceID != "" }, 8*time.Second, 50*time.Millisecond)
 }
+
+func TestTemplateTestDeleteEdgeCases(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+
+	// Coder unavailable during cleanup: the slow 60 s poll, not 5 s.
+	key := e.failedWithWorkspace(t)
+	e.fake.failNext(routeWorkspace, fakeFault{Status: 500})
+	requireDeleted(t, e.reconcile(t, key, 1), metav1.ConditionFalse, "ControlPlaneUnavailable")
+	require.Equal(t, time.Minute, e.lastStep.RequeueAfter)
+
+	// A failed delete build seen late: the backoff counts from its
+	// completion, so the retry follows at once.
+	deletes := e.fake.requestCount(routeCreateBuild)
+	e.fake.setBuildJob(uuid.MustParse(e.get(t, key).Status.DeleteBuildID), codersdk.ProvisionerJobFailed)
+	e.clock.SetTime(e.clock.Now().Add(5 * time.Minute))
+	requireDeleted(t, e.reconcile(t, key, 1), metav1.ConditionFalse, "DeleteRetrying")
+	require.Equal(t, time.Second, e.lastStep.RequeueAfter)
+	e.reconcile(t, key, 1)
+	require.Equal(t, deletes+1, e.fake.requestCount(routeCreateBuild))
+
+	// An unknown delete build status proves no failure: a passed test waits.
+	key, _, buildID := e.startedTest(t)
+	e.fake.setBuildJob(buildID, codersdk.ProvisionerJobSucceeded)
+	e.fake.setAgents(buildID, agent("main", codersdk.WorkspaceAgentConnected, codersdk.WorkspaceAgentLifecycleReady))
+	requireTemplateTestRunning(t, e.settle(t, key), "DeletingWorkspace", "")
+	e.fake.failNext(routeWorkspace, fakeFault{Rewrite: func(a any) any {
+		ws := a.(codersdk.Workspace)
+		ws.LatestBuild.Job.Status = codersdk.ProvisionerJobUnknown
+		return ws
+	}})
+	tt := e.reconcile(t, key, 1)
+	requireTemplateTestRunning(t, tt, "DeletingWorkspace", "is unknown")
+	require.Zero(t, tt.Status.DeleteAttempts)
+}
