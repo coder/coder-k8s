@@ -219,3 +219,53 @@ See [Promote a template version](../reference/aggregated-api-behavior.md#promote
 ## Aggregated requests return `400` or `409`
 
 These errors often come from the rules for names or for `resourceVersion`. See [Aggregated API behavior](../reference/aggregated-api-behavior.md).
+
+## A `CoderTemplateTest` stays `Pending`
+
+The test waits for something outside it. `status.reason` names it:
+
+```bash
+kubectl get codertemplatetest <name> -n <namespace> -o jsonpath='{.status.reason}: {.status.message}{"\n"}'
+```
+
+Usual causes:
+
+1. `OwnerNotConfigured` or `OwnerNotEligible`: the control plane has no tester, or the tester is not allowed. The message names the problem. See [Create the tester user](test-templates.md#1-create-the-tester-user).
+2. `OperatorAccessNotReady` or `ControlPlaneNotReady`: the control plane in `spec.controlPlaneRef` is missing or not ready. See [`CoderControlPlane` stays `Pending`](#codercontrolplane-stays-pending).
+3. `TemplateNotFound` or `TemplateVersionNotFound`: `spec.template` or `spec.version` names nothing in Coder. The spec is immutable, so create a new test with the right names.
+4. `CoderUnavailable`: a Coder request failed. Check Coder and its logs.
+
+A test without any status means that the controller has not reconciled it. See [The controller runs but nothing reconciles](#the-controller-runs-but-nothing-reconciles). Every wait ends at `spec.timeoutSeconds` with `DeadlineExceeded`. For every reason, see [Read the result](test-templates.md#4-read-the-result).
+
+## A `CoderTemplateTest` does not finish deleting
+
+The test keeps the finalizer `coder.com/template-test-cleanup` until the condition `WorkspaceDeleted` is `True`, or its reason is `Retained` or `ControlPlaneGone`. Read the condition:
+
+```bash
+kubectl get codertemplatetest <name> -n <namespace> \
+  -o jsonpath='{range .status.conditions[?(@.type=="WorkspaceDeleted")]}{.status} {.reason}: {.message}{"\n"}{end}'
+```
+
+- `Deleting` or `DeleteRetrying`: the delete build runs or failed. Read its logs in Coder. The controller retries.
+- `ControlPlaneUnavailable` or `CoderAnswerMismatch`: Coder is not usable. Fix Coder, and the controller continues.
+- `OwnershipUnknown`: a workspace with the test's name exists, but nothing proves that the test created it. The controller never touches it.
+
+If the controller cannot finish, use the [escape hatch](test-templates.md#cleanup-and-the-escape-hatch). As a last resort, check Coder for a workspace named `status.workspaceName`, then remove the finalizer:
+
+```bash
+kubectl patch codertemplatetest <name> -n <namespace> --type json \
+  -p '[{"op":"remove","path":"/metadata/finalizers"}]'
+```
+
+CAUTION: Delete the workspace in Coder before you remove the finalizer. Otherwise the workspace, and the tester's session key, stay in Coder.
+
+## A namespace stays `Terminating`
+
+1. Tests in the namespace wait for their cleanup. List them with `kubectl get codertemplatetests -n <namespace>`, then see [A `CoderTemplateTest` does not finish deleting](#a-codertemplatetest-does-not-finish-deleting).
+2. With the aggregated API server installed, a namespace without an eligible `CoderControlPlane` never finishes deleting ([#209](https://github.com/coder/coder-k8s/issues/209)). Its condition `NamespaceDeletionContentFailure` is `True` with the message `no eligible CoderControlPlane instances found in namespace "<namespace>"`. The aggregated API answers the namespace controller's LIST with `503`. Read the conditions:
+
+    ```bash
+    kubectl get namespace <namespace> -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.message}{"\n"}{end}'
+    ```
+
+    If `NamespaceContentRemaining` and `NamespaceFinalizersRemaining` are `False`, nothing is left in the namespace, and only #209 holds it.
