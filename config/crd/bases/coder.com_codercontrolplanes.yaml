@@ -2044,6 +2044,21 @@ spec:
                       to the CoderControlPlane name.
                     type: string
                 type: object
+              templateTests:
+                description: TemplateTests configures CoderTemplateTest runs against
+                  this control plane.
+                properties:
+                  ownerUserID:
+                    description: |-
+                      OwnerUserID is the UUID of the Coder user that owns every test
+                      workspace. Use a dedicated low-privilege tester user: each start build
+                      gives the owner's API token to the template's Terraform. Tests stay
+                      pending until this is set. The CoderTemplateTest controller is not
+                      enabled yet, so this field has no effect today.
+                    format: uuid
+                    maxLength: 36
+                    type: string
+                type: object
               tls:
                 default: {}
                 description: TLS configures Coder built-in TLS.

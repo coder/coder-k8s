@@ -91,6 +91,7 @@ jobs:
             installer:
               - 'api/**/*.go'
               - 'config/crd/bases/**'
+              - 'config/crd/dormant/**'
               - 'config/rbac/**'
               - 'config/default/**'
               - 'deploy/deployment.yaml'
@@ -132,12 +133,21 @@ jobs:
       - name: Verify installer manifests are up to date
         run: |
           make build-installer
-          git diff --exit-code -- dist/install.yaml config/default/ config/crd/bases/ config/rbac/
+          git diff --exit-code -- dist/install.yaml config/default/ config/crd/bases/ config/crd/dormant/ config/rbac/
 
-          UNTRACKED_GENERATED="$(git ls-files --others --exclude-standard -- dist/ config/default/ config/crd/bases/ config/rbac/)"
+          UNTRACKED_GENERATED="$(git ls-files --others --exclude-standard -- dist/ config/default/ config/crd/bases/ config/crd/dormant/ config/rbac/)"
           if [[ -n "${UNTRACKED_GENERATED}" ]]; then
             echo "assertion failed: generated installer artifacts must be tracked" >&2
             printf '%s\n' "${UNTRACKED_GENERATED}" >&2
+            exit 1
+          fi
+
+      - name: Verify the dormant CoderTemplateTest CRD is not installed
+        # Remove this step when the CoderTemplateTest controller ships (#152).
+        run: |
+          if grep -n -E '^[[:space:]]+kind: CoderTemplateTest$|codertemplatetests\.coder\.com' \
+            dist/install.yaml config/default/kustomization.yaml config/crd/bases/*.yaml; then
+            echo "assertion failed: the CoderTemplateTest CRD must not ship before its controller" >&2
             exit 1
           fi
 

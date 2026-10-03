@@ -122,6 +122,14 @@ find_crd_file_for_kind() {
 	fi
 }
 
+# is_dormant_kind <kind>: succeeds when the kind's CRD is in config/crd/dormant (see DORMANT_CRDS in
+# hack/update-manifests.sh). Dormant kinds are not served yet, so they get no reference page.
+is_dormant_kind() {
+	local kind="$1"
+	[[ -d "${SCRIPT_ROOT}/config/crd/dormant" ]] || return 1
+	grep -RIlq --include='*.yaml' -E "^[[:space:]]+kind:[[:space:]]*${kind}[[:space:]]*$" "${SCRIPT_ROOT}/config/crd/dormant"
+}
+
 extract_crd_field() {
 	local crd_file="$1"
 	local field="$2"
@@ -249,6 +257,9 @@ generate_docs_for_source() {
 		fi
 
 		crd_file="$(find_crd_file_for_kind "${kind}")"
+		if [[ -z "${crd_file}" && "${source_kind}" == "controller" ]] && is_dormant_kind "${kind}"; then
+			continue
+		fi
 		if [[ -z "${crd_file}" ]]; then
 			if [[ "${require_crd}" == "true" ]]; then
 				fail "assertion failed: missing CRD manifest for required kind ${kind}"
