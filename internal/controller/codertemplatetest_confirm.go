@@ -24,9 +24,10 @@ const templateTestSettleWindow = 15 * time.Minute
 func (r *CoderTemplateTestReconciler) confirmCreate(
 	ctx context.Context, sdk *codersdk.Client, tt *coderv1alpha1.CoderTemplateTest, now time.Time,
 ) (*templateTestStep, error) {
-	if tt.Status.OwnerID == "" || tt.Status.WorkspaceName == "" || tt.Status.OrganizationID == "" ||
-		tt.Status.TemplateID == "" || tt.Status.TemplateVersionID == "" {
-		return nil, fmt.Errorf("assertion failed: template test %s/%s has a create marker without pinned owner, name, organization, template, and version", tt.Namespace, tt.Name)
+	for _, pin := range []string{tt.Status.OwnerID, tt.Status.OrganizationID, tt.Status.TemplateID, tt.Status.TemplateVersionID} {
+		if id, err := uuid.Parse(pin); err != nil || id == uuid.Nil || tt.Status.WorkspaceName == "" {
+			return nil, fmt.Errorf("assertion failed: template test %s/%s has a create marker without a workspace name or with pinned ID %q", tt.Namespace, tt.Name, pin)
+		}
 	}
 	operator, err := sdk.User(ctx, codersdk.Me)
 	if err != nil {
@@ -118,8 +119,11 @@ func provenance(
 			return nil, err
 		}
 		// Only the first build: a later start build by the operator does not
-		// prove who created the workspace. The controller sends no preset,
-		// so Coder never answers with a claimed prebuilt workspace.
+		// prove who created the workspace. Coder v2.37.2 can claim a prebuilt
+		// workspace without a preset ID in the request, when the parameters
+		// match a preset (coderd/workspaces.go:670-685). Build 1 of a claimed
+		// workspace belongs to the prebuilds system user, so such a workspace
+		// stays unproven: the test fails and keeps its finalizer.
 		if b.BuildNumber == 1 && b.Transition == codersdk.WorkspaceTransitionStart && b.InitiatorID == operatorID &&
 			b.TemplateVersionID.String() == tt.Status.TemplateVersionID {
 			if b.ID == uuid.Nil {

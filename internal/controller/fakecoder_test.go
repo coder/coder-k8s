@@ -49,6 +49,8 @@ type fakeFault struct {
 	// Rewrite changes a successful answer, to model Coder answering for
 	// something other than what was asked.
 	Rewrite func(answer any) any
+	// Detail goes into the error answer's detail and a validation error.
+	Detail string
 }
 
 type fakeWorkspace struct {
@@ -181,7 +183,11 @@ func (f *fakeCoder) route(mux *http.ServeMux, pattern, route string, h func(*htt
 			}
 			_ = conn.Close()
 		default:
-			writeFakeJSON(w, fault.Status, codersdk.Response{Message: fmt.Sprintf("fake fault %d", fault.Status)})
+			resp := codersdk.Response{Message: fmt.Sprintf("fake fault %d", fault.Status), Detail: fault.Detail}
+			if fault.Detail != "" {
+				resp.Validations = []codersdk.ValidationError{{Field: "name", Detail: fault.Detail}}
+			}
+			writeFakeJSON(w, fault.Status, resp)
 		}
 	})
 }
