@@ -264,9 +264,17 @@ func TestTemplateTestCleanupRechecks(t *testing.T) {
 	requireDeleted(t, tt, metav1.ConditionUnknown, "OwnershipUnknown")
 	message := meta.FindStatusCondition(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted).Message
 	require.Contains(t, message, `value "keep"`)
-	require.Contains(t, message, "removing the finalizer releases the test")
+	require.Contains(t, message, "Only removing the finalizer releases the test.")
+	require.NotContains(t, message, "retain or", "retain needs the control plane's opt-in")
 	tt = e.reconcile(t, key, 1)
 	require.Equal(t, message, meta.FindStatusCondition(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted).Message)
+	require.Equal(t, reads, e.fake.totalRequests())
+
+	// With the opt-in, the message names retain as well.
+	e.allowRetain(t)
+	tt = e.reconcile(t, key, 1)
+	require.Contains(t, meta.FindStatusCondition(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted).Message,
+		"retain or removing the finalizer releases the test")
 	require.Equal(t, reads, e.fake.totalRequests())
 
 	// A gone control plane releases it as well (A1).

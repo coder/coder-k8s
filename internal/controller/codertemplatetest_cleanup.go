@@ -133,10 +133,18 @@ func (r *CoderTemplateTestReconciler) cleanupStep(ctx context.Context, tt *coder
 	}
 	if templateTestDeletedReason(tt) == "OwnershipUnknown" {
 		// Someone else's workspace can hold the name. The controller never
-		// reads or touches it again. Only retain, or an admin who removes
-		// the finalizer, releases the test (A3).
-		set(metav1.ConditionUnknown, "OwnershipUnknown", fmt.Sprintf("Workspace %s exists, but nothing proves that this test created it. Only %s: retain or removing the finalizer releases the test.",
-			name, templateTestDeletionPolicyAnnotation))
+		// reads or touches it again. Only an admin who removes the
+		// finalizer, or retain with the control plane's opt-in, releases the
+		// test (A3, A17).
+		allowed, err := r.retainAllowed(ctx, tt)
+		if err != nil {
+			return 0, err
+		}
+		release := "Only removing the finalizer releases the test."
+		if allowed {
+			release = fmt.Sprintf("Only %s: retain or removing the finalizer releases the test.", templateTestDeletionPolicyAnnotation)
+		}
+		set(metav1.ConditionUnknown, "OwnershipUnknown", fmt.Sprintf("Workspace %s exists, but nothing proves that this test created it. %s", name, release))
 		return 0, nil
 	}
 
@@ -186,8 +194,6 @@ func (r *CoderTemplateTestReconciler) cleanupStep(ctx context.Context, tt *coder
 	return requeue, nil
 }
 
-// controlPlaneGone reports whether the referenced control plane is NotFound
-// or being deleted. Then nothing can clean up, so the finalizer goes (A1).
 // retainAllowed reports whether the test's control plane sets
 // spec.templateTests.allowRetain. A missing control plane allows nothing: the
 // ControlPlaneGone case releases the test instead.
@@ -202,6 +208,8 @@ func (r *CoderTemplateTestReconciler) retainAllowed(ctx context.Context, tt *cod
 	return controlPlane.Spec.TemplateTests != nil && controlPlane.Spec.TemplateTests.AllowRetain, nil
 }
 
+// controlPlaneGone reports whether the referenced control plane is NotFound
+// or being deleted. Then nothing can clean up, so the finalizer goes (A1).
 func (r *CoderTemplateTestReconciler) controlPlaneGone(ctx context.Context, tt *coderv1alpha1.CoderTemplateTest) (bool, error) {
 	controlPlane := &coderv1alpha1.CoderControlPlane{}
 	key := types.NamespacedName{Namespace: tt.Namespace, Name: tt.Spec.ControlPlaneRef.Name}
