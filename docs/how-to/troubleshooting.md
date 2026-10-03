@@ -280,10 +280,9 @@ CAUTION: Delete the workspace in Coder before you remove the finalizer. Otherwis
 ## A namespace stays `Terminating`
 
 1. Tests in the namespace wait for their cleanup. List them with `kubectl get codertemplatetests -n <namespace>`, then see [A `CoderTemplateTest` does not finish deleting](#a-codertemplatetest-does-not-finish-deleting).
-2. With the aggregated API server installed, a namespace without an eligible `CoderControlPlane` never finishes deleting ([#209](https://github.com/coder/coder-k8s/issues/209)). Its condition `NamespaceDeletionContentFailure` is `True` with the message `no eligible CoderControlPlane instances found in namespace "<namespace>"`. The aggregated API answers the namespace controller's LIST with `503`. Read the conditions:
+2. If the namespace condition `NamespaceDeletionContentFailure` is `True`, read its message. It contains the error that the aggregated API returned when the namespace controller listed its resources, for example a `503` or a `400`. For what each error means, see [Namespaces without a Coder backend](../reference/aggregated-api-behavior.md#namespaces-without-a-coder-backend) and [Aggregated reads return `ServiceUnavailable`](#aggregated-reads-return-serviceunavailable). If a `CoderControlPlane` is still in the namespace, check its finalizers, for example `coder.com/workspace-rbac-cleanup`, and the controller logs.
 
     ```bash
     kubectl get namespace <namespace> -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.message}{"\n"}{end}'
+    kubectl get codercontrolplanes -n <namespace> -o jsonpath='{range .items[*]}{.metadata.name}: {.metadata.finalizers}{"\n"}{end}'
     ```
-
-    If `NamespaceContentRemaining` and `NamespaceFinalizersRemaining` are `False`, nothing is left in the namespace, and only #209 holds it.
