@@ -287,6 +287,37 @@ func (f *fakeCoder) archiveVersion(versionID uuid.UUID) {
 	f.versions[versionID] = v
 }
 
+// updateUser edits a user, for example to suspend it.
+func (f *fakeCoder) updateUser(userID uuid.UUID, edit func(*codersdk.User)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.users[userID]
+	require.True(f.t, ok, "assertion failed: unknown user %s", userID)
+	edit(&u)
+	f.users[userID] = u
+}
+
+// setVersionJob moves a version's import job to status.
+func (f *fakeCoder) setVersionJob(versionID uuid.UUID, status codersdk.ProvisionerJobStatus) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.versions[versionID]
+	require.True(f.t, ok, "assertion failed: unknown version %s", versionID)
+	v.Job.Status = status
+	f.versions[versionID] = v
+}
+
+// promoteVersion makes a version the active version of its template.
+func (f *fakeCoder) promoteVersion(versionID uuid.UUID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.versions[versionID]
+	require.True(f.t, ok, "assertion failed: unknown version %s", versionID)
+	tpl := f.templates[*v.TemplateID]
+	tpl.ActiveVersionID = versionID
+	f.templates[tpl.ID] = tpl
+}
+
 // setBuildJob moves a build's job to status. A succeeded delete build deletes
 // the workspace, which frees its name.
 func (f *fakeCoder) setBuildJob(buildID uuid.UUID, status codersdk.ProvisionerJobStatus) {
@@ -349,8 +380,10 @@ func (f *fakeCoder) userByIdent(ident string) (codersdk.User, bool) {
 	return findIn(f.users, func(u codersdk.User) bool { return u.ID.String() == ident || strings.EqualFold(u.Username, ident) })
 }
 
+// orgByIdent matches names case-insensitively, like Coder v2.37.2
+// (GetOrganizationByName compares LOWER(name)).
 func (f *fakeCoder) orgByIdent(ident string) (codersdk.Organization, bool) {
-	return findIn(f.orgs, func(o codersdk.Organization) bool { return o.ID.String() == ident || o.Name == ident })
+	return findIn(f.orgs, func(o codersdk.Organization) bool { return o.ID.String() == ident || strings.EqualFold(o.Name, ident) })
 }
 
 func (f *fakeCoder) findBuild(buildID uuid.UUID) (*fakeWorkspace, *codersdk.WorkspaceBuild) {
