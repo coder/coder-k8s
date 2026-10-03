@@ -41,6 +41,9 @@ type transitionFakeCoder struct {
 	onPost     func(w http.ResponseWriter, r *http.Request)
 	onReread   func(w http.ResponseWriter, r *http.Request)
 	lookupGate chan struct{}
+	meStatus   int // when set, GET /users/me answers this error status
+
+	meCalls atomic.Int32
 
 	lookups atomic.Int32
 	rereads atomic.Int32
@@ -63,7 +66,7 @@ func newTransitionFakeCoder(t *testing.T, latest codersdk.WorkspaceBuild) *trans
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 		f.mu.Lock()
-		ws, gate, onPost, onReread := f.ws, f.lookupGate, f.onPost, f.onReread
+		ws, gate, onPost, onReread, meStatus := f.ws, f.lookupGate, f.onPost, f.onReread, f.meStatus
 		f.mu.Unlock()
 		switch {
 		case r.Method == http.MethodGet && len(parts) == 6 && parts[2] == "users" && parts[4] == "workspace":
@@ -81,6 +84,11 @@ func newTransitionFakeCoder(t *testing.T, latest codersdk.WorkspaceBuild) *trans
 			}
 			writeLogFakeJSON(w, ws)
 		case r.Method == http.MethodGet && len(parts) == 4 && parts[2] == "users" && parts[3] == codersdk.Me:
+			f.meCalls.Add(1)
+			if meStatus != 0 {
+				writeLogFakeError(w, meStatus)
+				return
+			}
 			writeLogFakeJSON(w, codersdk.User{ReducedUser: codersdk.ReducedUser{MinimalUser: codersdk.MinimalUser{ID: f.operatorID}}})
 		case r.Method == http.MethodGet && len(parts) == 4 && parts[2] == "organizations":
 			switch {
@@ -541,6 +549,28 @@ func TestWorkspaceTransitionUncertainPost(t *testing.T) {
 		}
 		if event := receiveWatchEvent(t, watcher, watchEventTimeout); workspaceFromWatchEvent(t, event).Status.LatestBuildID != queued.ID.String() {
 			t.Fatalf("%s: watch event %s, want the confirmed build", tc.name, event.Type)
+		}
+	}
+
+	// The new build looks right, but GET /users/me fails, so the server cannot confirm who started
+	// it: the uncertain 504, not a 500 and not Queued.
+	{
+		f := newTransitionFakeCoder(t, build(start, codersdk.ProvisionerJobSucceeded))
+		queued := build(stop, codersdk.ProvisionerJobPending)
+		queued.ID, queued.BuildNumber, queued.InitiatorID = uuid.New(), 8, f.operatorID
+		f.set(func(f *transitionFakeCoder) {
+			f.meStatus = http.StatusInternalServerError
+			f.onPost = func(w http.ResponseWriter, r *http.Request) {
+				f.update(func(ws *codersdk.Workspace) { ws.LatestBuild = queued })
+				stalledPost(w, r)
+			}
+		})
+		s := NewWorkspaceTransitionStorage(newTestWorkspaces(t, f, 300*time.Millisecond), stop)
+		if _, err := runTransition(t, s, false); !apierrors.IsTimeout(err) || !strings.Contains(err.Error(), "uncertain") {
+			t.Fatalf("users/me fails: err=%v, want an uncertain 504", err)
+		}
+		if f.meCalls.Load() != 1 || f.rereads.Load() != 1 {
+			t.Fatalf("users/me fails: me calls=%d rereads=%d, want 1 and 1", f.meCalls.Load(), f.rereads.Load())
 		}
 	}
 

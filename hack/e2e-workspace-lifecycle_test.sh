@@ -91,6 +91,20 @@ case "${pos[0]}:${pos[1]:-}" in
       else r=Promoted; [[ $SCENARIO == promote-not-applied ]] || { av=$v; st=$((st + 1)); }; fi
       echo "$id $av $n $st" >"$S/template"; jq -n --arg r "$r" '{status: {result: $r}}'; exit 0
     fi
+    if [[ $raw == */start* || $raw == */stop* ]]; then # #148 start/stop; builds use their own counter
+      sub=${raw##*/} && sub=${sub%%\?*} && f=$(wsfile "${raw%/*}"); [[ -f $f ]] || err NotFound missing
+      want=running && [[ $sub == start ]] || want=stopped
+      dry=false && [[ $raw != *dryRun=All* ]] || dry=true
+      b=$(jq -r .status.latestBuildID "$f")
+      if [[ $(jq -r .status.latestBuildStatus "$f") == "$want" && $SCENARIO != repeat-start-queues ]]; then o=Unchanged
+      elif [[ $dry == true && $SCENARIO != dryrun-queues ]]; then o=WouldQueue b=""
+      else
+        n=$(($(cat "$S/tcounter" 2>/dev/null || echo 0) + 1)) && echo "$n" >"$S/tcounter" && b=tbuild-$n o=Queued
+        echo "$b" >>"$S/builds-$(jq -r .metadata.uid "$f")"
+        jq --arg b "$b" --arg st "$want" '.status = {latestBuildID: $b, latestBuildStatus: $st}' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+      fi
+      exec jq -n --arg t "$sub" --arg o "$o" --argjson d "$dry" --arg b "$b" '{status: {transition: $t, outcome: $o, dryRun: $d, buildID: $b}}'
+    fi
     ws_create && cat "$(wsfile "$(jq -r .metadata.name "$file")")" ;;
   apply:)
     if [[ $file == *.yaml ]]; then # the CoderTemplate manifest; $S/template holds "id active-version version-count"
@@ -227,6 +241,7 @@ mutations() { grep -E '^kubectl .*((create|replace|delete) --raw|apply -f)|^curl
   awk '/^kubectl/ {for (i = 2; i <= NF; i++) if ($i ~ /^(create|replace|delete|apply)$/) {print "kubectl " $i; next}} /^curl/ {print "curl PATCH"}' | paste -sd, -; }
 VERSIONS="kubectl apply,kubectl apply,kubectl create,kubectl create,kubectl create" # template, second version, promote v1, repeat, dry-run v2
 APPLIES="$VERSIONS,kubectl apply,kubectl apply,kubectl apply"                       # then workspace, identical template and workspace re-apply
+TRANS="kubectl create,kubectl create,kubectl create,kubectl create" # #148 start, repeated start, dry-run stop, stop
 check() { # <description> <command...>
   local desc=$1
   shift
@@ -249,8 +264,8 @@ check "watch URL uses the current token and only watch/resourceVersion/timeoutSe
   eval '[[ $(<"$S/watch_url") =~ ^/apis/aggregation\.coder\.com/v1alpha1/namespaces/coder/coderworkspaces\?watch=1\&resourceVersion=${rv}\&timeoutSeconds=[0-9]+$ ]]'
 check "watch URL omits sendInitialEvents and resourceVersionMatch" eval '! grep -qE "sendInitialEvents|resourceVersionMatch" "$S/watch_url"'
 check "update was sent only after watch registration" eval '[[ $(grep -n "watch=1" "$S/calls.log" | cut -d: -f1) -lt $(grep -n "replace --raw" "$S/calls.log" | head -1 | cut -d: -f1) ]]'
-check "mutation order: create, update, rename, stale 409 update+delete, wrong-UID 409, delete, recreate, 409 delete" \
-  no_mutations_after "$APPLIES,kubectl replace,curl PATCH,kubectl replace,kubectl delete,kubectl delete,kubectl delete,kubectl create,kubectl delete"
+check "mutation order: create, update, start/stop, rename, stale 409 update+delete, wrong-UID 409, delete, recreate, 409 delete" \
+  no_mutations_after "$APPLIES,kubectl replace,$TRANS,curl PATCH,kubectl replace,kubectl delete,kubectl delete,kubectl delete,kubectl create,kubectl delete"
 check "stale requests carry the genuine pre-rename token; rename changed it" eval 'grep -qx "rv_pre_rename=2" "$T/work/receipt.txt" &&
   grep -qx "rv_post_rename=2-renamed" "$T/work/receipt.txt" && jq -e ".metadata.resourceVersion == \"2\"" "$T/work/stale-update.json" >/dev/null'
 check "template applied with the long request timeout, then re-applied before any lifecycle mutation" eval '[[ $(grep -c -- "--request-timeout=600s apply -f config/e2e/codertemplate.yaml" "$S/calls.log") -eq 2 ]]'
@@ -265,8 +280,8 @@ check "background port-forward and watch stopped" bg_stopped
 check "every non-streaming kubectl request carries --request-timeout=30s" \
   eval '! grep "^kubectl" "$S/calls.log" | grep -v -e "watch=1" -e port-forward | grep -qvE -- "--request-timeout=[0-9]+s "'
 check "recreate only after the delete job succeeded" eval '[[ $(grep -n include_deleted "$S/calls.log" | tail -1 | cut -d: -f1) -lt $(grep -n "^kubectl --request-timeout=30s create" "$S/calls.log" | tail -1 | cut -d: -f1) ]]'
-check "receipt: source, run, version, identity, UIDs, 14 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
-  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 14 ]]'
+check "receipt: source, run, version, identity, UIDs, 15 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
+  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 15 ]]'
 
 echo "TEST image-mismatch: serving image differs from built image"
 run_scenario image-mismatch SERVING_ID="$OTHER"; summary
@@ -311,25 +326,25 @@ check "bounded event match fails; no rename or delete" \
 
 echo "TEST rename-rejected: Coder rejects the out-of-band rename"
 run_scenario rename-rejected; summary
-check "fails at rename; no delete" eval '[[ $RC -ne 0 ]] && bg_stopped && no_mutations_after "$APPLIES,kubectl replace,curl PATCH"'
+check "fails at rename; no delete" eval '[[ $RC -ne 0 ]] && bg_stopped && no_mutations_after "$APPLIES,kubectl replace,$TRANS,curl PATCH"'
 
 echo "TEST delete-ignores-preconditions: stale DELETE (old token, live UID) is accepted"
 run_scenario delete-ignores-preconditions; summary
 check "fails on missing 409; no later delete or recreate" \
-  eval 'failed_with "expected (Conflict) but request succeeded" && no_mutations_after "$APPLIES,kubectl replace,curl PATCH,kubectl replace,kubectl delete"'
+  eval 'failed_with "expected (Conflict) but request succeeded" && no_mutations_after "$APPLIES,kubectl replace,$TRANS,curl PATCH,kubectl replace,kubectl delete"'
 
 echo "TEST wrong-uid-ignored: wrong-UID delete is accepted"
 run_scenario wrong-uid-ignored; summary
 check "fails on missing 409; no live delete or recreate" \
-  eval 'failed_with "expected (Conflict) but request succeeded" && no_mutations_after "$APPLIES,kubectl replace,curl PATCH,kubectl replace,kubectl delete,kubectl delete"'
+  eval 'failed_with "expected (Conflict) but request succeeded" && no_mutations_after "$APPLIES,kubectl replace,$TRANS,curl PATCH,kubectl replace,kubectl delete,kubectl delete"'
 
 echo "TEST render-fail-delete: DeleteOptions render fails inside expect_error (errexit off)"
 run_scenario render-fail-delete; summary
-check "fails with zero kubectl delete calls and no recreate" eval 'failed_with "expected (Conflict)" && no_mutations_after "$APPLIES,kubectl replace,curl PATCH,kubectl replace"'
+check "fails with zero kubectl delete calls and no recreate" eval 'failed_with "expected (Conflict)" && no_mutations_after "$APPLIES,kubectl replace,$TRANS,curl PATCH,kubectl replace"'
 
 echo "TEST delete-job-failed: workspace is 404 but its delete job failed"
 run_scenario delete-job-failed DELETE_JOB_STATUS=failed; summary
-check "fails on delete job status; no recreate" eval 'failed_with "delete job of uid-1 ended in status failed" && no_mutations_after "$APPLIES,kubectl replace,curl PATCH,kubectl replace,kubectl delete,kubectl delete,kubectl delete"'
+check "fails on delete job status; no recreate" eval 'failed_with "delete job of uid-1 ended in status failed" && no_mutations_after "$APPLIES,kubectl replace,$TRANS,curl PATCH,kubectl replace,kubectl delete,kubectl delete,kubectl delete"'
 
 echo "TEST watch-exits: watch registers then exits before the update"
 run_scenario watch-exits; summary
@@ -339,15 +354,15 @@ echo "TEST recreate-build-drift: prior-UID delete returns 409 but the recreated 
 run_scenario recreate-build-drift; summary
 check "fails on recreated latest build status" eval 'failed_with "recreated object changed after prior-UID delete"'
 
-STALE="$APPLIES,kubectl replace,curl PATCH,kubectl replace,kubectl delete"
+STALE="$APPLIES,kubectl replace,$TRANS,curl PATCH,kubectl replace,kubectl delete"
 # name|expected message|mutations: each #109 negative must stop before the wrong-UID/live deletes and recreate.
 while IFS='|' read -r name msg muts; do
   echo "TEST $name (#109)"
   run_scenario "$name" </dev/null; summary
   check "fails with '$msg'; mutations stop at: $muts" eval 'failed_with "$msg" && no_mutations_after "$muts"'
 done <<CASES
-old-timestamp-rename|rename did not change resourceVersion|$APPLIES,kubectl replace,curl PATCH
-stale-update-accepted|expected (Conflict) but request succeeded|$APPLIES,kubectl replace,curl PATCH,kubectl replace
+old-timestamp-rename|rename did not change resourceVersion|$APPLIES,kubectl replace,$TRANS,curl PATCH
+stale-update-accepted|expected (Conflict) but request succeeded|$APPLIES,kubectl replace,$TRANS,curl PATCH,kubectl replace
 stale-side-effect-latest|backend latest build changed after stale requests|$STALE
 stale-side-effect-count|backend build count changed after stale requests|$STALE
 stale-side-effect-object|object changed after stale requests|$STALE
@@ -398,6 +413,16 @@ echo "TEST promote-repeat-writes (#149): a repeated promote changes the template
 run_scenario promote-repeat-writes; summary
 check "fails on updated_at; no workspace mutation" eval 'failed_with "repeated promote v1 wrote to Coder" &&
   no_mutations_after "kubectl apply,kubectl apply,kubectl create,kubectl create"'
+
+echo "TEST repeat-start-queues (#148): a repeated start of a running workspace queues a build"
+run_scenario repeat-start-queues; summary
+check "fails on the repeated start; no rename" eval 'failed_with "repeated start did not answer Unchanged" &&
+  no_mutations_after "$APPLIES,kubectl replace,kubectl create,kubectl create"'
+
+echo "TEST dryrun-queues (#148): a dry-run stop queues a build"
+run_scenario dryrun-queues; summary
+check "fails on the dry-run stop; no real stop and no rename" eval 'failed_with "dry-run stop did not answer WouldQueue" &&
+  no_mutations_after "$APPLIES,kubectl replace,kubectl create,kubectl create,kubectl create"'
 
 echo "TEST missing-built-id: BUILT_IMAGE_ID is not a sha256 ID"
 run_scenario missing-built-id BUILT_IMAGE_ID=e2e; summary

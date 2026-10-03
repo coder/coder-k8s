@@ -278,6 +278,24 @@ wait "$FOLLOW_PID" || fail "log follow failed: $(head -c 300 "$WORK/follow.err")
 [[ -s $WORK/follow.log ]] || fail "log follow of stop build $BUILD printed nothing"
 log "log follow: $(wc -l <"$WORK/follow.log") lines"
 
+step "coderworkspaces/start and /stop round trip; a repeated start and a dry-run stop queue nothing (#148)"
+transition() { k create --raw "$API/$NAME/$1${2:-}" -f - <<<'{}'; } # <start|stop> [query]
+queued_build() { jq -er --arg t "$1" 'select(.status.outcome == "Queued" and .status.transition == $t) | .status.buildID'; }
+OUT=$(transition start) || fail "POST $NAME/start failed"
+BUILD=$(queued_build start <<<"$OUT") || fail "start of the stopped workspace did not queue a build: $OUT"
+wait_until "start build $BUILD" build_done "$NAME" "$BUILD" running
+COUNT=$(build_count) || fail "cannot list backend builds of $UID0"
+OUT=$(transition start) || fail "repeated POST $NAME/start failed"
+jq -e --arg b "$BUILD" '.status.outcome == "Unchanged" and .status.buildID == $b' <<<"$OUT" >/dev/null ||
+  fail "repeated start did not answer Unchanged with build $BUILD: $OUT"
+OUT=$(transition stop '?dryRun=All') || fail "dry-run POST $NAME/stop failed"
+jq -e '.status.outcome == "WouldQueue" and .status.dryRun == true and (.status.buildID // "") == ""' <<<"$OUT" >/dev/null ||
+  fail "dry-run stop did not answer WouldQueue without a build: $OUT"
+[[ $(build_count) == "$COUNT" ]] || fail "a repeated start or a dry-run stop queued a build (count was $COUNT)"
+OUT=$(transition stop) || fail "POST $NAME/stop failed"
+BUILD=$(queued_build stop <<<"$OUT") || fail "stop of the running workspace did not queue a build: $OUT"
+wait_until "stop build $BUILD" build_done "$NAME" "$BUILD" stopped
+
 step "out-of-band Coder rename keeps UID; old name is 404"
 PRE=$(ws_get "$NAME") # genuine pre-rename object of the stopped workspace
 OLD_RV=$(jq -er '.metadata.resourceVersion' <<<"$PRE") || fail "pre-rename object lacks resourceVersion"
