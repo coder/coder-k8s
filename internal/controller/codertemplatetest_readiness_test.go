@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 )
@@ -82,9 +83,18 @@ func TestTemplateTestReadinessPass(t *testing.T) {
 	requireTemplateTestRunning(t, tt, "AgentsReady", "")
 	require.Equal(t, e.clock.Now().Unix(), tt.Status.AgentsReadyTime.Unix())
 
-	reads := e.fake.requestCount(routeWorkspace)
-	requireTemplateTestRunning(t, e.settle(t, key), "AgentsReady", "")
-	require.Equal(t, reads, e.fake.requestCount(routeWorkspace), "a passed test reads no readiness again")
+	// Then the delete build. Only its success makes the test Succeeded.
+	tt = e.settle(t, key)
+	requireTemplateTestRunning(t, tt, "DeletingWorkspace", "is pending")
+	require.Equal(t, 1, e.fake.requestCount(routeCreateBuild), "one delete build")
+	e.fake.setBuildJob(uuid.MustParse(tt.Status.DeleteBuildID), codersdk.ProvisionerJobSucceeded)
+	tt = e.settle(t, key)
+	require.Equal(t, coderv1alpha1.CoderTemplateTestPhaseSucceeded, tt.Status.Phase, tt.Status.Message)
+	require.True(t, meta.IsStatusConditionTrue(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionReady))
+	require.True(t, meta.IsStatusConditionTrue(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted))
+	require.NotNil(t, tt.Status.CompletionTime)
+	require.False(t, controllerutil.ContainsFinalizer(tt, coderv1alpha1.CoderTemplateTestCleanupFinalizer))
+	require.Equal(t, 1, e.fake.requestCount(routeCreateBuild))
 	require.Equal(t, nameLookups, e.fake.requestCount(routeWorkspaceByName), "the name check runs only before creation")
 }
 
@@ -129,7 +139,7 @@ func TestTemplateTestReadinessFailures(t *testing.T) {
 			requireTemplateTestFailedWith(t, tt, tc.reason, metav1.ConditionTrue, tc.deleted)
 			continue
 		}
-		requireTemplateTestFailedWith(t, tt, tc.reason, metav1.ConditionFalse, "CleanupPending")
+		requireTemplateTestFailedWith(t, tt, tc.reason, metav1.ConditionFalse, "Deleting")
 		require.Nil(t, tt.Status.AgentsReadyTime, tc.name)
 		require.NotContains(t, e.statusText(t, key), agentNamePrefix, tc.name)
 		require.NotContains(t, tt.Status.Message, `""`, "%s: no empty values in the message", tc.name)

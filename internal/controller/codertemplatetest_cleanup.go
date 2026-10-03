@@ -26,8 +26,10 @@ const (
 // gone (plan amendments A1 and A2).
 func templateTestCleanupDone(tt *coderv1alpha1.CoderTemplateTest) bool {
 	reason := templateTestDeletedReason(tt)
-	// Retained counts only while the annotation still says retain: an admin
-	// can switch back to delete before the finalizer is released.
+	// Retained counts only while the annotation still says retain. When an
+	// admin switches a retained final test back to delete, even after the
+	// release, the controller adds the finalizer again and deletes the
+	// workspace.
 	retained := reason == "Retained" && tt.Annotations[templateTestDeletionPolicyAnnotation] == "retain"
 	return meta.IsStatusConditionTrue(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted) ||
 		retained || reason == "ControlPlaneGone"
@@ -105,21 +107,32 @@ func (r *CoderTemplateTestReconciler) cleanupStep(ctx context.Context, tt *coder
 			step = nil
 		}
 	}
+	requeue := templateTestUnavailablePoll
+	if step == nil {
+		result, err := r.deleteStep(ctx, sdk, tt, r.Clock.Now())
+		if result.wait, err = waitOnWrongAnswer(ctx, result.wait, err); err != nil {
+			return 0, err
+		}
+		if result.deleted {
+			set(metav1.ConditionTrue, "Deleted", fmt.Sprintf("The delete build of workspace %s succeeded.", name))
+			return 0, nil
+		}
+		step, requeue = result.wait, max(result.requeue, templateTestRunningPoll)
+	}
 	switch {
-	case step == nil:
-		// The delete steps come with the next part of plan PR 5.
-		set(metav1.ConditionFalse, "CleanupPending", fmt.Sprintf("Workspace %s can exist. The delete steps are not enabled yet.", name))
-		return 0, nil
 	case step.deleted != nil:
 		set(step.deleted.Status, step.deleted.Reason, step.deleted.Message)
 		return 0, nil
 	case step.reason == "ConfirmingCreate":
 		set(metav1.ConditionUnknown, "CreateOutcomeUnknown", step.message)
 		return templateTestRunningPoll, nil
+	case step.reason == "Deleting" || step.reason == "DeleteRetrying" || step.reason == "CoderAnswerMismatch":
+		set(metav1.ConditionFalse, step.reason, step.message)
+		return requeue, nil
 	}
 	// The control plane exists, but Coder or its token is not usable.
 	set(metav1.ConditionFalse, "ControlPlaneUnavailable", step.message)
-	return templateTestUnavailablePoll, nil
+	return requeue, nil
 }
 
 // controlPlaneGone reports whether the referenced control plane is NotFound
