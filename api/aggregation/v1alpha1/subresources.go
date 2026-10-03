@@ -33,7 +33,8 @@ type CoderTemplateVersionPromotionSpec struct {
 type CoderTemplateVersionPromotionResult string
 
 const (
-	// PromotionResultPromoted means that this request changed the active version.
+	// PromotionResultPromoted means that the requested version is active after this request, as a
+	// re-read of the template confirmed. This request or a concurrent one activated it.
 	PromotionResultPromoted CoderTemplateVersionPromotionResult = "Promoted"
 	// PromotionResultAlreadyActive means that the version was already active, so nothing changed.
 	PromotionResultAlreadyActive CoderTemplateVersionPromotionResult = "AlreadyActive"
