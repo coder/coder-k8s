@@ -35,9 +35,9 @@ type deleteResult struct {
 // status.workspaceID. It acts on the latest build: it cancels an active start
 // or stop build, waits for an active delete build, and retries a failed
 // delete build after a backoff. It never cancels a delete build and never
-// sends an orphan delete.
+// sends an orphan delete. afterPass marks the delete of a passed test.
 func (r *CoderTemplateTestReconciler) deleteStep(
-	ctx context.Context, sdk *codersdk.Client, tt *coderv1alpha1.CoderTemplateTest, now time.Time,
+	ctx context.Context, sdk *codersdk.Client, tt *coderv1alpha1.CoderTemplateTest, now time.Time, afterPass bool,
 ) (deleteResult, error) {
 	name := tt.Status.WorkspaceName
 	wait := func(requeue time.Duration, reason, format string, args ...any) (deleteResult, error) {
@@ -70,9 +70,12 @@ func (r *CoderTemplateTestReconciler) deleteStep(
 	case build.Transition == codersdk.WorkspaceTransitionDelete && status != codersdk.ProvisionerJobFailed && status != codersdk.ProvisionerJobCanceled:
 		// An unknown status proves no failure: wait.
 		return wait(templateTestRunningPoll, "Deleting", "The delete build of workspace %s is %s.", name, status)
-	case build.Transition == codersdk.WorkspaceTransitionDelete && build.ID.String() == tt.Status.DeleteBuildID:
+	case build.Transition == codersdk.WorkspaceTransitionDelete && (build.ID.String() == tt.Status.DeleteBuildID || afterPass):
 		// Count each failed delete build once. The status write stores the
-		// count before any new delete build.
+		// count before any new delete build. After a pass, every failed
+		// delete build counts and fails the test, even one whose ID a failed
+		// status write lost, or someone else's. The test has counted none
+		// yet, and the same status write makes it final, so it counts once.
 		tt.Status.DeleteAttempts++
 		tt.Status.DeleteBuildID = ""
 		retryAt := templateTestDeleteRetryAt(build, tt.Status.DeleteAttempts, now)
@@ -121,7 +124,7 @@ func (r *CoderTemplateTestReconciler) deleteStep(
 func (r *CoderTemplateTestReconciler) deleteAfterPass(
 	ctx context.Context, sdk *codersdk.Client, tt *coderv1alpha1.CoderTemplateTest, now time.Time,
 ) (*templateTestStep, error) {
-	result, err := r.deleteStep(ctx, sdk, tt, now)
+	result, err := r.deleteStep(ctx, sdk, tt, now, true)
 	switch {
 	case err != nil:
 		return nil, err

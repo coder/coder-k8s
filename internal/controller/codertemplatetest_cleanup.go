@@ -141,7 +141,7 @@ func (r *CoderTemplateTestReconciler) cleanupStep(ctx context.Context, tt *coder
 	}
 	requeue := templateTestUnavailablePoll
 	if step == nil {
-		result, err := r.deleteStep(ctx, sdk, tt, r.Clock.Now())
+		result, err := r.deleteStep(ctx, sdk, tt, r.Clock.Now(), false)
 		if result.wait, err = waitOnWrongAnswer(ctx, result.wait, err); err != nil {
 			return 0, err
 		}
@@ -160,7 +160,7 @@ func (r *CoderTemplateTestReconciler) cleanupStep(ctx context.Context, tt *coder
 		return 0, nil
 	case step.reason == "ConfirmingCreate":
 		set(metav1.ConditionUnknown, "CreateOutcomeUnknown", step.message)
-		return templateTestRunningPoll, nil
+		return cmp.Or(step.requeue, templateTestRunningPoll), nil
 	case step.reason == "Deleting" || step.reason == "DeleteRetrying" || step.reason == "CoderAnswerMismatch":
 		set(metav1.ConditionFalse, step.reason, step.message)
 		return requeue, nil
