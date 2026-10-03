@@ -27,6 +27,10 @@ const (
 	// this test can still exist in Coder. Unknown means the controller cannot
 	// prove it either way.
 	CoderTemplateTestConditionWorkspaceDeleted = "WorkspaceDeleted"
+
+	// CoderTemplateTestCleanupFinalizer keeps a test until its workspace is
+	// deleted in Coder.
+	CoderTemplateTestCleanupFinalizer = "coder.com/template-test-cleanup"
 )
 
 // CoderTemplateTestVersion selects the template version under test. Set

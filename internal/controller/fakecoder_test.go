@@ -19,8 +19,9 @@ import (
 	"github.com/coder/coder-k8s/internal/aggregated/coder"
 )
 
-// fakeCoderToken is the only session token the fake Coder accepts.
-const fakeCoderToken = "fake-operator-token"
+// fakeCoderToken is the only session token the fake Coder accepts. It equals
+// the token that createTestControlPlane stores.
+const fakeCoderToken = "operator-session-token"
 
 // Route names for fakeCoder.failNext and fakeCoder.requestCount.
 const (
