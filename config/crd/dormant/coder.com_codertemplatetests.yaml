@@ -102,7 +102,7 @@ spec:
                 description: |-
                   Template is the Coder template as <organization>.<template>, the same
                   format as aggregated CoderTemplate names. Each name has at most 32
-                  characters.
+                  characters and is not one of Coder's reserved names new or create.
                 maxLength: 65
                 pattern: ^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*\.[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$
                 type: string
@@ -110,6 +110,8 @@ spec:
                 - message: organization and template names must each have at most
                     32 characters
                   rule: self.matches('^[^.]{1,32}[.][^.]{1,32}$')
+                - message: organization and template names must not be new or create
+                  rule: '!self.matches(''^(new|create)[.]'') && !self.matches(''[.](new|create)$'')'
               timeoutSeconds:
                 default: 900
                 description: |-

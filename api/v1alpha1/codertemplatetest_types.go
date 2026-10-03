@@ -82,9 +82,10 @@ type CoderTemplateTestSpec struct {
 	ControlPlaneRef CoderControlPlaneReference `json:"controlPlaneRef"`
 	// Template is the Coder template as <organization>.<template>, the same
 	// format as aggregated CoderTemplate names. Each name has at most 32
-	// characters.
+	// characters and is not one of Coder's reserved names new or create.
 	// +kubebuilder:validation:MaxLength=65
 	// +kubebuilder:validation:XValidation:rule="self.matches('^[^.]{1,32}[.][^.]{1,32}$')",message="organization and template names must each have at most 32 characters"
+	// +kubebuilder:validation:XValidation:rule="!self.matches('^(new|create)[.]') && !self.matches('[.](new|create)$')",message="organization and template names must not be new or create"
 	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*\.[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$`
 	Template string `json:"template"`
 	// Version selects the template version under test.

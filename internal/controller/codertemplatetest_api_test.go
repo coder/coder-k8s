@@ -75,6 +75,15 @@ func TestCoderTemplateTestAPIValidation(t *testing.T) {
 		{name: "organization name too long", wantErr: "organization and template names must each have at most 32 characters", mutate: func(s *coderv1alpha1.CoderTemplateTestSpec) {
 			s.Template = strings.Repeat("a", 33) + ".b"
 		}},
+		{name: "reserved template name", wantErr: "organization and template names must not be new or create", mutate: func(s *coderv1alpha1.CoderTemplateTestSpec) {
+			s.Template = "default.new"
+		}},
+		{name: "reserved organization name", wantErr: "organization and template names must not be new or create", mutate: func(s *coderv1alpha1.CoderTemplateTestSpec) {
+			s.Template = "create.docker"
+		}},
+		{name: "reserved word inside a name", mutate: func(s *coderv1alpha1.CoderTemplateTestSpec) {
+			s.Template = "newco.create-env"
+		}},
 		{name: "version name with a slash", wantErr: "spec.version.name", mutate: func(s *coderv1alpha1.CoderTemplateTestSpec) {
 			s.Version.Name = "v1/../v2"
 		}},
