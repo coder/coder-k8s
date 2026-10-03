@@ -119,6 +119,23 @@ type CoderControlPlaneSpec struct {
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 	// TopologySpreadConstraints control pod topology spread.
 	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+
+	// TemplateTests configures CoderTemplateTest runs against this control plane.
+	// +optional
+	TemplateTests *TemplateTestsSpec `json:"templateTests,omitempty"`
+}
+
+// TemplateTestsSpec configures CoderTemplateTest runs against a control plane.
+type TemplateTestsSpec struct {
+	// OwnerUserID is the UUID of the Coder user that owns every test
+	// workspace. Use a dedicated low-privilege tester user: each start build
+	// gives the owner's API token to the template's Terraform. Tests stay
+	// pending until this is set. The CoderTemplateTest controller is not
+	// enabled yet, so this field has no effect today.
+	// +kubebuilder:validation:Format=uuid
+	// +kubebuilder:validation:MaxLength=36
+	// +optional
+	OwnerUserID string `json:"ownerUserID,omitempty"`
 }
 
 // DatabaseSpec configures the external PostgreSQL database used by Coder.

@@ -28,6 +28,11 @@ list_manifests() {
 	printf '%s\n' "${resource_files[@]}"
 }
 
+# CRDs of kinds whose controller is not registered yet. They go to config/crd/dormant/, which no kustomization,
+# example, doc or script applies, so the kind is never served without the controller's cleanup guarantees.
+# Move a file back by deleting its entry when the controller ships.
+DORMANT_CRDS=(coder.com_codertemplatetests.yaml)
+
 # RBAC manifests that only the aggregated API server needs; the controller-only install bundle leaves them out.
 BUNDLE_EXCLUDED_RBAC=(apiservice-cabundle-role.yaml auth-delegator-binding.yaml authentication-reader-binding.yaml)
 
@@ -92,6 +97,8 @@ if [[ ! -d config/crd/bases ]]; then
 	exit 1
 fi
 find config/crd/bases -maxdepth 1 -mindepth 1 -type f -name '*.yaml' -delete
+mkdir -p config/crd/dormant
+find config/crd/dormant -maxdepth 1 -mindepth 1 -type f -name '*.yaml' -delete
 # config/rbac/ also holds hand-written manifests, so only its generated role.yaml is removed and must be recreated.
 rm -f config/rbac/role.yaml
 
@@ -100,6 +107,14 @@ GOFLAGS=-mod=vendor go run ./vendor/sigs.k8s.io/controller-tools/cmd/controller-
 	crd:crdVersions=v1 \
 	paths=./api/v1alpha1 \
 	output:crd:artifacts:config=config/crd/bases
+
+for dormant_crd in "${DORMANT_CRDS[@]}"; do
+	if [[ ! -f "config/crd/bases/${dormant_crd}" ]]; then
+		echo "assertion failed: controller-gen did not write config/crd/bases/${dormant_crd} (listed in DORMANT_CRDS)" >&2
+		exit 1
+	fi
+	mv "config/crd/bases/${dormant_crd}" "config/crd/dormant/${dormant_crd}"
+done
 
 # Generate RBAC across the repo.
 GOFLAGS=-mod=vendor go run ./vendor/sigs.k8s.io/controller-tools/cmd/controller-gen \

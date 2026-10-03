@@ -40,6 +40,7 @@
 | `tolerations` | [Toleration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#toleration-v1-core) array | Tolerations are applied to the control plane pod. |
 | `affinity` | [Affinity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#affinity-v1-core) | Affinity configures pod affinity/anti-affinity rules. |
 | `topologySpreadConstraints` | [TopologySpreadConstraint](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#topologyspreadconstraint-v1-core) array | TopologySpreadConstraints control pod topology spread. |
+| `templateTests` | [TemplateTestsSpec](#templatetestsspec) | TemplateTests configures CoderTemplateTest runs against this control plane. |
 
 ## Status
 
@@ -207,6 +208,14 @@ TLSSpec configures Coder built-in TLS.
 | Field | Type | Description |
 | --- | --- | --- |
 | `secretNames` | string array | SecretNames lists TLS secrets to mount for built-in TLS. When non-empty, TLS is enabled on the Coder control plane. |
+
+### TemplateTestsSpec
+
+TemplateTestsSpec configures CoderTemplateTest runs against a control plane.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `ownerUserID` | string | OwnerUserID is the UUID of the Coder user that owns every test workspace. Use a dedicated low-privilege tester user: each start build gives the owner's API token to the template's Terraform. Tests stay pending until this is set. The CoderTemplateTest controller is not enabled yet, so this field has no effect today. |
 
 ## Source
 
