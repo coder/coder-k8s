@@ -232,6 +232,12 @@ func TestTemplateTestOwnerEligibility(t *testing.T) {
 			e.fake.addMember(e.fake.addOrganization("other"), u, codersdk.RoleOrganizationTemplateAdmin)
 			return u
 		}},
+		{name: "admin role as a default member role of another organization", refusal: `default member role "organization-template-admin"`, setup: func(e *templateTestEnv) uuid.UUID {
+			other := e.fake.addOrganization("other")
+			e.fake.setDefaultMemberRoles(other, codersdk.RoleOrganizationWorkspaceAccess, codersdk.RoleOrganizationTemplateAdmin)
+			e.fake.addMember(other, e.tester)
+			return e.tester
+		}},
 		{name: "unknown organization role", refusal: `role "custom-builder"`, setup: func(e *templateTestEnv) uuid.UUID {
 			u := e.fake.addUser("t", codersdk.LoginTypePassword)
 			e.fake.addMember(e.orgID, u, "custom-builder")

@@ -228,6 +228,7 @@ func (f *fakeCoder) addOrganization(name string) uuid.UUID {
 	defer f.mu.Unlock()
 	o := codersdk.Organization{}
 	o.ID, o.Name = uuid.New(), name
+	o.DefaultOrgMemberRoles = []string{codersdk.RoleOrganizationWorkspaceAccess} // The v2.37.2 default.
 	f.orgs[o.ID] = o
 	f.orgRoles[o.ID] = map[uuid.UUID][]codersdk.SlimRole{}
 	return o.ID
@@ -295,6 +296,17 @@ func (f *fakeCoder) updateUser(userID uuid.UUID, edit func(*codersdk.User)) {
 	require.True(f.t, ok, "assertion failed: unknown user %s", userID)
 	edit(&u)
 	f.users[userID] = u
+}
+
+// setDefaultMemberRoles sets the roles Coder grants every member of an
+// organization.
+func (f *fakeCoder) setDefaultMemberRoles(orgID uuid.UUID, roles ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	o, ok := f.orgs[orgID]
+	require.True(f.t, ok, "assertion failed: unknown organization %s", orgID)
+	o.DefaultOrgMemberRoles = roles
+	f.orgs[orgID] = o
 }
 
 // setVersionJob moves a version's import job to status.

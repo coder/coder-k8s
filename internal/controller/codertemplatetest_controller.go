@@ -166,9 +166,9 @@ func (r *CoderTemplateTestReconciler) resolveInputs(ctx context.Context, tt *cod
 	if err != nil {
 		return templateTestWait("OwnerNotConfigured", "spec.templateTests.ownerUserID on CoderControlPlane %s: %v", controlPlane.Name, err), nil
 	}
-	owner, step := checkTemplateTestOwner(ctx, sdk, ownerID)
-	if step != nil {
-		return step, nil
+	owner, step, err := checkTemplateTestOwner(ctx, sdk, ownerID)
+	if step != nil || err != nil {
+		return step, err
 	}
 
 	orgName, templateName, err := coder.ParseTemplateName(tt.Spec.Template)
@@ -254,45 +254,58 @@ func (r *CoderTemplateTestReconciler) coderClient(ctx context.Context, tt *coder
 
 // checkTemplateTestOwner refuses owners whose token is worth more than a plain
 // workspace user's: every start build hands the owner's token to Terraform.
-func checkTemplateTestOwner(ctx context.Context, sdk *codersdk.Client, ownerID uuid.UUID) (codersdk.User, *templateTestStep) {
+func checkTemplateTestOwner(ctx context.Context, sdk *codersdk.Client, ownerID uuid.UUID) (codersdk.User, *templateTestStep, error) {
 	refuse := func(format string, args ...any) *templateTestStep {
 		return templateTestWait("OwnerNotEligible", "Coder user %s: %s", ownerID, fmt.Sprintf(format, args...))
 	}
 	user, err := sdk.User(ctx, ownerID.String())
 	if isCoderNotFound(err) {
-		return user, refuse("the user does not exist.")
+		return user, refuse("the user does not exist."), nil
 	} else if err != nil {
-		return user, coderUnavailable("get owner", err)
+		return user, coderUnavailable("get owner", err), nil
 	}
 	if user.ID != ownerID {
-		return user, refuse("Coder returned user %s.", user.ID)
+		return user, nil, fmt.Errorf("assertion failed: Coder returned user %s for owner %s", user.ID, ownerID)
 	}
 	if user.Status == codersdk.UserStatusSuspended {
-		return user, refuse("the user is suspended.")
+		return user, refuse("the user is suspended."), nil
 	}
 	// Headless users created before service accounts still have login type none.
 	if !user.IsServiceAccount && user.LoginType != codersdk.LoginTypePassword && user.LoginType != codersdk.LoginTypeNone { //nolint:staticcheck // See above.
-		return user, refuse("login type %q belongs to a person. Use a service account or a password user.", user.LoginType)
+		return user, refuse("login type %q belongs to a person. Use a service account or a password user.", user.LoginType), nil
 	}
 	for _, role := range user.Roles {
 		if role.Name != codersdk.RoleMember {
-			return user, refuse("site role %q is not allowed.", role.Name)
+			return user, refuse("site role %q is not allowed.", role.Name), nil
 		}
 	}
 	// User.Roles holds site roles only, so read the roles in every
-	// organization: an admin role anywhere makes the token privileged.
+	// organization: an admin role anywhere makes the token privileged. Coder
+	// also grants each organization's default member roles to every member.
+	allowed := func(role string) bool {
+		return role == codersdk.RoleOrganizationMember || role == codersdk.RoleOrganizationWorkspaceAccess
+	}
 	for _, orgID := range user.OrganizationIDs {
+		org, err := sdk.Organization(ctx, orgID)
+		if err != nil {
+			return user, coderUnavailable("get owner organization", err), nil
+		}
+		for _, role := range org.DefaultOrgMemberRoles {
+			if !allowed(role) {
+				return user, refuse("default member role %q in organization %s is not allowed.", role, orgID), nil
+			}
+		}
 		member, err := sdk.OrganizationMember(ctx, orgID.String(), ownerID.String())
 		if err != nil {
-			return user, coderUnavailable("get owner membership", err)
+			return user, coderUnavailable("get owner membership", err), nil
 		}
 		for _, role := range member.Roles {
-			if role.Name != codersdk.RoleOrganizationMember && role.Name != codersdk.RoleOrganizationWorkspaceAccess {
-				return user, refuse("role %q in organization %s is not allowed.", role.Name, orgID)
+			if !allowed(role.Name) {
+				return user, refuse("role %q in organization %s is not allowed.", role.Name, orgID), nil
 			}
 		}
 	}
-	return user, nil
+	return user, nil, nil
 }
 
 // resolveTemplateTestVersion returns the version under test. Once a version
