@@ -100,6 +100,7 @@ rules:
   resources:
   - codercontrolplanes/finalizers
   - coderprovisioners/finalizers
+  - codertemplatetests/finalizers
   - coderworkspaceproxies/finalizers
   verbs:
   - update
@@ -108,11 +109,23 @@ rules:
   resources:
   - codercontrolplanes/status
   - coderprovisioners/status
+  - codertemplatetests/status
   - coderworkspaceproxies/status
   verbs:
   - get
   - patch
   - update
+- apiGroups:
+  - coder.com
+  resources:
+  - codertemplatetests
+  verbs:
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - coordination.k8s.io
   resources:

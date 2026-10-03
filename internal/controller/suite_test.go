@@ -32,7 +32,7 @@ func TestMain(m *testing.M) {
 	}
 
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths: []string{"../../config/crd/bases", "../../config/crd/dormant"},
+		CRDDirectoryPaths: []string{"../../config/crd/bases"},
 	}
 
 	var err error

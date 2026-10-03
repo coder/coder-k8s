@@ -83,6 +83,9 @@ jobs:
               - 'api/aggregation/**'
               - 'internal/aggregated/**'
               - 'internal/app/apiserverapp/**'
+              - 'api/v1alpha1/**'
+              - 'internal/controller/codertemplatetest*'
+              - 'internal/app/controllerapp/**'
               - 'config/e2e/**'
               - 'deploy/**'
               - 'examples/cloudnativepg/**'
@@ -91,7 +94,6 @@ jobs:
             installer:
               - 'api/**/*.go'
               - 'config/crd/bases/**'
-              - 'config/crd/dormant/**'
               - 'config/rbac/**'
               - 'config/default/**'
               - 'deploy/deployment.yaml'
@@ -133,21 +135,12 @@ jobs:
       - name: Verify installer manifests are up to date
         run: |
           make build-installer
-          git diff --exit-code -- dist/install.yaml config/default/ config/crd/bases/ config/crd/dormant/ config/rbac/
+          git diff --exit-code -- dist/install.yaml config/default/ config/crd/bases/ config/rbac/
 
-          UNTRACKED_GENERATED="$(git ls-files --others --exclude-standard -- dist/ config/default/ config/crd/bases/ config/crd/dormant/ config/rbac/)"
+          UNTRACKED_GENERATED="$(git ls-files --others --exclude-standard -- dist/ config/default/ config/crd/bases/ config/rbac/)"
           if [[ -n "${UNTRACKED_GENERATED}" ]]; then
             echo "assertion failed: generated installer artifacts must be tracked" >&2
             printf '%s\n' "${UNTRACKED_GENERATED}" >&2
-            exit 1
-          fi
-
-      - name: Verify the dormant CoderTemplateTest CRD is not installed
-        # Remove this step when the CoderTemplateTest controller ships (#152).
-        run: |
-          if grep -n -E '^[[:space:]]+kind: CoderTemplateTest$|codertemplatetests\.coder\.com' \
-            dist/install.yaml config/default/kustomization.yaml config/crd/bases/*.yaml; then
-            echo "assertion failed: the CoderTemplateTest CRD must not ship before its controller" >&2
             exit 1
           fi
 
@@ -314,7 +307,14 @@ jobs:
         env:
           AGENT_IMAGE: public.ecr.aws/docker/library/alpine@sha256:3e9b4b680bfc9fb5269227cffbd6d42be39fbf7c0b908123913864aa4447e764
         run: |
-          docker pull "$AGENT_IMAGE"
+          for attempt in 1 2 3; do
+            docker pull "$AGENT_IMAGE" && break
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::docker pull failed 3 times: $AGENT_IMAGE" >&2
+              exit 1
+            fi
+            sleep 10
+          done
           docker tag "$AGENT_IMAGE" e2e.local/alpine:3.22.6
           kind load docker-image e2e.local/alpine:3.22.6 --name e2e
 
@@ -501,7 +501,8 @@ jobs:
           kubectl -n default delete pod e2e-authn-probe --wait=false
 
       # The driver creates the CoderTemplates itself (kubectl apply of config/e2e/codertemplate*.yaml) after its setup checks.
-      - name: Template and workspace lifecycle (apply, re-apply, watch, rename, delete, recreate, tester, agent)
+      # Its last phase scales Coder to zero and deletes namespace coder: later steps must not need either.
+      - name: Template and workspace lifecycle (apply, re-apply, watch, rename, delete, recreate, tester, agent, template tests)
         if: env.E2E_FULL == 'true'
         env:
           BUILT_IMAGE_ID: ${{ steps.build_image.outputs.image_id }}

@@ -96,6 +96,19 @@ func (r *CoderTemplateTestReconciler) cleanupStep(ctx context.Context, tt *coder
 	if policy != "" && policy != "delete" && policy != "retain" {
 		note = fmt.Sprintf(" The controller ignores %s value %q.", templateTestDeletionPolicyAnnotation, policy)
 	}
+	if policy == "retain" {
+		// Anyone who creates a test can set the annotation, so retain needs
+		// the control plane's opt-in, which only its admins can set.
+		allowed, err := r.retainAllowed(ctx, tt)
+		if err != nil {
+			return 0, err
+		}
+		if !allowed {
+			policy = "delete"
+			note = fmt.Sprintf(" The controller ignores %s: retain because CoderControlPlane %s does not set spec.templateTests.allowRetain.",
+				templateTestDeletionPolicyAnnotation, tt.Spec.ControlPlaneRef.Name)
+		}
+	}
 	// Read the clock when the condition changes: the Coder calls below can
 	// take up to their timeout, and the TTL counts from this time.
 	set := func(status metav1.ConditionStatus, reason, message string) {
@@ -120,8 +133,9 @@ func (r *CoderTemplateTestReconciler) cleanupStep(ctx context.Context, tt *coder
 	}
 	if templateTestDeletedReason(tt) == "OwnershipUnknown" {
 		// Someone else's workspace can hold the name. The controller never
-		// reads or touches it again. Only retain releases the test (A3).
-		set(metav1.ConditionUnknown, "OwnershipUnknown", fmt.Sprintf("Workspace %s exists, but nothing proves that this test created it. Only %s: retain releases the test.",
+		// reads or touches it again. Only retain, or an admin who removes
+		// the finalizer, releases the test (A3).
+		set(metav1.ConditionUnknown, "OwnershipUnknown", fmt.Sprintf("Workspace %s exists, but nothing proves that this test created it. Only %s: retain or removing the finalizer releases the test.",
 			name, templateTestDeletionPolicyAnnotation))
 		return 0, nil
 	}
@@ -174,6 +188,20 @@ func (r *CoderTemplateTestReconciler) cleanupStep(ctx context.Context, tt *coder
 
 // controlPlaneGone reports whether the referenced control plane is NotFound
 // or being deleted. Then nothing can clean up, so the finalizer goes (A1).
+// retainAllowed reports whether the test's control plane sets
+// spec.templateTests.allowRetain. A missing control plane allows nothing: the
+// ControlPlaneGone case releases the test instead.
+func (r *CoderTemplateTestReconciler) retainAllowed(ctx context.Context, tt *coderv1alpha1.CoderTemplateTest) (bool, error) {
+	controlPlane := &coderv1alpha1.CoderControlPlane{}
+	key := types.NamespacedName{Namespace: tt.Namespace, Name: tt.Spec.ControlPlaneRef.Name}
+	if err := r.Get(ctx, key, controlPlane); apierrors.IsNotFound(err) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("get codercontrolplane %s: %w", key, err)
+	}
+	return controlPlane.Spec.TemplateTests != nil && controlPlane.Spec.TemplateTests.AllowRetain, nil
+}
+
 func (r *CoderTemplateTestReconciler) controlPlaneGone(ctx context.Context, tt *coderv1alpha1.CoderTemplateTest) (bool, error) {
 	controlPlane := &coderv1alpha1.CoderControlPlane{}
 	key := types.NamespacedName{Namespace: tt.Namespace, Name: tt.Spec.ControlPlaneRef.Name}

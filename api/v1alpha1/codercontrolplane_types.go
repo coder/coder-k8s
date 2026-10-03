@@ -130,12 +130,19 @@ type TemplateTestsSpec struct {
 	// OwnerUserID is the UUID of the Coder user that owns every test
 	// workspace. Use a dedicated low-privilege tester user: each start build
 	// gives the owner's API token to the template's Terraform. Tests stay
-	// pending until this is set. The CoderTemplateTest controller is not
-	// enabled yet, so this field has no effect today.
+	// pending until this is set.
 	// +kubebuilder:validation:Format=uuid
 	// +kubebuilder:validation:MaxLength=36
 	// +optional
 	OwnerUserID string `json:"ownerUserID,omitempty"`
+	// AllowRetain lets the annotation coder.com/deletion-policy: retain on a
+	// CoderTemplateTest release the test without deleting its workspace.
+	// This delegates that power to everyone who can create tests against
+	// this control plane: they can leave workspaces, and their owner's
+	// session keys, in Coder. When false (the default), the controller
+	// ignores retain and deletes the workspace.
+	// +optional
+	AllowRetain bool `json:"allowRetain,omitempty"`
 }
 
 // DatabaseSpec configures the external PostgreSQL database used by Coder.

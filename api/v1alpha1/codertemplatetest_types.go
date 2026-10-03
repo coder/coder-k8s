@@ -84,7 +84,7 @@ type CoderTemplateTestSpec struct {
 	// ControlPlaneRef names the CoderControlPlane in the same namespace. The
 	// controller calls Coder with that control plane's operator token.
 	ControlPlaneRef CoderControlPlaneReference `json:"controlPlaneRef"`
-	// Template is the Coder template as <organization>.<template>, the same
+	// Template is the Coder template as `<organization>.<template>`, the same
 	// format as aggregated CoderTemplate names. Each name has at most 32
 	// characters and is not one of Coder's reserved names new or create.
 	// +kubebuilder:validation:MaxLength=65

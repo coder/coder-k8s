@@ -43,10 +43,13 @@ const (
 	templateTestMaxMessageLength = 256
 )
 
-// CoderTemplateTestReconciler runs CoderTemplateTest objects. It is not
-// registered with the manager yet: the API stays dormant until activation
-// (#152). This version creates the test workspace and checks its readiness,
-// but does not delete it yet.
+// +kubebuilder:rbac:groups=coder.com,resources=codertemplatetests,verbs=get;list;watch;update;patch;delete
+// +kubebuilder:rbac:groups=coder.com,resources=codertemplatetests/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=coder.com,resources=codertemplatetests/finalizers,verbs=update
+
+// CoderTemplateTestReconciler runs CoderTemplateTest objects (#152): it
+// creates a throwaway workspace from a template version, waits until every
+// agent is ready, records the result, and deletes the workspace.
 type CoderTemplateTestReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -374,8 +377,10 @@ func checkTemplateTestOwner(ctx context.Context, sdk *codersdk.Client, ownerID u
 	if err := coderAnswerFor("user", ownerID.String(), user.ID.String()); err != nil {
 		return user, nil, err
 	}
-	if user.Status != codersdk.UserStatusActive && user.Status != codersdk.UserStatusDormant {
-		return user, refuse("status %q is not allowed. Only active and dormant users can own test workspaces.", user.Status), nil
+	// Coder refuses a dormant owner's agents (401), so their test could only
+	// time out. Coder creates users through the API as dormant.
+	if user.Status != codersdk.UserStatusActive {
+		return user, refuse("status %q is not allowed. Only active users can own test workspaces: activate the user in Coder.", user.Status), nil
 	}
 	// Headless users created before service accounts still have login type none.
 	if !user.IsServiceAccount && user.LoginType != codersdk.LoginTypePassword && user.LoginType != codersdk.LoginTypeNone { //nolint:staticcheck // See above.

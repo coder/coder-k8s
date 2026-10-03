@@ -11,6 +11,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
+	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -114,6 +115,15 @@ func SetupControllers(mgr manager.Manager) error {
 	}
 	if err := provisionerReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create provisioner controller: %w", err)
+	}
+
+	templateTestReconciler := &controller.CoderTemplateTestReconciler{
+		Client: client,
+		Scheme: managerScheme,
+		Clock:  clock.RealClock{},
+	}
+	if err := templateTestReconciler.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create template test controller: %w", err)
 	}
 
 	return nil

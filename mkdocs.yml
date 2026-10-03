@@ -41,6 +41,7 @@ nav:
       - Deploy the controller: how-to/deploy-controller.md
       - Deploy the aggregated API server: how-to/deploy-aggregated-apiserver.md
       - Start, stop, and read logs of workspaces: how-to/start-stop-workspaces.md
+      - Test a template version: how-to/test-templates.md
       - Run the MCP server: how-to/mcp-server.md
       - Troubleshooting: how-to/troubleshooting.md
   - Reference:
@@ -49,6 +50,7 @@ nav:
           # BEGIN GENERATED API NAV
           - CoderControlPlane: reference/api/codercontrolplane.md
           - CoderProvisioner: reference/api/coderprovisioner.md
+          - CoderTemplateTest: reference/api/codertemplatetest.md
           - CoderWorkspaceProxy: reference/api/coderworkspaceproxy.md
           - CoderTemplate: reference/api/codertemplate.md
           - CoderTemplateVersion: reference/api/codertemplateversion.md
