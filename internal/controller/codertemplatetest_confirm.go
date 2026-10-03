@@ -91,7 +91,7 @@ func (r *CoderTemplateTestReconciler) confirmCreate(
 		return step, nil
 	case now.Before(tt.Status.CreateAttemptTime.Add(templateTestSettleWindow)):
 		return templateTestWait("ConfirmingCreate", "No workspace %s from this test found yet. Reading again.", tt.Status.WorkspaceName), nil
-	case !slices.ContainsFunc(operator.Roles, func(role codersdk.SlimRole) bool { return role.Name == codersdk.RoleOwner }):
+	case !slices.ContainsFunc(operator.Roles, func(role codersdk.SlimRole) bool { return role.Name == codersdk.RoleOwner && role.OrganizationID == "" }):
 		// Coder also answers 404 when the caller may not read the workspace
 		// (coderd/workspaces.go:304, v2.37.2). Only a site owner reads every
 		// workspace, so only then does a 404 prove that none exists.

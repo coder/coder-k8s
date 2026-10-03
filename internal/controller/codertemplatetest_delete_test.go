@@ -130,6 +130,12 @@ func TestTemplateTestSettleNeedsSiteOwner(t *testing.T) {
 	e.clock.SetTime(e.clock.Now().Add(15 * time.Minute))
 	requireTemplateTestRunning(t, e.settle(t, key), "ConfirmingCreate", "not a site owner")
 
+	// An organization role named owner is not the site owner role.
+	e.fake.updateUser(e.fake.operatorID, func(u *codersdk.User) {
+		u.Roles = []codersdk.SlimRole{{Name: codersdk.RoleOwner, OrganizationID: e.orgID.String()}}
+	})
+	requireTemplateTestRunning(t, e.settle(t, key), "ConfirmingCreate", "not a site owner")
+
 	e.fake.updateUser(e.fake.operatorID, func(u *codersdk.User) { u.Roles = []codersdk.SlimRole{{Name: codersdk.RoleOwner}} })
 	requireTemplateTestFailed(t, e.settle(t, key), "CreateOutcomeUnknown")
 }
@@ -185,6 +191,23 @@ func TestTemplateTestDeleteEdgeCases(t *testing.T) {
 	require.Equal(t, time.Second, e.lastStep.RequeueAfter)
 	e.reconcile(t, key, 1)
 	require.Equal(t, deletes+1, e.fake.requestCount(routeCreateBuild))
+
+	// Without a completion time, the retry counts from the build's own time,
+	// so it still comes after one backoff.
+	deletes = e.fake.requestCount(routeCreateBuild)
+	e.fake.setBuildJob(uuid.MustParse(e.get(t, key).Status.DeleteBuildID), codersdk.ProvisionerJobFailed)
+	noCompletion := fakeFault{Rewrite: func(a any) any {
+		ws := a.(codersdk.Workspace)
+		ws.LatestBuild.Job.CompletedAt = nil
+		return ws
+	}}
+	e.fake.failNext(routeWorkspace, noCompletion)
+	e.fake.failNext(routeWorkspace, noCompletion)
+	requireDeleted(t, e.reconcile(t, key, 1), metav1.ConditionFalse, "DeleteRetrying")
+	require.Equal(t, 2*time.Minute, e.lastStep.RequeueAfter)
+	e.clock.SetTime(e.clock.Now().Add(2 * time.Minute))
+	e.reconcile(t, key, 1)
+	require.Equal(t, deletes+1, e.fake.requestCount(routeCreateBuild), "a stable retry time")
 
 	// An unknown delete build status proves no failure: a passed test waits.
 	key, _, buildID := e.startedTest(t)

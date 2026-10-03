@@ -142,13 +142,19 @@ func (r *CoderTemplateTestReconciler) deleteAfterPass(
 }
 
 // templateTestDeleteRetryAt is when the controller may replace a failed delete
-// build: its completion plus the backoff.
+// build: its completion plus the backoff. Without a completion time it uses
+// the build's own stable times, so repeated reads agree on the retry time.
 func templateTestDeleteRetryAt(build codersdk.WorkspaceBuild, attempts int32, now time.Time) time.Time {
-	completedAt := now
-	if build.Job.CompletedAt != nil {
-		completedAt = *build.Job.CompletedAt
+	anchor := now
+	switch {
+	case build.Job.CompletedAt != nil:
+		anchor = *build.Job.CompletedAt
+	case !build.UpdatedAt.IsZero():
+		anchor = build.UpdatedAt
+	case !build.CreatedAt.IsZero():
+		anchor = build.CreatedAt
 	}
-	return completedAt.Add(templateTestDeleteBackoff(attempts))
+	return anchor.Add(templateTestDeleteBackoff(attempts))
 }
 
 // templateTestDeleteBackoff is the wait after the given number of failed
