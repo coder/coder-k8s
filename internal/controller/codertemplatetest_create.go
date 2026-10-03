@@ -127,5 +127,6 @@ func (r *CoderTemplateTestReconciler) retryAfter(key types.NamespacedName, tt *c
 	if attempts < 6 { // 2 s * 2^6 passes the cap.
 		backoff = min(templateTestBackoffBase<<attempts, templateTestBackoffCap)
 	}
-	return time.Duration(float64(backoff) * (0.8 + 0.4*rand.Float64())) //nolint:gosec // Jitter needs no secure randomness.
+	jittered := time.Duration(float64(backoff) * (0.8 + 0.4*rand.Float64())) //nolint:gosec // Jitter needs no secure randomness.
+	return min(jittered, templateTestBackoffCap)
 }

@@ -182,4 +182,10 @@ func TestTemplateTestBackoffForgetsDeletedTests(t *testing.T) {
 	run(key)
 	e.fake.failNext(routeUser, fakeFault{Status: 429})
 	require.InDelta(t, 2*time.Second, run(key).RequeueAfter, float64(400*time.Millisecond))
+
+	// The jittered delay never passes the 2 m cap.
+	for range 16 {
+		e.fake.failNext(routeUser, fakeFault{Status: 429})
+		require.LessOrEqual(t, run(key).RequeueAfter, 2*time.Minute)
+	}
 }
