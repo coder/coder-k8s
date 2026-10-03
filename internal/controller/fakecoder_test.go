@@ -24,10 +24,19 @@ const fakeCoderToken = "fake-operator-token"
 
 // Route names for fakeCoder.failNext and fakeCoder.requestCount.
 const (
+	routeUser            = "user"
+	routeOrganization    = "organization"
+	routeOrgMember       = "organizationMember"
+	routeTemplateByName  = "templateByName"
+	routeTemplate        = "template"
+	routeVersionByName   = "templateVersionByName"
+	routeVersion         = "templateVersion"
 	routeCreateWorkspace = "createWorkspace"
 	routeWorkspaceByName = "workspaceByOwnerAndName"
 	routeWorkspace       = "workspace"
 	routeWorkspaceBuilds = "workspaceBuilds"
+	routeCreateBuild     = "createWorkspaceBuild"
+	routeCancelBuild     = "cancelWorkspaceBuild"
 )
 
 // fakeFault is one injected failure for the next request on a route.
@@ -45,7 +54,7 @@ type fakeWorkspace struct {
 }
 
 // fakeCoder is a stateful in-memory Coder API for CoderTemplateTest controller
-// tests. It serves the workspace routes the controller uses, through the real
+// tests. It serves only the routes the controller uses, through the real
 // codersdk client, and mirrors the Coder v2.37.2 answers that the controller's
 // crash-safety rules depend on. It leaves WorkspaceBuild.Status empty because
 // the controller reads only Job.Status.
@@ -59,6 +68,7 @@ type fakeCoder struct {
 	operatorID uuid.UUID
 	users      map[uuid.UUID]codersdk.User
 	orgs       map[uuid.UUID]codersdk.Organization
+	orgRoles   map[uuid.UUID]map[uuid.UUID][]codersdk.SlimRole // Organization -> user -> roles.
 	templates  map[uuid.UUID]codersdk.Template
 	versions   map[uuid.UUID]codersdk.TemplateVersion
 	workspaces map[uuid.UUID]*fakeWorkspace
@@ -71,17 +81,42 @@ func newFakeCoder(t *testing.T) *fakeCoder {
 	f := &fakeCoder{
 		t: t, done: make(chan struct{}), now: time.Now,
 		users: map[uuid.UUID]codersdk.User{}, orgs: map[uuid.UUID]codersdk.Organization{},
-		templates: map[uuid.UUID]codersdk.Template{},
-		versions:  map[uuid.UUID]codersdk.TemplateVersion{}, workspaces: map[uuid.UUID]*fakeWorkspace{},
+		orgRoles: map[uuid.UUID]map[uuid.UUID][]codersdk.SlimRole{}, templates: map[uuid.UUID]codersdk.Template{},
+		versions: map[uuid.UUID]codersdk.TemplateVersion{}, workspaces: map[uuid.UUID]*fakeWorkspace{},
 		faults: map[string][]fakeFault{}, requests: map[string]int{},
 	}
 	f.operatorID = f.addUser("operator", codersdk.LoginTypePassword, codersdk.RoleOwner)
 
 	mux := http.NewServeMux()
+	f.route(mux, "GET /api/v2/users/{user}", routeUser, func(r *http.Request) (int, any) {
+		return found(f.userByIdent(r.PathValue("user")))
+	})
+	f.route(mux, "GET /api/v2/organizations/{org}", routeOrganization, func(r *http.Request) (int, any) {
+		return found(f.orgByIdent(r.PathValue("org")))
+	})
+	f.route(mux, "GET /api/v2/organizations/{org}/members/{user}", routeOrgMember, f.getOrgMember)
+	f.route(mux, "GET /api/v2/organizations/{org}/templates/{name}", routeTemplateByName, func(r *http.Request) (int, any) {
+		return found(findIn(f.templates, func(t codersdk.Template) bool {
+			return t.OrganizationID.String() == r.PathValue("org") && t.Name == r.PathValue("name")
+		}))
+	})
+	f.route(mux, "GET /api/v2/templates/{id}", routeTemplate, func(r *http.Request) (int, any) {
+		return found(findIn(f.templates, func(t codersdk.Template) bool { return t.ID.String() == r.PathValue("id") }))
+	})
+	f.route(mux, "GET /api/v2/templates/{id}/versions/{name}", routeVersionByName, func(r *http.Request) (int, any) {
+		return found(findIn(f.versions, func(v codersdk.TemplateVersion) bool {
+			return v.TemplateID.String() == r.PathValue("id") && v.Name == r.PathValue("name")
+		}))
+	})
+	f.route(mux, "GET /api/v2/templateversions/{id}", routeVersion, func(r *http.Request) (int, any) {
+		return found(findIn(f.versions, func(v codersdk.TemplateVersion) bool { return v.ID.String() == r.PathValue("id") }))
+	})
 	f.route(mux, "POST /api/v2/users/{user}/workspaces", routeCreateWorkspace, f.createWorkspace)
 	f.route(mux, "GET /api/v2/users/{user}/workspace/{name}", routeWorkspaceByName, f.getWorkspaceByOwnerAndName)
 	f.route(mux, "GET /api/v2/workspaces/{id}", routeWorkspace, f.getWorkspace)
 	f.route(mux, "GET /api/v2/workspaces/{id}/builds", routeWorkspaceBuilds, f.listBuilds)
+	f.route(mux, "POST /api/v2/workspaces/{id}/builds", routeCreateBuild, f.createBuild)
+	f.route(mux, "PATCH /api/v2/workspacebuilds/{id}/cancel", routeCancelBuild, f.cancelBuild)
 
 	f.server = httptest.NewServer(mux)
 	t.Cleanup(func() {
@@ -154,6 +189,23 @@ func fakeError(status int, format string, args ...any) (int, any) {
 	return status, codersdk.Response{Message: fmt.Sprintf(format, args...)}
 }
 
+func found[T any](v T, ok bool) (int, any) {
+	if !ok {
+		return fakeError(http.StatusNotFound, "Resource not found.")
+	}
+	return http.StatusOK, v
+}
+
+func findIn[T any](m map[uuid.UUID]T, match func(T) bool) (T, bool) {
+	for _, v := range m {
+		if match(v) {
+			return v, true
+		}
+	}
+	var zero T
+	return zero, false
+}
+
 // Setup helpers lock the fake, so tests can call them while a controller
 // talks to the server.
 
@@ -176,7 +228,24 @@ func (f *fakeCoder) addOrganization(name string) uuid.UUID {
 	o := codersdk.Organization{}
 	o.ID, o.Name = uuid.New(), name
 	f.orgs[o.ID] = o
+	f.orgRoles[o.ID] = map[uuid.UUID][]codersdk.SlimRole{}
 	return o.ID
+}
+
+// addMember makes a user a member of an organization with roles.
+func (f *fakeCoder) addMember(orgID, userID uuid.UUID, roles ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.users[userID]
+	require.True(f.t, ok, "assertion failed: unknown user %s", userID)
+	require.Contains(f.t, f.orgRoles, orgID, "assertion failed: unknown organization")
+	slim := []codersdk.SlimRole{}
+	for _, role := range roles {
+		slim = append(slim, codersdk.SlimRole{Name: role, OrganizationID: orgID.String()})
+	}
+	f.orgRoles[orgID][userID] = slim
+	u.OrganizationIDs = append(u.OrganizationIDs, orgID)
+	f.users[userID] = u
 }
 
 func (f *fakeCoder) addTemplate(orgID uuid.UUID, name string) uuid.UUID {
@@ -208,13 +277,26 @@ func (f *fakeCoder) addVersion(templateID uuid.UUID, name string, job codersdk.P
 	return v.ID
 }
 
-// setBuildJob moves a build's job to status.
+func (f *fakeCoder) archiveVersion(versionID uuid.UUID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.versions[versionID]
+	require.True(f.t, ok, "assertion failed: unknown version %s", versionID)
+	v.Archived = true
+	f.versions[versionID] = v
+}
+
+// setBuildJob moves a build's job to status. A succeeded delete build deletes
+// the workspace, which frees its name.
 func (f *fakeCoder) setBuildJob(buildID uuid.UUID, status codersdk.ProvisionerJobStatus) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	_, b := f.findBuild(buildID)
+	fw, b := f.findBuild(buildID)
 	require.NotNil(f.t, b, "assertion failed: unknown build %s", buildID)
 	f.setJob(b, status)
+	if status == codersdk.ProvisionerJobSucceeded && b.Transition == codersdk.WorkspaceTransitionDelete {
+		fw.deleted = true
+	}
 }
 
 // setAgents gives a build one resource that holds agents.
@@ -223,7 +305,10 @@ func (f *fakeCoder) setAgents(buildID uuid.UUID, agents ...codersdk.WorkspaceAge
 	defer f.mu.Unlock()
 	_, b := f.findBuild(buildID)
 	require.NotNil(f.t, b, "assertion failed: unknown build %s", buildID)
-	b.Resources = []codersdk.WorkspaceResource{{ID: uuid.New(), Name: "main", Agents: agents}}
+	b.Resources = []codersdk.WorkspaceResource{{
+		ID: uuid.New(), Name: "main",
+		Agents: append([]codersdk.WorkspaceAgent(nil), agents...), // Later caller edits must not change the fake.
+	}}
 }
 
 // markDeleted deletes a workspace out of band, which frees its name.
@@ -260,12 +345,11 @@ func (f *fakeCoder) userByIdent(ident string) (codersdk.User, bool) {
 	if ident == codersdk.Me {
 		ident = f.operatorID.String()
 	}
-	for _, u := range f.users {
-		if u.ID.String() == ident || strings.EqualFold(u.Username, ident) {
-			return u, true
-		}
-	}
-	return codersdk.User{}, false
+	return findIn(f.users, func(u codersdk.User) bool { return u.ID.String() == ident || strings.EqualFold(u.Username, ident) })
+}
+
+func (f *fakeCoder) orgByIdent(ident string) (codersdk.Organization, bool) {
+	return findIn(f.orgs, func(o codersdk.Organization) bool { return o.ID.String() == ident || o.Name == ident })
 }
 
 func (f *fakeCoder) findBuild(buildID uuid.UUID) (*fakeWorkspace, *codersdk.WorkspaceBuild) {
@@ -284,6 +368,9 @@ func (f *fakeCoder) setJob(b *codersdk.WorkspaceBuild, status codersdk.Provision
 	b.Job.Status = status
 	if !status.Active() {
 		b.Job.CompletedAt = &now
+	}
+	if status == codersdk.ProvisionerJobCanceled {
+		b.Job.CanceledAt = &now
 	}
 }
 
@@ -326,9 +413,24 @@ func (f *fakeCoder) workspaceByID(r *http.Request) *fakeWorkspace {
 	return f.workspaces[id]
 }
 
+func (f *fakeCoder) getOrgMember(r *http.Request) (int, any) {
+	o, okOrg := f.orgByIdent(r.PathValue("org"))
+	u, okUser := f.userByIdent(r.PathValue("user"))
+	roles, okMember := f.orgRoles[o.ID][u.ID]
+	if !okOrg || !okUser || !okMember {
+		return fakeError(http.StatusNotFound, "Resource not found.")
+	}
+	m := codersdk.OrganizationMemberWithUserData{
+		Username: u.Username, Email: u.Email, Status: u.Status, LoginType: u.LoginType,
+		IsServiceAccount: u.IsServiceAccount, GlobalRoles: u.Roles,
+	}
+	m.UserID, m.OrganizationID, m.Roles = u.ID, o.ID, roles
+	return http.StatusOK, m
+}
+
 // createWorkspace mirrors Coder v2.37.2 for a request that sends only
-// template_version_id. A live workspace with the same name (case-insensitive)
-// gives 409.
+// template_version_id: archived 500, import running 406, import failed 400,
+// live name taken 409 (case-insensitive).
 func (f *fakeCoder) createWorkspace(r *http.Request) (int, any) {
 	owner, ok := f.userByIdent(r.PathValue("user"))
 	if !ok {
@@ -340,8 +442,14 @@ func (f *fakeCoder) createWorkspace(r *http.Request) (int, any) {
 	}
 	v, ok := f.versions[req.TemplateVersionID]
 	switch {
-	case req.TemplateID != uuid.Nil || !ok || v.Job.Status != codersdk.ProvisionerJobSucceeded:
-		return fakeError(http.StatusBadRequest, "fake coder needs only the template_version_id of an imported version")
+	case req.TemplateID != uuid.Nil || !ok:
+		return fakeError(http.StatusBadRequest, "fake coder needs a known template_version_id only")
+	case v.Archived:
+		return fakeError(http.StatusInternalServerError, "template version is archived")
+	case v.Job.Status == codersdk.ProvisionerJobPending || v.Job.Status == codersdk.ProvisionerJobRunning:
+		return fakeError(http.StatusNotAcceptable, "template version import is still running")
+	case v.Job.Status != codersdk.ProvisionerJobSucceeded:
+		return fakeError(http.StatusBadRequest, "template version import failed")
 	case f.liveWorkspace(owner.ID, req.Name) != nil:
 		return fakeError(http.StatusConflict, "workspace %q already exists", req.Name)
 	}
@@ -359,7 +467,10 @@ func (f *fakeCoder) createWorkspace(r *http.Request) (int, any) {
 // getWorkspaceByOwnerAndName prefers the live workspace. With
 // include_deleted=true it falls back to the newest deleted one.
 func (f *fakeCoder) getWorkspaceByOwnerAndName(r *http.Request) (int, any) {
-	owner, _ := f.userByIdent(r.PathValue("user"))
+	owner, ok := f.userByIdent(r.PathValue("user"))
+	if !ok {
+		return fakeError(http.StatusNotFound, "Resource not found.")
+	}
 	name := r.PathValue("name")
 	if fw := f.liveWorkspace(owner.ID, name); fw != nil {
 		return http.StatusOK, fw.view()
@@ -401,4 +512,52 @@ func (f *fakeCoder) listBuilds(r *http.Request) (int, any) {
 		out = append(out, fw.builds[i])
 	}
 	return http.StatusOK, out
+}
+
+// createBuild accepts only delete builds and refuses orphan deletes, so a
+// controller that would leak resources fails loudly.
+func (f *fakeCoder) createBuild(r *http.Request) (int, any) {
+	fw := f.workspaceByID(r)
+	if fw == nil {
+		return fakeError(http.StatusNotFound, "Resource not found.")
+	}
+	var req codersdk.CreateWorkspaceBuildRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return fakeError(http.StatusBadRequest, "decode request: %v", err)
+	}
+	latest := fw.builds[len(fw.builds)-1]
+	switch {
+	case req.Transition != codersdk.WorkspaceTransitionDelete || req.Orphan:
+		return fakeError(http.StatusBadRequest, "fake coder accepts only non-orphan delete builds")
+	case fw.deleted:
+		return fakeError(http.StatusGone, "Workspace was deleted.")
+	case latest.Job.Status.Active():
+		return fakeError(http.StatusConflict, "A build is already active.")
+	}
+	return http.StatusCreated, f.appendBuild(fw, latest.TemplateVersionID, codersdk.WorkspaceTransitionDelete)
+}
+
+// cancelBuild mirrors Coder: 412 on an expect_status mismatch, a pending job
+// is canceled at once, and a running job moves to canceling.
+func (f *fakeCoder) cancelBuild(r *http.Request) (int, any) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		return fakeError(http.StatusBadRequest, "Invalid build ID.")
+	}
+	_, b := f.findBuild(id)
+	if b == nil {
+		return fakeError(http.StatusNotFound, "Resource not found.")
+	}
+	expect := codersdk.ProvisionerJobStatus(r.URL.Query().Get("expect_status"))
+	switch {
+	case b.Job.Status != codersdk.ProvisionerJobPending && b.Job.Status != codersdk.ProvisionerJobRunning:
+		return fakeError(http.StatusBadRequest, "Job is not cancelable.")
+	case expect != "" && expect != b.Job.Status:
+		return fakeError(http.StatusPreconditionFailed, "Job status is %s.", b.Job.Status)
+	case b.Job.Status == codersdk.ProvisionerJobPending:
+		f.setJob(b, codersdk.ProvisionerJobCanceled)
+	default:
+		f.setJob(b, codersdk.ProvisionerJobCanceling)
+	}
+	return http.StatusOK, codersdk.Response{Message: "Job has been marked as canceled."}
 }
