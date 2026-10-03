@@ -576,18 +576,19 @@ T0=$SECONDS
 k delete namespace "$NS" --wait=false >/dev/null || fail "cannot delete namespace $NS"
 gone_obj() { ! k -n "$NS" get "$1" "$2" -o name >/dev/null 2>"$WORK/obj.err" && grep -q NotFound "$WORK/obj.err"; }
 NS_SEEN=""
-ns_gone() { # the test and the control plane go first, then the namespace itself disappears (#209)
+ns_gone() { # the namespace disappears (#209), and with it the test and the control plane
   tt_state e2e-ns-delete || true # logs the ControlPlaneGone release while the object still exists
-  gone_obj codertemplatetest e2e-ns-delete && gone_obj codercontrolplane coder || return 1
   if k get namespace "$NS" -o json >"$WORK/ns.json" 2>"$WORK/ns.err"; then
-    local seen # diagnostics: the phase and every True condition, logged when they change
+    # Diagnostics from the first poll on, so a run shows NamespaceDeletionContentFailure (the aggregated
+    # LIST errors while the control plane still exists): the phase and every True condition, on change.
+    local seen
     seen=$(jq -r '[.status.phase // "unknown"] + [.status.conditions[]? | select(.status == "True") |
       "\(.type): \(.message)"] | join("; ")' "$WORK/ns.json") || seen="unparsable namespace JSON"
     [[ $seen == "$NS_SEEN" ]] || log "namespace $NS still exists: $seen"
     NS_SEEN=$seen
     return 1
   fi
-  grep -q NotFound "$WORK/ns.err"
+  grep -q NotFound "$WORK/ns.err" && gone_obj codertemplatetest e2e-ns-delete && gone_obj codercontrolplane coder
 }
 TIMEOUT=$NS_DELETE_TIMEOUT wait_until "test, control plane, and namespace $NS deleted (ControlPlaneGone release)" ns_gone
 NS_DELETE_SECONDS=$((SECONDS - T0))
