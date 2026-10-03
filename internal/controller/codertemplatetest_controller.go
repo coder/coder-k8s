@@ -158,9 +158,8 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			// Readiness checks come with the second half of plan PR 4.
 			step = templateTestWait("WaitingForBuild", "Workspace %s exists. Readiness checks are not enabled yet.", tt.Status.WorkspaceName)
 		case tt.Status.CreateAttemptTime != nil:
-			// A create request may exist. The confirming reads come with the
-			// next change. Until then the test never sends a second request.
-			step = templateTestWait("ConfirmingCreate", "Workspace %s may exist. Confirming reads are not enabled yet.", tt.Status.WorkspaceName)
+			// A create request may exist: read Coder, never send it again.
+			step, err = r.confirmCreate(ctx, sdk, tt, now)
 		default:
 			step, err = r.resolveInputs(ctx, sdk, controlPlane, tt, workspaceName)
 		}
@@ -175,7 +174,7 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	if step == nil {
 		// Every input is resolved and pinned: write the marker, then create.
-		step, err = r.createWorkspace(ctx, sdk, tt, before, now)
+		step, err = r.createWorkspace(ctx, sdk, tt, before, now, deadline)
 		if step, err = waitOnWrongAnswer(ctx, step, err); err != nil {
 			return ctrl.Result{}, err
 		}

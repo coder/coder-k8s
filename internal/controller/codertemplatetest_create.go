@@ -27,12 +27,18 @@ const (
 // request of this attempt. A marker write conflict ends the reconcile before
 // any request, so a decision made on a stale object never reaches Coder.
 func (r *CoderTemplateTestReconciler) createWorkspace(
-	ctx context.Context, sdk *codersdk.Client, tt *coderv1alpha1.CoderTemplateTest, before *coderv1alpha1.CoderTemplateTestStatus, now time.Time,
+	ctx context.Context, sdk *codersdk.Client, tt *coderv1alpha1.CoderTemplateTest, before *coderv1alpha1.CoderTemplateTestStatus, now, deadline time.Time,
 ) (*templateTestStep, error) {
 	tt.Status.CreateAttemptTime = &metav1.Time{Time: now}
 	applyTemplateTestStep(tt, now, templateTestWait("CreatingWorkspace", "Creating workspace %s.", tt.Status.WorkspaceName))
 	if err := r.writeStatus(ctx, tt, before); err != nil {
 		return nil, err
+	}
+	// The marker write can take a while. No request was sent yet, so a
+	// test past its deadline clears the marker and fails without a workspace.
+	if !r.Clock.Now().Before(deadline) {
+		tt.Status.CreateAttemptTime = nil
+		return templateTestWait("CreatingWorkspace", "No create request was sent."), nil
 	}
 
 	versionID, err := uuid.Parse(tt.Status.TemplateVersionID)
@@ -59,6 +65,7 @@ func (r *CoderTemplateTestReconciler) createWorkspace(
 		if err := errors.Join(
 			coderAnswerFor("workspace", tt.Status.WorkspaceName, workspace.Name),
 			coderAnswerFor("start build workspace", workspace.ID.String(), workspace.LatestBuild.WorkspaceID.String()),
+			coderAnswerFor("start build transition", string(codersdk.WorkspaceTransitionStart), string(workspace.LatestBuild.Transition)),
 			coderAnswerFor("workspace owner", tt.Status.OwnerID, workspace.OwnerID.String()),
 			coderAnswerFor("start build version", tt.Status.TemplateVersionID, workspace.LatestBuild.TemplateVersionID.String()),
 		); err != nil {
