@@ -68,14 +68,14 @@ func TestTemplateTestTTLAfterFinished(t *testing.T) {
 	require.NoError(t, k8sClient.Create(e.ctx, tt))
 	key := types.NamespacedName{Namespace: tt.Namespace, Name: tt.Name}
 	finished := e.passTest(t, key)
-	require.Positive(t, e.lastStep.RequeueAfter, "the controller comes back for the TTL")
-	require.LessOrEqual(t, e.lastStep.RequeueAfter, 70*time.Second) // The condition time is real.
+	require.Equal(t, 60*time.Second, e.lastStep.RequeueAfter, "the controller comes back for the TTL")
 
 	// The TTL counts from the later of completion and the workspace's
-	// deletion. The condition time comes from the real clock, so allow 10 s.
+	// deletion. Both times come from the controller clock.
 	e.clock.SetTime(finished.Status.CompletionTime.Add(59 * time.Second))
 	require.NotNil(t, e.reconcile(t, key, 1), "not before the TTL")
-	e.clock.SetTime(finished.Status.CompletionTime.Add(70 * time.Second))
+	require.Equal(t, time.Second, e.lastStep.RequeueAfter)
+	e.clock.SetTime(finished.Status.CompletionTime.Add(60 * time.Second))
 	recorder := &deleteRecorder{Client: k8sClient}
 	r := &controller.CoderTemplateTestReconciler{Client: recorder, Scheme: scheme, Clock: e.clock}
 	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
