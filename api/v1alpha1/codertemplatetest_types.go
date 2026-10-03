@@ -1,7 +1,6 @@
 package v1alpha1
 
 import (
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -35,9 +34,11 @@ const (
 // +kubebuilder:validation:XValidation:rule="(has(self.name) ? 1 : 0) + (has(self.id) ? 1 : 0) + (has(self.active) ? 1 : 0) == 1",message="set exactly one of name, id, or active"
 // +kubebuilder:validation:XValidation:rule="!has(self.active) || self.active",message="active must be true when set"
 type CoderTemplateTestVersion struct {
-	// Name is the name of a version of the template.
+	// Name is the name of a version of the template. It follows Coder's
+	// template version name rules.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9]+([_.-][a-zA-Z0-9]+)*$`
 	// +optional
 	Name string `json:"name,omitempty"`
 	// ID is the UUID of a version of the template.
@@ -65,15 +66,25 @@ type CoderTemplateTestParameter struct {
 	Value string `json:"value,omitempty"`
 }
 
+// CoderControlPlaneReference names a CoderControlPlane in the same namespace.
+type CoderControlPlaneReference struct {
+	// Name is the CoderControlPlane name.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	Name string `json:"name"`
+}
+
 // CoderTemplateTestSpec defines one test run of a Coder template version.
 type CoderTemplateTestSpec struct {
 	// ControlPlaneRef names the CoderControlPlane in the same namespace. The
 	// controller calls Coder with that control plane's operator token.
-	// +kubebuilder:validation:XValidation:rule="has(self.name) && size(self.name) > 0",message="controlPlaneRef.name must not be empty"
-	ControlPlaneRef corev1.LocalObjectReference `json:"controlPlaneRef"`
+	ControlPlaneRef CoderControlPlaneReference `json:"controlPlaneRef"`
 	// Template is the Coder template as <organization>.<template>, the same
-	// format as aggregated CoderTemplate names.
+	// format as aggregated CoderTemplate names. Each name has at most 32
+	// characters.
 	// +kubebuilder:validation:MaxLength=65
+	// +kubebuilder:validation:XValidation:rule="self.matches('^[^.]{1,32}[.][^.]{1,32}$')",message="organization and template names must each have at most 32 characters"
 	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*\.[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$`
 	Template string `json:"template"`
 	// Version selects the template version under test.

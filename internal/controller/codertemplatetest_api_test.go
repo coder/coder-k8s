@@ -7,7 +7,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -19,7 +18,7 @@ import (
 
 func validTemplateTestSpec() coderv1alpha1.CoderTemplateTestSpec {
 	return coderv1alpha1.CoderTemplateTestSpec{
-		ControlPlaneRef: corev1.LocalObjectReference{Name: "coder"},
+		ControlPlaneRef: coderv1alpha1.CoderControlPlaneReference{Name: "coder"},
 		Template:        "default.docker",
 		Version:         coderv1alpha1.CoderTemplateTestVersion{Name: "v1.4.0"},
 	}
@@ -67,8 +66,20 @@ func TestCoderTemplateTestAPIValidation(t *testing.T) {
 		{name: "template too long", wantErr: "spec.template", mutate: func(s *coderv1alpha1.CoderTemplateTestSpec) {
 			s.Template = strings.Repeat("a", 33) + "." + strings.Repeat("b", 32)
 		}},
-		{name: "empty control plane name", wantErr: "controlPlaneRef.name must not be empty", mutate: func(s *coderv1alpha1.CoderTemplateTestSpec) {
+		{name: "empty control plane name", wantErr: "spec.controlPlaneRef.name", mutate: func(s *coderv1alpha1.CoderTemplateTestSpec) {
 			s.ControlPlaneRef.Name = ""
+		}},
+		{name: "control plane name not a DNS name", wantErr: "spec.controlPlaneRef.name", mutate: func(s *coderv1alpha1.CoderTemplateTestSpec) {
+			s.ControlPlaneRef.Name = "not a name"
+		}},
+		{name: "organization name too long", wantErr: "organization and template names must each have at most 32 characters", mutate: func(s *coderv1alpha1.CoderTemplateTestSpec) {
+			s.Template = strings.Repeat("a", 33) + ".b"
+		}},
+		{name: "version name with a slash", wantErr: "spec.version.name", mutate: func(s *coderv1alpha1.CoderTemplateTestSpec) {
+			s.Version.Name = "v1/../v2"
+		}},
+		{name: "version name with a leading dot", wantErr: "spec.version.name", mutate: func(s *coderv1alpha1.CoderTemplateTestSpec) {
+			s.Version.Name = ".v1"
 		}},
 		{name: "duplicate parameter", wantErr: "spec.parameters", mutate: func(s *coderv1alpha1.CoderTemplateTestSpec) {
 			s.Parameters = []coderv1alpha1.CoderTemplateTestParameter{{Name: "a"}, {Name: "a"}}

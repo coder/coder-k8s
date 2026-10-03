@@ -66,19 +66,14 @@ spec:
                   controller calls Coder with that control plane's operator token.
                 properties:
                   name:
-                    default: ""
-                    description: |-
-                      Name of the referent.
-                      This field is effectively required, but due to backwards compatibility is
-                      allowed to be empty. Instances of this type with an empty value here are
-                      almost certainly wrong.
-                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    description: Name is the CoderControlPlane name.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                     type: string
+                required:
+                - name
                 type: object
-                x-kubernetes-map-type: atomic
-                x-kubernetes-validations:
-                - message: controlPlaneRef.name must not be empty
-                  rule: has(self.name) && size(self.name) > 0
               parameters:
                 description: Parameters are rich parameter values for the start build.
                 items:
@@ -106,10 +101,15 @@ spec:
               template:
                 description: |-
                   Template is the Coder template as <organization>.<template>, the same
-                  format as aggregated CoderTemplate names.
+                  format as aggregated CoderTemplate names. Each name has at most 32
+                  characters.
                 maxLength: 65
                 pattern: ^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*\.[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$
                 type: string
+                x-kubernetes-validations:
+                - message: organization and template names must each have at most
+                    32 characters
+                  rule: self.matches('^[^.]{1,32}[.][^.]{1,32}$')
               timeoutSeconds:
                 default: 900
                 description: |-
@@ -143,9 +143,12 @@ spec:
                     maxLength: 36
                     type: string
                   name:
-                    description: Name is the name of a version of the template.
+                    description: |-
+                      Name is the name of a version of the template. It follows Coder's
+                      template version name rules.
                     maxLength: 64
                     minLength: 1
+                    pattern: ^[a-zA-Z0-9]+([_.-][a-zA-Z0-9]+)*$
                     type: string
                 type: object
                 x-kubernetes-validations:
