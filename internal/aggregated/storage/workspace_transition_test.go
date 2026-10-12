@@ -491,6 +491,10 @@ func TestWorkspaceTransitionUncertainPost(t *testing.T) {
 		{"a proxy answered 502", stop, false, nil, http.StatusBadGateway, false},
 		{"a proxy answered 503 after the build was queued", stop, false, &found{transition: stop}, http.StatusServiceUnavailable, true},
 		{"Coder answered 504", stop, false, nil, http.StatusGatewayTimeout, false},
+		// Coder answers the POST with 201. Since codersdk v2.37, a 201 without the build's JSON is a
+		// *codersdk.Error with status 201. Another 2xx always was one.
+		{"a proxy answered 201 with an HTML page after the build was queued", stop, false, &found{transition: stop}, http.StatusCreated, true},
+		{"a proxy answered 200 with an HTML page", stop, false, nil, http.StatusOK, false},
 		{"another user queued the same transition", stop, false, &found{transition: stop, byOther: true}, 0, false},
 		{"the new build has the other transition", stop, false, &found{transition: start}, 0, false},
 		{"a start with the requested version", start, true, &found{transition: start}, 0, true},
@@ -521,11 +525,16 @@ func TestWorkspaceTransitionUncertainPost(t *testing.T) {
 				if tc.found != nil {
 					f.update(func(ws *codersdk.Workspace) { ws.LatestBuild = queued })
 				}
-				if tc.status != 0 {
+				switch {
+				case tc.status >= 200 && tc.status < 300:
+					w.Header().Set("Content-Type", "text/html")
+					w.WriteHeader(tc.status)
+					_, _ = w.Write([]byte("<html>proxy page</html>"))
+				case tc.status != 0:
 					writeLogFakeError(w, tc.status)
-					return
+				default:
+					stalledPost(w, r)
 				}
-				stalledPost(w, r)
 			}
 		})
 		s := NewWorkspaceTransitionStorage(newTestWorkspaces(t, f, 300*time.Millisecond), tc.transition)

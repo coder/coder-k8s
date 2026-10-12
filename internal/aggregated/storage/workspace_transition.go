@@ -187,9 +187,12 @@ func confirmsPost(ctx context.Context, sdk *codersdk.Client, previousID uuid.UUI
 }
 
 // isUncertainStatus reports whether a Coder or proxy status leaves it open whether the build
-// was queued.
+// was queued. A 2xx status means the POST got through, but the answer names no build: Coder
+// answers 201, so the SDK returns a *codersdk.Error for any other 2xx, and since codersdk v2.37
+// also for a 201 whose body is not the build's JSON (for example a proxy page).
 func isUncertainStatus(status int) bool {
-	return status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
+	return (status >= http.StatusOK && status < http.StatusMultipleChoices) ||
+		status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
 }
 
 // afterConflict handles a Coder 409 on the build POST: another build became active after the
