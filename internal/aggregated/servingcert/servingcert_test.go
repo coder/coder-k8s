@@ -78,6 +78,29 @@ func TestGenerateProducesVerifiableServingCert(t *testing.T) {
 	}
 }
 
+// The CA must take its validity from the injected clock and be backdated like the serving
+// certificate. Otherwise a replica or kube-apiserver whose clock is behind the issuer's rejects a
+// fresh CA as "not valid until", and Parse(Generate(now), now) fails across a second boundary.
+func TestGenerateDatesCAFromInjectedClock(t *testing.T) {
+	now := time.Now().Add(-30 * time.Minute)
+	b, err := Generate(testNS, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// x509 encodes validity with one-second precision.
+	if want := now.Add(-clockSkewAllowance).Truncate(time.Second); !b.CACert.NotBefore.Equal(want) {
+		t.Fatalf("CA NotBefore = %s, want %s", b.CACert.NotBefore, want)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(b.CACert)
+	if _, err := b.Cert.Verify(x509.VerifyOptions{DNSName: DNSNames(testNS)[2], Roots: roots, CurrentTime: now}); err != nil {
+		t.Fatalf("serving certificate does not verify at the injected time: %v", err)
+	}
+	if _, err := Parse(secretFor(b), testNS, now); err != nil {
+		t.Fatalf("generated bundle does not parse at the injected time: %v", err)
+	}
+}
+
 func TestEnsureCreatesMarkedSecretAndServesIt(t *testing.T) {
 	client := fake.NewClientset()
 	m := newTestManager(t, client, time.Now())

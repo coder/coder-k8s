@@ -116,6 +116,9 @@ func Generate(namespace string, now time.Time) (*Bundle, error) {
 	caCert, err := certutil.NewSelfSignedCACert(certutil.Config{
 		CommonName:   fmt.Sprintf("%s-ca@%d", ServiceName, now.Unix()),
 		Organization: []string{"coder-k8s"},
+		// certutil otherwise uses its own time.Now() with no backdating, so a clock that is behind
+		// the issuer's (another replica, kube-apiserver, or an injected now) sees a future CA.
+		NotBefore: now.Add(-clockSkewAllowance),
 	}, caKey)
 	if err != nil {
 		return nil, fmt.Errorf("generate CA certificate: %w", err)
