@@ -51,6 +51,10 @@ type fakeFault struct {
 	Rewrite func(answer any) any
 	// Detail goes into the error answer's detail and a validation error.
 	Detail string
+	// HTML answers Status with this text/html body instead of a JSON error,
+	// like a proxy or SSO page. With a 2xx Status, codersdk v2.37 returns a
+	// *codersdk.Error with that status.
+	HTML string
 }
 
 type fakeWorkspace struct {
@@ -182,6 +186,10 @@ func (f *fakeCoder) route(mux *http.ServeMux, pattern, route string, h func(*htt
 				_ = tcp.SetLinger(0) // Send RST instead of FIN.
 			}
 			_ = conn.Close()
+		case fault.HTML != "":
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(fault.Status)
+			_, _ = w.Write([]byte(fault.HTML))
 		default:
 			resp := codersdk.Response{Message: fmt.Sprintf("fake fault %d", fault.Status), Detail: fault.Detail}
 			if fault.Detail != "" {

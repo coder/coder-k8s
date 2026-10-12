@@ -54,7 +54,10 @@ func TestHTTPTransportSecurity(t *testing.T) {
 		{name: "plain text", contentType: "text/plain", wantStatus: http.StatusUnsupportedMediaType},
 		{name: "form encoded", contentType: "application/x-www-form-urlencoded", wantStatus: http.StatusUnsupportedMediaType},
 		{name: "missing content type", contentType: "omit", wantStatus: http.StatusUnsupportedMediaType},
-		{name: "JSON charset parameter", contentType: "application/json; charset=utf-8", wantStatus: http.StatusUnsupportedMediaType},
+		// go-sdk v1.7.0 matches the base media type. A charset parameter keeps the request
+		// non-simple for CORS, so browsers still preflight it.
+		{name: "JSON charset parameter", contentType: "application/json; charset=utf-8", wantCall: true},
+		{name: "oversized body", body: workspaceCall + strings.Repeat(" ", mcp.DefaultMaxRequestBodyBytes), wantStatus: http.StatusRequestEntityTooLarge},
 		// A noncanonical key must not override the exact "method" key (GHSA-wvj2-96wp-fq3f).
 		{name: "case mismatch", body: strings.Replace(workspaceCall, `"method":"tools/call"`, `"method":"ping","Method":"tools/call"`, 1)},
 		// GHSA-q382-vc8q-7jhj concerns null characters in keys, not a JSON null value.

@@ -2,19 +2,30 @@ package tracing
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/url"
 
 	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/propagation"
 	semconv "go.opentelemetry.io/otel/semconv/v1.14.0"
 	"go.opentelemetry.io/otel/semconv/v1.14.0/httpconv"
 	"go.opentelemetry.io/otel/semconv/v1.14.0/netconv"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/coderd/httpmw/patternmatcher"
 )
+
+// SessionIDBaggageKey is the W3C baggage key clients use to propagate the
+// per-session correlation ID described in the connection-log RFC. The value is
+// a 16-byte identifier encoded as a 32-character hexadecimal string.
+const SessionIDBaggageKey = "client_session_id"
 
 // Middleware adds tracing to http routes.
 func Middleware(tracerProvider trace.TracerProvider) func(http.Handler) http.Handler {
@@ -29,37 +40,36 @@ func Middleware(tracerProvider trace.TracerProvider) func(http.Handler) http.Han
 		"/external-auth/*/callback",
 	}.MustCompile()
 
-	var tracer trace.Tracer
-	if tracerProvider != nil {
-		tracer = tracerProvider.Tracer(TracerName)
+	if tracerProvider == nil {
+		tracerProvider = noop.NewTracerProvider()
 	}
+	tracer := tracerProvider.Tracer(TracerName)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-			if tracer == nil || !re.MatchString(r.URL.Path) {
+			if !re.MatchString(r.URL.Path) {
 				next.ServeHTTP(rw, r)
 				return
 			}
 
-			// Extract the trace context from the request headers.
-			tmp := otel.GetTextMapPropagator()
-			hc := propagation.HeaderCarrier(r.Header)
-			ctx := tmp.Extract(r.Context(), hc)
+			// Read the client_session_id from the request and add it to the log
+			// context. This is done even when tracing is disabled so that logs can
+			// always be correlated by client_session_id.
+			sessionID := sessionIDFromRequest(r)
+			if sessionID != "" {
+				r = r.WithContext(slog.With(r.Context(), slog.F("client_session_id", sessionID)))
+			}
 
-			// start span with default span name. Span name will be updated to "method route" format once request finishes.
-			ctx, span := tracer.Start(ctx, fmt.Sprintf("%s %s", r.Method, r.RequestURI))
+			// Start span with default span name. Span name will be updated to
+			// "method route" format once request finishes. The initial name
+			// excludes the query string because span names are exported to
+			// tracing backends at span start and some endpoints accept
+			// bearer credentials as query parameters.
+			r, span := StartHTTPSpan(tracer, rw, r, fmt.Sprintf("%s %s", r.Method, r.URL.Path))
 			defer span.End()
-			r = r.WithContext(ctx)
 
-			if span.SpanContext().HasTraceID() && span.SpanContext().HasSpanID() {
-				// Technically these values are included in the Traceparent
-				// header, but they are easier to read for humans this way.
-				rw.Header().Set("X-Trace-ID", span.SpanContext().TraceID().String())
-				rw.Header().Set("X-Span-ID", span.SpanContext().SpanID().String())
-
-				// Inject the trace context into the response headers.
-				hc := propagation.HeaderCarrier(rw.Header())
-				tmp.Inject(ctx, hc)
+			if sessionID != "" {
+				span.SetAttributes(attribute.String("client_session_id", sessionID))
 			}
 
 			sw, ok := rw.(*StatusWriter)
@@ -73,6 +83,80 @@ func Middleware(tracerProvider trace.TracerProvider) func(http.Handler) http.Han
 			EndHTTPSpan(r, sw.Status, span)
 		})
 	}
+}
+
+// sessionIDFromRequest extracts and validates the client_session_id from the
+// request. It prefers the W3C baggage member and falls back to the
+// client_session_id query parameter. The query parameter fallback exists
+// because browser WebSocket clients (such as the web terminal PTY) cannot set
+// arbitrary baggage headers. It returns an empty string when neither source
+// provides a valid value.
+func sessionIDFromRequest(r *http.Request) string {
+	if id := sessionIDFromHeaders(r.Header); id != "" {
+		return id
+	}
+	return sessionIDFromQueryString(r.URL.Query())
+}
+
+// sessionIDFromHeaders extracts and validates the client_session_id baggage member
+// from the request headers. It returns an empty string when the member is
+// absent or malformed. Extraction uses an explicit baggage propagator so it
+// does not depend on the globally configured text map propagator.
+func sessionIDFromHeaders(h http.Header) string {
+	ctx := propagation.Baggage{}.Extract(context.Background(), propagation.HeaderCarrier(h))
+	id := baggage.FromContext(ctx).Member(SessionIDBaggageKey).Value()
+	if !validSessionID(id) {
+		return ""
+	}
+	return id
+}
+
+// sessionIDFromQueryString extracts and validates the client_session_id query
+// parameter. It returns an empty string when the parameter is absent or
+// malformed. It mirrors sessionIDFromHeaders for the query-parameter fallback
+// used by browser WebSocket clients (such as the web terminal PTY) that cannot
+// set arbitrary baggage headers.
+func sessionIDFromQueryString(q url.Values) string {
+	id := q.Get(SessionIDBaggageKey)
+	if !validSessionID(id) {
+		return ""
+	}
+	return id
+}
+
+// validSessionID reports whether s is a 32-character lowercase hexadecimal
+// string (a 16-byte value), the encoding the RFC mandates for the session ID.
+// Only lowercase is accepted so that case-sensitive searches correlate
+// reliably. Validating also guards against logging arbitrary client-controlled
+// baggage values.
+func validSessionID(s string) bool {
+	b, err := hex.DecodeString(s)
+	if err != nil || len(b) != 16 {
+		return false
+	}
+	// hex.DecodeString also accepts upper-case, so require the canonical
+	// lowercase encoding.
+	return hex.EncodeToString(b) == s
+}
+
+// StartHTTPSpan starts a span, propagating inbound trace context and writing
+// X-Trace-ID/X-Span-ID response headers. The caller must end the span.
+func StartHTTPSpan(tracer trace.Tracer, rw http.ResponseWriter, r *http.Request, name string) (*http.Request, trace.Span) {
+	propagator := otel.GetTextMapPropagator()
+	ctx := propagator.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+
+	ctx, span := tracer.Start(ctx, name)
+	r = r.WithContext(ctx)
+
+	if span.SpanContext().HasTraceID() && span.SpanContext().HasSpanID() {
+		// Technically these values are included in the Traceparent header, but
+		// they are easier to read for humans this way.
+		rw.Header().Set("X-Trace-ID", span.SpanContext().TraceID().String())
+		rw.Header().Set("X-Span-ID", span.SpanContext().SpanID().String())
+		propagator.Inject(ctx, propagation.HeaderCarrier(rw.Header()))
+	}
+
+	return r, span
 }
 
 // EndHTTPSpan captures request and response data after the handler is done.

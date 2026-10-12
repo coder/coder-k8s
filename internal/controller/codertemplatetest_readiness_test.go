@@ -159,6 +159,20 @@ func TestTemplateTestReadiness404(t *testing.T) {
 	requireTemplateTestRunning(t, e.reconcile(t, key, 1), "WaitingForBuild", "is pending")
 }
 
+// TestTemplateTestReadinessProxyPage checks that a 2xx answer without the
+// workspace's JSON, a *codersdk.Error with that status since codersdk v2.37,
+// keeps the test waiting and never proves deletion.
+func TestTemplateTestReadinessProxyPage(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	key, _, _ := e.startedTest(t)
+	e.fake.failNext(routeWorkspace, fakeFault{Status: 200, HTML: "<html>proxy</html>"})
+	tt := e.reconcile(t, key, 1)
+	requireTemplateTestRunning(t, tt, "CoderUnavailable", "Coder answered 200: Received an HTML response")
+	require.Nil(t, meta.FindStatusCondition(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted))
+	requireTemplateTestRunning(t, e.reconcile(t, key, 1), "WaitingForBuild", "is pending")
+}
+
 func TestTemplateTestReadinessWrongAnswers(t *testing.T) {
 	t.Parallel()
 	e := newTemplateTestEnv(t)

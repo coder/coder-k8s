@@ -73,16 +73,17 @@ curl -fsS http://127.0.0.1:8090/readyz
 
 ## Request rules
 
-The bearer token check runs first. After it, the MCP Go SDK (1.4.1) enforces these transport checks. They are protections, not authentication, and they can cause surprising errors:
+The bearer token check runs first. After it, the server and the MCP Go SDK (1.7.0) enforce these transport checks. They are protections, not authentication, and they can cause surprising errors:
 
 | Rule | Error when broken |
 | --- | --- |
+| Cross-site POST requests (detected via `Origin` or `Sec-Fetch-Site`) are rejected. Clients that send neither header are allowed. | `403 Forbidden` |
 | Requests arriving on a loopback address must use a loopback `Host` (`localhost:8090`, `127.0.0.1:8090`). A reverse proxy that connects over loopback but keeps a Service or external hostname fails. | `403 Forbidden` |
-| POST requests must have exactly `Content-Type: application/json`. A missing header, form types, and `application/json; charset=utf-8` all fail. | `415 Unsupported Media Type` |
-| Cross-site POST requests (detected via `Origin` or `Sec-Fetch-Site`) are rejected. Clients that send neither header are allowed. | Rejected |
+| POST requests must use the `application/json` media type. Parameters such as `charset=utf-8` are allowed; a missing header and form types fail. | `415 Unsupported Media Type` |
+| Request bodies are limited to 4 MiB. | `413 Request Entity Too Large` |
 
 Also note:
 
 - JSON field names are case-sensitive. A key with an appended null character does not alias the original key.
 - Service names, session IDs, and other client-supplied headers are not credentials. Only the bearer token is.
-- Do not disable the SDK's localhost or cross-origin protections to work around routing problems.
+- Do not disable the localhost or cross-origin protections to work around routing problems.
