@@ -33,6 +33,9 @@ kubectl -n coder-system patch deployment/coder-k8s --type=json \
 !!! warning "Upgrades: mark credential Secrets first"
     `CoderWorkspaceProxy` and `CoderProvisioner` use a Secret only when it has the label `coder.com/credential=true` and lists the destination in `coder.com/credential-destinations`. Before you upgrade from a version without this check, do the steps in [Upgrade from a version without these checks](workspace-proxy-credentials.md#upgrade-from-a-version-without-these-checks).
 
+!!! warning "Upgrades: check the operator token Secrets"
+    A `CoderControlPlane` uses its operator token Secret only when the control plane is the controller owner of that Secret. Earlier versions took over an existing Secret with that name. Before you upgrade, do the check in [Operator token Secret](#operator-token-secret).
+
 ## 3. Verify
 
 ```bash
@@ -130,3 +133,45 @@ When a Secret changes, Kubernetes does not update the environment variables in r
     ```
 
 The controller does not restart pods automatically. The operator access bootstrap reads the Secret again on each reconcile. Thus it uses the new URL without a restart.
+
+## Operator token Secret
+
+The controller stores the API token of the `coder-k8s-operator` user in a Secret: `spec.operatorAccess.generatedTokenSecretName`, or `<control plane>-operator-token` by default. `status.operatorTokenSecretRef` names that Secret.
+
+- When the Secret does not exist, the controller creates it, with the control plane as the controller owner.
+- When the control plane is the controller owner of the Secret (same UID), the controller reads and updates it.
+- When the Secret exists and another owner, or no owner, controls it, the controller does not read, change or adopt it. It also does not create or change the token in Coder. It sets `operatorAccessReady` to `false` and removes `status.operatorTokenSecretRef`, so that provisioners, template tests and the aggregated API server stop using operator access for this control plane. The Coder Deployment does not use this Secret, so it does not change.
+
+The controller reports the `OperatorTokenSecretOwned` condition while operator access is on:
+
+| Status | Reason | Meaning |
+|---|---|---|
+| `True` | `TokenSecretOwned` | The control plane owns the Secret, or the Secret does not exist yet and the controller creates it. |
+| `False` | `TokenSecretNotOwned` | The Secret exists and another owner, or no owner, controls it. The message names the Secret. |
+
+```bash
+kubectl -n coder get codercontrolplane coder \
+  -o jsonpath='{range .status.conditions[?(@.type=="OperatorTokenSecretOwned")]}{.status} {.reason}: {.message}{"\n"}{end}'
+```
+
+To fix `TokenSecretNotOwned`, do one of these steps. The controller checks again every 30 seconds.
+
+- If the Secret is a leftover operator token Secret, for example from a control plane that you deleted with `--cascade=orphan` and created again, delete it. The controller creates a new Secret and a new operator token.
+- If the Secret belongs to something else, set `spec.operatorAccess.generatedTokenSecretName` to a name that does not exist yet.
+
+### Upgrade from a version that took over the Secret
+
+Earlier versions set the control plane as the controller owner of this Secret on every reconcile. So a Secret that an earlier version used already has the right owner, and the control plane keeps working after the upgrade. A control plane fails the check only when its Secret lost that owner after the last reconcile of the earlier version.
+
+Before you upgrade, list the operator token Secrets that the control plane does not own:
+
+```bash
+kubectl get codercontrolplanes -A -o json | jq -r '.items[] | select(.spec.operatorAccess.disabled != true) |
+  "\(.metadata.namespace) \(.status.operatorTokenSecretRef.name // .spec.operatorAccess.generatedTokenSecretName // (.metadata.name + "-operator-token")) \(.metadata.uid)"' |
+while read -r ns secret uid; do
+  owner=$(kubectl -n "$ns" get secret "$secret" -o jsonpath='{.metadata.ownerReferences[?(@.controller==true)].uid}' 2>/dev/null) || continue
+  [ "$owner" = "$uid" ] || echo "not owned: $ns/$secret"
+done
+```
+
+The command prints nothing when every Secret is owned or does not exist. For each line that it prints, do one of the fix steps above.
