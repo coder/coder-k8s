@@ -221,7 +221,8 @@ func TestCoderMCPServerCredentialChecks(t *testing.T) {
 		{name: "CR in the api key", secrets: setups(apiKey("Bearer "+testMCPKey+"\rX", testMCPOrigin)), reason: credentialsecret.ReasonMalformed, message: "not a valid HTTP header value"},
 		{name: "LF in the api key", secrets: setups(apiKey(testMCPKey+"\nX: y", testMCPOrigin)), reason: credentialsecret.ReasonMalformed, message: "not a valid HTTP header value"},
 		{name: "NUL in the api key", secrets: setups(apiKey(testMCPKey+"\x00x", testMCPOrigin)), reason: credentialsecret.ReasonMalformed, message: "not a valid HTTP header value"},
-		{name: "obs-text in the api key", secrets: setups(apiKey(testMCPKey+"\xe9\tx", testMCPOrigin))},
+		{name: "non-ASCII UTF-8 in the api key", secrets: setups(apiKey(testMCPKey+"caf\xc3\xa9\tx", testMCPOrigin))},
+		{name: "invalid UTF-8 in the api key", secrets: setups(apiKey(testMCPKey+"\xe9x", testMCPOrigin)), reason: credentialsecret.ReasonMalformed, message: "apiKey: the value of key token in Secret github-mcp is not valid UTF-8."},
 		{name: "headers", spec: useHeaders, secrets: setups(headers(testMCPOrigin))},
 		{name: "header, unlisted origin", spec: useHeaders, secrets: setups(headers(testMCPAuthOrigin)), reason: credentialsecret.ReasonDestinationNotAllowed, message: "header:X-Tenant (to spec.url): "},
 		{name: "header, not Opaque", spec: useHeaders, secrets: setups(headers(testMCPOrigin), modify("tenant-mcp", notOpaque)), reason: credentialsecret.ReasonRefused},
@@ -231,6 +232,7 @@ func TestCoderMCPServerCredentialChecks(t *testing.T) {
 		}), reason: credentialsecret.ReasonMalformed, message: "header:X-Tenant: "},
 		{name: "oauth2", spec: useOAuth2Revocation(""), secrets: setups(oauth2(testMCPClientSecret, testMCPOrigin, testMCPAuthOrigin))},
 		{name: "oauth2, CR in the client secret", spec: useOAuth2Revocation(""), secrets: setups(oauth2(testMCPClientSecret+"\rx", testMCPOrigin, testMCPAuthOrigin))},
+		{name: "oauth2, invalid UTF-8 in the client secret", spec: useOAuth2Revocation(""), secrets: setups(oauth2(testMCPClientSecret+"\xffx", testMCPOrigin, testMCPAuthOrigin)), reason: credentialsecret.ReasonMalformed, message: "oauth2ClientSecret: "},
 		{name: "oauth2, url not listed", spec: useOAuth2Revocation(""), secrets: setups(oauth2(testMCPClientSecret, testMCPAuthOrigin)), reason: credentialsecret.ReasonDestinationNotAllowed, message: "oauth2ClientSecret (to spec.url): "},
 		{name: "oauth2, auth origin not listed", spec: useOAuth2Revocation(""), secrets: setups(oauth2(testMCPClientSecret, testMCPOrigin)), reason: credentialsecret.ReasonDestinationNotAllowed, message: "oauth2ClientSecret (to spec.auth.oauth2.authURL): "},
 		{name: "oauth2, token origin not listed", spec: func(s *coderv1alpha1.CoderMCPServerSpec) {
@@ -437,6 +439,16 @@ func TestCoderMCPServerSlugLookup(t *testing.T) {
 				}})
 			}
 		}, stalled: true, reason: "CoderAnswerMismatch", requeue: 10 * time.Minute, message: "assertion failed: Coder answered MCP server config organization"},
+		{name: "matching config without an ID", prepare: func(ctx context.Context, t *testing.T, env mcpServerEnv, server *coderv1alpha1.CoderMCPServer) {
+			create("github", "")(ctx, t, env, server)
+			for range 2 { // One fault per reconcile.
+				env.fake.failNext(routeMCPServers, fakeFault{Rewrite: func(answer any) any {
+					list := answer.([]codersdk.MCPServerConfig)
+					list[0].ID = uuid.Nil
+					return list
+				}})
+			}
+		}, stalled: true, reason: "CoderAnswerMismatch", requeue: 10 * time.Minute, message: "assertion failed: Coder answered the MCP server config with slug github without an ID"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

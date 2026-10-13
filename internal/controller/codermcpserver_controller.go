@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
@@ -372,6 +373,13 @@ func readMCPServerCredentials(ctx context.Context, reader client.Reader, server 
 					"Secret %s changed during the reconcile. The controller reads it again.", c.ref.Name), nil
 			}
 			seen[c.ref.Name] = token
+			// Coder receives every credential inside a JSON string, and
+			// encoding/json replaces invalid UTF-8 with U+FFFD, so Coder would
+			// store another value.
+			if !utf8.ValidString(value.Reveal()) {
+				return nil, mcpServerStalled(0, credentialsecret.ReasonMalformed,
+					"%s: the value of key %s in Secret %s is not valid UTF-8.", c.field, c.ref.Key, c.ref.Name), nil
+			}
 			if c.headerValue && !isHTTPFieldValue(value.Reveal()) {
 				return nil, mcpServerStalled(0, credentialsecret.ReasonMalformed,
 					"%s: the value of key %s in Secret %s is not a valid HTTP header value.", c.field, c.ref.Key, c.ref.Name), nil
@@ -407,6 +415,9 @@ func lookUpMCPServerSlug(ctx context.Context, sdk *codersdk.Client, server *code
 		}
 		if config.Slug != server.Spec.Slug {
 			continue
+		}
+		if config.ID == uuid.Nil {
+			return mcpServerStalled(mcpServerResync, "CoderAnswerMismatch", "assertion failed: Coder answered the MCP server config with slug %s without an ID", config.Slug)
 		}
 		if config.DisplayName == mcpServerNoncePrefix+string(server.UID) {
 			return mcpServerWait(mcpServerResync, "Pending",
