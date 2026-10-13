@@ -280,7 +280,7 @@ type CoderWorkspacePool struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   CoderWorkspacePoolSpec   `json:"spec,omitempty"`
+	Spec   CoderWorkspacePoolSpec   `json:"spec"`
 	Status CoderWorkspacePoolStatus `json:"status,omitempty"`
 }
 

@@ -10,6 +10,7 @@ import (
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
@@ -89,6 +90,22 @@ func TestCoderWorkspacePoolAPIValidation(t *testing.T) {
 			require.ErrorContains(t, err, tc.wantErr)
 		})
 	}
+}
+
+// TestCoderWorkspacePoolAPIRequiresSpec proves the API server refuses a pool
+// without a spec. Without this, the spec-level rules never run.
+func TestCoderWorkspacePoolAPIRequiresSpec(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	namespace := createTestNamespace(ctx, t, "pool-api")
+	pool := &unstructured.Unstructured{}
+	pool.SetGroupVersionKind(coderv1alpha1.GroupVersion.WithKind("CoderWorkspacePool"))
+	pool.SetNamespace(namespace)
+	pool.SetName("no-spec")
+
+	err := k8sClient.Create(ctx, pool)
+	require.True(t, apierrors.IsInvalid(err), "want Invalid, got %v", err)
+	require.ErrorContains(t, err, "spec: Required value")
 }
 
 func TestCoderWorkspacePoolAPIDefaultsAndImmutability(t *testing.T) {
