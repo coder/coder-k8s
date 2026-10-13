@@ -42,8 +42,10 @@ const (
 	// KeyKey is the Secret data key for the PEM serving private key.
 	KeyKey = corev1.TLSPrivateKeyKey
 
-	// ServingCertValidity is the lifetime of a serving certificate. The CA lives 10 years
-	// (client-go certutil.NewSelfSignedCACert).
+	// CAValidity is the lifetime of the CA, counted from the issuing clock (the same 10 years as
+	// client-go certutil.NewSelfSignedCACert).
+	CAValidity = 10 * 365 * 24 * time.Hour
+	// ServingCertValidity is the lifetime of a serving certificate.
 	ServingCertValidity = 365 * 24 * time.Hour
 	// clockSkewAllowance backdates serving certificates so small clock differences do not reject them.
 	clockSkewAllowance = time.Hour
@@ -113,15 +115,31 @@ func Generate(namespace string, now time.Time) (*Bundle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("assertion failed: parse generated CA key: %w", err)
 	}
-	caCert, err := certutil.NewSelfSignedCACert(certutil.Config{
-		CommonName:   fmt.Sprintf("%s-ca@%d", ServiceName, now.Unix()),
-		Organization: []string{"coder-k8s"},
-		// certutil otherwise uses its own time.Now() with no backdating, so a clock that is behind
-		// the issuer's (another replica, kube-apiserver, or an injected now) sees a future CA.
-		NotBefore: now.Add(-clockSkewAllowance),
-	}, caKey)
+	serial, err := randomSerial()
+	if err != nil {
+		return nil, err
+	}
+	// The same certificate as client-go certutil.NewSelfSignedCACert, but dated from now: certutil
+	// takes NotAfter from its own time.Now(). NotBefore is backdated, so a clock that is behind the
+	// issuer's (another replica, kube-apiserver, or an injected now) does not see a future CA.
+	commonName := fmt.Sprintf("%s-ca@%d", ServiceName, now.Unix())
+	caTmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: commonName, Organization: []string{"coder-k8s"}},
+		DNSNames:              []string{commonName},
+		NotBefore:             now.Add(-clockSkewAllowance).UTC(),
+		NotAfter:              now.Add(CAValidity).UTC(),
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, caKey.Public(), caKey)
 	if err != nil {
 		return nil, fmt.Errorf("generate CA certificate: %w", err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		return nil, fmt.Errorf("assertion failed: parse generated CA certificate: %w", err)
 	}
 	caCertPEM, err := certutil.EncodeCertificates(caCert)
 	if err != nil {
@@ -143,13 +161,13 @@ func (b *Bundle) issueServingCert(namespace string, now time.Time) error {
 	if err != nil {
 		return fmt.Errorf("generate serving key: %w", err)
 	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).SetInt64(math.MaxInt64-1))
+	serial, err := randomSerial()
 	if err != nil {
-		return fmt.Errorf("generate serial: %w", err)
+		return err
 	}
 	names := DNSNames(namespace)
 	tmpl := &x509.Certificate{
-		SerialNumber: new(big.Int).Add(serial, big.NewInt(1)),
+		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: names[2]},
 		DNSNames:     names,
 		NotBefore:    now.Add(-clockSkewAllowance).UTC(),
@@ -264,6 +282,15 @@ func (b *Bundle) NeedsRenewal(namespace string, now time.Time) bool {
 		}
 	}
 	return false
+}
+
+// randomSerial returns a uniform random certificate serial number in [1, MaxInt64).
+func randomSerial() (*big.Int, error) {
+	serial, err := rand.Int(rand.Reader, new(big.Int).SetInt64(math.MaxInt64-1))
+	if err != nil {
+		return nil, fmt.Errorf("generate serial: %w", err)
+	}
+	return serial.Add(serial, big.NewInt(1)), nil
 }
 
 func parseSingleCert(data []byte) (*x509.Certificate, error) {
