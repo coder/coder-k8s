@@ -37,12 +37,13 @@ import (
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/coderbootstrap"
+	"github.com/coder/coder-k8s/internal/controlplaneurl"
 	"github.com/coder/coder-k8s/internal/credentialsecret"
 )
 
 const (
 	defaultCoderImage         = "ghcr.io/coder/coder:latest"
-	defaultControlPlanePort   = int32(80)
+	defaultControlPlanePort   = controlplaneurl.DefaultServicePort
 	controlPlaneTargetPort    = int32(8080)
 	controlPlaneTLSTargetPort = int32(8443)
 
@@ -433,27 +434,11 @@ func workspaceDeploymentsEnabled(explicit *bool) bool {
 }
 
 func controlPlaneTLSEnabled(cp *coderv1alpha1.CoderControlPlane) bool {
-	if cp == nil {
-		return false
-	}
-	return len(cp.Spec.TLS.SecretNames) > 0
+	return controlplaneurl.TLSEnabled(cp)
 }
 
 func httpRouteBackendServicePort(coderControlPlane *coderv1alpha1.CoderControlPlane) (int32, error) {
-	if coderControlPlane == nil {
-		return 0, fmt.Errorf("assertion failed: coder control plane must not be nil")
-	}
-
-	servicePort := coderControlPlane.Spec.Service.Port
-	if servicePort == 0 {
-		servicePort = defaultControlPlanePort
-	}
-
-	if controlPlaneTLSEnabled(coderControlPlane) && servicePort == 443 {
-		return defaultControlPlanePort, nil
-	}
-
-	return servicePort, nil
+	return controlplaneurl.HTTPServicePort(coderControlPlane)
 }
 
 func requiresWorkspaceRBACDriftRequeue(cp *coderv1alpha1.CoderControlPlane) bool {
@@ -1645,18 +1630,9 @@ func (r *CoderControlPlaneReconciler) desiredStatus(
 }
 
 func controlPlaneSDKURL(coderControlPlane *coderv1alpha1.CoderControlPlane) string {
-	if coderControlPlane == nil {
-		return ""
-	}
-
 	// Always use HTTP for in-cluster SDK calls. TLS certs are typically provisioned
 	// for external hostnames and may fail verification against *.svc.cluster.local.
-	servicePort, err := httpRouteBackendServicePort(coderControlPlane)
-	if err != nil {
-		return ""
-	}
-
-	return fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", coderControlPlane.Name, coderControlPlane.Namespace, servicePort)
+	return controlplaneurl.InternalHTTPURL(coderControlPlane)
 }
 
 func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(

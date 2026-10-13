@@ -16,6 +16,7 @@ import (
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/aggregated/coder"
+	"github.com/coder/coder-k8s/internal/controlplaneurl"
 )
 
 // controlPlaneCoderTimeout bounds each Coder request made with the operator
@@ -86,13 +87,5 @@ func controlPlaneCoderClient(ctx context.Context, reader client.Reader, namespac
 // is HTTPS on the service name, which certificates rarely cover, so the
 // controller uses the internal HTTP URL like the control-plane controller.
 func controlPlaneCoderURL(controlPlane *coderv1alpha1.CoderControlPlane) (*url.URL, error) {
-	statusURL, err := url.Parse(controlPlane.Status.URL)
-	if err != nil || statusURL.Scheme != "https" {
-		return statusURL, err
-	}
-	internalURL := controlPlaneSDKURL(controlPlane)
-	if internalURL == "" {
-		return nil, errors.New("no internal HTTP URL")
-	}
-	return url.Parse(internalURL)
+	return controlplaneurl.CoderAPIURL(controlPlane)
 }

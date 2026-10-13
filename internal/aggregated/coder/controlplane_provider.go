@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -14,6 +13,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/controlplaneurl"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -159,12 +159,12 @@ func (p *ControlPlaneClientProvider) ClientForNamespace(ctx context.Context, nam
 		)
 	}
 
-	coderURL := strings.TrimSpace(controlPlane.Status.URL)
-	parsedCoderURL, err := url.Parse(coderURL)
+	// With TLS, status.url is HTTPS on the Service name, which certificates
+	// rarely cover: use the internal HTTP URL like the controllers do.
+	parsedCoderURL, err := controlplaneurl.CoderAPIURL(&controlPlane)
 	if err != nil {
 		return nil, fmt.Errorf(
-			"parse CoderControlPlane URL %q for %s/%s: %w",
-			coderURL,
+			"derive Coder API URL from CoderControlPlane %s/%s: %w",
 			controlPlane.Namespace,
 			controlPlane.Name,
 			err,
