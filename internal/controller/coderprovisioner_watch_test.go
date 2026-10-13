@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,7 +41,8 @@ func TestCoderProvisionerCredentials_SecretWatchRequeues(t *testing.T) {
 	require.NoError(t, err)
 	// The manager goroutine owns f.bootstrapClient from here on: the test reads
 	// only Kubernetes objects, so it does not race with the fake.
-	r := &controller.CoderProvisionerReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), BootstrapClient: f.bootstrapClient}
+	reads := &atomic.Int64{}
+	r := &controller.CoderProvisionerReconciler{Client: readCountingClient{Client: mgr.GetClient(), reads: reads}, Scheme: mgr.GetScheme(), BootstrapClient: f.bootstrapClient}
 	require.NoError(t, r.SetupWithManager(mgr))
 	mgrCtx, cancel := context.WithCancel(ctx)
 	mgrDone := make(chan error, 1)
@@ -57,6 +59,11 @@ func TestCoderProvisionerCredentials_SecretWatchRequeues(t *testing.T) {
 	}, 30*time.Second, 100*time.Millisecond)
 	_, exists := f.deployment(ctx, t, provisioner)
 	require.False(t, exists, "a refused provisioner must not get a Deployment")
+
+	// Writing CredentialsReady=False queues one more reconcile through the
+	// provisioner's own watch. Wait until the reconciler is idle, so that the
+	// Secret deletion below can only be picked up through the Secret watch.
+	requireReconcilerIdle(t, reads, 5*time.Second)
 
 	// The documented remedy: delete the unowned Secret. Only the watch can
 	// trigger the next reconcile.
@@ -76,4 +83,34 @@ func TestCoderProvisionerCredentials_SecretWatchRequeues(t *testing.T) {
 		_, exists := f.deployment(ctx, t, provisioner)
 		return created.UID != unowned.UID && owner != nil && owner.UID == latest.UID && exists
 	}, 30*time.Second, 100*time.Millisecond)
+}
+
+// readCountingClient counts the reads of a reconciler. Every reconcile reads
+// objects, so an unchanged count over a window means no reconcile ran in it.
+type readCountingClient struct {
+	client.Client
+	reads *atomic.Int64
+}
+
+func (c readCountingClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	c.reads.Add(1)
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+func (c readCountingClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	c.reads.Add(1)
+	return c.Client.List(ctx, list, opts...)
+}
+
+// requireReconcilerIdle waits until reads stays unchanged for window.
+func requireReconcilerIdle(t *testing.T, reads *atomic.Int64, window time.Duration) {
+	t.Helper()
+	last, stableSince := reads.Load(), time.Now()
+	require.Eventually(t, func() bool {
+		if current := reads.Load(); current != last {
+			last, stableSince = current, time.Now()
+			return false
+		}
+		return time.Since(stableSince) >= window
+	}, 60*time.Second, 100*time.Millisecond, "the reconciler did not become idle")
 }
