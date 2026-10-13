@@ -110,13 +110,17 @@ spec:
                   OwnerUserID is the UUID of the Coder user who owns every workspace of
                   the pool. The control plane's admin must allow this owner and the
                   template. Every start build gives the owner's API token to the
-                  template's Terraform, so use a dedicated low-privilege user.
+                  template's Terraform, so use a dedicated low-privilege user. Write the
+                  UUID in lower case with hyphens, as in the control plane's owners list.
                 format: uuid
                 maxLength: 36
+                pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
                 type: string
                 x-kubernetes-validations:
                 - message: ownerUserID is immutable
                   rule: self == oldSelf
+                - message: ownerUserID must not be the Coder prebuilds system user
+                  rule: self != 'c42fdf75-3097-471c-8c33-fb52454d81c0'
               parameters:
                 description: Parameters are rich parameter values for the start builds.
                 items:
