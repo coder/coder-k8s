@@ -477,6 +477,30 @@ func TestValueNeverPrintsSecret(t *testing.T) {
 	})
 }
 
+func TestNewValue(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(testValue)
+	value := credentialsecret.NewValue(data)
+	data[0] = 'X' // NewValue copies, so a later change to data does not reach value.
+	if value.Reveal() != testValue {
+		t.Fatalf("Reveal returned another value")
+	}
+	if value.Token != (credentialsecret.ChangeToken{}) {
+		t.Fatalf("NewValue set a change token: %+v", value.Token)
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	credentialsecrettest.RequireNoLeak(t, []string{testValue}, map[string]any{
+		"%v":   fmt.Sprintf("%v", value),
+		"%#v":  fmt.Sprintf("%#v", value),
+		"json": string(encoded),
+		"log":  fmt.Sprint(value.MarshalLog()),
+	})
+}
+
 func TestRedact(t *testing.T) {
 	t.Parallel()
 
