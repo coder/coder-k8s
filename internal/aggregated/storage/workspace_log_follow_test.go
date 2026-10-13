@@ -123,6 +123,10 @@ func TestWorkspaceLogFollowStreamsLiveEntries(t *testing.T) {
 	if got := ff.after.Load(); got != entries[1].ID {
 		t.Fatalf("follow continued after %d, want the last snapshot entry %d", got, entries[1].ID)
 	}
+	// The documented cost of a follow: the 2 snapshot requests and 1 that opens the live stream.
+	if got := f.requests.Load(); got != 3 {
+		t.Fatalf("a follow must make 3 Coder requests, got %d", got)
+	}
 	close(next)
 	rest, err := io.ReadAll(lines)
 	if err != nil || string(rest) != entries[3].Text()+"\n" {

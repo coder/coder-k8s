@@ -116,6 +116,11 @@ func TestMapCoderError(t *testing.T) {
 				if !apierrors.IsTooManyRequests(err) {
 					t.Fatalf("expected TooManyRequests, got %v", err)
 				}
+				// The docs promise Coder's message and no Retry-After, so clients do not retry on
+				// their own against the shared operator-token limit.
+				if delay, ok := apierrors.SuggestsClientDelay(err); ok || delay != 0 || !strings.Contains(err.Error(), "rate limited") {
+					t.Fatalf("expected Coder's message and no Retry-After, got %v (delay %d)", err, delay)
+				}
 			},
 		},
 		{

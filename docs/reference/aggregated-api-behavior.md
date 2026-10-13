@@ -17,7 +17,7 @@ The aggregated API server serves `coderworkspaces`, `codertemplates` and `codert
 | [Template versions](#template-versions) | Read-only: `get` and `list`, no watch. Reads never download template source. |
 | [Promote a template version](#promote-a-template-version) | `codertemplates/<name>/promote` (`create`) makes a version active. A rollback promotes an older version. It needs its own RBAC grant. `dryRun=All` previews it. An unconfirmed result returns `503`, and a concurrent change returns `409`. |
 | [Template builds](#template-builds) | Create and update with `spec.files` wait until Coder completes the import. The full request must complete within 34 seconds. |
-| [Coder timeouts](#coder-timeouts) | A Coder call that runs out of time returns `504` on every resource. A create that gets a broken `2xx` answer returns `504` or `500`. After a `504` on a write, re-read before you retry. |
+| [Coder timeouts](#coder-timeouts) | A Coder call that runs out of time returns `504` on every resource. A create that gets a broken `2xx` answer returns `504` or `500`. After a `504` on a write, or a `500` on a create, re-read before you retry. |
 | [Workspace build log](#workspace-build-log) | `coderworkspaces/log` returns the latest build log as text. It needs its own RBAC grant and has fixed size, time, and concurrency limits. |
 | [Start and stop](#start-and-stop) | `coderworkspaces/start` and `coderworkspaces/stop` start or stop a workspace. Each needs its own RBAC grant. A repeated request does not queue a second build while one is active. |
 
@@ -393,6 +393,8 @@ The server limits each log request:
 
 Snapshots and `follow=true` streams use the same open-request slots. A user with 4 open `follow=true` streams gets `429` on a snapshot too.
 
+Every log request also uses the Coder API rate limit of the operator token, which all aggregated API calls share. Coder allows 512 requests per minute for each user and request path by default, and the Coder deployment can change it with `CODER_API_RATE_LIMIT`. A log request makes 2 Coder requests: one that reads the workspace and one that reads the log. With `follow=true`, it makes 1 more request that opens the live stream, and it sends no more requests while the stream is open. When Coder rate-limits the operator token, the server returns `429` with the message of Coder and without `Retry-After`. See [Cost and limits of reads](#cost-and-limits-of-reads).
+
 ## Start and stop
 
 `POST …/namespaces/<namespace>/coderworkspaces/<name>/start` starts a workspace. `POST …/coderworkspaces/<name>/stop` stops it:
@@ -430,8 +432,8 @@ The server reads the latest build of the workspace and decides from its transiti
 
 - `Queued`: the server queued a new build. The build fields name the new build.
 - `InProgress`: a build of the requested kind is already pending or running. The server queued nothing. The build fields name that build.
-- `Unchanged`: the workspace is already started or stopped. The server queued nothing.
-- `409 Conflict`: another build is active. The message names that build. Retry after it ends. `kubectl get --raw "$API/acme.alice.dev/log?follow=true"` ends when the build ends.
+- `Unchanged`: the latest build has the requested kind and succeeded. The server queued nothing.
+- `409 Conflict`: another build is active. The message names that build. Retry after it ends. `kubectl get --raw "$API/acme.alice.dev/log?follow=true"` ends when the build ends, or earlier at a [log limit](#workspace-build-log).
 
 Other status codes:
 

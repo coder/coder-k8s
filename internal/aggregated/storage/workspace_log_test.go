@@ -37,6 +37,7 @@ const (
 type logFakeCoder struct {
 	server      *httptest.Server
 	buildID     uuid.UUID
+	requests    atomic.Int32 // every request, of any kind
 	lookups     atomic.Int32
 	logFetches  atomic.Int32
 	logsHandler atomic.Pointer[http.HandlerFunc]
@@ -56,6 +57,7 @@ func newLogFakeCoder(t testing.TB) *logFakeCoder {
 	}
 	f.setLogs(nil)
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.requests.Add(1)
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 		switch {
 		case len(parts) == 6 && parts[2] == "users" && parts[4] == "workspace":
@@ -213,6 +215,12 @@ func TestWorkspaceLogSnapshot(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "2026-10-02T10:00:00Z [info] [provisioner|Planning infrastructure] line 1\n") {
 		t.Fatalf("unexpected line format: %q", got)
+	}
+	// The documented cost of a snapshot (docs/reference/aggregated-api-behavior.md): one workspace
+	// lookup and one log read, against the Coder rate limit of the operator token.
+	if f.requests.Load() != 2 || f.lookups.Load() != 1 || f.logFetches.Load() != 1 {
+		t.Fatalf("a snapshot must make 2 Coder requests (1 lookup, 1 log read), got %d (%d lookups, %d log reads)",
+			f.requests.Load(), f.lookups.Load(), f.logFetches.Load())
 	}
 
 	for _, empty := range []string{"[]", "null"} {

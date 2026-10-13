@@ -66,7 +66,7 @@ The response is a `CoderWorkspaceTransition`. Read `status.outcome`:
 
 - `Queued`: the server queued a build. `status.buildID` and `status.buildNumber` name it.
 - `InProgress`: a build of the same kind is already pending or running. Nothing was queued.
-- `Unchanged`: the workspace is already started or stopped. Nothing was queued.
+- `Unchanged`: the latest build is a start (for `start`) or a stop (for `stop`), and it succeeded. Nothing was queued. If the latest build of that kind failed or was canceled, the request queues a new build and returns `Queued`.
 - `WouldQueue`: only with `dryRun=All`. A real request would queue a build.
 
 A repeated request does not queue a second build, so you can retry a start or stop that is still in progress. A start while a stop build runs, or a stop while a start build runs, returns `409`.
@@ -81,7 +81,7 @@ kubectl get coderworkspace.aggregation.coder.com acme.alice.dev -n coder \
   -o jsonpath='{.status.latestBuildStatus}{"\n"}'
 ```
 
-- The follow ends when the build ends. If the build has already ended, it prints the whole log and returns at once.
+- The follow ends when the build ends, or earlier when it reaches the size or time limit of a log request. Then send the request again. See the [log limits](../reference/aggregated-api-behavior.md#workspace-build-log). If the build has already ended, it prints the whole log and returns at once.
 - The status is `running` after a start and `stopped` after a stop.
 - Without `follow=true`, the log request returns the log so far. Add `limitBytes=<n>` to read at most `n` bytes.
 - Build logs can contain secrets that Terraform printed. Share them with care.
