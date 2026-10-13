@@ -394,8 +394,9 @@ func volumeSecretNames(source *corev1.VolumeSource) []string {
 // spec.licenseSecretRef, spec.database.connectionSecretRef, spec.extraEnv
 // secretKeyRefs, spec.envFrom secretRefs, spec.imagePullSecrets,
 // spec.tls.secretNames, spec.expose.ingress.tls, spec.certs.secrets, and the
-// Secret sources of spec.volumes. The names are sorted and unique. Controllers re-queue the resources that
-// reference these names when a control plane changes.
+// Secret sources of spec.volumes. The names are sorted and unique.
+// Controllers re-queue the resources that reference these names when a
+// control plane changes.
 func ControlPlaneSecretNames(controlPlane *coderv1alpha1.CoderControlPlane) []string {
 	secrets := controlPlaneSecrets(controlPlane)
 	names := make([]string, 0, len(secrets))
