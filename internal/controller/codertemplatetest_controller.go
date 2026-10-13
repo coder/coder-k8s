@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -14,9 +13,7 @@ import (
 
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -36,7 +33,6 @@ import (
 const (
 	templateTestWorkspacePrefix  = "ktt-"
 	templateTestUIDHexLength     = 28
-	templateTestCoderTimeout     = 30 * time.Second
 	templateTestPendingPoll      = 15 * time.Second
 	templateTestRunningPoll      = 5 * time.Second
 	templateTestDefaultTimeout   = int32(900)
@@ -323,43 +319,11 @@ func (r *CoderTemplateTestReconciler) resolveInputs(
 
 // coderClient reads the referenced control plane and its operator token.
 func (r *CoderTemplateTestReconciler) coderClient(ctx context.Context, tt *coderv1alpha1.CoderTemplateTest) (*codersdk.Client, *coderv1alpha1.CoderControlPlane, *templateTestStep, error) {
-	controlPlane := &coderv1alpha1.CoderControlPlane{}
-	key := types.NamespacedName{Namespace: tt.Namespace, Name: tt.Spec.ControlPlaneRef.Name}
-	if err := r.Get(ctx, key, controlPlane); apierrors.IsNotFound(err) {
-		return nil, nil, templateTestWait("ControlPlaneNotReady", "CoderControlPlane %s does not exist.", key.Name), nil
-	} else if err != nil {
-		return nil, nil, nil, fmt.Errorf("get codercontrolplane %s: %w", key, err)
+	sdk, controlPlane, wait, err := controlPlaneCoderClient(ctx, r.Client, tt.Namespace, tt.Spec.ControlPlaneRef.Name)
+	if wait != nil {
+		return nil, nil, templateTestWait(wait.reason, "%s", wait.message), nil
 	}
-	switch {
-	case !controlPlane.DeletionTimestamp.IsZero():
-		return nil, nil, templateTestWait("ControlPlaneNotReady", "CoderControlPlane %s is being deleted.", key.Name), nil
-	case controlPlane.Status.URL == "":
-		return nil, nil, templateTestWait("ControlPlaneNotReady", "CoderControlPlane %s has no status.url yet.", key.Name), nil
-	case !controlPlane.Status.OperatorAccessReady || controlPlane.Status.OperatorTokenSecretRef == nil:
-		return nil, nil, templateTestWait("OperatorAccessNotReady", "CoderControlPlane %s has no operator access yet.", key.Name), nil
-	}
-	ref := controlPlane.Status.OperatorTokenSecretRef
-	secretKey := strings.TrimSpace(ref.Key)
-	if secretKey == "" {
-		secretKey = coderv1alpha1.DefaultTokenSecretKey
-	}
-	secret := &corev1.Secret{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: tt.Namespace, Name: strings.TrimSpace(ref.Name)}, secret); client.IgnoreNotFound(err) != nil {
-		return nil, nil, nil, fmt.Errorf("read operator token of codercontrolplane %s: %w", key, err)
-	}
-	token := string(secret.Data[secretKey])
-	if token == "" {
-		return nil, nil, templateTestWait("OperatorAccessNotReady", "The operator token Secret of CoderControlPlane %s has no token yet.", key.Name), nil
-	}
-	coderURL, err := templateTestCoderURL(controlPlane)
-	if err != nil {
-		return nil, nil, templateTestWait("ControlPlaneNotReady", "CoderControlPlane %s has no usable Coder URL: %v", key.Name, err), nil
-	}
-	sdk, err := coder.NewSDKClient(coder.Config{CoderURL: coderURL, SessionToken: token, RequestTimeout: templateTestCoderTimeout})
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("create Coder client for codercontrolplane %s: %w", key, err)
-	}
-	return sdk, controlPlane, nil, nil
+	return sdk, controlPlane, nil, err
 }
 
 // checkTemplateTestOwner refuses owners whose token is worth more than a plain
@@ -548,21 +512,6 @@ func (r *CoderTemplateTestReconciler) releaseFinalizer(ctx context.Context, tt *
 		return fmt.Errorf("remove finalizer from template test %s/%s: %w", tt.Namespace, tt.Name, err)
 	}
 	return nil
-}
-
-// templateTestCoderURL returns the URL for Coder calls. With TLS, status.url
-// is HTTPS on the service name, which certificates rarely cover, so the
-// controller uses the internal HTTP URL like the control-plane controller.
-func templateTestCoderURL(controlPlane *coderv1alpha1.CoderControlPlane) (*url.URL, error) {
-	statusURL, err := url.Parse(controlPlane.Status.URL)
-	if err != nil || statusURL.Scheme != "https" {
-		return statusURL, err
-	}
-	internalURL := controlPlaneSDKURL(controlPlane)
-	if internalURL == "" {
-		return nil, errors.New("no internal HTTP URL")
-	}
-	return url.Parse(internalURL)
 }
 
 // templateTestWorkspaceName derives the Coder workspace name from the object

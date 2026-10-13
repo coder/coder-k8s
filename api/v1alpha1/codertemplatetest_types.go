@@ -70,15 +70,6 @@ type CoderTemplateTestParameter struct {
 	Value string `json:"value,omitempty"`
 }
 
-// CoderControlPlaneReference names a CoderControlPlane in the same namespace.
-type CoderControlPlaneReference struct {
-	// Name is the CoderControlPlane name.
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
-	Name string `json:"name"`
-}
-
 // CoderTemplateTestSpec defines one test run of a Coder template version.
 type CoderTemplateTestSpec struct {
 	// ControlPlaneRef names the CoderControlPlane in the same namespace. The
