@@ -201,7 +201,8 @@ jobs:
         run: |
           # grep exits 1 when nothing matches. Any other status (for example a missing file) fails the step.
           status=0
-          grep -n -E '^[[:space:]]+kind: CoderWorkspacePool$|coderworkspacepools\.coder\.com' \
+          # The third pattern matches the CRD path entry in config/default/kustomization.yaml.
+          grep -n -E '^[[:space:]]+kind: CoderWorkspacePool$|coderworkspacepools\.coder\.com|coder\.com_coderworkspacepools\.yaml' \
             dist/install.yaml config/default/kustomization.yaml config/crd/bases/*.yaml || status=$?
           if [[ "${status}" -eq 0 ]]; then
             echo "assertion failed: the CoderWorkspacePool CRD must not ship before its controller" >&2
