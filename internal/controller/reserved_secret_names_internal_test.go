@@ -60,7 +60,15 @@ func TestReservedSecretName(t *testing.T) {
 			Expose: &coderv1alpha1.ExposeSpec{Ingress: &coderv1alpha1.IngressExposeSpec{TLS: &coderv1alpha1.IngressTLSExposeSpec{
 				SecretName: "ingress-tls", WildcardSecretName: "wildcard-tls",
 			}}},
-			Volumes: []corev1.Volume{{Name: "v", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "volume"}}}},
+			Volumes: []corev1.Volume{
+				{Name: "v", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "volume"}}},
+				{Name: "p", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{
+					{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "projected"}}},
+				}}}},
+			},
+			// Operator access is off, but turning it back on recreates the
+			// token Secret, so its name stays reserved.
+			OperatorAccess: coderv1alpha1.OperatorAccessSpec{Disabled: true},
 		},
 		Status: coderv1alpha1.CoderControlPlaneStatus{OperatorTokenSecretRef: ptr.To(key("recorded-token"))},
 	}
@@ -69,10 +77,16 @@ func TestReservedSecretName(t *testing.T) {
 		&coderv1alpha1.CoderWorkspaceProxy{
 			ObjectMeta: metav1.ObjectMeta{Name: "proxy", Namespace: "ns"},
 			Spec: coderv1alpha1.WorkspaceProxySpec{
-				Bootstrap: &coderv1alpha1.ProxyBootstrapSpec{CredentialsSecretRef: key("proxy-bootstrap")},
+				Bootstrap:        &coderv1alpha1.ProxyBootstrapSpec{CredentialsSecretRef: key("proxy-bootstrap")},
+				ImagePullSecrets: []corev1.LocalObjectReference{{Name: "proxy-pull"}},
 			},
+			Status: coderv1alpha1.WorkspaceProxyStatus{ProxyTokenSecretRef: ptr.To(key("proxy-recorded"))},
 		},
-		&coderv1alpha1.CoderProvisioner{ObjectMeta: metav1.ObjectMeta{Name: "prov", Namespace: "ns"}},
+		&coderv1alpha1.CoderProvisioner{
+			ObjectMeta: metav1.ObjectMeta{Name: "prov", Namespace: "ns"},
+			Spec:       coderv1alpha1.CoderProvisionerSpec{ImagePullSecrets: []corev1.LocalObjectReference{{Name: "prov-pull"}}},
+			Status:     coderv1alpha1.CoderProvisionerStatus{SecretRef: ptr.To(key("prov-recorded"))},
+		},
 		&coderv1alpha1.CoderAIProvider{ObjectMeta: metav1.ObjectMeta{Name: "openai", Namespace: "ns"}, Spec: coderv1alpha1.CoderAIProviderSpec{APIKeySecretRef: key("openai-key")}},
 		&coderv1alpha1.CoderMCPServer{ObjectMeta: metav1.ObjectMeta{Name: "mcp", Namespace: "ns"}, Spec: coderv1alpha1.CoderMCPServerSpec{Auth: coderv1alpha1.CoderMCPServerAuth{
 			APIKey:        &coderv1alpha1.CoderMCPServerAPIKeyAuth{SecretRef: key("mcp-key")},
@@ -89,7 +103,9 @@ func TestReservedSecretName(t *testing.T) {
 		"coder-operator-token": "CoderControlPlane", "recorded-token": "CoderControlPlane", "license": "CoderControlPlane",
 		"database": "CoderControlPlane", "env-from": "CoderControlPlane", "extra-env": "CoderControlPlane", "tls": "CoderControlPlane",
 		"pull": "CoderControlPlane", "ca": "CoderControlPlane", "ingress-tls": "CoderControlPlane", "wildcard-tls": "CoderControlPlane",
-		"volume": "CoderControlPlane", "proxy-bootstrap": "CoderWorkspaceProxy", "proxy-proxy-token": "CoderWorkspaceProxy",
+		"volume": "CoderControlPlane", "projected": "CoderControlPlane", "proxy-bootstrap": "CoderWorkspaceProxy",
+		"proxy-proxy-token": "CoderWorkspaceProxy", "proxy-pull": "CoderWorkspaceProxy", "proxy-recorded": "CoderWorkspaceProxy",
+		"prov-pull": "CoderProvisioner", "prov-recorded": "CoderProvisioner",
 		provisionerKeySecret: "CoderProvisioner", "openai-key": "CoderAIProvider", "mcp-key": "CoderMCPServer",
 		"mcp-header": "CoderMCPServer", "mcp-oauth": "CoderMCPServer",
 	} {

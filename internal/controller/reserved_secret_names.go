@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -55,10 +56,10 @@ var reservedSecretNameSources = []reservedSecretNameSource{
 		func(l *coderv1alpha1.CoderControlPlaneList) []coderv1alpha1.CoderControlPlane { return l.Items }, controlPlaneSecretNames)},
 	{kind: "CoderWorkspaceProxy", users: secretUsers(
 		func(l *coderv1alpha1.CoderWorkspaceProxyList) []coderv1alpha1.CoderWorkspaceProxy { return l.Items },
-		func(p *coderv1alpha1.CoderWorkspaceProxy) []string { return indexWorkspaceProxyBySecretNames(p) })},
+		workspaceProxySecretNames)},
 	{kind: "CoderProvisioner", users: secretUsers(
 		func(l *coderv1alpha1.CoderProvisionerList) []coderv1alpha1.CoderProvisioner { return l.Items },
-		func(p *coderv1alpha1.CoderProvisioner) []string { return indexProvisionerBySecretNames(p) })},
+		provisionerSecretNames)},
 	{kind: "CoderAIProvider", users: secretUsers(
 		func(l *coderv1alpha1.CoderAIProviderList) []coderv1alpha1.CoderAIProvider { return l.Items },
 		func(p *coderv1alpha1.CoderAIProvider) []string { return []string{p.Spec.APIKeySecretRef.Name} })},
@@ -95,6 +96,9 @@ func secretUsers[L, T any, PL interface {
 
 // controlPlaneSecretNames returns every Secret name that a CoderControlPlane
 // references or generates.
+//
+// The operator token name stays reserved while operator access is disabled:
+// turning it back on makes the control plane create that Secret again.
 func controlPlaneSecretNames(cp *coderv1alpha1.CoderControlPlane) []string {
 	names := []string{credentialsecret.OperatorTokenSecretName(cp)}
 	if ref := cp.Status.OperatorTokenSecretRef; ref != nil {
@@ -105,21 +109,64 @@ func controlPlaneSecretNames(cp *coderv1alpha1.CoderControlPlane) []string {
 	names = append(names, indexByEnvFromSecretName(cp)...)
 	names = append(names, extraEnvSecretNames(cp.Spec.ExtraEnv)...)
 	names = append(names, cp.Spec.TLS.SecretNames...)
-	for _, ref := range cp.Spec.ImagePullSecrets {
-		names = append(names, ref.Name)
-	}
+	names = append(names, localRefNames(cp.Spec.ImagePullSecrets)...)
 	for _, ref := range cp.Spec.Certs.Secrets {
 		names = append(names, ref.Name)
 	}
 	if cp.Spec.Expose != nil && cp.Spec.Expose.Ingress != nil && cp.Spec.Expose.Ingress.TLS != nil {
 		names = append(names, cp.Spec.Expose.Ingress.TLS.SecretName, cp.Spec.Expose.Ingress.TLS.WildcardSecretName)
 	}
-	for _, volume := range cp.Spec.Volumes {
+	names = append(names, volumeSecretNames(cp.Spec.Volumes)...)
+	return sortedUnique(names)
+}
+
+// workspaceProxySecretNames adds the image pull Secrets and the recorded
+// token Secret to the names that the proxy's credential index returns.
+func workspaceProxySecretNames(proxy *coderv1alpha1.CoderWorkspaceProxy) []string {
+	names := indexWorkspaceProxyBySecretNames(proxy)
+	names = append(names, localRefNames(proxy.Spec.ImagePullSecrets)...)
+	if ref := proxy.Status.ProxyTokenSecretRef; ref != nil {
+		names = append(names, ref.Name)
+	}
+	return sortedUnique(names)
+}
+
+// provisionerSecretNames adds the image pull Secrets and the recorded key
+// Secret to the names that the provisioner's credential index returns.
+func provisionerSecretNames(provisioner *coderv1alpha1.CoderProvisioner) []string {
+	names := indexProvisionerBySecretNames(provisioner)
+	names = append(names, localRefNames(provisioner.Spec.ImagePullSecrets)...)
+	if ref := provisioner.Status.SecretRef; ref != nil {
+		names = append(names, ref.Name)
+	}
+	return sortedUnique(names)
+}
+
+// volumeSecretNames returns the Secrets that volumes mount, directly or
+// through a projected volume.
+func volumeSecretNames(volumes []corev1.Volume) []string {
+	var names []string
+	for _, volume := range volumes {
 		if volume.Secret != nil {
 			names = append(names, volume.Secret.SecretName)
 		}
+		if volume.Projected != nil {
+			for _, source := range volume.Projected.Sources {
+				if source.Secret != nil {
+					names = append(names, source.Secret.Name)
+				}
+			}
+		}
 	}
-	return sortedUnique(names)
+	return names
+}
+
+func localRefNames(refs []corev1.LocalObjectReference) []string {
+	names := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		names = append(names, ref.Name)
+	}
+	return names
 }
 
 func mcpServerSecretNames(server *coderv1alpha1.CoderMCPServer) []string {
