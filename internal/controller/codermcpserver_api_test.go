@@ -122,6 +122,30 @@ func TestCoderMCPServerAPIValidation(t *testing.T) {
 		{name: "display name with a trailing space", wantErr: "spec.displayName", mutate: func(s *coderv1alpha1.CoderMCPServerSpec) {
 			s.DisplayName = "GitHub "
 		}},
+		{name: "display name with inner Unicode spaces", mutate: func(s *coderv1alpha1.CoderMCPServerSpec) {
+			s.DisplayName = "Git\u00a0Hub\u2003Enterprise"
+		}},
+		{name: "display name with a trailing no-break space", wantErr: "spec.displayName", mutate: func(s *coderv1alpha1.CoderMCPServerSpec) {
+			s.DisplayName = "GitHub\u00a0"
+		}},
+		{name: "display name with a leading vertical tab", wantErr: "spec.displayName", mutate: func(s *coderv1alpha1.CoderMCPServerSpec) {
+			s.DisplayName = "\vGitHub"
+		}},
+		{name: "description with a leading em space", wantErr: "spec.description", mutate: func(s *coderv1alpha1.CoderMCPServerSpec) {
+			s.Description = "\u2003Issues"
+		}},
+		{name: "description with a trailing next-line character", wantErr: "spec.description", mutate: func(s *coderv1alpha1.CoderMCPServerSpec) {
+			s.Description = "Issues\u0085"
+		}},
+		{name: "icon URL with a trailing ideographic space", wantErr: "spec.iconURL", mutate: func(s *coderv1alpha1.CoderMCPServerSpec) {
+			s.IconURL = "/icon/github.svg\u3000"
+		}},
+		{name: "URL with a trailing no-break space", wantErr: "spec.url", mutate: func(s *coderv1alpha1.CoderMCPServerSpec) {
+			s.URL = "https://mcp.example.com/mcp\u00a0"
+		}},
+		{name: "oauth2 client ID with a trailing line separator", wantErr: "spec.auth.oauth2.clientID", mutate: func(s *coderv1alpha1.CoderMCPServerSpec) {
+			useOAuth2(s, func(o *coderv1alpha1.CoderMCPServerOAuth2Auth) { o.ClientID = "coder-agents\u2028" })
+		}},
 		{name: "description with a leading newline", wantErr: "spec.description", mutate: func(s *coderv1alpha1.CoderMCPServerSpec) {
 			s.Description = "\nIssues"
 		}},

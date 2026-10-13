@@ -21,6 +21,9 @@ const (
 )
 
 // CoderMCPServerSpec defines one MCP server config in a Coder organization.
+// Coder trims every text field with strings.TrimSpace, so the patterns reject
+// leading and trailing Unicode white space. The class [\s\v\x{85}\p{Z}] is
+// exactly the set of runes that unicode.IsSpace reports.
 type CoderMCPServerSpec struct {
 	// ControlPlaneRef names the CoderControlPlane in the same namespace. The
 	// controller calls Coder with that control plane's operator token.
@@ -43,16 +46,16 @@ type CoderMCPServerSpec struct {
 	// DisplayName is the name that Coder shows to users in chat.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
-	// +kubebuilder:validation:Pattern=`^\S([\s\S]*\S)?$`
+	// +kubebuilder:validation:Pattern=`^[^\s\v\x{85}\p{Z}]([\s\S]*[^\s\v\x{85}\p{Z}])?$`
 	DisplayName string `json:"displayName"`
 	// Description is a short summary of what the server provides.
 	// +kubebuilder:validation:MaxLength=512
-	// +kubebuilder:validation:Pattern=`^\S([\s\S]*\S)?$`
+	// +kubebuilder:validation:Pattern=`^[^\s\v\x{85}\p{Z}]([\s\S]*[^\s\v\x{85}\p{Z}])?$`
 	// +optional
 	Description string `json:"description,omitempty"`
 	// IconURL is the icon URL, path or emoji that Coder shows.
 	// +kubebuilder:validation:MaxLength=2048
-	// +kubebuilder:validation:Pattern=`^\S+$`
+	// +kubebuilder:validation:Pattern=`^[^\s\v\x{85}\p{Z}]+$`
 	// +optional
 	IconURL string `json:"iconURL,omitempty"`
 	// URL is the http:// or https:// MCP endpoint that Coder connects to. It
@@ -60,7 +63,7 @@ type CoderMCPServerSpec struct {
 	// allowed destination.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=2048
-	// +kubebuilder:validation:Pattern=`^\S+$`
+	// +kubebuilder:validation:Pattern=`^[^\s\v\x{85}\p{Z}]+$`
 	// +kubebuilder:validation:XValidation:rule="isURL(self) && url(self).getHostname() != ''",message="url must be a valid URL with a host"
 	// +kubebuilder:validation:XValidation:rule="self.matches('^https?://[^/?#@\\\\s]+([/?#].*)?$')",message="url must be an http:// or https:// URL with a host and no user info"
 	URL string `json:"url"`
@@ -168,7 +171,7 @@ type CoderMCPServerOAuth2Auth struct {
 	// ClientID is the OAuth2 client ID.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
-	// +kubebuilder:validation:Pattern=`^\S+$`
+	// +kubebuilder:validation:Pattern=`^[^\s\v\x{85}\p{Z}]+$`
 	ClientID string `json:"clientID"`
 	// ClientSecretRef references the key in a Secret in the same namespace
 	// that holds the client secret. The Secret must opt in to the credential
@@ -180,21 +183,21 @@ type CoderMCPServerOAuth2Auth struct {
 	// AuthURL is the authorization endpoint that users' browsers open.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=2048
-	// +kubebuilder:validation:Pattern=`^\S+$`
+	// +kubebuilder:validation:Pattern=`^[^\s\v\x{85}\p{Z}]+$`
 	// +kubebuilder:validation:XValidation:rule="isURL(self) && url(self).getHostname() != ''",message="authURL must be a valid URL with a host"
 	// +kubebuilder:validation:XValidation:rule="self.matches('^https?://[^/?#@\\\\s]+([/?#].*)?$')",message="authURL must be an http:// or https:// URL with a host and no user info"
 	AuthURL string `json:"authURL"`
 	// TokenURL is the token endpoint that Coder sends the client secret to.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=2048
-	// +kubebuilder:validation:Pattern=`^\S+$`
+	// +kubebuilder:validation:Pattern=`^[^\s\v\x{85}\p{Z}]+$`
 	// +kubebuilder:validation:XValidation:rule="isURL(self) && url(self).getHostname() != ''",message="tokenURL must be a valid URL with a host"
 	// +kubebuilder:validation:XValidation:rule="self.matches('^https?://[^/?#@\\\\s]+([/?#].*)?$')",message="tokenURL must be an http:// or https:// URL with a host and no user info"
 	TokenURL string `json:"tokenURL"`
 	// RevocationURL is the https:// token revocation endpoint. Coder sends the
 	// client secret there when a user disconnects.
 	// +kubebuilder:validation:MaxLength=2048
-	// +kubebuilder:validation:Pattern=`^\S+$`
+	// +kubebuilder:validation:Pattern=`^[^\s\v\x{85}\p{Z}]+$`
 	// +kubebuilder:validation:XValidation:rule="isURL(self) && url(self).getHostname() != ''",message="revocationURL must be a valid URL with a host"
 	// +kubebuilder:validation:XValidation:rule="self.matches('^https://[^/?#@\\\\s]+([/?#].*)?$')",message="revocationURL must be an https:// URL with a host and no user info"
 	// +optional

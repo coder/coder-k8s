@@ -56,8 +56,11 @@ spec:
           metadata:
             type: object
           spec:
-            description: CoderMCPServerSpec defines one MCP server config in a Coder
-              organization.
+            description: |-
+              CoderMCPServerSpec defines one MCP server config in a Coder organization.
+              Coder trims every text field with strings.TrimSpace, so the patterns reject
+              leading and trailing Unicode white space. The class [\s\v\x{85}\p{Z}] is
+              exactly the set of runes that unicode.IsSpace reports.
             properties:
               access:
                 description: |-
@@ -194,7 +197,7 @@ spec:
                           browsers open.
                         maxLength: 2048
                         minLength: 1
-                        pattern: ^\S+$
+                        pattern: ^[^\s\v\x{85}\p{Z}]+$
                         type: string
                         x-kubernetes-validations:
                         - message: authURL must be a valid URL with a host
@@ -206,7 +209,7 @@ spec:
                         description: ClientID is the OAuth2 client ID.
                         maxLength: 256
                         minLength: 1
-                        pattern: ^\S+$
+                        pattern: ^[^\s\v\x{85}\p{Z}]+$
                         type: string
                       clientSecretRef:
                         description: |-
@@ -234,7 +237,7 @@ spec:
                           RevocationURL is the https:// token revocation endpoint. Coder sends the
                           client secret there when a user disconnects.
                         maxLength: 2048
-                        pattern: ^\S+$
+                        pattern: ^[^\s\v\x{85}\p{Z}]+$
                         type: string
                         x-kubernetes-validations:
                         - message: revocationURL must be a valid URL with a host
@@ -257,7 +260,7 @@ spec:
                           the client secret to.
                         maxLength: 2048
                         minLength: 1
-                        pattern: ^\S+$
+                        pattern: ^[^\s\v\x{85}\p{Z}]+$
                         type: string
                         x-kubernetes-validations:
                         - message: tokenURL must be a valid URL with a host
@@ -324,14 +327,14 @@ spec:
               description:
                 description: Description is a short summary of what the server provides.
                 maxLength: 512
-                pattern: ^\S([\s\S]*\S)?$
+                pattern: ^[^\s\v\x{85}\p{Z}]([\s\S]*[^\s\v\x{85}\p{Z}])?$
                 type: string
               displayName:
                 description: DisplayName is the name that Coder shows to users in
                   chat.
                 maxLength: 128
                 minLength: 1
-                pattern: ^\S([\s\S]*\S)?$
+                pattern: ^[^\s\v\x{85}\p{Z}]([\s\S]*[^\s\v\x{85}\p{Z}])?$
                 type: string
               enabled:
                 default: true
@@ -347,7 +350,7 @@ spec:
               iconURL:
                 description: IconURL is the icon URL, path or emoji that Coder shows.
                 maxLength: 2048
-                pattern: ^\S+$
+                pattern: ^[^\s\v\x{85}\p{Z}]+$
                 type: string
               modelIntent:
                 description: ModelIntent asks the model to state its intent with each
@@ -389,7 +392,7 @@ spec:
                   allowed destination.
                 maxLength: 2048
                 minLength: 1
-                pattern: ^\S+$
+                pattern: ^[^\s\v\x{85}\p{Z}]+$
                 type: string
                 x-kubernetes-validations:
                 - message: url must be a valid URL with a host
