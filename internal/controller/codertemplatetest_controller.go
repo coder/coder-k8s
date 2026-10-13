@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -27,7 +26,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
-	"github.com/coder/coder-k8s/internal/aggregated/coder"
 )
 
 const (
@@ -176,7 +174,7 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, fmt.Errorf("assertion failed: template test %s/%s is %s without status.startTime", tt.Namespace, tt.Name, tt.Status.Phase)
 	}
 	if templateTestMayHaveWorkspace(tt) {
-		if gone, err := r.controlPlaneGone(ctx, tt); err != nil || gone {
+		if gone, err := controlPlaneGone(ctx, r.Client, tt.Namespace, tt.Spec.ControlPlaneRef.Name); err != nil || gone {
 			if err == nil {
 				applyTemplateTestStep(tt, now, templateTestControlPlaneGone(tt))
 				err = r.writeStatus(ctx, tt, before)
@@ -257,42 +255,13 @@ func (r *CoderTemplateTestReconciler) resolveInputs(
 	if err != nil {
 		return templateTestWait("OwnerNotConfigured", "spec.templateTests.ownerUserID on CoderControlPlane %s: %v", controlPlane.Name, err), nil
 	}
-	owner, step, err := checkTemplateTestOwner(ctx, sdk, ownerID)
-	if step != nil || err != nil {
-		return step, err
+	owner, ownerStep, err := checkCoderWorkspaceOwner(ctx, sdk, ownerID)
+	if ownerStep != nil || err != nil {
+		return templateTestStepFrom(ownerStep), err
 	}
-
-	orgName, templateName, err := coder.ParseTemplateName(tt.Spec.Template)
-	if err != nil {
-		return nil, fmt.Errorf("assertion failed: spec.template %q passed validation but does not parse: %w", tt.Spec.Template, err)
-	}
-	org, err := sdk.OrganizationByName(ctx, orgName)
-	if isCoderNotFound(err) {
-		return templateTestWait("TemplateNotFound", "Coder organization %q does not exist.", orgName), nil
-	} else if err != nil {
-		return coderUnavailable("get organization", err), nil
-	}
-	if err := coderAnswerFor("organization", strings.ToLower(orgName), strings.ToLower(org.Name)); err != nil {
-		return nil, err
-	}
-	if !slices.Contains(owner.OrganizationIDs, org.ID) {
-		return templateTestWait("OwnerNotEligible", "Coder user %s is not a member of organization %q.", ownerID, orgName), nil
-	}
-	template, err := sdk.TemplateByName(ctx, org.ID, templateName)
-	if isCoderNotFound(err) {
-		return templateTestWait("TemplateNotFound", "Coder template %q does not exist.", tt.Spec.Template), nil
-	} else if err != nil {
-		return coderUnavailable("get template", err), nil
-	}
-	if err := errors.Join(coderAnswerFor("template", strings.ToLower(templateName), strings.ToLower(template.Name)),
-		coderAnswerFor("template organization", org.ID.String(), template.OrganizationID.String())); err != nil {
-		return nil, err
-	}
-	if template.Deprecated {
-		// Coder v2.37.2 refuses new workspaces for a deprecated template
-		// (coderd/workspaces.go:958). The deprecation message is Coder
-		// detail, so status leaves it out.
-		return templateTestFail("TemplateDeprecated", "Coder template %q is deprecated and accepts no new workspaces.", tt.Spec.Template), nil
+	template, templateStep, err := resolveCoderTemplate(ctx, sdk, tt.Spec.Template, owner)
+	if templateStep != nil || err != nil {
+		return templateTestStepFrom(templateStep), err
 	}
 	version, step, err := resolveTemplateTestVersion(ctx, sdk, tt, template)
 	if step != nil || err != nil {
@@ -302,7 +271,7 @@ func (r *CoderTemplateTestReconciler) resolveInputs(
 	if version.ID.String() != tt.Status.TemplateVersionID {
 		return nil, fmt.Errorf("assertion failed: resolved version %s is not the pinned version %s", version.ID, tt.Status.TemplateVersionID)
 	}
-	tt.Status.OrganizationID, tt.Status.TemplateID, tt.Status.OwnerID = org.ID.String(), template.ID.String(), ownerID.String()
+	tt.Status.OrganizationID, tt.Status.TemplateID, tt.Status.OwnerID = template.OrganizationID.String(), template.ID.String(), ownerID.String()
 	tt.Status.WorkspaceName = workspaceName
 
 	_, err = sdk.WorkspaceByOwnerAndName(ctx, ownerID.String(), workspaceName, codersdk.WorkspaceOptions{})
@@ -326,120 +295,17 @@ func (r *CoderTemplateTestReconciler) coderClient(ctx context.Context, tt *coder
 	return sdk, controlPlane, nil, err
 }
 
-// checkTemplateTestOwner refuses owners whose token is worth more than a plain
-// workspace user's: every start build hands the owner's token to Terraform.
-func checkTemplateTestOwner(ctx context.Context, sdk *codersdk.Client, ownerID uuid.UUID) (codersdk.User, *templateTestStep, error) {
-	refuse := func(format string, args ...any) *templateTestStep {
-		return templateTestWait("OwnerNotEligible", "Coder user %s: %s", ownerID, fmt.Sprintf(format, args...))
-	}
-	user, err := sdk.User(ctx, ownerID.String())
-	if isCoderNotFound(err) {
-		return user, refuse("the user does not exist."), nil
-	} else if err != nil {
-		return user, coderUnavailable("get owner", err), nil
-	}
-	if err := coderAnswerFor("user", ownerID.String(), user.ID.String()); err != nil {
-		return user, nil, err
-	}
-	// Coder refuses a dormant owner's agents (401), so their test could only
-	// time out. Coder creates users through the API as dormant.
-	if user.Status != codersdk.UserStatusActive {
-		return user, refuse("status %q is not allowed. Only active users can own test workspaces: activate the user in Coder.", user.Status), nil
-	}
-	// Headless users created before service accounts still have login type none.
-	if !user.IsServiceAccount && user.LoginType != codersdk.LoginTypePassword && user.LoginType != codersdk.LoginTypeNone { //nolint:staticcheck // See above.
-		return user, refuse("login type %q belongs to a person. Use a service account or a password user.", user.LoginType), nil
-	}
-	for _, role := range user.Roles {
-		if role.Name != codersdk.RoleMember {
-			return user, refuse("site role %q is not allowed.", role.Name), nil
-		}
-	}
-	// User.Roles holds site roles only, so read the roles in every
-	// organization: an admin role anywhere makes the token privileged. Coder
-	// also grants each organization's default member roles to every member.
-	allowed := func(role string) bool {
-		return role == codersdk.RoleOrganizationMember || role == codersdk.RoleOrganizationWorkspaceAccess
-	}
-	for _, orgID := range user.OrganizationIDs {
-		org, err := sdk.Organization(ctx, orgID)
-		if err != nil {
-			return user, coderUnavailable("get owner organization", err), nil
-		}
-		if err := coderAnswerFor("organization", orgID.String(), org.ID.String()); err != nil {
-			return user, nil, err
-		}
-		for _, role := range org.DefaultOrgMemberRoles {
-			if !allowed(role) {
-				return user, refuse("default member role %q in organization %s is not allowed.", role, orgID), nil
-			}
-		}
-		member, err := sdk.OrganizationMember(ctx, orgID.String(), ownerID.String())
-		if err != nil {
-			return user, coderUnavailable("get owner membership", err), nil
-		}
-		if err := errors.Join(coderAnswerFor("member user", ownerID.String(), member.UserID.String()),
-			coderAnswerFor("member organization", orgID.String(), member.OrganizationID.String())); err != nil {
-			return user, nil, err
-		}
-		for _, role := range member.Roles {
-			if !allowed(role.Name) {
-				return user, refuse("role %q in organization %s is not allowed.", role.Name, orgID), nil
-			}
-		}
-	}
-	return user, nil, nil
-}
-
 // resolveTemplateTestVersion returns the version under test. Once a version
 // is pinned, the controller reads that version and never resolves again.
 func resolveTemplateTestVersion(ctx context.Context, sdk *codersdk.Client, tt *coderv1alpha1.CoderTemplateTest, template codersdk.Template) (codersdk.TemplateVersion, *templateTestStep, error) {
-	var version codersdk.TemplateVersion
-	var err error
-	var asked func() error // The rule for the answer: it names what was asked for.
-	switch id := cmp.Or(tt.Status.TemplateVersionID, tt.Spec.Version.ID); {
-	case id != "":
-		parsed, parseErr := uuid.Parse(id)
-		if parseErr != nil {
-			// The CRD and this controller store only UUIDs here.
-			return version, nil, fmt.Errorf("assertion failed: version ID %q is not a UUID: %w", id, parseErr)
-		}
-		version, err = sdk.TemplateVersion(ctx, parsed)
-		asked = func() error { return coderAnswerFor("version", parsed.String(), version.ID.String()) }
-	case tt.Spec.Version.Name != "":
-		version, err = sdk.TemplateVersionByName(ctx, template.ID, tt.Spec.Version.Name)
-		asked = func() error { return coderAnswerFor("version", tt.Spec.Version.Name, version.Name) }
-	default:
-		version, err = sdk.TemplateVersion(ctx, template.ActiveVersionID)
-		asked = func() error { return coderAnswerFor("version", template.ActiveVersionID.String(), version.ID.String()) }
-	}
-	switch {
-	case isCoderNotFound(err):
-		return version, templateTestWait("TemplateVersionNotFound", "The version of template %q does not exist.", tt.Spec.Template), nil
-	case err != nil:
-		return version, coderUnavailable("get template version", err), nil
-	}
-	if err := asked(); err != nil {
-		return version, nil, err
-	}
-	if version.TemplateID == nil || *version.TemplateID != template.ID {
-		return version, templateTestFail("TemplateVersionMismatch", "Version %s does not belong to template %q.", version.ID, tt.Spec.Template), nil
+	version, step, err := readCoderTemplateVersion(ctx, sdk, tt.Spec.Template, template, cmp.Or(tt.Status.TemplateVersionID, tt.Spec.Version.ID), tt.Spec.Version.Name)
+	if step != nil || err != nil {
+		return version, templateTestStepFrom(step), err
 	}
 	// Pin the version as soon as Coder names it, even while it imports, so a
 	// later promotion never changes the version under test.
 	tt.Status.TemplateVersionID, tt.Status.TemplateVersionName = version.ID.String(), version.Name
-	switch {
-	case version.Archived:
-		return version, templateTestFail("TemplateVersionArchived", "Version %s is archived.", version.Name), nil
-	}
-	switch version.Job.Status {
-	case codersdk.ProvisionerJobSucceeded:
-		return version, nil, nil
-	case codersdk.ProvisionerJobPending, codersdk.ProvisionerJobRunning:
-		return version, templateTestWait("TemplateVersionImporting", "Version %s is still importing.", version.Name), nil
-	default:
-		return version, templateTestFail("TemplateVersionImportFailed", "The import of version %s ended %s.", version.Name, version.Job.Status), nil
-	}
+	return version, templateTestStepFrom(checkCoderTemplateVersionUsable(version)), nil
 }
 
 func applyTemplateTestStep(tt *coderv1alpha1.CoderTemplateTest, now time.Time, step *templateTestStep) {
@@ -562,9 +428,16 @@ func isCoderNotFound(err error) bool {
 // coderUnavailable keeps the test waiting after a failed Coder call. The
 // message holds the status and Coder's short message only, never details.
 func coderUnavailable(action string, err error) *templateTestStep {
-	step := templateTestWait("CoderUnavailable", "%s: %s", action, coderErrorSummary(err))
-	step.rateLimited = coderStatus(err) == http.StatusTooManyRequests
-	return step
+	return templateTestStepFrom(coderStepUnavailable(action, err))
+}
+
+// templateTestStepFrom turns a shared lookup's outcome into a test step. Nil
+// stays nil.
+func templateTestStepFrom(step *coderStep) *templateTestStep {
+	if step == nil {
+		return nil
+	}
+	return &templateTestStep{failed: step.failed, reason: step.reason, message: step.message, rateLimited: step.rateLimited}
 }
 
 // coderErrorSummary holds the status and Coder's short message only, never

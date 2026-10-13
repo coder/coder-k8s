@@ -85,6 +85,9 @@ jobs:
               - 'internal/app/apiserverapp/**'
               - 'api/v1alpha1/**'
               - 'internal/controller/codertemplatetest*'
+              # Shared Coder access that CoderTemplateTest and later pool controllers call.
+              - 'internal/controller/controlplane_access.go'
+              - 'internal/controller/coder_access.go'
               - 'internal/app/controllerapp/**'
               - 'config/e2e/**'
               - 'deploy/**'
