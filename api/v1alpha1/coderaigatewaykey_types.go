@@ -25,6 +25,24 @@ const (
 	CoderAIGatewayKeySecretDataKey = "key"
 )
 
+// AIGatewaySpec configures CoderAIGatewayKey objects that use a
+// CoderControlPlane (CoderControlPlane.spec.aiGateway).
+type AIGatewaySpec struct {
+	// AllowKeys lets CoderAIGatewayKey objects in this namespace create and
+	// rotate Coder AI Gateway keys with this control plane's operator token.
+	// A gateway key lets its holder load the API key of every enabled AI
+	// provider, so this delegates that power to everyone who can create
+	// CoderAIGatewayKey objects here. When false (the default), the
+	// controller creates no key. Setting it back to false stops new keys and
+	// rotations. The current key of each CoderAIGatewayKey stays until that
+	// object is deleted.
+	//
+	// This field has no effect yet: the CoderAIGatewayKey controller is not
+	// shipped.
+	// +optional
+	AllowKeys bool `json:"allowKeys,omitempty"`
+}
+
 // CoderAIGatewayKeySpec defines a Coder AI Gateway key and its rotation.
 type CoderAIGatewayKeySpec struct {
 	// ControlPlaneRef names the CoderControlPlane in the same namespace. The
