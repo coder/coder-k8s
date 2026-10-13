@@ -83,6 +83,8 @@ spec:
                 minLength: 1
                 type: string
                 x-kubernetes-validations:
+                - message: baseURL must be a valid URL
+                  rule: isURL(self)
                 - message: baseURL must be an http:// or https:// URL with a host
                     and no user info
                   rule: self.matches('^https?://[^/?#@\\s]+([/?#].*)?$')
