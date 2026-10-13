@@ -51,6 +51,8 @@ type fakeFault struct {
 	Rewrite func(answer any) any
 	// Detail goes into the error answer's detail and a validation error.
 	Detail string
+	// Message replaces the error answer's message.
+	Message string
 	// HTML answers Status with this text/html body instead of a JSON error,
 	// like a proxy or SSO page. With a 2xx Status, codersdk v2.37 returns a
 	// *codersdk.Error with that status.
@@ -201,6 +203,9 @@ func (f *fakeCoder) route(mux *http.ServeMux, pattern, route string, h func(*htt
 			_, _ = w.Write([]byte(fault.HTML))
 		default:
 			resp := codersdk.Response{Message: fmt.Sprintf("fake fault %d", fault.Status), Detail: fault.Detail}
+			if fault.Message != "" {
+				resp.Message = fault.Message
+			}
 			if fault.Detail != "" {
 				resp.Validations = []codersdk.ValidationError{{Field: "name", Detail: fault.Detail}}
 			}

@@ -1,9 +1,7 @@
 package controller
 
 import (
-	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -50,6 +48,13 @@ func (r *CoderAIProviderReconciler) createOrConfirm(
 			if step := requireSiteOwner(ctx, sdk); step != nil {
 				return step, nil
 			}
+			if ready := meta.FindStatusCondition(provider.Status.Conditions, coderv1alpha1.CoderAIProviderConditionReady); ready != nil &&
+				ready.Reason == aiProviderConfirmingRejectedCreate && ready.ObservedGeneration == provider.Generation {
+				// The last create of this spec was rejected, and now a read
+				// confirms that it created nothing. Do not send it again.
+				provider.Status.CreateAttemptTime, provider.Status.Credential = nil, nil
+				return aiProviderStalled(0, "CoderRejected", "Coder rejected the create request of provider %s, and a read confirmed that nothing was created.", provider.Name), nil
+			}
 		}
 		return r.createAIProvider(ctx, sdk, provider, key, before)
 	case err != nil:
@@ -88,8 +93,14 @@ func recordAIProvider(provider *coderv1alpha1.CoderAIProvider, found codersdk.AI
 			"Coder already has a provider named %s (ID %s) that this resource did not create. The controller never changes it. Choose another name, or delete that provider in Coder.",
 			provider.Name, found.ID), nil
 	}
-	if found.ID == uuid.Nil || provider.Status.Credential == nil {
-		return nil, fmt.Errorf("assertion failed: AI provider %s/%s has a create marker without a credential, or Coder answered without an ID", provider.Namespace, provider.Name)
+	if found.ID == uuid.Nil {
+		return nil, fmt.Errorf("assertion failed: Coder answered AI provider %s without an ID", provider.Name)
+	}
+	if provider.Status.Credential == nil {
+		// A create of this object committed after its marker was cleared, so
+		// the key it sent is not known. An empty change token makes the sync
+		// step send the current key.
+		provider.Status.Credential = &coderv1alpha1.CoderAIProviderCredentialStatus{}
 	}
 	if len(found.APIKeys) != 1 || found.APIKeys[0].ID == uuid.Nil {
 		return aiProviderStalled(0, "KeyChangedExternally",
@@ -134,69 +145,63 @@ func (r *CoderAIProviderReconciler) createAIProvider(
 			}
 			return step, err
 		}
+		r.rememberSentKey(provider, key)
 		return nil, nil
-	case createHadNoEffect(err) || status == http.StatusForbidden:
-		// Coder answers 403 from its authorization check before the insert
-		// commits (coderd/ai_providers.go:233-237), so it had no effect.
+	case status == 0 && createHadNoEffect(err):
+		// A failed dial or TLS handshake never sent the request.
 		provider.Status.CreateAttemptTime, provider.Status.Credential = nil, nil
 		return aiProviderWait(aiProviderRetry, "CreateRetrying", "The create request had no effect: %s", coderErrorSummary(err)), nil
-	case status == http.StatusConflict:
-		// Someone created the name after the lookup. Read it: the nonce
-		// proves whether an earlier create of this object committed.
-		found, err := sdk.AIProvider(ctx, provider.Name)
-		if err != nil {
-			return aiProviderWait(aiProviderConfirmPoll, "ConfirmingCreate", "get provider %s after a conflict: %s", provider.Name, coderErrorSummary(err)), nil
-		}
-		return recordAIProvider(provider, found)
 	case status >= 400 && status < 500:
-		provider.Status.CreateAttemptTime, provider.Status.Credential = nil, nil
-		return aiProviderStalled(0, "CoderRejected", "Coder rejected the create request: %s", coderErrorSummary(err)), nil
+		return r.confirmRejectedCreate(ctx, sdk, provider, status, err)
 	default:
 		return aiProviderWait(aiProviderConfirmPoll, "ConfirmingCreate",
 			"The create result is uncertain (%s). The controller reads Coder instead of sending it again.", coderErrorSummary(err)), nil
 	}
 }
 
-// applyAIProvider sets the display name, icon and enabled flag of the
-// provider that this object created, once per generation. A changed base URL
-// or key needs a later controller version, so it does not count as applied.
-func applyAIProvider(ctx context.Context, sdk *codersdk.Client, provider *coderv1alpha1.CoderAIProvider, key credentialsecret.Value) *aiProviderStep {
-	// A Secret change does not change the generation, so check the key
-	// before the ready shortcut.
-	if !sameAIProviderKey(provider.Status.Credential, key.Token) {
-		return aiProviderWait(aiProviderResync, "Pending", "The key Secret changed after the create. This controller version does not send a changed key.")
-	}
-	if provider.Status.AppliedGeneration == provider.Generation {
-		return aiProviderReady(provider)
-	}
-	enabled := provider.Spec.Enabled == nil || *provider.Spec.Enabled
-	updated, err := sdk.UpdateAIProvider(ctx, provider.Status.ProviderID, codersdk.UpdateAIProviderRequest{
-		DisplayName: &provider.Spec.DisplayName, Icon: &provider.Spec.Icon, Enabled: &enabled,
-	})
-	status := coderStatus(err)
+// confirmRejectedCreate reads Coder after a 4xx answer to a create. Coder
+// sends its 4xx answers before the insert commits, but a proxy can put a 4xx
+// in place of a committed answer, so only a read proves that nothing of this
+// object exists. Until then the marker stays (#253 review round 3).
+func (r *CoderAIProviderReconciler) confirmRejectedCreate(
+	ctx context.Context, sdk *codersdk.Client, provider *coderv1alpha1.CoderAIProvider, status int, createErr error,
+) (*aiProviderStep, error) {
+	found, err := sdk.AIProvider(ctx, provider.Name)
 	switch {
-	case status == http.StatusNotFound:
-		return aiProviderStalled(0, "DeletedExternally", "Provider %s (ID %s) is gone from Coder. The controller does not create it again until the spec changes.", provider.Name, provider.Status.ProviderID)
-	case isCoderAuthFailure(status):
-		// No Kubernetes event follows a repaired token or role, so retry.
-		return aiProviderWait(aiProviderRetry, "CoderUnavailable", "update provider %s: %s", provider.Name, coderErrorSummary(err))
-	case status >= 400 && status < 500 && status != http.StatusTooManyRequests:
-		return aiProviderStalled(0, "CoderRejected", "Coder rejected the update: %s", coderErrorSummary(err))
-	case err != nil:
-		return aiProviderWait(aiProviderRetry, "CoderUnavailable", "update provider %s: %s", provider.Name, coderErrorSummary(err))
+	case err == nil:
+		// Ours (the create committed) or someone else's (NameConflict).
+		return recordAIProvider(provider, found)
+	case !isCoderNotFound(err):
+		reason := "ConfirmingCreate"
+		if !aiProviderCreateRetryable(status) {
+			// Remember the rejection, so a later read that confirms absence
+			// stalls instead of sending the rejected create again.
+			reason = aiProviderConfirmingRejectedCreate
+		}
+		return aiProviderWait(aiProviderRetry, reason, "get provider %s after a %d answer: %s", provider.Name, status, coderErrorSummary(err)), nil
 	}
-	if err := errors.Join(coderAnswerFor("AI provider", provider.Status.ProviderID, updated.ID.String()), coderAnswerFor("AI provider", provider.Name, updated.Name)); err != nil {
-		return aiProviderStalled(aiProviderResync, "CoderAnswerMismatch", "%s", err.Error())
+	if step := requireSiteOwner(ctx, sdk); step != nil {
+		return step, nil
 	}
-	if updated.BaseURL != provider.Spec.BaseURL || string(updated.Type) != provider.Spec.Type {
-		return aiProviderWait(aiProviderResync, "Pending", "The base URL changed after the create. This controller version does not send a changed base URL.")
+	provider.Status.CreateAttemptTime, provider.Status.Credential = nil, nil
+	if aiProviderCreateRetryable(status) {
+		return aiProviderWait(aiProviderRetry, "CreateRetrying", "The create request had no effect: %s", coderErrorSummary(createErr)), nil
 	}
-	// Coder shows the name for an empty display name (db2sdk.go:52-55).
-	if updated.DisplayName != cmp.Or(provider.Spec.DisplayName, provider.Name) || updated.Icon != provider.Spec.Icon || updated.Enabled != enabled {
-		return aiProviderStalled(aiProviderResync, "CoderAnswerMismatch", "Coder answered the update of provider %s without the requested display name, icon or enabled flag.", provider.Name)
+	return aiProviderStalled(0, "CoderRejected", "Coder rejected the create request: %s", coderErrorSummary(createErr)), nil
+}
+
+// aiProviderConfirmingRejectedCreate is the wait reason after a create that
+// Coder rejected, while the read that confirms absence fails.
+const aiProviderConfirmingRejectedCreate = "ConfirmingRejectedCreate"
+
+// aiProviderCreateRetryable reports 4xx create answers that a retry can fix
+// without a spec change.
+func aiProviderCreateRetryable(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusConflict, http.StatusTooManyRequests:
+		return true
 	}
-	provider.Status.AppliedGeneration = provider.Generation
-	return aiProviderReady(provider)
+	return false
 }
 
 // isCoderAuthFailure reports 401 and 403. An expired operator token or a

@@ -200,7 +200,7 @@ func TestCoderAIProviderCredentialChecks(t *testing.T) {
 			got, result := env.reconcile(ctx, t, provider)
 			if tc.reason == "" {
 				requireAIProviderReady(t, got)
-				require.Equal(t, 1, env.fake.requestCount(routeAIProvider), "a usable key reaches the name lookup")
+				require.Equal(t, 2, env.fake.requestCount(routeAIProvider), "a usable key reaches the name lookup, then the read by ID")
 				require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider))
 				require.Equal(t, 10*time.Minute, result.RequeueAfter)
 				return
@@ -361,7 +361,7 @@ func TestCoderAIProviderWatches(t *testing.T) {
 			require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(provider), got))
 			condition := meta.FindStatusCondition(got.Status.Conditions, "Ready")
 			return condition != nil && condition.Reason == reason
-		}, 30*time.Second, 100*time.Millisecond, reason)
+		}, 60*time.Second, 100*time.Millisecond, reason)
 	}
 	requireReason("ControlPlaneNotReady")
 

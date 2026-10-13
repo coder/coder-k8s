@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -14,7 +15,12 @@ import (
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/controller"
+	"github.com/coder/coder-k8s/internal/credentialsecret/credentialsecrettest"
 )
+
+// hangTimeout ends a reconcile whose Coder request hangs. It leaves room for
+// the requests before the hang on a loaded test host.
+const hangTimeout = 10 * time.Second
 
 // newAIProviderCreateEnv returns a namespace with a ready control plane, a
 // consented key Secret and a provider object named openai.
@@ -67,12 +73,13 @@ func TestCoderAIProviderCreate(t *testing.T) {
 	require.True(t, stored.enabled)
 	require.Equal(t, "OpenAI", stored.displayName)
 	require.Equal(t, "/icon/openai.svg", stored.icon)
-	require.Equal(t, testAIProviderKey, stored.keys[0].plaintext, "the apply step does not touch the key")
+	require.Equal(t, testAIProviderKey, stored.keys[0].plaintext, "the sync step does not resend an unchanged key")
+	require.Equal(t, got.Status.Credential.KeyID, stored.keys[0].id.String())
 
-	// A ready provider needs no Coder call and no status write.
+	// A ready provider costs one read and no write or status update.
 	before := env.fake.totalRequests()
 	again, _ := env.reconcile(ctx, t, got)
-	require.Equal(t, before, env.fake.totalRequests())
+	require.Equal(t, before+1, env.fake.totalRequests())
 	require.Equal(t, got.ResourceVersion, again.ResourceVersion)
 	require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider))
 	require.Equal(t, 2, env.fake.requestCount(routeUpdateAIProvider))
@@ -157,13 +164,14 @@ func TestCoderAIProviderCreateHangs(t *testing.T) {
 			env, _, provider := newAIProviderCreateEnv(ctx, t)
 			env.fake.failNext(routeCreateAIProvider, fakeFault{Hang: true, AfterCommit: tc.committed})
 
-			short, cancel := context.WithTimeout(ctx, 2*time.Second)
+			short, cancel := context.WithTimeout(ctx, hangTimeout)
 			defer cancel()
 			_, err := env.r.Reconcile(short, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(provider)})
 			require.Error(t, err, "the status write after the hang fails with the expired context")
 			stored := &coderv1alpha1.CoderAIProvider{}
 			require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(provider), stored))
 			require.NotNil(t, stored.Status.CreateAttemptTime, "the marker was written before the request")
+			credentialsecrettest.RequireNoLeak(t, []string{testAIProviderKey}, map[string]any{"error": err, "status": stored.Status})
 
 			env.restart()
 			got, _ := env.reconcile(ctx, t, stored)
@@ -185,11 +193,13 @@ func TestCoderAIProviderCrashAfterApply(t *testing.T) {
 	ctx := context.Background()
 	env, _, provider := newAIProviderCreateEnv(ctx, t)
 	env.fake.failNext(routeUpdateAIProvider, fakeFault{Hang: true, AfterCommit: true})
-	short, cancel := context.WithTimeout(ctx, 2*time.Second)
+	short, cancel := context.WithTimeout(ctx, hangTimeout)
 	defer cancel()
 	_, err := env.r.Reconcile(short, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(provider)})
 	require.Error(t, err, "the status write after the hang fails with the expired context")
-	stored, _ := env.fake.aiProvider("openai")
+	credentialsecrettest.RequireNoLeak(t, []string{testAIProviderKey}, map[string]any{"error": err})
+	stored, ok := env.fake.aiProvider("openai")
+	require.True(t, ok, "the create committed")
 	require.Equal(t, "OpenAI", stored.displayName, "the apply committed and replaced the nonce")
 	got := &coderv1alpha1.CoderAIProvider{}
 	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(provider), got))
@@ -198,6 +208,66 @@ func TestCoderAIProviderCrashAfterApply(t *testing.T) {
 
 	env.restart()
 	got, _ = env.reconcile(ctx, t, got)
+	requireAIProviderReady(t, got)
+	require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider))
+}
+
+// #253 review round 3: a 4xx that replaces a committed create answer, which
+// Coder itself never sends after a commit, is confirmed by a read. The
+// object then owns the provider instead of failing an assertion.
+func TestCoderAIProviderCreateRejectedAfterCommit(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{http.StatusNotAcceptable, http.StatusBadRequest} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			env, _, provider := newAIProviderCreateEnv(ctx, t)
+			env.fake.failNext(routeCreateAIProvider, fakeFault{AfterCommit: true, Status: status, Detail: "echo " + testAIProviderKey})
+			got, _ := env.reconcile(ctx, t, provider)
+			requireAIProviderReady(t, got)
+			require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider))
+			require.Equal(t, 1, env.fake.aiProviderCount())
+			stored, _ := env.fake.aiProvider("openai")
+			require.Equal(t, stored.id.String(), got.Status.ProviderID)
+		})
+	}
+}
+
+// A rejected create is not sent again when the read that confirms absence
+// fails once.
+func TestCoderAIProviderRejectedCreateConfirmFails(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newAIProviderCreateEnv(ctx, t)
+	env.fake.failNext(routeAIProvider, fakeFault{Rewrite: func(answer any) any { return answer }}) // The name lookup passes.
+	env.fake.failNext(routeAIProvider, fakeFault{Status: http.StatusBadGateway})                   // The confirmation read fails.
+	env.fake.failNext(routeCreateAIProvider, fakeFault{Status: http.StatusBadRequest})
+	got, _ := env.reconcile(ctx, t, provider)
+	requireAIProviderStep(t, got, false, "ConfirmingRejectedCreate")
+	require.NotNil(t, got.Status.CreateAttemptTime)
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIProviderStep(t, got, true, "CoderRejected")
+	require.Nil(t, got.Status.CreateAttemptTime)
+	require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider), "the rejected create was not sent again")
+}
+
+// A create answer without a provider ID is impossible, so it fails fast.
+// The marker stays, and a read decides on the next reconcile.
+func TestCoderAIProviderCreateAnswerWithoutID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newAIProviderCreateEnv(ctx, t)
+	env.fake.failNext(routeCreateAIProvider, fakeFault{Rewrite: func(answer any) any {
+		p := answer.(codersdk.AIProvider)
+		p.ID = uuid.Nil
+		return p
+	}})
+	_, err := env.r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(provider)})
+	require.ErrorContains(t, err, "assertion failed: Coder answered AI provider openai without an ID")
+	stored := &coderv1alpha1.CoderAIProvider{}
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(provider), stored))
+	require.NotNil(t, stored.Status.CreateAttemptTime)
+	got, _ := env.reconcile(ctx, t, stored)
 	requireAIProviderReady(t, got)
 	require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider))
 }
@@ -274,96 +344,4 @@ func TestCoderAIProviderConfirmNeedsSiteOwner(t *testing.T) {
 	got, _ = env.reconcile(ctx, t, got)
 	requireAIProviderReady(t, got)
 	require.Equal(t, 2, env.fake.requestCount(routeCreateAIProvider))
-}
-
-// The apply step only sets display name, icon and enabled. A changed key or
-// a provider deleted in Coder does not count as applied.
-func TestCoderAIProviderApplyGuards(t *testing.T) {
-	t.Parallel()
-	t.Run("key Secret changed after the create", func(t *testing.T) {
-		t.Parallel()
-		ctx := context.Background()
-		env, secret, provider := newAIProviderCreateEnv(ctx, t)
-		env.fake.failNext(routeUpdateAIProvider, fakeFault{Status: http.StatusInternalServerError})
-		got, _ := env.reconcile(ctx, t, provider)
-		require.NotEmpty(t, got.Status.ProviderID)
-
-		require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(secret), secret))
-		secret.Data["api-key"] = []byte(testAIProviderKey + "-rotated")
-		require.NoError(t, k8sClient.Update(ctx, secret))
-		got, _ = env.reconcile(ctx, t, got)
-		require.Contains(t, requireAIProviderStep(t, got, false, "Pending"), "key Secret changed")
-		require.Equal(t, 1, env.fake.requestCount(routeUpdateAIProvider), "no update with a changed key")
-		stored, _ := env.fake.aiProvider("openai")
-		require.Equal(t, testAIProviderKey, stored.keys[0].plaintext)
-	})
-	t.Run("base URL changed after the create", func(t *testing.T) {
-		t.Parallel()
-		ctx := context.Background()
-		env, _, provider := newAIProviderCreateEnv(ctx, t)
-		env.fake.failNext(routeUpdateAIProvider, fakeFault{Status: http.StatusInternalServerError})
-		got, _ := env.reconcile(ctx, t, provider)
-		require.NotEmpty(t, got.Status.ProviderID)
-
-		got.Spec.BaseURL = "https://api.openai.com/v2" // Same origin, so the key is still allowed.
-		require.NoError(t, k8sClient.Update(ctx, got))
-		got, _ = env.reconcile(ctx, t, got)
-		require.Contains(t, requireAIProviderStep(t, got, false, "Pending"), "base URL changed")
-		require.Zero(t, got.Status.AppliedGeneration)
-		stored, _ := env.fake.aiProvider("openai")
-		require.Equal(t, "https://api.openai.com/v1", stored.baseURL)
-	})
-	t.Run("update answer without the requested values", func(t *testing.T) {
-		t.Parallel()
-		ctx := context.Background()
-		env, _, provider := newAIProviderCreateEnv(ctx, t)
-		env.fake.failNext(routeUpdateAIProvider, fakeFault{Rewrite: func(answer any) any {
-			p := answer.(codersdk.AIProvider)
-			p.Enabled = false
-			return p
-		}})
-		got, _ := env.reconcile(ctx, t, provider)
-		requireAIProviderStep(t, got, true, "CoderAnswerMismatch")
-		require.Zero(t, got.Status.AppliedGeneration)
-	})
-	t.Run("key Secret rotated after Ready", func(t *testing.T) {
-		t.Parallel()
-		ctx := context.Background()
-		env, secret, provider := newAIProviderCreateEnv(ctx, t)
-		got, _ := env.reconcile(ctx, t, provider)
-		requireAIProviderReady(t, got)
-
-		require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(secret), secret))
-		secret.Data["api-key"] = []byte(testAIProviderKey + "-rotated")
-		require.NoError(t, k8sClient.Update(ctx, secret))
-		got, _ = env.reconcile(ctx, t, got)
-		require.Contains(t, requireAIProviderStep(t, got, false, "Pending"), "key Secret changed")
-		require.Equal(t, got.Generation, got.Status.AppliedGeneration, "the spec is still applied")
-	})
-	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
-		t.Run(http.StatusText(status)+" on the apply is retried", func(t *testing.T) {
-			t.Parallel()
-			ctx := context.Background()
-			env, _, provider := newAIProviderCreateEnv(ctx, t)
-			env.fake.failNext(routeUpdateAIProvider, fakeFault{Status: status})
-			got, result := env.reconcile(ctx, t, provider)
-			requireAIProviderStep(t, got, false, "CoderUnavailable")
-			require.Equal(t, 30*time.Second, result.RequeueAfter)
-			got, _ = env.reconcile(ctx, t, got)
-			requireAIProviderReady(t, got)
-		})
-	}
-	t.Run("deleted in Coder before the apply", func(t *testing.T) {
-		t.Parallel()
-		ctx := context.Background()
-		env, _, provider := newAIProviderCreateEnv(ctx, t)
-		env.fake.failNext(routeUpdateAIProvider, fakeFault{Status: http.StatusInternalServerError})
-		got, _ := env.reconcile(ctx, t, provider)
-		require.NoError(t, env.fake.client(t, 2*time.Second).DeleteAIProvider(ctx, got.Status.ProviderID))
-
-		got, _ = env.reconcile(ctx, t, got)
-		requireAIProviderStep(t, got, true, "DeletedExternally")
-		require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider), "no new create")
-		require.Zero(t, got.Status.AppliedGeneration)
-	})
 }
