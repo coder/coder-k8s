@@ -126,8 +126,9 @@ spec:
                   empty list, and the immutability rule would then refuse their updates.
                 items:
                   description: |-
-                    CoderWorkspacePoolParameter is one rich parameter value for the start
-                    builds. Values are stored in plain text, so never put secrets here.
+                    CoderWorkspacePoolMemberParameter is one pinned rich parameter value.
+                    Value is required and always serialized, so an empty value looks the same
+                    in a stored object and in a typed update, and the immutability rule holds.
                   properties:
                     name:
                       description: Name is the parameter name.
@@ -135,11 +136,12 @@ spec:
                       minLength: 1
                       type: string
                     value:
-                      description: Value is the parameter value.
+                      description: Value is the parameter value. It can be empty.
                       maxLength: 4096
                       type: string
                   required:
                   - name
+                  - value
                   type: object
                 maxItems: 64
                 minItems: 1

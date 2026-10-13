@@ -38,6 +38,20 @@ func newPoolMember(namespace, name string, mutate func(*coderv1alpha1.CoderWorks
 	return member
 }
 
+// unstructuredMember builds a valid member with raw parameters, as YAML or a
+// dynamic client sends them, bypassing the typed omitempty tags.
+func unstructuredMember(t *testing.T, namespace, name string, parameters []any) *unstructured.Unstructured {
+	t.Helper()
+	spec, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&newPoolMember(namespace, name, nil).Spec)
+	require.NoError(t, err)
+	spec["parameters"] = parameters
+	member := &unstructured.Unstructured{Object: map[string]any{"spec": spec}}
+	member.SetGroupVersionKind(coderv1alpha1.GroupVersion.WithKind("CoderWorkspacePoolMember"))
+	member.SetNamespace(namespace)
+	member.SetName(name)
+	return member
+}
+
 func requireInvalid(t *testing.T, err error, want string) {
 	t.Helper()
 	require.True(t, apierrors.IsInvalid(err), "want Invalid, got %v", err)
@@ -59,7 +73,7 @@ func TestCoderWorkspacePoolMemberAPIValidation(t *testing.T) {
 		{name: "minimal"},
 		{name: "full spec", mutate: func(s *spec) {
 			s.PresetID = "5f0c3c4e-0000-4000-8000-000000000005"
-			s.Parameters = []coderv1alpha1.CoderWorkspacePoolParameter{{Name: "region", Value: "eu-west-1"}}
+			s.Parameters = []coderv1alpha1.CoderWorkspacePoolMemberParameter{{Name: "region", Value: "eu-west-1"}}
 			s.ClaimRef = &coderv1alpha1.CoderWorkspaceClaimReference{Name: "build-1234", UID: "5f0c3c4e-0000-4000-8000-000000000006"}
 		}},
 		{name: "prebuilds owner", mutate: func(s *spec) { s.OwnerID = prebuildsUserID }, wantErr: "ownerID must not be the Coder prebuilds system user"},
@@ -80,7 +94,7 @@ func TestCoderWorkspacePoolMemberAPIValidation(t *testing.T) {
 		{name: "short ready timeout", mutate: func(s *spec) { s.ReadyTimeoutSeconds = 59 }, wantErr: "spec.readyTimeoutSeconds"},
 		{name: "long ready timeout", mutate: func(s *spec) { s.ReadyTimeoutSeconds = 7201 }, wantErr: "spec.readyTimeoutSeconds"},
 		{name: "duplicate parameter", mutate: func(s *spec) {
-			s.Parameters = []coderv1alpha1.CoderWorkspacePoolParameter{{Name: "region"}, {Name: "region"}}
+			s.Parameters = []coderv1alpha1.CoderWorkspacePoolMemberParameter{{Name: "region"}, {Name: "region"}}
 		}, wantErr: "Duplicate value"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -103,15 +117,21 @@ func TestCoderWorkspacePoolMemberAPIValidation(t *testing.T) {
 	// A stored empty list would make every later typed update look like a
 	// parameters change, the claimRef bind included.
 	t.Run("empty parameters list", func(t *testing.T) {
-		member := &unstructured.Unstructured{}
-		member.SetGroupVersionKind(coderv1alpha1.GroupVersion.WithKind("CoderWorkspacePoolMember"))
-		member.SetNamespace(namespace)
-		member.SetName("empty-parameters")
-		spec, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&newPoolMember(namespace, "", nil).Spec)
-		require.NoError(t, err)
-		spec["parameters"] = []any{}
-		require.NoError(t, unstructured.SetNestedMap(member.Object, spec, "spec"))
-		requireInvalid(t, k8sClient.Create(ctx, member), "spec.parameters")
+		requireInvalid(t, k8sClient.Create(ctx, unstructuredMember(t, namespace, "empty-parameters", []any{})), "spec.parameters")
+	})
+	t.Run("parameter without a value", func(t *testing.T) {
+		member := unstructuredMember(t, namespace, "no-value", []any{map[string]any{"name": "region"}})
+		requireInvalid(t, k8sClient.Create(ctx, member), "spec.parameters[0].value")
+	})
+	// An explicit empty value must survive a typed round trip, the claimRef
+	// bind included.
+	t.Run("empty value round trip", func(t *testing.T) {
+		member := unstructuredMember(t, namespace, "empty-value", []any{map[string]any{"name": "region", "value": ""}})
+		require.NoError(t, k8sClient.Create(ctx, member))
+		typed := &coderv1alpha1.CoderWorkspacePoolMember{}
+		require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(member), typed))
+		typed.Spec.ClaimRef = &coderv1alpha1.CoderWorkspaceClaimReference{Name: "build-1234", UID: "5f0c3c4e-0000-4000-8000-000000000006"}
+		require.NoError(t, k8sClient.Update(ctx, typed))
 	})
 	t.Run("unknown phase", func(t *testing.T) {
 		member := newPoolMember(namespace, "phase", nil)
@@ -130,7 +150,7 @@ func TestCoderWorkspacePoolMemberAPIImmutability(t *testing.T) {
 	namespace := createTestNamespace(ctx, t, "member-api")
 	type spec = coderv1alpha1.CoderWorkspacePoolMemberSpec
 	member := newPoolMember(namespace, "member", func(s *spec) {
-		s.Parameters = []coderv1alpha1.CoderWorkspacePoolParameter{{Name: "region", Value: "eu-west-1"}}
+		s.Parameters = []coderv1alpha1.CoderWorkspacePoolMemberParameter{{Name: "region", Value: "eu-west-1"}}
 	})
 	require.NoError(t, k8sClient.Create(ctx, member))
 	other := "5f0c3c4e-0000-4000-8000-000000000009"

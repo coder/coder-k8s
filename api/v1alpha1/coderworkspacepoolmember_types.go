@@ -49,6 +49,19 @@ type CoderWorkspaceClaimReference struct {
 	UID string `json:"uid"`
 }
 
+// CoderWorkspacePoolMemberParameter is one pinned rich parameter value.
+// Value is required and always serialized, so an empty value looks the same
+// in a stored object and in a typed update, and the immutability rule holds.
+type CoderWorkspacePoolMemberParameter struct {
+	// Name is the parameter name.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	Name string `json:"name"`
+	// Value is the parameter value. It can be empty.
+	// +kubebuilder:validation:MaxLength=4096
+	Value string `json:"value"`
+}
+
 // CoderWorkspacePoolMemberSpec holds the inputs that a member pinned from its
 // pool's status.resolved. Only claimRef changes after creation, and only
 // once. Every ID is a UUID in lower case with hyphens, as Coder writes it.
@@ -100,7 +113,7 @@ type CoderWorkspacePoolMemberSpec struct {
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=64
 	// +optional
-	Parameters []CoderWorkspacePoolParameter `json:"parameters,omitempty"`
+	Parameters []CoderWorkspacePoolMemberParameter `json:"parameters,omitempty"`
 	// ParametersHash is the pool's hash of Parameters when it created the
 	// member.
 	// +kubebuilder:validation:MinLength=1
