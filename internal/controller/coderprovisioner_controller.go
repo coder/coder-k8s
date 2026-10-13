@@ -563,12 +563,16 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	if keyMaterial != "" {
-		// A new key exists in Coder. Record it in status before its plaintext
-		// reaches the Secret, so that deletion always finds the key to revoke.
-		// A failed write (for example a conflict because the provisioner is
-		// being deleted) revokes the new key before anyone can read it.
-		recordAppliedKeyStatus(provisioner, organizationID, appliedOrgName, provisionerKeyID, provisionerKeyName,
-			appliedTagsHash, appliedControlPlaneRefName, appliedControlPlaneURL)
+		// A new key exists in Coder. Record its IDs in status before its
+		// plaintext reaches the Secret, so that deletion always finds the key
+		// to revoke. Only the IDs: the applied spec values stay as they are
+		// until the Secret holds the key, so a failed Secret write is detected
+		// as drift (or missing metadata) and rotated again on the next try.
+		// A failed status write (for example a conflict because the
+		// provisioner is being deleted) revokes the new key before anyone can
+		// read it.
+		provisioner.Status.OrganizationID = organizationID
+		provisioner.Status.ProvisionerKeyID = provisionerKeyID
 		if err := r.Status().Update(ctx, provisioner); err != nil {
 			r.revokeUnpublishedKey(ctx, controlPlane.Status.URL, sessionToken, organizationID, provisionerKeyID)
 			return ctrl.Result{}, fmt.Errorf("record new provisioner key in status: %w", err)
@@ -787,12 +791,9 @@ func (r *CoderProvisionerReconciler) removeCleanupFinalizer(ctx context.Context,
 }
 
 // recordedProvisionerKey returns the organization and key IDs that status
-// records for the key this provisioner applied. ok is false when status does
-// not record a complete, valid key.
+// records for the key this provisioner created. ok is false when status does
+// not record valid IDs.
 func recordedProvisionerKey(status coderv1alpha1.CoderProvisionerStatus) (organizationID, keyID uuid.UUID, ok bool) {
-	if status.ProvisionerKeyName == "" {
-		return uuid.Nil, uuid.Nil, false
-	}
 	organizationID, err := uuid.Parse(status.OrganizationID)
 	if err != nil || organizationID == uuid.Nil {
 		return uuid.Nil, uuid.Nil, false

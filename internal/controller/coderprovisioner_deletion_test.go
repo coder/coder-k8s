@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -18,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/coderbootstrap"
 )
 
 // TestCoderProvisionerDeletion_NoRecordedKeySkipsCoder checks that a
@@ -179,4 +181,57 @@ func TestCoderProvisionerKey_RecordedBeforePublished(t *testing.T) {
 			require.True(t, apierrors.IsNotFound(err), "no Secret may hold the revoked key, got %v", err)
 		})
 	}
+}
+
+// TestCoderProvisionerKey_FailedSecretUpdateRotatesAgain checks that a drift
+// rotation whose Secret update fails is retried: the Secret must not keep the
+// material of the key that the rotation deleted.
+func TestCoderProvisionerKey_FailedSecretUpdateRotatesAgain(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newProvisionerCredentialFixture(ctx, t, "cprov-key-retry")
+	f.bootstrapClient.provisionerKeyResponses = []coderbootstrap.EnsureProvisionerKeyResponse{
+		{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "provisioner", Key: "material-1"},
+		{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "provisioner", Key: "material-2"},
+		{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "provisioner", Key: "material-3"},
+	}
+	provisioner := f.createProvisioner(ctx, t, nil, nil)
+	f.reconcile(ctx, t, provisioner)
+	f.reconcile(ctx, t, provisioner)
+	keySecretName := types.NamespacedName{Name: provisioner.Name + "-provisioner-key", Namespace: provisioner.Namespace}
+	secret := &corev1.Secret{}
+	require.NoError(t, k8sClient.Get(ctx, keySecretName, secret))
+	require.Equal(t, "material-1", string(secret.Data[coderv1alpha1.DefaultProvisionerKeySecretKey]))
+
+	latest := f.get(ctx, t, provisioner)
+	latest.Spec.Tags = map[string]string{"region": "rotated"}
+	require.NoError(t, k8sClient.Update(ctx, latest))
+
+	base, err := ctrlclient.NewWithWatch(cfg, ctrlclient.Options{Scheme: scheme})
+	require.NoError(t, err)
+	failSecretUpdate := true
+	f.reconciler.Client = interceptor.NewClient(base, interceptor.Funcs{
+		Update: func(ctx context.Context, c ctrlclient.WithWatch, obj ctrlclient.Object, opts ...ctrlclient.UpdateOption) error {
+			if s, ok := obj.(*corev1.Secret); ok && s.Name == keySecretName.Name && failSecretUpdate {
+				failSecretUpdate = false
+				return apierrors.NewServiceUnavailable("injected Secret update failure")
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+	})
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}}
+
+	_, err = f.reconciler.Reconcile(ctx, request)
+	require.Error(t, err, "the injected Secret update failure must fail the reconcile")
+	afterFailure := f.get(ctx, t, provisioner)
+	require.Equal(t, f.bootstrapClient.provisionerKeyResponses[1].KeyID.String(), afterFailure.Status.ProvisionerKeyID,
+		"status must record the new key before the Secret write")
+
+	_, err = f.reconciler.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.NoError(t, k8sClient.Get(ctx, keySecretName, secret))
+	require.Equal(t, "material-3", string(secret.Data[coderv1alpha1.DefaultProvisionerKeySecretKey]),
+		"the retry must rotate again and publish a live key")
+	final := f.get(ctx, t, provisioner)
+	require.Equal(t, f.bootstrapClient.provisionerKeyResponses[2].KeyID.String(), final.Status.ProvisionerKeyID)
 }
