@@ -47,7 +47,18 @@ func aiProviderNamesSeededByEnv(env []corev1.EnvVar) (names map[string]string, u
 	type indexed struct{ name, typ field }
 	providers := map[string]*indexed{}
 	var order []string
+	// Kubernetes keeps the last of two variables with one name, also an
+	// empty one, so only the last entry counts.
+	last := map[string]corev1.EnvVar{}
+	var variables []string
 	for _, e := range env {
+		if _, ok := last[e.Name]; !ok {
+			variables = append(variables, e.Name)
+		}
+		last[e.Name] = e
+	}
+	for _, variable := range variables {
+		e := last[variable]
 		if e.Value == "" && e.ValueFrom == nil {
 			continue
 		}
@@ -68,7 +79,6 @@ func aiProviderNamesSeededByEnv(env []corev1.EnvVar) (names map[string]string, u
 				providers[prefix+index] = p
 				order = append(order, prefix+index)
 			}
-			// Kubernetes keeps the last of two variables with one name.
 			f := field{value: e.Value, variable: e.Name, unknown: e.ValueFrom != nil || strings.Contains(e.Value, "$(")}
 			if key == "NAME" {
 				p.name = f

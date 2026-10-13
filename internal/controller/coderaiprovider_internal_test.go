@@ -80,6 +80,13 @@ func TestAIProviderNamesSeededByEnv(t *testing.T) {
 			{Name: "CODER_AIBRIDGE_PROVIDER_2_NAME", Value: "literal"},
 			{Name: "CODER_AIBRIDGE_PROVIDER_2_TYPE", Value: "$(TYPE)"},
 		}, want: map[string]string{"team-openai": "CODER_AIBRIDGE_PROVIDER_0_NAME", "last": "CODER_AIBRIDGE_PROVIDER_1_NAME", "literal": "CODER_AIBRIDGE_PROVIDER_2_NAME"}},
+		{name: "empty last duplicates", env: []corev1.EnvVar{
+			{Name: "CODER_AI_GATEWAY_PROVIDER_0_TYPE", Value: "openai"},
+			{Name: "CODER_AI_GATEWAY_PROVIDER_0_NAME", Value: "custom"},
+			{Name: "CODER_AI_GATEWAY_PROVIDER_0_NAME"},
+			{Name: "CODER_AIBRIDGE_ANTHROPIC_KEY", Value: "sk-ant"},
+			{Name: "CODER_AIBRIDGE_ANTHROPIC_KEY"},
+		}, want: map[string]string{"openai": "CODER_AI_GATEWAY_PROVIDER_0_TYPE"}},
 		{
 			name: "indexed name from a Secret", env: []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_PROVIDER_0_TYPE", Value: "openai"}, {Name: "CODER_AI_GATEWAY_PROVIDER_0_NAME", ValueFrom: fromSecret}},
 			want: map[string]string{}, unresolved: "CODER_AI_GATEWAY_PROVIDER_0_NAME",
