@@ -156,6 +156,15 @@ jobs:
             exit 1
           fi
 
+      - name: Verify the dormant CoderAIGatewayKey CRD is not installed
+        # Remove this step when the CoderAIGatewayKey controller ships (#156).
+        run: |
+          if grep -n -E '^[[:space:]]+kind: CoderAIGatewayKey$|coderaigatewaykeys\.coder\.com' \
+            dist/install.yaml config/default/kustomization.yaml config/crd/bases/*.yaml; then
+            echo "assertion failed: the CoderAIGatewayKey CRD must not ship before its controller" >&2
+            exit 1
+          fi
+
       - name: Run golangci-lint
         run: go tool golangci-lint run --timeout=5m ./...
 
