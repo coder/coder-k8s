@@ -135,7 +135,9 @@ func (r *CoderAIProviderReconciler) createAIProvider(
 			return step, err
 		}
 		return nil, nil
-	case createHadNoEffect(err):
+	case createHadNoEffect(err) || status == http.StatusForbidden:
+		// Coder answers 403 from its authorization check before the insert
+		// commits (coderd/ai_providers.go:233-237), so it had no effect.
 		provider.Status.CreateAttemptTime, provider.Status.Credential = nil, nil
 		return aiProviderWait(aiProviderRetry, "CreateRetrying", "The create request had no effect: %s", coderErrorSummary(err)), nil
 	case status == http.StatusConflict:
@@ -159,11 +161,13 @@ func (r *CoderAIProviderReconciler) createAIProvider(
 // provider that this object created, once per generation. A changed base URL
 // or key needs a later controller version, so it does not count as applied.
 func applyAIProvider(ctx context.Context, sdk *codersdk.Client, provider *coderv1alpha1.CoderAIProvider, key credentialsecret.Value) *aiProviderStep {
-	if provider.Status.AppliedGeneration == provider.Generation {
-		return aiProviderReady(provider)
-	}
+	// A Secret change does not change the generation, so check the key
+	// before the ready shortcut.
 	if !sameAIProviderKey(provider.Status.Credential, key.Token) {
 		return aiProviderWait(aiProviderResync, "Pending", "The key Secret changed after the create. This controller version does not send a changed key.")
+	}
+	if provider.Status.AppliedGeneration == provider.Generation {
+		return aiProviderReady(provider)
 	}
 	enabled := provider.Spec.Enabled == nil || *provider.Spec.Enabled
 	updated, err := sdk.UpdateAIProvider(ctx, provider.Status.ProviderID, codersdk.UpdateAIProviderRequest{
@@ -173,6 +177,9 @@ func applyAIProvider(ctx context.Context, sdk *codersdk.Client, provider *coderv
 	switch {
 	case status == http.StatusNotFound:
 		return aiProviderStalled(0, "DeletedExternally", "Provider %s (ID %s) is gone from Coder. The controller does not create it again until the spec changes.", provider.Name, provider.Status.ProviderID)
+	case isCoderAuthFailure(status):
+		// No Kubernetes event follows a repaired token or role, so retry.
+		return aiProviderWait(aiProviderRetry, "CoderUnavailable", "update provider %s: %s", provider.Name, coderErrorSummary(err))
 	case status >= 400 && status < 500 && status != http.StatusTooManyRequests:
 		return aiProviderStalled(0, "CoderRejected", "Coder rejected the update: %s", coderErrorSummary(err))
 	case err != nil:
@@ -190,6 +197,12 @@ func applyAIProvider(ctx context.Context, sdk *codersdk.Client, provider *coderv
 	}
 	provider.Status.AppliedGeneration = provider.Generation
 	return aiProviderReady(provider)
+}
+
+// isCoderAuthFailure reports 401 and 403. An expired operator token or a
+// removed owner role can be repaired without any Kubernetes event.
+func isCoderAuthFailure(status int) bool {
+	return status == http.StatusUnauthorized || status == http.StatusForbidden
 }
 
 func sameAIProviderKey(recorded *coderv1alpha1.CoderAIProviderCredentialStatus, token credentialsecret.ChangeToken) bool {

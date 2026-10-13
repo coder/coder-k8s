@@ -107,6 +107,7 @@ func TestCoderAIProviderCreateOutcomes(t *testing.T) {
 			return p
 		}}, firstStep: "ConfirmingCreate", posts: 1, keepMarker: true},
 		{name: "rate limited", fault: fakeFault{Status: http.StatusTooManyRequests}, firstStep: "CreateRetrying", posts: 2},
+		{name: "forbidden", fault: fakeFault{Status: http.StatusForbidden}, firstStep: "CreateRetrying", posts: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -325,6 +326,33 @@ func TestCoderAIProviderApplyGuards(t *testing.T) {
 		requireAIProviderStep(t, got, true, "CoderAnswerMismatch")
 		require.Zero(t, got.Status.AppliedGeneration)
 	})
+	t.Run("key Secret rotated after Ready", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		env, secret, provider := newAIProviderCreateEnv(ctx, t)
+		got, _ := env.reconcile(ctx, t, provider)
+		requireAIProviderReady(t, got)
+
+		require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(secret), secret))
+		secret.Data["api-key"] = []byte(testAIProviderKey + "-rotated")
+		require.NoError(t, k8sClient.Update(ctx, secret))
+		got, _ = env.reconcile(ctx, t, got)
+		require.Contains(t, requireAIProviderStep(t, got, false, "Pending"), "key Secret changed")
+		require.Equal(t, got.Generation, got.Status.AppliedGeneration, "the spec is still applied")
+	})
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status)+" on the apply is retried", func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			env, _, provider := newAIProviderCreateEnv(ctx, t)
+			env.fake.failNext(routeUpdateAIProvider, fakeFault{Status: status})
+			got, result := env.reconcile(ctx, t, provider)
+			requireAIProviderStep(t, got, false, "CoderUnavailable")
+			require.Equal(t, 30*time.Second, result.RequeueAfter)
+			got, _ = env.reconcile(ctx, t, got)
+			requireAIProviderReady(t, got)
+		})
+	}
 	t.Run("deleted in Coder before the apply", func(t *testing.T) {
 		t.Parallel()
 		ctx := context.Background()
