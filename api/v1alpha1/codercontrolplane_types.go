@@ -125,6 +125,12 @@ type CoderControlPlaneSpec struct {
 	// TopologySpreadConstraints control pod topology spread.
 	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
 
+	// AIGateway configures CoderAIGatewayKey objects that use this control
+	// plane. It has no effect yet: the CoderAIGatewayKey controller is not
+	// shipped.
+	// +optional
+	AIGateway *AIGatewaySpec `json:"aiGateway,omitempty"`
+
 	// TemplateTests configures CoderTemplateTest runs against this control plane.
 	// +optional
 	TemplateTests *TemplateTestsSpec `json:"templateTests,omitempty"`
