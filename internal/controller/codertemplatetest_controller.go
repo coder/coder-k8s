@@ -5,9 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
@@ -32,7 +30,7 @@ const (
 	templateTestWorkspacePrefix  = "ktt-"
 	templateTestUIDHexLength     = 28
 	templateTestPendingPoll      = 15 * time.Second
-	templateTestRunningPoll      = 5 * time.Second
+	templateTestRunningPoll      = coderBuildPoll
 	templateTestDefaultTimeout   = int32(900)
 	templateTestMaxMessageLength = 256
 )
@@ -49,7 +47,7 @@ type CoderTemplateTestReconciler struct {
 	Scheme *runtime.Scheme
 	Clock  clock.PassiveClock
 
-	rateLimited sync.Map // types.NamespacedName -> consecutive HTTP 429 answers.
+	rateLimited coderBackoff // Keyed by types.NamespacedName.
 }
 
 // templateTestControlPlaneRefIndex indexes tests by the control plane they use.
@@ -124,7 +122,7 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	keepBackoff := false
 	defer func() {
 		if !keepBackoff {
-			r.rateLimited.Delete(req.NamespacedName)
+			r.rateLimited.forget(req.NamespacedName)
 		}
 	}()
 	tt := &coderv1alpha1.CoderTemplateTest{}
@@ -391,20 +389,6 @@ func templateTestWorkspaceName(uid types.UID) (string, error) {
 	return templateTestWorkspacePrefix + hex[:templateTestUIDHexLength], nil
 }
 
-// coderAnswerFor is the rule for every Coder answer the reconciler trusts:
-// the answer names the ID or name that the controller asked for. Anything else
-// means Coder, a proxy, or the SDK is broken, so it is an assertion failure.
-func coderAnswerFor(kind, asked, answered string) error {
-	if asked == answered {
-		return nil
-	}
-	return &coderAnswerError{msg: fmt.Sprintf("assertion failed: Coder answered %s %q when asked for %q", kind, answered, asked)}
-}
-
-type coderAnswerError struct{ msg string }
-
-func (e *coderAnswerError) Error() string { return e.msg }
-
 func templateTestDeadlineExceeded(tt *coderv1alpha1.CoderTemplateTest, lastReason, lastMessage string) *templateTestStep {
 	return templateTestFail("DeadlineExceeded", "The test did not finish within %ds. Last wait: %s: %s",
 		templateTestTimeoutSeconds(tt), lastReason, lastMessage)
@@ -421,10 +405,6 @@ func isTemplateTestFinal(phase string) bool {
 	return phase == coderv1alpha1.CoderTemplateTestPhaseSucceeded || phase == coderv1alpha1.CoderTemplateTestPhaseFailed
 }
 
-func isCoderNotFound(err error) bool {
-	return coderStatus(err) == http.StatusNotFound
-}
-
 // coderUnavailable keeps the test waiting after a failed Coder call. The
 // message holds the status and Coder's short message only, never details.
 func coderUnavailable(action string, err error) *templateTestStep {
@@ -438,25 +418,6 @@ func templateTestStepFrom(step *coderStep) *templateTestStep {
 		return nil
 	}
 	return &templateTestStep{failed: step.failed, reason: step.reason, message: step.message, rateLimited: step.rateLimited}
-}
-
-// coderErrorSummary holds the status and Coder's short message only, never
-// details, validation errors, or job logs.
-func coderErrorSummary(err error) string {
-	var sdkErr *codersdk.Error
-	if errors.As(err, &sdkErr) {
-		return fmt.Sprintf("Coder answered %d: %s", sdkErr.StatusCode(), sdkErr.Message)
-	}
-	return err.Error()
-}
-
-// coderStatus returns the HTTP status of a Coder answer, or 0 without one.
-func coderStatus(err error) int {
-	var sdkErr *codersdk.Error
-	if errors.As(err, &sdkErr) {
-		return sdkErr.StatusCode()
-	}
-	return 0
 }
 
 func truncateTemplateTestMessage(message string) string {
