@@ -146,6 +146,26 @@ func TestClaimOwnedSecret(t *testing.T) {
 	_, isCredErr := asCredentialError(err)
 	require.False(t, isCredErr, "the race is retryable, not a stall")
 
+	// Caller bugs fail before anything is created: a reserved label, a kind
+	// that does not match the owner, and a reader that returns another Secret.
+	empty := fake.NewClientBuilder().WithScheme(scheme).Build()
+	for _, reserved := range []string{credentialsecret.LabelKey, outputSecretManagedByKey} {
+		_, err = claimOwnedSecret(ctx, empty, empty, scheme, owner, ownedSecretKind, ownedSecretName, map[string]string{reserved: "x"})
+		require.ErrorContains(t, err, "assertion failed: output Secret labels must not set "+reserved)
+	}
+	_, err = claimOwnedSecret(ctx, empty, empty, scheme, owner, "CoderWorkspaceProxy", ownedSecretName, nil)
+	require.ErrorContains(t, err, `assertion failed: output Secret owner kind "CoderWorkspaceProxy" does not match`)
+	secrets := &corev1.SecretList{}
+	require.NoError(t, empty.List(ctx, secrets))
+	require.Empty(t, secrets.Items, "a caller bug must create nothing")
+	wrongObject := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claimed.DeepCopy()).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, _ client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			return c.Get(ctx, client.ObjectKeyFromObject(claimed), obj, opts...)
+		},
+	}).Build()
+	_, err = getOwnedSecret(ctx, wrongObject, owner, ownedSecretKind, "another-name")
+	require.ErrorContains(t, err, "assertion failed: reading output Secret ns/another-name returned ns/gateway-key")
+
 	_, err = claimOwnedSecret(ctx, c, nil, scheme, owner, ownedSecretKind, ownedSecretName, nil)
 	require.ErrorContains(t, err, "assertion failed: claiming an output Secret needs a client, a reader and a scheme")
 	_, err = getOwnedSecret(ctx, nil, owner, ownedSecretKind, ownedSecretName)
@@ -220,6 +240,11 @@ func TestWriteOwnedSecret(t *testing.T) {
 	// current is now stale: the write must conflict, not overwrite.
 	_, err = writeOwnedSecret(ctx, c, owner, ownedSecretKind, current, map[string][]byte{"key": []byte("key-2")}, nil, nil)
 	require.True(t, apierrors.IsConflict(err), "want a conflict, got %v", err)
+	require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(written), stored))
+	require.Equal(t, []byte("key-1"), stored.Data["key"])
+
+	_, err = writeOwnedSecret(ctx, c, owner, ownedSecretKind, stored, map[string][]byte{"key": []byte("key-3")}, map[string]string{credentialsecret.LabelKey: "true"}, nil)
+	require.ErrorContains(t, err, "assertion failed: output Secret labels must not set "+credentialsecret.LabelKey)
 	require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(written), stored))
 	require.Equal(t, []byte("key-1"), stored.Data["key"])
 

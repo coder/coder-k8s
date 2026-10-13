@@ -68,6 +68,9 @@ func getOwnedSecret(ctx context.Context, reader client.Reader, owner client.Obje
 	} else if err != nil {
 		return nil, fmt.Errorf("get output Secret %q: %w", name, err)
 	}
+	if secret.Name != name || secret.Namespace != owner.GetNamespace() {
+		return nil, fmt.Errorf("assertion failed: reading output Secret %s/%s returned %s/%s", owner.GetNamespace(), name, secret.Namespace, secret.Name)
+	}
 	if failure := checkOwnedSecret(secret, owner, kind); failure != nil {
 		return nil, failure
 	}
@@ -83,6 +86,9 @@ func claimOwnedSecret(ctx context.Context, c client.Client, reader client.Reader
 	if c == nil || reader == nil || scheme == nil {
 		return nil, errors.New("assertion failed: claiming an output Secret needs a client, a reader and a scheme")
 	}
+	if err := assertOutputSecretLabels(labels); err != nil {
+		return nil, err
+	}
 	secret, err := getOwnedSecret(ctx, reader, owner, kind, name)
 	if err != nil || secret != nil {
 		return secret, err
@@ -93,6 +99,11 @@ func claimOwnedSecret(ctx context.Context, c client.Client, reader client.Reader
 	}
 	if err := controllerutil.SetControllerReference(owner, secret, scheme); err != nil {
 		return nil, fmt.Errorf("set owner of output Secret %q: %w", name, err)
+	}
+	if !isControlledBy(secret, owner, kind) {
+		// kind does not match the owner's kind in the scheme: every later
+		// check would refuse this Secret, so create nothing.
+		return nil, fmt.Errorf("assertion failed: output Secret owner kind %q does not match the owner's controller reference %+v", kind, secret.OwnerReferences)
 	}
 	switch err := c.Create(ctx, secret); {
 	case err == nil:
@@ -137,6 +148,9 @@ func writeOwnedSecret(ctx context.Context, c client.Client, owner client.Object,
 	if failure := checkOwnedSecret(secret, owner, kind); failure != nil {
 		return nil, fmt.Errorf("assertion failed: refusing to write a Secret that this %s does not own: %s", kind, failure.Message)
 	}
+	if err := assertOutputSecretLabels(labels); err != nil {
+		return nil, err
+	}
 	updated := secret.DeepCopy()
 	want := outputSecretMeta(secret.Namespace, secret.Name, labels, annotations)
 	updated.Labels = mergeStringMaps(updated.Labels, want.Labels)
@@ -171,6 +185,18 @@ func mergeStringMaps(base, overlay map[string]string) map[string]string {
 	}
 	maps.Copy(out, overlay)
 	return out
+}
+
+// assertOutputSecretLabels refuses labels that would make the Secret an input
+// credential or change who manages it. With them, the helper would refuse
+// its own Secret on the next read.
+func assertOutputSecretLabels(labels map[string]string) error {
+	for _, key := range []string{credentialsecret.LabelKey, outputSecretManagedByKey} {
+		if _, ok := labels[key]; ok {
+			return fmt.Errorf("assertion failed: output Secret labels must not set %s", key)
+		}
+	}
+	return nil
 }
 
 func assertOutputSecretArgs(owner client.Object, kind, name string) error {
