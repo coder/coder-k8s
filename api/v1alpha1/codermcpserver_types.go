@@ -20,6 +20,39 @@ const (
 	CoderMCPServerCleanupFinalizer = "coder.com/mcp-server-cleanup"
 )
 
+// MCPServersSpec configures CoderMCPServer objects that use a
+// CoderControlPlane (CoderControlPlane.spec.mcpServers).
+type MCPServersSpec struct {
+	// Organizations are the names of the Coder organizations whose MCP server
+	// configs CoderMCPServer objects can create, change and delete with this
+	// control plane's operator token. This delegates Coder organization-admin
+	// power over MCP servers in these organizations to everyone who can
+	// create CoderMCPServer objects here. A CoderMCPServer for an
+	// organization outside this list sends no MCP request. Removing an
+	// organization stops further changes to its servers. Deleting a
+	// CoderMCPServer still deletes the config it created.
+	//
+	// This field has no effect yet: the CoderMCPServer controller is not
+	// shipped.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=32
+	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*$`
+	// +kubebuilder:validation:XValidation:rule="self.all(o, o != 'new' && o != 'create')",message="mcpServers.organizations must not hold new or create"
+	// +listType=set
+	Organizations []string `json:"organizations"`
+	// AllowForceOn lets CoderMCPServer objects use availability: force_on,
+	// which adds a server to every new chat of each user who can read it,
+	// without that user's choice. When false (the default), such objects
+	// send no MCP request.
+	//
+	// This field has no effect yet: the CoderMCPServer controller is not
+	// shipped.
+	// +optional
+	AllowForceOn bool `json:"allowForceOn,omitempty"`
+}
+
 // CoderMCPServerSpec defines one MCP server config in a Coder organization.
 // Coder trims every text field with strings.TrimSpace, so the patterns reject
 // leading and trailing Unicode white space. The class [\s\v\x{85}\p{Z}] is
