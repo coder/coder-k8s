@@ -132,6 +132,24 @@ func TestClaimOwnedSecret(t *testing.T) {
 	got, err = claimOwnedSecret(ctx, race, race, scheme, owner, ownedSecretKind, ownedSecretName, nil)
 	require.Nil(t, got)
 	requireReason(t, err, reasonSecretNotOwned)
+
+	// Someone else creates the name and deletes it again before the re-read:
+	// the claim must not report success without a Secret.
+	vanish := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+		Create: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.CreateOption) error {
+			return apierrors.NewAlreadyExists(schema.GroupResource{Resource: "secrets"}, obj.GetName())
+		},
+	}).Build()
+	got, err = claimOwnedSecret(ctx, vanish, vanish, scheme, owner, ownedSecretKind, ownedSecretName, nil)
+	require.Nil(t, got)
+	require.ErrorContains(t, err, "created and deleted by another writer")
+	_, isCredErr := asCredentialError(err)
+	require.False(t, isCredErr, "the race is retryable, not a stall")
+
+	_, err = claimOwnedSecret(ctx, c, nil, scheme, owner, ownedSecretKind, ownedSecretName, nil)
+	require.ErrorContains(t, err, "assertion failed: claiming an output Secret needs a client, a reader and a scheme")
+	_, err = getOwnedSecret(ctx, nil, owner, ownedSecretKind, ownedSecretName)
+	require.ErrorContains(t, err, "assertion failed: reading an output Secret needs a reader")
 }
 
 // A create that the API server or an admission check refuses gives
@@ -216,6 +234,13 @@ func TestWriteOwnedSecret(t *testing.T) {
 	}).Build()
 	_, err = writeOwnedSecret(ctx, dryRun, owner, ownedSecretKind, stored, map[string][]byte{"key": []byte("placeholder")}, nil, nil, client.DryRunAll)
 	require.NoError(t, err)
+
+	// A Secret from another namespace that carries a matching controller
+	// reference is still not this owner's Secret.
+	elsewhere := stored.DeepCopy()
+	elsewhere.Namespace = "other"
+	_, err = writeOwnedSecret(ctx, c, owner, ownedSecretKind, elsewhere, map[string][]byte{"key": []byte("key-3")}, nil, nil)
+	require.ErrorContains(t, err, `assertion failed: output Secret "gateway-key" is in namespace "other", not in the owner's namespace "ns"`)
 
 	_, err = writeOwnedSecret(ctx, c, owner, ownedSecretKind, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: ownedSecretName, Namespace: "ns"}}, nil, nil, nil)
 	require.ErrorContains(t, err, "assertion failed: output Secret \"gateway-key\" was not read before the write")

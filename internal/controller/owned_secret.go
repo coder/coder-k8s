@@ -56,6 +56,9 @@ func checkOwnedSecret(secret *corev1.Secret, owner client.Object, kind string) *
 // when the Secret is absent, the Secret when owner controls it, and a
 // SecretNotOwned failure otherwise.
 func getOwnedSecret(ctx context.Context, reader client.Reader, owner client.Object, kind, name string) (*corev1.Secret, error) {
+	if reader == nil {
+		return nil, errors.New("assertion failed: reading an output Secret needs a reader")
+	}
 	if err := assertOutputSecretArgs(owner, kind, name); err != nil {
 		return nil, err
 	}
@@ -77,8 +80,8 @@ func getOwnedSecret(ctx context.Context, reader client.Reader, owner client.Obje
 // someone else created first gives SecretNotOwned. A create that the API
 // server refuses gives SecretWriteRejected.
 func claimOwnedSecret(ctx context.Context, c client.Client, reader client.Reader, scheme *runtime.Scheme, owner client.Object, kind, name string, labels map[string]string) (*corev1.Secret, error) {
-	if c == nil || scheme == nil {
-		return nil, errors.New("assertion failed: claiming an output Secret needs a client and a scheme")
+	if c == nil || reader == nil || scheme == nil {
+		return nil, errors.New("assertion failed: claiming an output Secret needs a client, a reader and a scheme")
 	}
 	secret, err := getOwnedSecret(ctx, reader, owner, kind, name)
 	if err != nil || secret != nil {
@@ -96,7 +99,12 @@ func claimOwnedSecret(ctx context.Context, c client.Client, reader client.Reader
 		return secret, nil
 	case apierrors.IsAlreadyExists(err):
 		// Created by someone else between the read and the create.
-		return getOwnedSecret(ctx, reader, owner, kind, name)
+		existing, err := getOwnedSecret(ctx, reader, owner, kind, name)
+		if err == nil && existing == nil {
+			// ... and deleted again before this read. Nothing was claimed.
+			return nil, fmt.Errorf("output Secret %q was created and deleted by another writer during the claim; retry", name)
+		}
+		return existing, err
 	case apierrors.IsInvalid(err), apierrors.IsForbidden(err), apierrors.IsBadRequest(err):
 		// The create held no data, so the API server's message holds none.
 		return nil, &credentialsecret.Error{Reason: reasonSecretWriteRejected, Message: fmt.Sprintf(
@@ -119,6 +127,9 @@ func writeOwnedSecret(ctx context.Context, c client.Client, owner client.Object,
 	}
 	if err := assertOutputSecretArgs(owner, kind, secret.Name); err != nil {
 		return nil, err
+	}
+	if secret.Namespace != owner.GetNamespace() {
+		return nil, fmt.Errorf("assertion failed: output Secret %q is in namespace %q, not in the owner's namespace %q", secret.Name, secret.Namespace, owner.GetNamespace())
 	}
 	if secret.ResourceVersion == "" {
 		return nil, fmt.Errorf("assertion failed: output Secret %q was not read before the write", secret.Name)
