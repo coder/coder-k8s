@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -55,6 +57,17 @@ const (
 // aiGatewayKeyValue is the format of a Coder AI Gateway key (plan I1). A
 // value in another format holds no key.
 var aiGatewayKeyValue = regexp.MustCompile(`^[0-9A-Za-z]{43}$`)
+
+// aiGatewayKeyPlaceholder has the format of a key, so the dry-run write sends
+// the same shape of data as a real write. It is not a key.
+var aiGatewayKeyPlaceholder = []byte(strings.Repeat("0", 43))
+
+// Annotations on the output Secret (plan 5.2). They change with each key, so
+// a reloader that watches the Secret sees every rotation.
+const (
+	aiGatewayKeyIDAnnotation   = "coder.com/ai-gateway-key-id"
+	aiGatewayKeyNameAnnotation = "coder.com/ai-gateway-key-name"
+)
 
 // CoderAIGatewayKeyReconciler reconciles CoderAIGatewayKey objects (#156). It
 // is not registered yet. This version runs the checks of the observe step
@@ -221,7 +234,7 @@ func (r *CoderAIGatewayKeyReconciler) observe(ctx context.Context, key *coderv1a
 		return &aiGatewayKeyStep{ready: true, reason: "Ready", requeue: aiGatewayKeyResync, message: fmt.Sprintf(
 			"Secret %q holds key %s, and Coder lists it.", key.Spec.SecretName, key.Status.CurrentKey.Name)}, nil
 	case aiGatewayKeyIssue:
-		return r.claimSecret(ctx, key)
+		return r.prepareSecret(ctx, key, prefix)
 	case aiGatewayKeyKillSwitch:
 		return aiGatewayKeyStalled(reasonKeyDeletedExternal,
 			"Coder no longer lists the current key %s. Someone deleted it outside the operator, so the operator creates no new key.", key.Status.CurrentKey.Name), nil
@@ -231,21 +244,54 @@ func (r *CoderAIGatewayKeyReconciler) observe(ctx context.Context, key *coderv1a
 	}
 }
 
-// claimSecret is the first part of the issue step (plan 4.3): the output
-// Secret exists and this object controls it before any key exists.
-func (r *CoderAIGatewayKeyReconciler) claimSecret(ctx context.Context, key *coderv1alpha1.CoderAIGatewayKey) (*aiGatewayKeyStep, error) {
+// prepareSecret runs the first two parts of the issue step (plan 4.3): the
+// output Secret exists and this object controls it, and the API server
+// accepts a write of a key into it, before any key exists.
+func (r *CoderAIGatewayKeyReconciler) prepareSecret(ctx context.Context, key *coderv1alpha1.CoderAIGatewayKey, prefix string) (*aiGatewayKeyStep, error) {
 	labels := map[string]string{
 		"app.kubernetes.io/name":     aiGatewayKeyAppName,
 		"app.kubernetes.io/instance": workspaceProxyInstanceLabelValue(key.Name),
 	}
-	_, err := claimOwnedSecret(ctx, r.Client, r.APIReader, r.Scheme, key, aiGatewayKeyKind, key.Spec.SecretName, labels)
+	secret, err := claimOwnedSecret(ctx, r.Client, r.APIReader, r.Scheme, key, aiGatewayKeyKind, key.Spec.SecretName, labels)
 	if credErr := (*credentialsecret.Error)(nil); errors.As(err, &credErr) {
 		return aiGatewayKeyStalled(credErr.Reason, "%s", credErr.Message), nil
 	} else if err != nil {
 		return nil, err
 	}
+	// The dry run sends what the real write will send, with a placeholder
+	// in place of the key, so an admission webhook, a policy or a quota that
+	// refuses it stops the issue step while no key exists. The object that a
+	// dry run returns is not the stored Secret, so it is dropped.
+	annotations := map[string]string{
+		aiGatewayKeyIDAnnotation:   uuid.Nil.String(),
+		aiGatewayKeyNameAnnotation: prefix + strconv.FormatInt(key.Status.NextSerial, 10),
+	}
+	_, err = writeOwnedSecret(ctx, r.Client, key, aiGatewayKeyKind, secret,
+		map[string][]byte{coderv1alpha1.CoderAIGatewayKeySecretDataKey: aiGatewayKeyPlaceholder}, labels, annotations, client.DryRunAll)
+	if err != nil {
+		return aiGatewayKeyWriteFailure(key.Spec.SecretName, err)
+	}
 	return aiGatewayKeyWait(aiGatewayKeyResync, reasonIssuingKey,
-		"Secret %q is claimed. This controller version creates no key yet.", key.Spec.SecretName), nil
+		"Secret %q is claimed, and a test write passed. This controller version creates no key yet.", key.Spec.SecretName), nil
+}
+
+// aiGatewayKeyWriteFailure maps a failed write of the output Secret. The
+// write can carry a key, so neither the step nor the returned error holds
+// the API server's message, only its reason and code. Errors without an API
+// status (assertion failures, a client-side timeout) hold no server text and
+// pass through.
+func aiGatewayKeyWriteFailure(name string, err error) (*aiGatewayKeyStep, error) {
+	var apiStatus apierrors.APIStatus
+	if !errors.As(err, &apiStatus) {
+		return nil, err
+	}
+	reason, code := apiStatus.Status().Reason, apiStatus.Status().Code
+	if apierrors.IsInvalid(err) || apierrors.IsForbidden(err) || apierrors.IsBadRequest(err) {
+		return aiGatewayKeyStalled(reasonSecretWriteRejected,
+			"The API server refused a write of Secret %q (%s, HTTP %d). Check the admission webhooks, policies and quotas for Secrets in this namespace.",
+			name, reason, code), nil
+	}
+	return nil, fmt.Errorf("write output Secret %q: the API server answered %s (HTTP %d)", name, reason, code)
 }
 
 // aiGatewayKeyListFailure classifies a failed LIST (plan 4.2 step 4). The

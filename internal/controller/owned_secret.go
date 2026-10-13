@@ -35,7 +35,7 @@ const (
 )
 
 // checkOwnedSecret returns a SecretNotOwned failure unless owner (of kind)
-// controls secret and secret is still a plain output Secret.
+// controls secret and secret is still a plain, writable output Secret.
 func checkOwnedSecret(secret *corev1.Secret, owner client.Object, kind string) *credentialsecret.Error {
 	switch {
 	case !isControlledBy(secret, owner, kind):
@@ -47,6 +47,11 @@ func checkOwnedSecret(secret *corev1.Secret, owner client.Object, kind string) *
 	case secret.Labels[credentialsecret.LabelKey] != "":
 		return &credentialsecret.Error{Reason: reasonSecretNotOwned, Message: fmt.Sprintf(
 			"Secret %q carries the label %s, so it is an input credential. The operator does not write it.", secret.Name, credentialsecret.LabelKey)}
+	case secret.Immutable != nil && *secret.Immutable:
+		// The API server refuses every data change, and immutable cannot be
+		// turned off, so the operator could never write a key into it.
+		return &credentialsecret.Error{Reason: reasonSecretNotOwned, Message: fmt.Sprintf(
+			"Secret %q is immutable, so the operator cannot write a key into it. Delete the Secret, and the operator creates it again.", secret.Name)}
 	}
 	return nil
 }
@@ -201,8 +206,8 @@ func assertOutputSecretLabels(labels map[string]string) error {
 
 func assertOutputSecretArgs(owner client.Object, kind, name string) error {
 	switch {
-	case owner == nil || owner.GetUID() == "" || owner.GetNamespace() == "":
-		return errors.New("assertion failed: an output Secret owner needs a UID and a namespace")
+	case owner == nil || owner.GetUID() == "" || owner.GetName() == "" || owner.GetNamespace() == "":
+		return errors.New("assertion failed: an output Secret owner needs a UID, a name and a namespace")
 	case kind == "" || name == "":
 		return errors.New("assertion failed: an output Secret needs an owner kind and a name")
 	}

@@ -70,6 +70,7 @@ func TestOwnedSecretRefusesForeignSecrets(t *testing.T) {
 		"owner but not controller": {ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{{APIVersion: gv, Kind: ownedSecretKind, Name: "x", UID: "uid-1"}}}},
 		"not Opaque":               {ObjectMeta: metav1.ObjectMeta{OwnerReferences: controllerRef(gv, ownedSecretKind, "uid-1")}, Type: corev1.SecretTypeDockerConfigJson},
 		"input credential label":   {ObjectMeta: metav1.ObjectMeta{OwnerReferences: controllerRef(gv, ownedSecretKind, "uid-1"), Labels: map[string]string{credentialsecret.LabelKey: "true"}}},
+		"immutable":                {ObjectMeta: metav1.ObjectMeta{OwnerReferences: controllerRef(gv, ownedSecretKind, "uid-1")}, Immutable: ptrOf(true)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -269,6 +270,14 @@ func TestWriteOwnedSecret(t *testing.T) {
 
 	_, err = writeOwnedSecret(ctx, c, owner, ownedSecretKind, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: ownedSecretName, Namespace: "ns"}}, nil, nil, nil)
 	require.ErrorContains(t, err, "assertion failed: output Secret \"gateway-key\" was not read before the write")
+
+	// Every helper needs an owner with a UID, a name and a namespace.
+	unnamed := owner.DeepCopy()
+	unnamed.Name = ""
+	_, err = getOwnedSecret(ctx, c, unnamed, ownedSecretKind, ownedSecretName)
+	require.ErrorContains(t, err, "assertion failed: an output Secret owner needs a UID, a name and a namespace")
+	_, err = writeOwnedSecret(ctx, c, unnamed, ownedSecretKind, stored, map[string][]byte{"key": []byte("key-3")}, nil, nil)
+	require.ErrorContains(t, err, "assertion failed: an output Secret owner needs a UID, a name and a namespace")
 }
 
 // The output Secret helper never adopts through CreateOrUpdate, which takes

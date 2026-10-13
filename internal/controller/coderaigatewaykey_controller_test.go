@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -195,6 +196,10 @@ func TestCoderAIGatewayKeySecretNotOwned(t *testing.T) {
 			s.OwnerReferences = []metav1.OwnerReference{gatewayKeyOwner(k)}
 			s.Labels = map[string]string{"coder.com/credential": "true"}
 		},
+		"immutable": func(s *corev1.Secret, k *coderv1alpha1.CoderAIGatewayKey) {
+			s.OwnerReferences = []metav1.OwnerReference{gatewayKeyOwner(k)}
+			s.Immutable = ptrTo(true)
+		},
 		"not Opaque": func(s *corev1.Secret, k *coderv1alpha1.CoderAIGatewayKey) {
 			s.OwnerReferences = []metav1.OwnerReference{gatewayKeyOwner(k)}
 			s.Type = corev1.SecretTypeBasicAuth
@@ -288,7 +293,7 @@ func TestCoderAIGatewayKeyClaimsSecret(t *testing.T) {
 
 	// A reconcile with no change sends no write: no status update and no
 	// finalizer patch.
-	writes := 0
+	writes, dryRuns := 0, 0
 	base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
 	require.NoError(t, err)
 	counting := env
@@ -298,7 +303,11 @@ func TestCoderAIGatewayKeyClaimsSecret(t *testing.T) {
 			return c.Patch(ctx, obj, patch, opts...)
 		},
 		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-			writes++
+			if isDryRunUpdate(opts) {
+				dryRuns++
+			} else {
+				writes++
+			}
 			return c.Update(ctx, obj, opts...)
 		},
 		SubResourceUpdate: func(ctx context.Context, c client.Client, subResource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
@@ -308,6 +317,7 @@ func TestCoderAIGatewayKeyClaimsSecret(t *testing.T) {
 	})
 	again, _ := counting.reconcile(ctx, t, got)
 	require.Zero(t, writes)
+	require.Equal(t, 1, dryRuns, "the issue step tests the key write with a dry run")
 	require.Equal(t, got.ResourceVersion, again.ResourceVersion)
 	after := &corev1.Secret{}
 	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(secret), after))
@@ -391,6 +401,74 @@ func TestCoderAIGatewayKeySecretCreateRejected(t *testing.T) {
 	requireAIGatewayKeyStep(t, got, true, "SecretWriteRejected")
 	require.Zero(t, env.fake.requestCount(routeCreateAIGatewayKey))
 	requireNoOutputSecret(ctx, t, env.namespace, testAIGatewaySecret)
+}
+
+func isDryRunUpdate(opts []client.UpdateOption) bool {
+	update := &client.UpdateOptions{}
+	update.ApplyOptions(opts)
+	return len(update.DryRun) == 1 && update.DryRun[0] == metav1.DryRunAll
+}
+
+// Plan 4.3 step 2 and S11: a dry-run key write that admission refuses stalls
+// with SecretWriteRejected, zero POSTs, and an unchanged empty Secret. The
+// status holds the reason and code, never the API server's message.
+func TestCoderAIGatewayKeyDryRunRejected(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	gr := schema.GroupResource{Resource: "secrets"}
+	for name, rejection := range map[string]error{
+		"invalid":   apierrors.NewInvalid(schema.GroupKind{Kind: "Secret"}, testAIGatewaySecret, field.ErrorList{field.Forbidden(field.NewPath("data"), "server-text-must-not-leak")}),
+		"forbidden": apierrors.NewForbidden(gr, testAIGatewaySecret, errors.New("server-text-must-not-leak")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+			base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+			require.NoError(t, err)
+			env.client = interceptor.NewClient(base, interceptor.Funcs{
+				Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+					if _, ok := obj.(*corev1.Secret); ok && isDryRunUpdate(opts) {
+						return rejection
+					}
+					return c.Update(ctx, obj, opts...)
+				},
+			})
+			got, _ := env.reconcile(ctx, t, env.createKey(ctx, t, "coder", testAIGatewaySecret))
+			message := requireAIGatewayKeyStep(t, got, true, "SecretWriteRejected")
+			require.NotContains(t, message, "server-text-must-not-leak")
+			require.Contains(t, message, string(apierrors.ReasonForError(rejection)))
+			require.Zero(t, env.fake.requestCount(routeCreateAIGatewayKey))
+			secret := &corev1.Secret{}
+			require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: env.namespace, Name: testAIGatewaySecret}, secret))
+			require.Empty(t, secret.Data)
+		})
+	}
+}
+
+// The API server refuses a data change of an immutable Secret, also in a
+// dry run. That is why checkOwnedSecret refuses an immutable output Secret
+// before any key exists. A dry run of a writable Secret stores nothing.
+func TestSecretDryRunWrites(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	namespace := createTestNamespace(ctx, t, "dryrun")
+	for name, immutable := range map[string]bool{"immutable": true, "writable": false} {
+		secret := createSecret(ctx, t, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}, Type: corev1.SecretTypeOpaque, Immutable: ptrTo(immutable),
+		})
+		update := secret.DeepCopy()
+		update.Data = map[string][]byte{"key": []byte("placeholder")}
+		err := k8sClient.Update(ctx, update, client.DryRunAll)
+		if immutable {
+			require.True(t, apierrors.IsInvalid(err), "want Invalid, got %v", err)
+		} else {
+			require.NoError(t, err)
+		}
+		stored := &corev1.Secret{}
+		require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(secret), stored))
+		require.Equal(t, secret.ResourceVersion, stored.ResourceVersion)
+		require.Empty(t, stored.Data)
+	}
 }
 
 // Through the manager: the control plane watch and Owns(Secret) requeue the
