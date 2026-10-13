@@ -101,6 +101,39 @@ func TestGenerateDatesCAFromInjectedClock(t *testing.T) {
 	}
 }
 
+// Both ends of the CA's validity must come from the injected clock. A far-past now makes a wall
+// clock NotAfter visible: it would land decades after now instead of CAValidity after it.
+func TestGenerateDatesCAValidityWindowFromFarPastClock(t *testing.T) {
+	now := time.Date(2001, time.February, 3, 4, 5, 6, 0, time.UTC)
+	b, err := Generate(testNS, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := now.Add(-clockSkewAllowance); !b.CACert.NotBefore.Equal(want) {
+		t.Fatalf("CA NotBefore = %s, want %s", b.CACert.NotBefore, want)
+	}
+	if want := now.Add(CAValidity); !b.CACert.NotAfter.Equal(want) {
+		t.Fatalf("CA NotAfter = %s, want %s", b.CACert.NotAfter, want)
+	}
+	if want := now.Add(ServingCertValidity); !b.Cert.NotAfter.Equal(want) {
+		t.Fatalf("serving NotAfter = %s, want %s", b.Cert.NotAfter, want)
+	}
+	if !b.CACert.IsCA || !b.CACert.BasicConstraintsValid || b.CACert.KeyUsage&x509.KeyUsageCertSign == 0 {
+		t.Fatal("CA certificate must be a CA with valid basic constraints and KeyUsageCertSign")
+	}
+	if _, err := Parse(secretFor(b), testNS, now); err != nil {
+		t.Fatalf("generated bundle does not parse at the injected time: %v", err)
+	}
+	if b.NeedsRenewal(testNS, now) {
+		t.Fatal("a fresh serving certificate must not need renewal at the injected time")
+	}
+	// The same bundle is long expired by the wall clock.
+	var corruptErr *CorruptSecretError
+	if _, err := Parse(secretFor(b), testNS, time.Now()); !errors.As(err, &corruptErr) || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("Parse at the wall clock = %v, want an expired CA", err)
+	}
+}
+
 func TestEnsureCreatesMarkedSecretAndServesIt(t *testing.T) {
 	client := fake.NewClientset()
 	m := newTestManager(t, client, time.Now())
@@ -631,7 +664,7 @@ func assertNoWrites(t *testing.T, client *fake.Clientset) {
 	}
 }
 
-// selfSignedCA builds a CA with an explicit validity window (certutil fixes it at 10 years).
+// selfSignedCA builds a CA with an explicit validity window (Generate fixes it at CAValidity).
 func selfSignedCA(t *testing.T, notBefore, notAfter time.Time) ([]byte, []byte) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
