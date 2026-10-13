@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -19,7 +20,10 @@ import (
 // tag v2.37.3. The routes are AGPL and need only an API key
 // (coderd/chat_routes.go:210-232, coderd/coderd.go:1508-1517). The fake's one
 // token is a site owner, so every answer is the full, unredacted view
-// (coderd/mcp.go:526-546). ACL routes come with a later change.
+// (coderd/mcp.go:526-546). The fake does not model other callers: the
+// redacted member view (coderd/mcp.go:1635-1649) and the 403 for a user_oidc
+// write without deployment-config permission (coderd/mcp.go:574-585) need a
+// second token. The ACL routes are in fakecoder_mcp_acl_test.go.
 const (
 	routeMCPServers      = "mcpServers"
 	routeCreateMCPServer = "createMCPServer"
@@ -32,9 +36,11 @@ const (
 // bodies of the write routes. Callers hold f.mu.
 type fakeMCPState struct {
 	servers []*fakeMCPServer // Insert order. Deletes remove rows (hard delete).
-	// bodies holds every create and update body as sent. They carry
-	// credentials, so tests may assert on them but must never log them.
+	// bodies holds every create, update and ACL update body as sent, in
+	// request order. They carry credentials, so tests may assert on them but
+	// must never log them.
 	bodies []fakeMCPBody
+	groups []*fakeGroup // Groups other than Everyone, in insert order.
 }
 
 type fakeMCPBody struct {
@@ -47,8 +53,9 @@ type fakeMCPServer struct {
 	view               codersdk.MCPServerConfig // The non-secret columns.
 	apiKeyValue        string
 	oauth2ClientSecret string
-	customHeaders      map[string]string // Stored as JSON. Empty means "{}".
-	userTokens         int               // Rows in mcp_server_user_tokens for this config.
+	customHeaders      map[string]string      // Stored as JSON. Empty means "{}".
+	userTokens         int                    // Rows in mcp_server_user_tokens for this config.
+	groupACL, userACL  map[uuid.UUID]struct{} // Each entry grants read.
 }
 
 // answer mirrors convertMCPServerConfig (coderd/mcp.go:1592-1633): the secrets
@@ -73,6 +80,7 @@ func (f *fakeCoder) registerMCPServerRoutes(mux *http.ServeMux) {
 	}))
 	f.route(mux, "PATCH "+base+"/{id}", routeUpdateMCPServer, f.withMCPServer(f.updateMCPServer))
 	f.route(mux, "DELETE "+base+"/{id}", routeDeleteMCPServer, f.withMCPServer(f.deleteMCPServer))
+	f.registerMCPServerACLRoutes(mux)
 }
 
 var fakeResourceNotFound = codersdk.Response{Message: "Resource not found or you do not have access to this resource"} // coderd/httpapi/httpapi.go:149
@@ -103,7 +111,9 @@ func (f *fakeCoder) withMCPServer(h func(*fakeMCPServer, *http.Request) (int, an
 // listMCPServers mirrors the owner's path of listMCPServerConfigs
 // (coderd/mcp.go:154-262) and GetMCPServerConfigsByOrganization
 // (coderd/database/queries/mcpserverconfigs.sql:27-37): every config of the
-// organization, ordered by display name, with no paging and no filter.
+// organization, ordered by display name, with no paging and no filter. The
+// fake compares bytes, while Coder sorts with the database collation, so
+// tests must not depend on the list order.
 func (f *fakeCoder) listMCPServers(r *http.Request) (int, any) {
 	org, ok := f.orgByIdent(r.PathValue("org"))
 	if !ok {
@@ -193,6 +203,8 @@ func (f *fakeCoder) createMCPServer(r *http.Request) (int, any) {
 		},
 		apiKeyValue: strings.TrimSpace(req.APIKeyValue), oauth2ClientSecret: strings.TrimSpace(req.OAuth2ClientSecret),
 		customHeaders: req.CustomHeaders,
+		// The Everyone group, whose ID is the organization ID, can read a new config (coderd/mcp.go:475-479).
+		groupACL: map[uuid.UUID]struct{}{org.ID: {}}, userACL: map[uuid.UUID]struct{}{},
 	}
 	f.mcp.servers = append(f.mcp.servers, s)
 	return http.StatusCreated, s.answer()
@@ -445,6 +457,7 @@ func (f *fakeCoder) mcpServers() []fakeMCPServer {
 		for k, v := range s.customHeaders {
 			c.customHeaders[k] = v
 		}
+		c.groupACL, c.userACL = maps.Clone(s.groupACL), maps.Clone(s.userACL)
 		out = append(out, c)
 	}
 	return out
