@@ -225,12 +225,12 @@ A Coder call that runs out of time returns `504 Gateway Timeout` on every aggreg
 - the request deadline ends first (see [The 34-second write budget](#the-34-second-write-budget), the [log limits](#workspace-build-log), and the [start and stop budget](#time-limit-and-retries)), or
 - Coder itself answers `504`.
 
-A create of a workspace or a template can also get a broken `2xx` answer, for example from a proxy in front of Coder. Coder can have created the object. The server returns `504`, with a message that says that the result is uncertain, only for these answers:
+A create of a workspace or a template can also get a broken `2xx` answer, for example from a proxy in front of Coder. Coder can have created the object. The server returns `504` for some of these answers and `500` for others:
 
-- `201` with an HTML page, an empty body, or a body that is not valid JSON.
-- Any other `2xx` status, for example `200`, except with a body of the type `application/json` that is not valid JSON.
+- `504`, with a message that says that the result is uncertain. Examples are a `201` with an HTML page, an empty body, invalid JSON, or a JSON array, and a `200` with an HTML page or with the JSON of Coder.
+- `500`. Examples are a `200` with the type `application/json` and invalid JSON or a JSON array, a `201` with `{}` or `null`, and a connection that breaks while the server reads the answer.
 
-Other broken `2xx` answers return `500`. Examples are a `200` with a body of the type `application/json` that is not valid JSON, a `201` with valid JSON that does not contain the names of the object (for example `{}`), and a connection that breaks while the server reads the answer. After a `504` or a `500` on a create, re-read the object before you retry.
+After a `504` or a `500` on a create, re-read the object before you retry.
 
 The message does not include the Coder URL.
 
