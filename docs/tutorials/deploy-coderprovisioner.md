@@ -4,6 +4,9 @@ In this tutorial, you add a `CoderProvisioner` to a control plane that already e
 
 Time: 5 minutes.
 
+!!! warning "Who may write CoderProvisioner resources"
+    Grant `create`, `update` and `patch` on `coderprovisioners` only to principals that may already read Secrets and create Pods in that namespace. A custom `spec.image` runs with everything the pod receives: the provisioner key, every `extraEnv` value, and the ServiceAccount token that manages workspace pods. See [Configure credential Secrets for proxies and provisioners](../how-to/workspace-proxy-credentials.md).
+
 ## Prerequisites
 
 Complete [Deploy a Coder Control Plane](getting-started.md) first. The control plane `codercontrolplane-sample` in the namespace `coder` must be `Ready`, and its operator access must be ready (the default).
@@ -47,7 +50,11 @@ kubectl get coderprovisioner coderprovisioner-sample -n coder \
   -o jsonpath='{.status.phase}{"\n"}{range .status.conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'
 ```
 
-Expected result: the phase is `Ready`, and the conditions include `DeploymentReady=True`.
+Expected result: the phase is `Ready`, and the conditions include `CredentialsReady=True` and `DeploymentReady=True`.
+
+The operator creates the provisioner key Secret and owns it. If you set `spec.key.secretName`, name a Secret that does not exist yet: the operator refuses a Secret that it does not own (reason `KeySecretNotOwned`).
+
+If you add `spec.extraEnv` entries with a `secretKeyRef`, each Secret needs the label `coder.com/credential=true` and the annotation `coder.com/credential-destinations` with the origin of the control plane `status.url`. Otherwise `CredentialsReady` is `False` and the operator does not change the Deployment. See [Configure credential Secrets for proxies and provisioners](../how-to/workspace-proxy-credentials.md).
 
 The operator creates these resources in the `coder` namespace:
 

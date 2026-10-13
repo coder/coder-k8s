@@ -11,6 +11,9 @@ kubectl create namespace coder-system
 kubectl apply -f config/crd/bases/ -f config/rbac/
 ```
 
+!!! warning "RBAC for CoderWorkspaceProxy, CoderProvisioner and CoderControlPlane"
+    Grant `create`, `update` and `patch` on `coderworkspaceproxies`, `coderprovisioners` and `codercontrolplanes` only to principals that may already read Secrets and create Pods in that namespace. A custom `spec.image` runs with whatever the pod receives, including the proxy token or provisioner key and every `extraEnv` value. The operator uses a Secret for these kinds only when the Secret is marked as a credential. See [Configure credential Secrets for proxies and provisioners](workspace-proxy-credentials.md).
+
 ## 2. Deploy in controller-only mode
 
 The default of `deploy/deployment.yaml` is `--app=all`. Change it to the controller:
@@ -26,6 +29,9 @@ kubectl -n coder-system patch deployment/coder-k8s --type=json \
 
 !!! warning "Upgrades: apply the CRDs and RBAC first"
     Apply `config/crd/bases/` and `config/rbac/` from the new version before or together with the new image. The operator watches every kind it reconciles. If a kind's CRD is missing, for example `CoderTemplateTest` after an upgrade from an earlier version, the manager cannot start.
+
+!!! warning "Upgrades: mark credential Secrets first"
+    `CoderWorkspaceProxy` and `CoderProvisioner` use a Secret only when it has the label `coder.com/credential=true` and lists the destination in `coder.com/credential-destinations`. Before you upgrade from a version without this check, do the steps in [Upgrade from a version without these checks](workspace-proxy-credentials.md#upgrade-from-a-version-without-these-checks).
 
 ## 3. Verify
 

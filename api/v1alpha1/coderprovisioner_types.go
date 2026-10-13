@@ -25,6 +25,10 @@ const (
 	CoderProvisionerConditionExternalProvisionersEntitled = "ExternalProvisionersEntitled"
 	// CoderProvisionerConditionDeploymentReady indicates whether the provisioner deployment has ready replicas.
 	CoderProvisionerConditionDeploymentReady = "DeploymentReady"
+	// CoderProvisionerConditionCredentialsReady indicates whether every
+	// referenced credential Secret and setting passed the operator's checks.
+	// When it is False, the operator keeps the last applied Deployment.
+	CoderProvisionerConditionCredentialsReady = "CredentialsReady"
 
 	// DefaultProvisionerKeySecretKey is the default data key for provisioner key secrets.
 	DefaultProvisionerKeySecretKey = "key"

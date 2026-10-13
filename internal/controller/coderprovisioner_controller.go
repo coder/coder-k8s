@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -34,6 +35,7 @@ import (
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/coderbootstrap"
+	"github.com/coder/coder-k8s/internal/credentialsecret"
 )
 
 const (
@@ -57,6 +59,16 @@ const (
 )
 
 var provisionerRateLimitBackoffAttempts sync.Map // map[string]int
+
+// provisionerReservedSettings are the env names and flags that
+// reconcileDeployment sets. Source (github.com/coder/coder/v2 v2.37.3, the
+// version in go.mod): cli/root.go:67 and :99 (varURL "url", envURL
+// "CODER_URL"), used at :418-419, and enterprise/cli/provisionerdaemonstart.go:285-286
+// (--key, CODER_PROVISIONER_DAEMON_KEY).
+var provisionerReservedSettings = reservedSettings{
+	envNames: []string{"CODER_URL", "CODER_PROVISIONER_DAEMON_KEY"},
+	flags:    []string{"url", "key"},
+}
 
 // CoderProvisionerReconciler reconciles a CoderProvisioner object.
 type CoderProvisionerReconciler struct {
@@ -169,6 +181,23 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		"Referenced control plane is available and has a URL",
 	)
 
+	// Fail static: a failed check sends nothing to Coder and leaves the
+	// Deployment as it is. The Secret watch re-queues this provisioner.
+	if err := r.checkProvisionerCredentials(ctx, provisioner, controlPlane); err != nil {
+		credErr, ok := asCredentialError(err)
+		if !ok {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, r.reportCredentialsNotReady(ctx, provisioner, statusSnapshot, credErr)
+	}
+	setCondition(
+		provisioner,
+		coderv1alpha1.CoderProvisionerConditionCredentialsReady,
+		metav1.ConditionTrue,
+		reasonCredentialsAccepted,
+		credentialsAcceptedMessage,
+	)
+
 	organizationName := provisionerOrganizationName(provisioner.Spec.OrganizationName)
 	keyName, keySecretName, keySecretKey := provisionerKeyConfig(provisioner)
 
@@ -230,18 +259,18 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	appliedControlPlaneURL := provisioner.Status.ControlPlaneURL
 
 	// Check whether a usable provisioner key secret already exists.
-	// The secret is considered "usable" only if the Secret object exists
+	// The secret is considered "usable" only if this provisioner owns it
 	// AND it contains a non-empty value at the configured data key.
-	secretNamespacedName := types.NamespacedName{Name: keySecretName, Namespace: provisioner.Namespace}
-	existingSecret := &corev1.Secret{}
-	secretUsable := false
-	if err := r.Get(ctx, secretNamespacedName, existingSecret); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("get provisioner key secret %s: %w", secretNamespacedName, err)
+	// checkProvisionerCredentials already refused an unowned Secret; read it
+	// again here so a Secret replaced in between is refused too.
+	existingSecret, err := r.getOwnedKeySecret(ctx, provisioner, keySecretName)
+	if err != nil {
+		if credErr, ok := asCredentialError(err); ok {
+			return ctrl.Result{}, r.reportCredentialsNotReady(ctx, provisioner, statusSnapshot, credErr)
 		}
-	} else {
-		secretUsable = len(existingSecret.Data[keySecretKey]) > 0
+		return ctrl.Result{}, err
 	}
+	secretUsable := existingSecret != nil && len(existingSecret.Data[keySecretKey]) > 0
 
 	organizationID := provisioner.Status.OrganizationID
 	provisionerKeyID := provisioner.Status.ProvisionerKeyID
@@ -535,6 +564,9 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	provisionerKeySecret, err := r.ensureProvisionerKeySecret(ctx, provisioner, keySecretName, keySecretKey, keyMaterial)
 	if err != nil {
+		if credErr, ok := asCredentialError(err); ok {
+			return ctrl.Result{}, r.reportCredentialsNotReady(ctx, provisioner, statusSnapshot, credErr)
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -792,6 +824,42 @@ func (r *CoderProvisionerReconciler) readOperatorSessionToken(
 	return token, ctrl.Result{}, "OperatorAccessReady", "Operator-managed access token from referenced control plane is available", nil
 }
 
+// checkProvisionerCredentials rejects reserved extraEnv and extraArgs entries,
+// refuses a provisioner key Secret that this provisioner does not own, and
+// applies the credential Secret contract to every extraEnv secretKeyRef.
+// The destination is the CODER_URL that reconcileDeployment sets.
+func (r *CoderProvisionerReconciler) checkProvisionerCredentials(
+	ctx context.Context,
+	provisioner *coderv1alpha1.CoderProvisioner,
+	controlPlane *coderv1alpha1.CoderControlPlane,
+) error {
+	if provisioner == nil {
+		return fmt.Errorf("assertion failed: coder provisioner must not be nil")
+	}
+	if controlPlane == nil {
+		return fmt.Errorf("assertion failed: coder control plane must not be nil")
+	}
+
+	if err := checkReservedSettings(provisioner.Spec.ExtraEnv, provisioner.Spec.ExtraArgs, provisionerReservedSettings); err != nil {
+		return err
+	}
+	_, keySecretName, _ := provisionerKeyConfig(provisioner)
+	if _, err := r.getOwnedKeySecret(ctx, provisioner, keySecretName); err != nil {
+		return err
+	}
+	usesSecrets := slices.ContainsFunc(provisioner.Spec.ExtraEnv, func(env corev1.EnvVar) bool {
+		return env.ValueFrom != nil && env.ValueFrom.SecretKeyRef != nil
+	})
+	if !usesSecrets {
+		return nil
+	}
+	coderURL, err := credentialsecret.ParseURL(controlPlane.Status.URL)
+	if err != nil {
+		return fmt.Errorf("codercontrolplane %s/%s status.url: %w", controlPlane.Namespace, controlPlane.Name, err)
+	}
+	return checkExtraEnvSecrets(ctx, r.Client, provisioner.Namespace, provisioner.Spec.ExtraEnv, coderURL)
+}
+
 func (r *CoderProvisionerReconciler) reconcileExternalProvisionerEntitlement(
 	ctx context.Context,
 	provisioner *coderv1alpha1.CoderProvisioner,
@@ -892,6 +960,10 @@ func (r *CoderProvisionerReconciler) reconcileExternalProvisionerEntitlement(
 	return ctrl.Result{}, nil
 }
 
+// ensureProvisionerKeySecret creates the provisioner key Secret when it is
+// absent, or updates it when this provisioner controls it. It never adopts or
+// writes a Secret that this provisioner does not control: that gives a
+// KeySecretNotOwned error.
 func (r *CoderProvisionerReconciler) ensureProvisionerKeySecret(
 	ctx context.Context,
 	provisioner *coderv1alpha1.CoderProvisioner,
@@ -899,32 +971,114 @@ func (r *CoderProvisionerReconciler) ensureProvisionerKeySecret(
 	secretKey string,
 	keyMaterial string,
 ) (*corev1.Secret, error) {
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: provisioner.Namespace}}
+	existing, err := r.getOwnedKeySecret(ctx, provisioner, secretName)
+	if err != nil {
+		return nil, err
+	}
+	labels := provisionerLabels(provisioner.Name)
 
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
-		labels := provisionerLabels(provisioner.Name)
-		secret.Labels = maps.Clone(labels)
-		secret.Type = corev1.SecretTypeOpaque
-		if secret.Data == nil {
-			secret.Data = make(map[string][]byte)
+	if existing == nil {
+		if keyMaterial == "" {
+			return nil, fmt.Errorf("provisioner key secret %q key %q is empty", secretName, secretKey)
 		}
-		if keyMaterial != "" {
-			secret.Data[secretKey] = []byte(keyMaterial)
-		}
-		if len(secret.Data[secretKey]) == 0 {
-			return fmt.Errorf("provisioner key secret %q key %q is empty", secretName, secretKey)
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: provisioner.Namespace, Labels: maps.Clone(labels)},
+			Type:       corev1.SecretTypeOpaque,
+			Data:       map[string][]byte{secretKey: []byte(keyMaterial)},
 		}
 		if err := controllerutil.SetControllerReference(provisioner, secret, r.Scheme); err != nil {
-			return fmt.Errorf("set controller reference: %w", err)
+			return nil, fmt.Errorf("set controller reference on provisioner key secret %q: %w", secretName, err)
 		}
-
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("reconcile provisioner key secret %q: %w", secretName, err)
+		if err := r.Create(ctx, secret); err != nil {
+			return nil, fmt.Errorf("create provisioner key secret %q: %w", secretName, err)
+		}
+		return secret, nil
 	}
 
-	return secret, nil
+	if !isControlledBy(existing, provisioner, "CoderProvisioner") {
+		return nil, fmt.Errorf("assertion failed: provisioner key secret %q must be controlled by this provisioner before an update", secretName)
+	}
+	updated := existing.DeepCopy()
+	updated.Labels = maps.Clone(labels)
+	if updated.Data == nil {
+		updated.Data = make(map[string][]byte)
+	}
+	if keyMaterial != "" {
+		updated.Data[secretKey] = []byte(keyMaterial)
+	}
+	if len(updated.Data[secretKey]) == 0 {
+		return nil, fmt.Errorf("provisioner key secret %q key %q is empty", secretName, secretKey)
+	}
+	if equality.Semantic.DeepEqual(existing, updated) {
+		return existing, nil
+	}
+	if err := r.Update(ctx, updated); err != nil {
+		return nil, fmt.Errorf("update provisioner key secret %q: %w", secretName, err)
+	}
+	return updated, nil
+}
+
+// getOwnedKeySecret returns the provisioner key Secret, or nil when it does
+// not exist. It returns a KeySecretNotOwned error when the Secret exists and
+// this provisioner is not its controller: the operator then does not read,
+// mount, write or adopt it.
+func (r *CoderProvisionerReconciler) getOwnedKeySecret(
+	ctx context.Context,
+	provisioner *coderv1alpha1.CoderProvisioner,
+	name string,
+) (*corev1.Secret, error) {
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: provisioner.Namespace}, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get provisioner key secret %q: %w", name, err)
+	}
+	if isControlledBy(secret, provisioner, "CoderProvisioner") {
+		return secret, nil
+	}
+
+	message := fmt.Sprintf("Secret %q named in spec.key.secretName exists and is not owned by this provisioner. "+
+		"The operator does not read or change it. Delete that Secret so the operator creates a new provisioner key, "+
+		"or set spec.key.secretName to a name that does not exist yet.", name)
+	if strings.TrimSpace(provisioner.Spec.Key.SecretName) == "" {
+		message = fmt.Sprintf("Secret %q (the default provisioner key Secret) exists and is not owned by this provisioner. "+
+			"The operator does not read or change it. Delete that Secret so the operator creates a new provisioner key, "+
+			"or set spec.key.secretName to a name that does not exist yet.", name)
+	}
+	return nil, &credentialsecret.Error{Reason: reasonKeySecretNotOwned, Message: message}
+}
+
+// reportCredentialsNotReady records a failed check in CredentialsReady and
+// changes nothing else.
+func (r *CoderProvisionerReconciler) reportCredentialsNotReady(
+	ctx context.Context,
+	provisioner *coderv1alpha1.CoderProvisioner,
+	statusSnapshot *coderv1alpha1.CoderProvisionerStatus,
+	credErr *credentialsecret.Error,
+) error {
+	if credErr == nil {
+		return fmt.Errorf("assertion failed: credential error must not be nil")
+	}
+	if statusSnapshot == nil {
+		return fmt.Errorf("assertion failed: status snapshot must not be nil")
+	}
+	ctrl.LoggerFrom(ctx).Info("provisioner credential check failed; keeping the last applied configuration",
+		"reason", credErr.Reason, "message", credErr.Message)
+	setCondition(
+		provisioner,
+		coderv1alpha1.CoderProvisionerConditionCredentialsReady,
+		metav1.ConditionFalse,
+		credErr.Reason,
+		credErr.Message+" The provisioner keeps its last applied configuration.",
+	)
+	if equality.Semantic.DeepEqual(*statusSnapshot, provisioner.Status) {
+		return nil
+	}
+	if err := r.Status().Update(ctx, provisioner); err != nil {
+		return fmt.Errorf("update coderprovisioner credentials condition: %w", err)
+	}
+	return nil
 }
 
 func (r *CoderProvisionerReconciler) reconcileServiceAccount(
@@ -1225,6 +1379,39 @@ func (r *CoderProvisionerReconciler) reconcileRequestsForControlPlane(
 	return requests
 }
 
+// indexProvisionerBySecretNames returns the Secret names that extraEnv
+// references, and the provisioner key Secret name.
+func indexProvisionerBySecretNames(obj client.Object) []string {
+	provisioner, ok := obj.(*coderv1alpha1.CoderProvisioner)
+	if !ok {
+		return nil
+	}
+	_, keySecretName, _ := provisionerKeyConfig(provisioner)
+	return sortedUnique(append(extraEnvSecretNames(provisioner.Spec.ExtraEnv), keySecretName))
+}
+
+func (r *CoderProvisionerReconciler) reconcileRequestsForSecret(ctx context.Context, obj client.Object) []reconcile.Request {
+	secret, ok := obj.(*corev1.Secret)
+	if !ok || secret.Name == "" || secret.Namespace == "" {
+		return nil
+	}
+
+	var provisioners coderv1alpha1.CoderProvisionerList
+	if err := r.List(ctx, &provisioners,
+		client.InNamespace(secret.Namespace),
+		client.MatchingFields{credentialSecretNamesFieldIndex: secret.Name},
+	); err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "list provisioners for secret", "secret", secret.Name, "namespace", secret.Namespace)
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(provisioners.Items))
+	for _, provisioner := range provisioners.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}})
+	}
+	return requests
+}
+
 // SetupWithManager wires the reconciler into controller-runtime.
 func (r *CoderProvisionerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if mgr == nil {
@@ -1249,6 +1436,15 @@ func (r *CoderProvisionerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("index coder provisioners by control plane ref name: %w", err)
 	}
 
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&coderv1alpha1.CoderProvisioner{},
+		credentialSecretNamesFieldIndex,
+		indexProvisionerBySecretNames,
+	); err != nil {
+		return fmt.Errorf("index coder provisioners by secret names: %w", err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&coderv1alpha1.CoderProvisioner{}).
 		Owns(&appsv1.Deployment{}).
@@ -1259,6 +1455,11 @@ func (r *CoderProvisionerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&coderv1alpha1.CoderControlPlane{},
 			handler.EnqueueRequestsFromMapFunc(r.reconcileRequestsForControlPlane),
+		).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.reconcileRequestsForSecret),
+			builder.WithPredicates(credentialsecret.WatchPredicate()),
 		).
 		Named("coderprovisioner").
 		Complete(r)

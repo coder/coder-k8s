@@ -168,7 +168,7 @@ func TestRolloutRestart_CoderWorkspaceProxyKeepsRestartedAt(t *testing.T) {
 	ctx := context.Background()
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "proxy-rollout-restart-token", Namespace: "default"},
+		ObjectMeta: consentedObjectMeta("proxy-rollout-restart-token", "default", "https://coder.example.com"),
 		Type:       corev1.SecretTypeOpaque,
 		Data:       map[string][]byte{coderv1alpha1.DefaultTokenSecretKey: []byte("token-value")},
 	}

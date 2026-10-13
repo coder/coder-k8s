@@ -142,7 +142,7 @@ func TestCoderWorkspaceProxyReconcile_UsingDirectTokenSecret(t *testing.T) {
 	secretName := "proxy-session-token"
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: "default"},
+		ObjectMeta: consentedObjectMeta(secretName, "default", "https://coder.example.com"),
 		Type:       corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			coderv1alpha1.DefaultTokenSecretKey: []byte("token-value"),
@@ -211,7 +211,7 @@ func TestCoderWorkspaceProxyReconcile_DoesNotCollideWithControlPlaneChildren(t *
 	resourceName := "shared-name"
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "proxy-shared-token", Namespace: "default"},
+		ObjectMeta: consentedObjectMeta("proxy-shared-token", "default", "https://coder.example.com"),
 		Type:       corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			coderv1alpha1.DefaultTokenSecretKey: []byte("proxy-token"),
@@ -286,7 +286,7 @@ func TestCoderWorkspaceProxyReconcile_TruncatesLongInstanceLabelValue(t *testing
 	secretName := "proxy-long-name-token"
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: "default"},
+		ObjectMeta: consentedObjectMeta(secretName, "default", "https://coder.example.com"),
 		Type:       corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			coderv1alpha1.DefaultTokenSecretKey: []byte("token-value"),
@@ -350,77 +350,10 @@ func TestCoderWorkspaceProxyReconcile_TruncatesLongInstanceLabelValue(t *testing
 	}
 }
 
-func TestCoderWorkspaceProxyReconcile_WithBootstrap_UsesExistingTokenWithoutCredentials(t *testing.T) {
-	ctx := context.Background()
-	tokenSecretName := "proxy-bootstrap-existing-token"
-	proxyTokenSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: tokenSecretName, Namespace: "default"},
-		Type:       corev1.SecretTypeOpaque,
-		Data: map[string][]byte{
-			coderv1alpha1.DefaultTokenSecretKey: []byte("existing-proxy-token"),
-		},
-	}
-	if err := k8sClient.Create(ctx, proxyTokenSecret); err != nil {
-		t.Fatalf("create existing proxy token secret: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = k8sClient.Delete(ctx, proxyTokenSecret)
-	})
-
-	workspaceProxy := &coderv1alpha1.CoderWorkspaceProxy{
-		ObjectMeta: metav1.ObjectMeta{Name: "proxy-bootstrap-existing", Namespace: "default"},
-		Spec: coderv1alpha1.WorkspaceProxySpec{
-			Image: "proxy-image:latest",
-			Bootstrap: &coderv1alpha1.ProxyBootstrapSpec{
-				CoderURL: "https://coder.example.com",
-				CredentialsSecretRef: coderv1alpha1.SecretKeySelector{
-					Name: "missing-bootstrap-credentials",
-					Key:  coderv1alpha1.DefaultTokenSecretKey,
-				},
-				ProxyName:                "proxy-bootstrap-existing",
-				GeneratedTokenSecretName: tokenSecretName,
-			},
-		},
-	}
-	if err := k8sClient.Create(ctx, workspaceProxy); err != nil {
-		t.Fatalf("create workspace proxy resource: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = k8sClient.Delete(ctx, workspaceProxy)
-	})
-
-	bootstrapClient := &fakeBootstrapClient{
-		response: coderbootstrap.RegisterWorkspaceProxyResponse{ProxyName: workspaceProxy.Name, ProxyToken: "generated-proxy-token"},
-	}
-	reconciler := &controller.CoderWorkspaceProxyReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
-
-	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: workspaceProxy.Name, Namespace: workspaceProxy.Namespace}})
-	if err != nil {
-		t.Fatalf("reconcile workspace proxy with existing token: %v", err)
-	}
-	if result != (ctrl.Result{}) {
-		t.Fatalf("expected empty result, got %+v", result)
-	}
-	if bootstrapClient.calls != 0 {
-		t.Fatalf("expected bootstrap client to be skipped when token already exists, got %d calls", bootstrapClient.calls)
-	}
-
-	reconciled := &coderv1alpha1.CoderWorkspaceProxy{}
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: workspaceProxy.Name, Namespace: workspaceProxy.Namespace}, reconciled); err != nil {
-		t.Fatalf("get reconciled workspace proxy: %v", err)
-	}
-	if reconciled.Status.ProxyTokenSecretRef == nil {
-		t.Fatalf("expected proxy token secret reference in status")
-	}
-	if reconciled.Status.ProxyTokenSecretRef.Name != tokenSecretName {
-		t.Fatalf("expected status token secret name %q, got %q", tokenSecretName, reconciled.Status.ProxyTokenSecretRef.Name)
-	}
-}
-
 func TestCoderWorkspaceProxyReconcile_WithBootstrap(t *testing.T) {
 	ctx := context.Background()
 	credentialsSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "proxy-bootstrap-credentials", Namespace: "default"},
+		ObjectMeta: consentedObjectMeta("proxy-bootstrap-credentials", "default", "https://coder.example.com"),
 		Type:       corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			coderv1alpha1.DefaultTokenSecretKey: []byte("coder-session-token"),

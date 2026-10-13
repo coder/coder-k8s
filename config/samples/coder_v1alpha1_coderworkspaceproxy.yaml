@@ -1,3 +1,22 @@
+# CoderWorkspaceProxy sample manifest.
+#
+# The operator uses a Secret only when it carries the label
+# coder.com/credential=true and lists the destination origin in the annotation
+# coder.com/credential-destinations. Replace the token placeholder with a Coder
+# workspace proxy token before you apply this file.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: coderworkspaceproxy-token
+  namespace: coder
+  labels:
+    coder.com/credential: "true"
+  annotations:
+    coder.com/credential-destinations: "https://coder.example.com"
+type: Opaque
+stringData:
+  token: "REPLACE_WITH_WORKSPACE_PROXY_TOKEN"
+---
 apiVersion: coder.com/v1alpha1
 kind: CoderWorkspaceProxy
 metadata:
