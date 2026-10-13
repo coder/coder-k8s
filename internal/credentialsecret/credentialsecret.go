@@ -103,6 +103,13 @@ func (v Value) Reveal() string {
 	return string(v.data)
 }
 
+// NewValue wraps credential bytes that did not come from a Secret, for
+// example a key that a remote service returned, so they print as
+// "[REDACTED]" too. It copies data. The ChangeToken stays empty.
+func NewValue(data []byte) Value {
+	return Value{data: bytes.Clone(data)}
+}
+
 // String implements fmt.Stringer.
 func (v Value) String() string { return redacted }
 
