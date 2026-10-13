@@ -149,6 +149,7 @@ func TestCoderAIGatewayKeyAnswerMismatch(t *testing.T) {
 	require.NoError(t, k8sClient.Update(ctx, got))
 	got, _ = env.reconcile(ctx, t, got)
 	requireAIGatewayKeyReady(t, got)
+	require.Equal(t, int64(2), got.Status.AppliedGeneration, "the issue applied the changed spec")
 	require.Equal(t, 2, env.fake.requestCount(routeCreateAIGatewayKey))
 }
 

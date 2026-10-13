@@ -110,6 +110,7 @@ func (r *CoderAIGatewayKeyReconciler) issueKey(
 	key.Status.PendingKey = nil
 	key.Status.ConsecutiveIssueFailures = 0
 	key.Status.LastHandledTrigger = key.Spec.Rotation.Trigger
+	key.Status.AppliedGeneration = key.Generation
 	key.Status.NextRotationTime = nil
 	if interval := ptr.Deref(key.Spec.Rotation.IntervalSeconds, 0); interval > 0 {
 		key.Status.NextRotationTime = &metav1.Time{Time: now.Add(time.Duration(interval) * time.Second)}

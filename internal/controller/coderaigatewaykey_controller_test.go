@@ -317,6 +317,7 @@ func TestCoderAIGatewayKeyIssuesFirstKey(t *testing.T) {
 	name := "ck8s-" + strings.ReplaceAll(string(got.UID), "-", "") + "-0"
 	require.Equal(t, name, keys[0].name)
 	require.Equal(t, int64(1), got.Status.NextSerial)
+	require.Equal(t, got.Generation, got.Status.AppliedGeneration)
 	require.Nil(t, got.Status.PendingKey)
 	require.Equal(t, &coderv1alpha1.CoderAIGatewayKeyCurrent{
 		Serial: 0, ID: keys[0].id.String(), Name: name, IssuedAt: metav1.NewTime(env.clock.Now()),
