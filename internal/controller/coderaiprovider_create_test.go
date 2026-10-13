@@ -101,6 +101,11 @@ func TestCoderAIProviderCreateOutcomes(t *testing.T) {
 			p.Name = "other"
 			return p
 		}}, firstStep: "ConfirmingCreate", posts: 1, keepMarker: true},
+		{name: "answer without the key", fault: fakeFault{AfterCommit: true, Rewrite: func(answer any) any {
+			p := answer.(codersdk.AIProvider)
+			p.APIKeys = nil
+			return p
+		}}, firstStep: "ConfirmingCreate", posts: 1, keepMarker: true},
 		{name: "rate limited", fault: fakeFault{Status: http.StatusTooManyRequests}, firstStep: "CreateRetrying", posts: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -170,6 +175,30 @@ func TestCoderAIProviderCreateHangs(t *testing.T) {
 			require.Equal(t, 1, env.fake.aiProviderCount())
 		})
 	}
+}
+
+// The provider ID is stored before the apply replaces the nonce, so a crash
+// between the apply and the next status write keeps ownership.
+func TestCoderAIProviderCrashAfterApply(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newAIProviderCreateEnv(ctx, t)
+	env.fake.failNext(routeUpdateAIProvider, fakeFault{Hang: true, AfterCommit: true})
+	short, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_, err := env.r.Reconcile(short, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(provider)})
+	require.Error(t, err, "the status write after the hang fails with the expired context")
+	stored, _ := env.fake.aiProvider("openai")
+	require.Equal(t, "OpenAI", stored.displayName, "the apply committed and replaced the nonce")
+	got := &coderv1alpha1.CoderAIProvider{}
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(provider), got))
+	require.Equal(t, stored.id.String(), got.Status.ProviderID, "the ID was stored before the apply")
+	require.Nil(t, got.Status.CreateAttemptTime)
+
+	env.restart()
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIProviderReady(t, got)
+	require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider))
 }
 
 // Plan S4: a provider that someone else creates between the lookup and the
@@ -282,6 +311,19 @@ func TestCoderAIProviderApplyGuards(t *testing.T) {
 		require.Zero(t, got.Status.AppliedGeneration)
 		stored, _ := env.fake.aiProvider("openai")
 		require.Equal(t, "https://api.openai.com/v1", stored.baseURL)
+	})
+	t.Run("update answer without the requested values", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		env, _, provider := newAIProviderCreateEnv(ctx, t)
+		env.fake.failNext(routeUpdateAIProvider, fakeFault{Rewrite: func(answer any) any {
+			p := answer.(codersdk.AIProvider)
+			p.Enabled = false
+			return p
+		}})
+		got, _ := env.reconcile(ctx, t, provider)
+		requireAIProviderStep(t, got, true, "CoderAnswerMismatch")
+		require.Zero(t, got.Status.AppliedGeneration)
 	})
 	t.Run("deleted in Coder before the apply", func(t *testing.T) {
 		t.Parallel()

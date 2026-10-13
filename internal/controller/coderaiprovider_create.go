@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -127,7 +128,7 @@ func (r *CoderAIProviderReconciler) createAIProvider(
 	case err == nil:
 		if step, err := recordAIProvider(provider, created); step != nil || err != nil {
 			// A wrong answer leaves the marker, so a read decides.
-			if step != nil && step.reason != "KeyChangedExternally" {
+			if step != nil {
 				provider.Status.CreateAttemptTime, provider.Status.Credential = before.CreateAttemptTime, before.Credential
 				step = aiProviderWait(aiProviderConfirmPoll, "ConfirmingCreate", "The create answer does not match the request (%s). The controller reads Coder instead of sending it again.", step.message)
 			}
@@ -182,6 +183,10 @@ func applyAIProvider(ctx context.Context, sdk *codersdk.Client, provider *coderv
 	}
 	if updated.BaseURL != provider.Spec.BaseURL || string(updated.Type) != provider.Spec.Type {
 		return aiProviderWait(aiProviderResync, "Pending", "The base URL changed after the create. This controller version does not send a changed base URL.")
+	}
+	// Coder shows the name for an empty display name (db2sdk.go:52-55).
+	if updated.DisplayName != cmp.Or(provider.Spec.DisplayName, provider.Name) || updated.Icon != provider.Spec.Icon || updated.Enabled != enabled {
+		return aiProviderStalled(aiProviderResync, "CoderAnswerMismatch", "Coder answered the update of provider %s without the requested display name, icon or enabled flag.", provider.Name)
 	}
 	provider.Status.AppliedGeneration = provider.Generation
 	return aiProviderReady(provider)

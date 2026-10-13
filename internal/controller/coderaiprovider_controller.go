@@ -207,6 +207,14 @@ func (r *CoderAIProviderReconciler) check(
 		if step, err = r.createOrConfirm(ctx, sdk, provider, key, before); err != nil {
 			return nil, err
 		}
+		if step == nil {
+			// Store the ID before the apply replaces the nonce: after that,
+			// only the stored ID proves that this object created the provider.
+			if err := r.writeStatus(ctx, provider, before); err != nil {
+				return nil, err
+			}
+			*before = *provider.Status.DeepCopy()
+		}
 	}
 	if step == nil {
 		step = applyAIProvider(ctx, sdk, provider, key)
