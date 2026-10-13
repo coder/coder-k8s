@@ -11,6 +11,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/controller"
@@ -197,4 +199,54 @@ func TestReconcile_OperatorAccess_OwnedTokenSecretIsReused(t *testing.T) {
 	require.Nil(t, apimeta.FindStatusCondition(getControlPlane(t, cp).Status.Conditions, coderv1alpha1.CoderControlPlaneConditionOperatorTokenSecretOwned))
 	err = k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: cp.Namespace}, &corev1.Secret{})
 	require.True(t, apierrors.IsNotFound(err), "disabling deletes the owned Secret, got %v", err)
+}
+
+// TestReconcile_OperatorAccess_TokenSecretCreateRace checks that a Secret
+// that appears between the read and the create stops the reconcile before the
+// operator changes the token in Coder.
+func TestReconcile_OperatorAccess_TokenSecretCreateRace(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-operator-token-create-race", Namespace: "default"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image:    "test-operator-token-race:latest",
+			ExtraEnv: []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: "postgres://example.race/coder"}},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, cp))
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, cp) })
+
+	secretName := cp.Name + "-operator-token"
+	foreign := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: cp.Namespace},
+		Type:       corev1.SecretTypeOpaque,
+		Data:       map[string][]byte{coderv1alpha1.DefaultTokenSecretKey: []byte("foreign-value")},
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, foreign) })
+
+	base, err := ctrlclient.NewWithWatch(cfg, ctrlclient.Options{Scheme: scheme})
+	require.NoError(t, err)
+	racing := interceptor.NewClient(base, interceptor.Funcs{
+		Create: func(ctx context.Context, c ctrlclient.WithWatch, obj ctrlclient.Object, opts ...ctrlclient.CreateOption) error {
+			if _, ok := obj.(*corev1.Secret); ok && obj.GetName() == secretName {
+				// Another actor wins the race for the name.
+				require.NoError(t, c.Create(ctx, foreign.DeepCopy()))
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	})
+
+	provisioner := &fakeOperatorAccessProvisioner{token: "operator-token-race"}
+	r := &controller.CoderControlPlaneReconciler{Client: racing, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}})
+	require.Error(t, err)
+	require.True(t, apierrors.IsAlreadyExists(err), "got %v", err)
+	require.Zero(t, provisioner.calls, "the operator must not change the token in Coder before it holds the Secret")
+
+	stored := &corev1.Secret{}
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: cp.Namespace}, stored))
+	require.Empty(t, stored.OwnerReferences)
+	require.Equal(t, "foreign-value", string(stored.Data[coderv1alpha1.DefaultTokenSecretKey]))
 }

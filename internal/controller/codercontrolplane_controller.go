@@ -1756,6 +1756,15 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
 	}
 
+	if tokenSecret == nil {
+		// Reserve the name before the database write: if another Secret appears
+		// meanwhile, Create fails and Coder stays unchanged.
+		tokenSecret, err = r.reserveOperatorTokenSecret(ctx, coderControlPlane, operatorTokenSecretName)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	token, provisionErr := r.OperatorAccessProvisioner.EnsureOperatorToken(ctx, coderbootstrap.EnsureOperatorTokenRequest{
 		PostgresURL:      postgresURL,
 		OperatorUsername: defaultOperatorAccessUsername,
@@ -2701,9 +2710,35 @@ func operatorTokenSecretNotOwnedMessage(coderControlPlane *coderv1alpha1.CoderCo
 		"or set spec.operatorAccess.generatedTokenSecretName to a name that does not exist yet.", name)
 }
 
-// ensureOperatorTokenSecret creates the operator token Secret when existing is
-// nil, or updates existing when this control plane controls it. It never adopts
-// or writes a Secret that this control plane does not control.
+// reserveOperatorTokenSecret creates an empty operator token Secret with this
+// control plane as its controller owner. Create fails with AlreadyExists when a
+// Secret with that name appeared since the read; the next reconcile then checks
+// its owner.
+func (r *CoderControlPlaneReconciler) reserveOperatorTokenSecret(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+	name string,
+) (*corev1.Secret, error) {
+	if strings.TrimSpace(name) == "" {
+		return nil, fmt.Errorf("assertion failed: secret name must not be empty")
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: coderControlPlane.Namespace, Labels: maps.Clone(controlPlaneLabels(coderControlPlane.Name))},
+		Type:       corev1.SecretTypeOpaque,
+	}
+	if err := controllerutil.SetControllerReference(coderControlPlane, secret, r.Scheme); err != nil {
+		return nil, fmt.Errorf("set controller reference on operator token secret %q: %w", name, err)
+	}
+	if err := r.Create(ctx, secret); err != nil {
+		return nil, fmt.Errorf("create operator token secret %q: %w", name, err)
+	}
+
+	return secret, nil
+}
+
+// ensureOperatorTokenSecret writes token into existing, which this control
+// plane must control. It never adopts or writes a Secret that this control
+// plane does not control.
 func (r *CoderControlPlaneReconciler) ensureOperatorTokenSecret(
 	ctx context.Context,
 	coderControlPlane *coderv1alpha1.CoderControlPlane,
@@ -2715,6 +2750,9 @@ func (r *CoderControlPlaneReconciler) ensureOperatorTokenSecret(
 	if coderControlPlane == nil {
 		return fmt.Errorf("assertion failed: coder control plane must not be nil")
 	}
+	if existing == nil {
+		return fmt.Errorf("assertion failed: operator token secret %q must exist before the token is written", name)
+	}
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("assertion failed: secret name must not be empty")
 	}
@@ -2724,25 +2762,6 @@ func (r *CoderControlPlaneReconciler) ensureOperatorTokenSecret(
 	if token == "" {
 		return fmt.Errorf("assertion failed: secret token must not be empty")
 	}
-	labels := controlPlaneLabels(coderControlPlane.Name)
-
-	if existing == nil {
-		secret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: coderControlPlane.Namespace, Labels: maps.Clone(labels)},
-			Type:       corev1.SecretTypeOpaque,
-			Data:       map[string][]byte{key: []byte(token)},
-		}
-		if err := controllerutil.SetControllerReference(coderControlPlane, secret, r.Scheme); err != nil {
-			return fmt.Errorf("set controller reference on operator token secret %q: %w", name, err)
-		}
-		// Create fails with AlreadyExists when a Secret appeared since the read.
-		// The next reconcile then checks its owner.
-		if err := r.Create(ctx, secret); err != nil {
-			return fmt.Errorf("create operator token secret %q: %w", name, err)
-		}
-		return nil
-	}
-
 	if existing.Name != name || existing.Namespace != coderControlPlane.Namespace {
 		return fmt.Errorf("assertion failed: operator token secret %s/%s does not match %s/%s",
 			existing.Namespace, existing.Name, coderControlPlane.Namespace, name)
@@ -2750,8 +2769,9 @@ func (r *CoderControlPlaneReconciler) ensureOperatorTokenSecret(
 	if !isManagedOperatorTokenSecret(existing, coderControlPlane) {
 		return fmt.Errorf("assertion failed: operator token secret %q must be controlled by this control plane before an update", name)
 	}
+
 	updated := existing.DeepCopy()
-	updated.Labels = maps.Clone(labels)
+	updated.Labels = maps.Clone(controlPlaneLabels(coderControlPlane.Name))
 	if updated.Data == nil {
 		updated.Data = make(map[string][]byte)
 	}
