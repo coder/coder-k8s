@@ -204,7 +204,7 @@ func TestTemplateStorageCreateWithFilesImportFailureCreatesNoTemplate(t *testing
 			wantErr:     apierrors.IsTimeout,
 			wantMessage: "did not succeed within",
 		},
-		{name: "polling error", failPolls: true, wantErr: apierrors.IsInternalError, wantMessage: "fetch template version"},
+		{name: "polling error", failPolls: true, wantErr: apierrors.IsInternalError, wantMessage: "the Coder API failed the request for codertemplates"},
 	}
 
 	for _, tc := range tests {

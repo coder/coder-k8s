@@ -158,6 +158,8 @@ If the error does not name a field, the ServiceAccount does not have a permissio
 - `401`: the request has no valid credential. A request that you send directly to port `6443` needs a Kubernetes bearer token. Requests without credentials can reach only `/healthz`, `/livez`, and `/readyz`. Use `kubectl`, which sends requests through kube-apiserver.
 - `403`: the caller does not have RBAC for `aggregation.coder.com` in that namespace. To find out, run `kubectl auth can-i list codertemplates.aggregation.coder.com -n <namespace> --as=<user>`. Before you give this RBAC, know that it gives owner-equivalent access in Coder. See [How callers are checked](deploy-aggregated-apiserver.md#how-callers-are-checked).
 - `500` that mentions `subjectaccessreviews`: the ServiceAccount of the server cannot create SubjectAccessReviews. Apply `config/rbac/auth-delegator-binding.yaml`. In standalone mode, apply `config/apiserver-standalone/auth-delegator-binding.yaml` instead.
+- `403` that says `the Coder API denied the request`: kube-apiserver let the caller in, but Coder refused the call that the server made with its Coder token. The message leaves out the Coder URL and Coder's own text. The server log has the full Coder error, on a line from the `coder-errors` logger.
+- `500` that says `the Coder API failed the request ... with status <code>` or `the Coder API could not be reached`: Coder answered with a server error, or the server could not reach Coder. Read the `coder-errors` line in the server log for the Coder URL and the full error.
 
 ## Aggregated reads return `ServiceUnavailable`
 

@@ -5,16 +5,28 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/coder/coder/v2/codersdk"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 // coderTimeoutMessage is the 504 message for a Coder call that ran out of time. It leaves out
 // the Coder URL.
 const coderTimeoutMessage = "the Coder API did not answer in time"
+
+// errorLog records the full Coder error, which names the Coder URL, for operators. Kubernetes
+// clients get a fixed message instead.
+var errorLog = ctrl.Log.WithName("coder-errors")
+
+// logHiddenError writes the full error at debug level.
+func logHiddenError(err error, resource schema.GroupResource, name string, statusCode int) {
+	errorLog.V(1).Info("Coder error hidden from the Kubernetes client",
+		"resource", resource.String(), "name", name, "status", statusCode, "error", err.Error())
+}
 
 // MapCoderError converts Coder SDK errors to Kubernetes API errors.
 func MapCoderError(err error, resource schema.GroupResource, name string) error {
@@ -37,17 +49,26 @@ func MapCoderError(err error, resource schema.GroupResource, name string) error 
 
 	var coderErr *codersdk.Error
 	if !errors.As(err, &coderErr) {
+		// A request that did not reach Coder or got no answer. The transport error names the
+		// Coder URL, so the message is fixed.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			logHiddenError(err, resource, name, 0)
+			return apierrors.NewInternalError(fmt.Errorf("the Coder API could not be reached for %s %q", resource.Resource, name))
+		}
 		return apierrors.NewInternalError(err)
 	}
 
 	statusCode := coderErr.StatusCode()
-	message := coderErrorMessage(coderErr, err)
+	message := coderErrorMessage(coderErr, statusCode)
 
 	switch statusCode {
 	case http.StatusNotFound:
 		return apierrors.NewNotFound(resource, name)
 	case http.StatusForbidden:
-		return apierrors.NewForbidden(resource, name, err)
+		// The SDK error names the Coder URL and Coder's own message, so the message is fixed.
+		logHiddenError(err, resource, name, statusCode)
+		return apierrors.NewForbidden(resource, name, errors.New("the Coder API denied the request"))
 	case http.StatusConflict:
 		if isAlreadyExistsConflict(coderErr) {
 			return apierrors.NewAlreadyExists(resource, name)
@@ -66,7 +87,10 @@ func MapCoderError(err error, resource schema.GroupResource, name string) error 
 			return apierrors.NewBadRequest(message)
 		}
 
-		return apierrors.NewInternalError(err)
+		// A 5xx (other than 504) or an unexpected status. The SDK error names the Coder URL,
+		// so the message is fixed.
+		logHiddenError(err, resource, name, statusCode)
+		return apierrors.NewInternalError(fmt.Errorf("the Coder API failed the request for %s %q with status %d", resource.Resource, name, statusCode))
 	}
 }
 
@@ -101,12 +125,11 @@ func MapCoderCreateError(err error, resource schema.GroupResource, name string) 
 	return MapCoderError(err, resource, name)
 }
 
-func coderErrorMessage(coderErr *codersdk.Error, fallback error) string {
+// coderErrorMessage returns Coder's message for a 4xx answer. Without one, it returns a fixed
+// message: the SDK error text names the Coder URL.
+func coderErrorMessage(coderErr *codersdk.Error, statusCode int) string {
 	if coderErr == nil {
 		panic("assertion failed: coder error must not be nil")
-	}
-	if fallback == nil {
-		panic("assertion failed: fallback error must not be nil")
 	}
 
 	message := strings.TrimSpace(coderErr.Message)
@@ -114,7 +137,7 @@ func coderErrorMessage(coderErr *codersdk.Error, fallback error) string {
 		return message
 	}
 
-	return fallback.Error()
+	return fmt.Sprintf("the Coder API rejected the request with status %d", statusCode)
 }
 
 func isAlreadyExistsConflict(err *codersdk.Error) bool {
