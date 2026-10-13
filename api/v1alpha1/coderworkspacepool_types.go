@@ -53,12 +53,14 @@ type WorkspacePoolsSpec struct {
 
 // WorkspacePoolOwner allows one Coder user as the owner of pool workspaces.
 type WorkspacePoolOwner struct {
-	// UserID is the UUID of the Coder user. Coder's prebuilds system user is
-	// refused: Coder's prebuild reconciler can delete or hand out the
-	// workspaces it owns.
+	// UserID is the UUID of the Coder user, in lower case with hyphens, as
+	// Coder writes it. One user has one spelling, so the list holds each
+	// owner once. Coder's prebuilds system user is refused: Coder's prebuild
+	// reconciler can delete or hand out the workspaces it owns.
 	// +kubebuilder:validation:Format=uuid
 	// +kubebuilder:validation:MaxLength=36
-	// +kubebuilder:validation:XValidation:rule="self.lowerAscii().replace('-', '') != 'c42fdf753097471c8c33fb52454d81c0'",message="userID must not be the Coder prebuilds system user"
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
+	// +kubebuilder:validation:XValidation:rule="self != 'c42fdf75-3097-471c-8c33-fb52454d81c0'",message="userID must not be the Coder prebuilds system user"
 	UserID string `json:"userID"`
 	// Templates are the only Coder templates, as `<organization>.<template>`,
 	// that pools of this owner can build.
@@ -143,11 +145,13 @@ type CoderWorkspacePoolSpec struct {
 	// OwnerUserID is the UUID of the Coder user who owns every workspace of
 	// the pool. The control plane's admin must allow this owner and the
 	// template. Every start build gives the owner's API token to the
-	// template's Terraform, so use a dedicated low-privilege user.
+	// template's Terraform, so use a dedicated low-privilege user. Write the
+	// UUID in lower case with hyphens, as in the control plane's owners list.
 	// +kubebuilder:validation:Format=uuid
 	// +kubebuilder:validation:MaxLength=36
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="ownerUserID is immutable"
-	// +kubebuilder:validation:XValidation:rule="self.lowerAscii().replace('-', '') != 'c42fdf753097471c8c33fb52454d81c0'",message="ownerUserID must not be the Coder prebuilds system user"
+	// +kubebuilder:validation:XValidation:rule="self != 'c42fdf75-3097-471c-8c33-fb52454d81c0'",message="ownerUserID must not be the Coder prebuilds system user"
 	OwnerUserID string `json:"ownerUserID"`
 	// Template is the Coder template as `<organization>.<template>`, the same
 	// format as aggregated CoderTemplate names. Each name has at most 32

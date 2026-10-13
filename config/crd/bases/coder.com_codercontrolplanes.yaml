@@ -4378,16 +4378,18 @@ spec:
                             rule: self.all(t, !t.matches('^(new|create)[.]') && !t.matches('[.](new|create)$'))
                         userID:
                           description: |-
-                            UserID is the UUID of the Coder user. Coder's prebuilds system user is
-                            refused: Coder's prebuild reconciler can delete or hand out the
-                            workspaces it owns.
+                            UserID is the UUID of the Coder user, in lower case with hyphens, as
+                            Coder writes it. One user has one spelling, so the list holds each
+                            owner once. Coder's prebuilds system user is refused: Coder's prebuild
+                            reconciler can delete or hand out the workspaces it owns.
                           format: uuid
                           maxLength: 36
+                          pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
                           type: string
                           x-kubernetes-validations:
                           - message: userID must not be the Coder prebuilds system
                               user
-                            rule: self.lowerAscii().replace('-', '') != 'c42fdf753097471c8c33fb52454d81c0'
+                            rule: self != 'c42fdf75-3097-471c-8c33-fb52454d81c0'
                       required:
                       - templates
                       - userID

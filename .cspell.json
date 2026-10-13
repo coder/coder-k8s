@@ -84,7 +84,9 @@
     "livez",
     "requestheader",
     "subjectaccessreviews",
-    "cabundle"
+    "cabundle",
+    "prebuild",
+    "prebuilds"
   ],
   "ignorePaths": [
     ".git/**",

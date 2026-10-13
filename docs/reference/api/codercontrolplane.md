@@ -246,7 +246,7 @@ WorkspacePoolOwner allows one Coder user as the owner of pool workspaces.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `userID` | string | UserID is the UUID of the Coder user. Coder's prebuilds system user is refused: Coder's prebuild reconciler can delete or hand out the workspaces it owns. |
+| `userID` | string | UserID is the UUID of the Coder user, in lower case with hyphens, as Coder writes it. One user has one spelling, so the list holds each owner once. Coder's prebuilds system user is refused: Coder's prebuild reconciler can delete or hand out the workspaces it owns. |
 | `templates` | string array | Templates are the only Coder templates, as `<organization>.<template>`, that pools of this owner can build. |
 | `maxWorkspaces` | integer | MaxWorkspaces caps the workspaces of this owner across all pools of this control plane: unclaimed, bound, and used. |
 

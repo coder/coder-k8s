@@ -98,10 +98,18 @@ func TestControlPlaneWorkspacePoolsValidation(t *testing.T) {
 		{name: "prebuilds user", spec: one(func(o *coderv1alpha1.WorkspacePoolOwner) {
 			o.UserID = "c42fdf75-3097-471c-8c33-fb52454d81c0"
 		}), wantErr: "userID must not be the Coder prebuilds system user"},
-		// format: uuid accepts upper case and no hyphens, and so does Coder.
-		{name: "prebuilds user in upper case without hyphens", spec: one(func(o *coderv1alpha1.WorkspacePoolOwner) {
-			o.UserID = "C42FDF753097471C8C33FB52454D81C0"
-		}), wantErr: "userID must not be the Coder prebuilds system user"},
+		// format: uuid alone accepts other spellings of one UUID, and the list
+		// map would then hold one Coder user as two owners.
+		{name: "owner in upper case", spec: one(func(o *coderv1alpha1.WorkspacePoolOwner) {
+			o.UserID = strings.ToUpper(poolOwnerID)
+		}), wantErr: "spec.workspacePools.owners[0].userID"},
+		{name: "owner without hyphens", spec: one(func(o *coderv1alpha1.WorkspacePoolOwner) {
+			o.UserID = strings.ReplaceAll(poolOwnerID, "-", "")
+		}), wantErr: "spec.workspacePools.owners[0].userID"},
+		{name: "one owner in two spellings", spec: &coderv1alpha1.WorkspacePoolsSpec{Owners: []coderv1alpha1.WorkspacePoolOwner{
+			{UserID: poolOwnerID, Templates: []string{"default.ci-runner"}},
+			{UserID: strings.ToUpper(poolOwnerID), Templates: []string{"default.other"}},
+		}}, wantErr: "spec.workspacePools.owners[1].userID"},
 		{name: "no templates list", spec: one(func(o *coderv1alpha1.WorkspacePoolOwner) { o.Templates = nil }), wantErr: "spec.workspacePools.owners[0].templates"},
 		{name: "empty templates list", spec: one(func(o *coderv1alpha1.WorkspacePoolOwner) { o.Templates = []string{} }), wantErr: "spec.workspacePools.owners[0].templates"},
 		{name: "17 templates", spec: one(func(o *coderv1alpha1.WorkspacePoolOwner) { o.Templates = templates }), wantErr: "spec.workspacePools.owners[0].templates"},
