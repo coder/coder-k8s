@@ -209,7 +209,7 @@ See [Promote a template version](../reference/aggregated-api-behavior.md#promote
 - `429` that says `You've been rate limited`: Coder rate-limited the operator token, which every aggregated API call uses. Coder allows 512 requests per minute by default (`CODER_API_RATE_LIMIT`).
 - `504`: Coder did not answer in time before the response started. Either one Coder call took longer than the Coder request timeout (30 seconds by default), or the time limit of the request ran out: 60 seconds for a snapshot, or 25 minutes with `follow=true`. Check that Coder is healthy, then try again.
 - A `Warning` that says the server cut the log: the log is larger than the server limit. See [Workspace build log](../reference/aggregated-api-behavior.md#workspace-build-log).
-- A `follow=true` stream ends before the build ends: the stream reached the 4 MiB response limit or the 25-minute time limit. The server sends no `Warning` for a cut in the live part of a stream. Send a new request with `follow=true`. It sends the existing entries again.
+- A `follow=true` stream ends before the build ends: the stream reached the 4 MiB response limit or the 25-minute time limit. The server sends no `Warning` for a cut in the live part of a stream. Send a new request with `follow=true`. It sends the existing entries again. It continues to follow only if the existing entries fit within the size limits of a log request. Otherwise it returns only the first part and ends, because this API cannot return the rest of the log.
 
 ## `coderworkspaces/start` or `/stop` returns `400`, `403`, `409`, or `504`
 
