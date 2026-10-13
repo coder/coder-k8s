@@ -32,6 +32,15 @@ type SecretKeySelector struct {
 	Key string `json:"key,omitempty"`
 }
 
+// CoderControlPlaneReference names a CoderControlPlane in the same namespace.
+type CoderControlPlaneReference struct {
+	// Name is the CoderControlPlane name.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	Name string `json:"name"`
+}
+
 // ServiceAccountSpec configures the ServiceAccount used by the Coder pod.
 type ServiceAccountSpec struct {
 	// DisableCreate skips ServiceAccount creation (use an existing SA).
