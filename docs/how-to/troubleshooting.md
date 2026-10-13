@@ -170,7 +170,7 @@ A `list` in one namespace that contains no `CoderControlPlane` at all does not r
 
 The logs show which provider configuration the server used.
 
-## Aggregated reads return `multiple eligible CoderControlPlane ...`
+## Aggregated reads return `multiple eligible CoderControlPlane instances`
 
 The server expects one eligible control plane for each request scope. If more than one control plane is eligible, do one of these steps:
 
@@ -280,7 +280,7 @@ CAUTION: Delete the workspace in Coder before you remove the finalizer. Otherwis
 ## A namespace stays `Terminating`
 
 1. Tests in the namespace wait for their cleanup. List them with `kubectl get codertemplatetests -n <namespace>`, then see [A `CoderTemplateTest` does not finish deleting](#a-codertemplatetest-does-not-finish-deleting).
-2. If the namespace condition `NamespaceDeletionContentFailure` is `True`, read its message. It contains the error that the aggregated API returned when the namespace controller listed its resources, for example a `503` or a `400`. For what each error means, see [Namespaces without a Coder backend](../reference/aggregated-api-behavior.md#namespaces-without-a-coder-backend) and [Aggregated reads return `ServiceUnavailable`](#aggregated-reads-return-serviceunavailable). If a `CoderControlPlane` is still in the namespace, check its finalizers, for example `coder.com/workspace-rbac-cleanup`, and the controller logs.
+2. If the namespace condition `NamespaceDeletionContentFailure` is `True`, read its message. Kubernetes sets this condition when any API fails while the namespace controller removes the resources of the namespace. If the message names `aggregation.coder.com`, it contains the error that the aggregated API returned when the namespace controller listed its resources, for example a `503` or a `400`. For a `503`, see [Namespaces without a Coder backend](../reference/aggregated-api-behavior.md#namespaces-without-a-coder-backend) and [Aggregated reads return `ServiceUnavailable`](#aggregated-reads-return-serviceunavailable). For a `400` that says `multiple eligible CoderControlPlane instances`, see [Aggregated reads return `multiple eligible CoderControlPlane instances`](#aggregated-reads-return-multiple-eligible-codercontrolplane-instances). If the message names another API, examine that API instead. If a `CoderControlPlane` is still in the namespace, check its finalizers, for example `coder.com/workspace-rbac-cleanup`, and the controller logs.
 
     ```bash
     kubectl get namespace <namespace> -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.message}{"\n"}{end}'
