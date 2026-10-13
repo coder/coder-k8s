@@ -78,4 +78,6 @@ kubectl get secret coderprovisioner-sample-provisioner-key -n coder
 kubectl delete coderprovisioner coderprovisioner-sample -n coder
 ```
 
+The operator then deletes the provisioner key in Coder that this provisioner created. It finds the key by the organization and key IDs in `status.organizationID` and `status.provisionerKeyID`, not by the names in the spec. When the status has no key, for example because the provisioner never passed its checks, the operator removes its finalizer without a call to Coder.
+
 To remove all the other resources, do the steps in [the control plane cleanup](getting-started.md#5-clean-up-optional).

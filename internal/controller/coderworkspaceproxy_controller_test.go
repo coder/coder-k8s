@@ -32,6 +32,8 @@ type fakeBootstrapClient struct {
 	deleteKeyErr            error
 	deleteKeyCalls          int
 	deleteKeyRequests       []deleteKeyRequest
+	deleteKeyByIDErr        error
+	deleteKeyByIDRequests   []coderbootstrap.DeleteProvisionerKeyByIDRequest
 
 	// Entitlements support.
 	entitlementsResponse codersdk.Entitlements
@@ -84,6 +86,11 @@ func (f *fakeBootstrapClient) DeleteProvisionerKey(_ context.Context, coderURL, 
 		KeyName:          keyName,
 	})
 	return f.deleteKeyErr
+}
+
+func (f *fakeBootstrapClient) DeleteProvisionerKeyByID(_ context.Context, req coderbootstrap.DeleteProvisionerKeyByIDRequest) error {
+	f.deleteKeyByIDRequests = append(f.deleteKeyByIDRequests, req)
+	return f.deleteKeyByIDErr
 }
 
 func (f *fakeBootstrapClient) Entitlements(_ context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error) {

@@ -553,7 +553,12 @@ func TestCoderProvisionerReconciler_Deletion(t *testing.T) {
 	require.NoError(t, k8sClient.Create(ctx, provisioner))
 
 	bootstrapClient := &fakeBootstrapClient{
-		provisionerKeyResponses: []coderbootstrap.EnsureProvisionerKeyResponse{{Key: "provisioner-key-material"}},
+		provisionerKeyResponses: []coderbootstrap.EnsureProvisionerKeyResponse{{
+			OrganizationID: uuid.New(),
+			KeyID:          uuid.New(),
+			KeyName:        "cleanup-key",
+			Key:            "provisioner-key-material",
+		}},
 	}
 	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
 
@@ -572,7 +577,9 @@ func TestCoderProvisionerReconciler_Deletion(t *testing.T) {
 	require.False(t, markedForDeletion.DeletionTimestamp.IsZero())
 
 	reconcileProvisioner(ctx, t, reconciler, namespacedName)
-	require.Equal(t, 1, bootstrapClient.deleteKeyCalls)
+	require.Zero(t, bootstrapClient.deleteKeyCalls)
+	require.Len(t, bootstrapClient.deleteKeyByIDRequests, 1)
+	require.Equal(t, bootstrapClient.provisionerKeyResponses[0].KeyID, bootstrapClient.deleteKeyByIDRequests[0].KeyID)
 
 	require.Eventually(t, func() bool {
 		reconciled := &coderv1alpha1.CoderProvisioner{}
@@ -628,6 +635,7 @@ func TestCoderProvisionerReconciler_DeletionControlPlaneGone(t *testing.T) {
 	// DeleteProvisionerKey cannot run once operator token source is gone with the
 	// deleted control plane, but finalizer cleanup must still complete.
 	require.Equal(t, 0, bootstrapClient.deleteKeyCalls)
+	require.Empty(t, bootstrapClient.deleteKeyByIDRequests)
 
 	// The finalizer should still be removed.
 	require.Eventually(t, func() bool {
