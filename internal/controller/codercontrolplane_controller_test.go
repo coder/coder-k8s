@@ -1710,8 +1710,18 @@ func TestReconcile_OperatorAccess_MalformedManagedSecret_ReprovisionsToken(t *te
 
 	managedSecretName := cp.Name + "-operator-token"
 	managedSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: managedSecretName, Namespace: cp.Namespace},
-		Type:       corev1.SecretTypeOpaque,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      managedSecretName,
+			Namespace: cp.Namespace,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: coderv1alpha1.GroupVersion.String(),
+				Kind:       "CoderControlPlane",
+				Name:       cp.Name,
+				UID:        cp.UID,
+				Controller: ptrTo(true),
+			}},
+		},
+		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			"wrong-key": []byte("not-a-token"),
 		},

@@ -16,6 +16,11 @@ const (
 	// spec.database.connectionSecretRef configuration can be resolved. It does
 	// not report database health or reachability.
 	CoderControlPlaneConditionDatabaseSecretResolved = "DatabaseSecretResolved"
+	// CoderControlPlaneConditionOperatorTokenSecretOwned indicates whether the
+	// operator token Secret is owned by this control plane, or does not exist
+	// yet. The operator does not read or write an operator token Secret that
+	// another owner, or no owner, controls.
+	CoderControlPlaneConditionOperatorTokenSecretOwned = "OperatorTokenSecretOwned"
 
 	// CoderControlPlaneLicenseTierNone indicates no license is currently installed.
 	CoderControlPlaneLicenseTierNone = "none"
@@ -165,6 +170,8 @@ type OperatorAccessSpec struct {
 	// +kubebuilder:default=false
 	Disabled bool `json:"disabled,omitempty"`
 	// GeneratedTokenSecretName stores the generated operator API token.
+	// The default is `<name>-operator-token`. The Secret must not exist yet,
+	// or must have this control plane as its controller owner.
 	GeneratedTokenSecretName string `json:"generatedTokenSecretName,omitempty"`
 }
 

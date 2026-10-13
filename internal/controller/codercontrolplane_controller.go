@@ -83,6 +83,9 @@ const (
 	databaseConditionReasonInvalidURL               = "InvalidURL"
 	databaseConditionReasonConflictingConfiguration = "ConflictingConfiguration"
 
+	// operatorTokenSecretConditionReasonOwned is the OperatorTokenSecretOwned=True reason.
+	operatorTokenSecretConditionReasonOwned = "TokenSecretOwned"
+
 	workspaceRBACDriftRequeueInterval = 2 * time.Minute
 	gatewayExposureRequeueInterval    = 2 * time.Minute
 	licenseUploadRequestTimeout       = 30 * time.Second
@@ -1669,6 +1672,7 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 	}
 
 	if coderControlPlane.Spec.OperatorAccess.Disabled {
+		meta.RemoveStatusCondition(&nextStatus.Conditions, coderv1alpha1.CoderControlPlaneConditionOperatorTokenSecretOwned)
 		cleanupErr := r.cleanupDisabledOperatorAccess(ctx, coderControlPlane)
 		nextStatus.OperatorAccessReady = false
 		if cleanupErr != nil {
@@ -1688,6 +1692,7 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 	}
 
 	if r.OperatorAccessProvisioner == nil {
+		meta.RemoveStatusCondition(&nextStatus.Conditions, coderv1alpha1.CoderControlPlaneConditionOperatorTokenSecretOwned)
 		nextStatus.OperatorTokenSecretRef = nil
 		nextStatus.OperatorAccessReady = false
 		return ctrl.Result{}, nil
@@ -1703,14 +1708,44 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 		return ctrl.Result{}, fmt.Errorf("assertion failed: operator token name must not be empty")
 	}
 
-	existingToken, err := r.readSecretValue(ctx, coderControlPlane.Namespace, operatorTokenSecretName, coderv1alpha1.DefaultTokenSecretKey)
-	switch {
-	case err == nil:
-		// Existing token is still validated by the provisioner to avoid stale or expired credentials.
-	case apierrors.IsNotFound(err), errors.Is(err, errSecretValueMissing), errors.Is(err, errSecretValueEmpty):
-		existingToken = ""
-	default:
-		return ctrl.Result{}, fmt.Errorf("read operator token secret %q: %w", operatorTokenSecretName, err)
+	tokenSecret, err := r.getOperatorTokenSecret(ctx, coderControlPlane, operatorTokenSecretName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if tokenSecret != nil && !isManagedOperatorTokenSecret(tokenSecret, coderControlPlane) {
+		// Another owner, or no owner, controls this Secret: do not read, write
+		// or adopt it, and stop publishing it to consumers of the status.
+		nextStatus.OperatorTokenSecretRef = nil
+		nextStatus.OperatorAccessReady = false
+		if err := setControlPlaneCondition(
+			nextStatus,
+			coderControlPlane.Generation,
+			coderv1alpha1.CoderControlPlaneConditionOperatorTokenSecretOwned,
+			metav1.ConditionFalse,
+			reasonTokenSecretNotOwned,
+			operatorTokenSecretNotOwnedMessage(coderControlPlane, operatorTokenSecretName),
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		// Events of unowned Secrets do not enqueue this control plane, so poll.
+		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+	}
+	if err := setControlPlaneCondition(
+		nextStatus,
+		coderControlPlane.Generation,
+		coderv1alpha1.CoderControlPlaneConditionOperatorTokenSecretOwned,
+		metav1.ConditionTrue,
+		operatorTokenSecretConditionReasonOwned,
+		fmt.Sprintf("Secret %q is owned by this control plane, or does not exist yet and the operator creates it.", operatorTokenSecretName),
+	); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// An existing token is still validated by the provisioner to avoid stale or
+	// expired credentials. A missing or empty key provisions a new token.
+	existingToken := ""
+	if tokenSecret != nil {
+		existingToken = string(tokenSecret.Data[coderv1alpha1.DefaultTokenSecretKey])
 	}
 
 	postgresURL, resolveErr := r.resolveBootstrapPostgresURL(ctx, coderControlPlane)
@@ -1742,6 +1777,7 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 	if err := r.ensureOperatorTokenSecret(
 		ctx,
 		coderControlPlane,
+		tokenSecret,
 		operatorTokenSecretName,
 		coderv1alpha1.DefaultTokenSecretKey,
 		token,
@@ -2634,9 +2670,44 @@ func sanitizeDNSLabel(value string) string {
 	return sanitized
 }
 
+// getOperatorTokenSecret returns the operator token Secret, or nil when it does
+// not exist. The caller checks ownership before it reads or writes the Secret.
+func (r *CoderControlPlaneReconciler) getOperatorTokenSecret(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+	name string,
+) (*corev1.Secret, error) {
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: coderControlPlane.Namespace}, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get operator token secret %q: %w", name, err)
+	}
+
+	return secret, nil
+}
+
+// operatorTokenSecretNotOwnedMessage names the Secret and the fix. It never
+// contains Secret values.
+func operatorTokenSecretNotOwnedMessage(coderControlPlane *coderv1alpha1.CoderControlPlane, name string) string {
+	if strings.TrimSpace(coderControlPlane.Spec.OperatorAccess.GeneratedTokenSecretName) != "" {
+		return fmt.Sprintf("Secret %q named in spec.operatorAccess.generatedTokenSecretName exists and is not owned by this control plane. "+
+			"The operator does not read or change it. Set spec.operatorAccess.generatedTokenSecretName to a name that does not exist yet, "+
+			"or remove the field to use the default name.", name)
+	}
+	return fmt.Sprintf("Secret %q (the default operator token Secret) exists and is not owned by this control plane. "+
+		"The operator does not read or change it. Delete that Secret so the operator creates a new operator token, "+
+		"or set spec.operatorAccess.generatedTokenSecretName to a name that does not exist yet.", name)
+}
+
+// ensureOperatorTokenSecret creates the operator token Secret when existing is
+// nil, or updates existing when this control plane controls it. It never adopts
+// or writes a Secret that this control plane does not control.
 func (r *CoderControlPlaneReconciler) ensureOperatorTokenSecret(
 	ctx context.Context,
 	coderControlPlane *coderv1alpha1.CoderControlPlane,
+	existing *corev1.Secret,
 	name string,
 	key string,
 	token string,
@@ -2653,24 +2724,45 @@ func (r *CoderControlPlaneReconciler) ensureOperatorTokenSecret(
 	if token == "" {
 		return fmt.Errorf("assertion failed: secret token must not be empty")
 	}
+	labels := controlPlaneLabels(coderControlPlane.Name)
 
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: coderControlPlane.Namespace}}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
-		secret.Labels = maps.Clone(controlPlaneLabels(coderControlPlane.Name))
-		secret.Type = corev1.SecretTypeOpaque
-		if secret.Data == nil {
-			secret.Data = make(map[string][]byte)
+	if existing == nil {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: coderControlPlane.Namespace, Labels: maps.Clone(labels)},
+			Type:       corev1.SecretTypeOpaque,
+			Data:       map[string][]byte{key: []byte(token)},
 		}
-		secret.Data[key] = []byte(token)
-
 		if err := controllerutil.SetControllerReference(coderControlPlane, secret, r.Scheme); err != nil {
-			return fmt.Errorf("set controller reference: %w", err)
+			return fmt.Errorf("set controller reference on operator token secret %q: %w", name, err)
 		}
-
+		// Create fails with AlreadyExists when a Secret appeared since the read.
+		// The next reconcile then checks its owner.
+		if err := r.Create(ctx, secret); err != nil {
+			return fmt.Errorf("create operator token secret %q: %w", name, err)
+		}
 		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("reconcile operator token secret %q: %w", name, err)
+	}
+
+	if existing.Name != name || existing.Namespace != coderControlPlane.Namespace {
+		return fmt.Errorf("assertion failed: operator token secret %s/%s does not match %s/%s",
+			existing.Namespace, existing.Name, coderControlPlane.Namespace, name)
+	}
+	if !isManagedOperatorTokenSecret(existing, coderControlPlane) {
+		return fmt.Errorf("assertion failed: operator token secret %q must be controlled by this control plane before an update", name)
+	}
+	updated := existing.DeepCopy()
+	updated.Labels = maps.Clone(labels)
+	if updated.Data == nil {
+		updated.Data = make(map[string][]byte)
+	}
+	updated.Data[key] = []byte(token)
+	if equality.Semantic.DeepEqual(existing, updated) {
+		return nil
+	}
+	// Update sends the resourceVersion of the read, so a Secret that changed
+	// since then gives a conflict instead of an overwrite.
+	if err := r.Update(ctx, updated); err != nil {
+		return fmt.Errorf("update operator token secret %q: %w", name, err)
 	}
 
 	return nil

@@ -46,7 +46,7 @@ kubectl get crd | grep coder.com
 Usual causes:
 
 1. The control plane Deployment has no ready pods.
-2. The operator bootstrap token is not ready yet.
+2. The operator bootstrap token is not ready yet. If the `OperatorTokenSecretOwned` condition is `False` with the reason `TokenSecretNotOwned`, another owner controls the operator token Secret. See [Operator token Secret](deploy-controller.md#operator-token-secret).
 3. `spec.licenseSecretRef` points to a license Secret that is missing or not valid.
 4. The controller cannot resolve `spec.database.connectionSecretRef`. Look at the reason of the `DatabaseSecretResolved` condition. See [Connect an external PostgreSQL database](deploy-controller.md#connect-an-external-postgresql-database).
 

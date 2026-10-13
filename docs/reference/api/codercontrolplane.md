@@ -145,7 +145,7 @@ OperatorAccessSpec configures the controller-managed coderd operator user.
 | Field | Type | Description |
 | --- | --- | --- |
 | `disabled` | boolean | Disabled turns off creation and management of the `coder-k8s-operator` user and API token. |
-| `generatedTokenSecretName` | string | GeneratedTokenSecretName stores the generated operator API token. |
+| `generatedTokenSecretName` | string | GeneratedTokenSecretName stores the generated operator API token. The default is `<name>-operator-token`. The Secret must not exist yet, or must have this control plane as its controller owner. |
 
 ### ProbeSpec
 

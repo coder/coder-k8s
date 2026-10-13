@@ -1397,8 +1397,10 @@ spec:
                       user and API token.
                     type: boolean
                   generatedTokenSecretName:
-                    description: GeneratedTokenSecretName stores the generated operator
-                      API token.
+                    description: |-
+                      GeneratedTokenSecretName stores the generated operator API token.
+                      The default is `<name>-operator-token`. The Secret must not exist yet,
+                      or must have this control plane as its controller owner.
                     type: string
                 type: object
               podSecurityContext:
