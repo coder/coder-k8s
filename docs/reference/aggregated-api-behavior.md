@@ -393,7 +393,7 @@ The server limits each log request:
 
 Snapshots and `follow=true` streams use the same open-request slots. A user with 4 open `follow=true` streams gets `429` on a snapshot too.
 
-Every log request also uses the Coder API rate limit of the operator token, which all aggregated API calls share. Coder allows 512 requests per minute for each user and request path by default, and the Coder deployment can change it with `CODER_API_RATE_LIMIT`. A log request makes 2 Coder requests: one that reads the workspace and one that reads the log. With `follow=true`, it makes 1 more request that opens the live stream, and it sends no more requests while the stream is open. When Coder rate-limits the operator token, the server returns `429` with the message of Coder and without `Retry-After`. See [Cost and limits of reads](#cost-and-limits-of-reads).
+Every log request also uses the Coder API rate limit of the operator token, which all aggregated API calls share. Coder allows 512 requests per minute for each user and request path by default, and the Coder deployment can change it with `CODER_API_RATE_LIMIT`. A log request makes 2 Coder requests: one that reads the workspace and one that reads the log. With `follow=true`, it makes 1 more request that opens the live stream, unless the existing log already reaches a size limit. It sends no more requests while the stream is open. When Coder rate-limits the operator token, the server returns `429` with the message of Coder and without `Retry-After`. See [Cost and limits of reads](#cost-and-limits-of-reads).
 
 ## Start and stop
 

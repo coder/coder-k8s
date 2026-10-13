@@ -81,7 +81,7 @@ kubectl get coderworkspace.aggregation.coder.com acme.alice.dev -n coder \
   -o jsonpath='{.status.latestBuildStatus}{"\n"}'
 ```
 
-- The follow ends when the build ends, or earlier when it reaches the size or time limit of a log request. Then send the request again. See the [log limits](../reference/aggregated-api-behavior.md#workspace-build-log). If the build has already ended, it prints the whole log and returns at once.
+- The follow ends when the build ends, or earlier at a [log limit](../reference/aggregated-api-behavior.md#workspace-build-log). After the time limit, send the request again: it prints the existing log again and continues to follow. After a size limit, a new request prints the same first part of the log again and does not follow, because this API cannot return the rest. If the build has already ended, it prints the whole log and returns at once.
 - The status is `running` after a start and `stopped` after a stop.
 - Without `follow=true`, the log request returns the log so far. Add `limitBytes=<n>` to read at most `n` bytes.
 - Build logs can contain secrets that Terraform printed. Share them with care.
