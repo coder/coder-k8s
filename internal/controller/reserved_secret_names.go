@@ -126,29 +126,13 @@ func secretUsersFor[L, T any, PL interface {
 }
 
 // controlPlaneSecretNames returns every Secret name that a CoderControlPlane
-// references or generates.
+// references or generates: the names that credentialsecret.Read refuses
+// because of cp.
 //
 // The operator token name stays reserved while operator access is disabled:
 // turning it back on makes the control plane create that Secret again.
 func controlPlaneSecretNames(cp *coderv1alpha1.CoderControlPlane) []string {
-	names := []string{credentialsecret.OperatorTokenSecretName(cp)}
-	if ref := cp.Status.OperatorTokenSecretRef; ref != nil {
-		names = append(names, strings.TrimSpace(ref.Name))
-	}
-	names = append(names, indexByLicenseSecretName(cp)...)
-	names = append(names, indexByDatabaseSecretName(cp)...)
-	names = append(names, indexByEnvFromSecretName(cp)...)
-	names = append(names, extraEnvSecretNames(cp.Spec.ExtraEnv)...)
-	names = append(names, cp.Spec.TLS.SecretNames...)
-	names = append(names, localRefNames(cp.Spec.ImagePullSecrets)...)
-	for _, ref := range cp.Spec.Certs.Secrets {
-		names = append(names, ref.Name)
-	}
-	if cp.Spec.Expose != nil && cp.Spec.Expose.Ingress != nil && cp.Spec.Expose.Ingress.TLS != nil {
-		names = append(names, cp.Spec.Expose.Ingress.TLS.SecretName, cp.Spec.Expose.Ingress.TLS.WildcardSecretName)
-	}
-	names = append(names, volumeSecretNames(cp.Spec.Volumes)...)
-	return sortedUnique(names)
+	return credentialsecret.ControlPlaneSecretNames(cp)
 }
 
 // workspaceProxySecretNames adds the image pull Secrets and the recorded
@@ -171,57 +155,6 @@ func provisionerSecretNames(provisioner *coderv1alpha1.CoderProvisioner) []strin
 		names = append(names, ref.Name)
 	}
 	return sortedUnique(names)
-}
-
-// volumeSecretNames returns every Secret that volumes reference: Secret and
-// projected volumes, and the credential Secrets of storage volume sources.
-func volumeSecretNames(volumes []corev1.Volume) []string {
-	var names []string
-	ref := func(r *corev1.LocalObjectReference) {
-		if r != nil {
-			names = append(names, r.Name)
-		}
-	}
-	for _, v := range volumes {
-		if v.Secret != nil {
-			names = append(names, v.Secret.SecretName)
-		}
-		if v.Projected != nil {
-			for _, source := range v.Projected.Sources {
-				if source.Secret != nil {
-					names = append(names, source.Secret.Name)
-				}
-			}
-		}
-		if v.AzureFile != nil {
-			names = append(names, v.AzureFile.SecretName)
-		}
-		if v.CSI != nil {
-			ref(v.CSI.NodePublishSecretRef)
-		}
-		if v.CephFS != nil {
-			ref(v.CephFS.SecretRef)
-		}
-		if v.Cinder != nil {
-			ref(v.Cinder.SecretRef)
-		}
-		if v.FlexVolume != nil {
-			ref(v.FlexVolume.SecretRef)
-		}
-		if v.ISCSI != nil {
-			ref(v.ISCSI.SecretRef)
-		}
-		if v.RBD != nil {
-			ref(v.RBD.SecretRef)
-		}
-		if v.ScaleIO != nil {
-			ref(v.ScaleIO.SecretRef)
-		}
-		if v.StorageOS != nil {
-			ref(v.StorageOS.SecretRef)
-		}
-	}
-	return names
 }
 
 func localRefNames(refs []corev1.LocalObjectReference) []string {

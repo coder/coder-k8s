@@ -20,38 +20,23 @@ import (
 	"github.com/coder/coder-k8s/internal/coderbootstrap"
 	"github.com/coder/coder-k8s/internal/controller"
 	"github.com/coder/coder-k8s/internal/credentialsecret"
+	"github.com/coder/coder-k8s/internal/credentialsecret/credentialsecrettest"
 )
 
-// The license and the database Secret of a CoderControlPlane are never usable
-// as credentials of another resource in the namespace, even when they carry the
-// opt-in label and list the destination (#249).
-var controlPlaneSecretRoles = []string{"license", "database"}
-
-// setControlPlaneSecret makes controlPlane use secretName in role, or stop
-// using any Secret in role when secretName is empty.
-func setControlPlaneSecret(spec *coderv1alpha1.CoderControlPlaneSpec, role, secretName string) {
-	switch role {
-	case "license":
-		spec.LicenseSecretRef = nil
-		if secretName != "" {
-			spec.LicenseSecretRef = &coderv1alpha1.SecretKeySelector{Name: secretName, Key: "license"}
-		}
-	case "database":
-		spec.Database = nil
-		if secretName != "" {
-			spec.Database = &coderv1alpha1.DatabaseSpec{ConnectionSecretRef: coderv1alpha1.SecretKeySelector{Name: secretName, Key: "url"}}
-		}
-	default:
-		panic("assertion failed: unknown control plane Secret role " + role)
-	}
-}
+// A Secret that a CoderControlPlane spec references is never usable as a
+// credential of another resource in the namespace, even when it carries the
+// opt-in label and lists the destination (#249, #260).
+var (
+	controlPlaneSecretRoles = credentialsecrettest.ControlPlaneSecretRoles
+	setControlPlaneSecret   = credentialsecrettest.SetControlPlaneSecret
+)
 
 // createControlPlaneUsing creates a second control plane in namespace that
 // uses secretName in role. It returns the control plane name.
 func createControlPlaneUsing(ctx context.Context, t *testing.T, namespace, role, secretName string) string {
 	t.Helper()
 	controlPlane := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: role + "-user", Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "secret-user", Namespace: namespace},
 		Spec:       coderv1alpha1.CoderControlPlaneSpec{Image: "coder-control-plane:test"},
 	}
 	setControlPlaneSecret(&controlPlane.Spec, role, secretName)
@@ -67,8 +52,15 @@ func refusalMessage(secretName, role, controlPlaneName string) string {
 func TestCoderWorkspaceProxyCredentials_RefusesControlPlaneSecrets(t *testing.T) {
 	t.Parallel()
 
-	for _, role := range controlPlaneSecretRoles {
-		for _, input := range []string{"bootstrap.credentialsSecretRef", "proxySessionTokenSecretRef", "extraEnv"} {
+	allInputs := []string{"bootstrap.credentialsSecretRef", "proxySessionTokenSecretRef", "extraEnv"}
+	for i, role := range controlPlaneSecretRoles {
+		// The license and database roles run every input. The other roles share
+		// one Read path, so each runs one input, in turn.
+		inputs := []string{allInputs[i%len(allInputs)]}
+		if role == "license" || role == "database" {
+			inputs = allInputs
+		}
+		for _, input := range inputs {
 			t.Run(role+"/"+input, func(t *testing.T) {
 				t.Parallel()
 				ctx := context.Background()

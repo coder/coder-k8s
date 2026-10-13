@@ -84,7 +84,10 @@
     "livez",
     "requestheader",
     "subjectaccessreviews",
-    "cabundle"
+    "cabundle",
+    "cephfs",
+    "iscsi",
+    "storageos"
   ],
   "ignorePaths": [
     ".git/**",
