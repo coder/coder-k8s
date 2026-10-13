@@ -9,6 +9,7 @@ The aggregated API server serves `coderworkspaces`, `codertemplates` and `codert
 | [Object names](#object-names) | Use the canonical names of Coder. Aliases (`default`, `me`) and wrong casing return `400`. |
 | [Delete preconditions](#delete-preconditions) | The server checks `uid` and `resourceVersion`. A mismatch returns `409` and does not change Coder. |
 | [Workspace `resourceVersion`](#workspace-resourceversion) | An opaque fingerprint. Compare it only for equality. Workspace activity alone can cause `409`. |
+| [List options](#list-options) | Templates and template versions apply label and field selectors. Paging is not supported. |
 | [Watch](#watch) | Shows only writes made through this server. No replay, no initial events. |
 | [Namespaces without a Coder backend](#namespaces-without-a-coder-backend) | A `list` in one namespace returns an empty list. Other requests return an error. Thus such a namespace can be deleted. |
 | [Server-side apply](#server-side-apply) | Create-on-update works. The server does not keep field ownership. |
@@ -121,6 +122,29 @@ What this means for clients:
 - Same conversion everywhere. GET, LIST, mutation responses, and local watch events use the same conversion. A mutation response and the next GET agree only while the state in Coder does not change. A running build can change it between the two.
 - Checked before a change. UPDATE always compares the token with the object that it just fetched. DELETE does too when `preconditions.resourceVersion` is supplied. A mismatch returns `409 Conflict` before Coder changes. For DELETE, `preconditions.uid` still protects identity: a later workspace with the same name has a different `uid`.
 - Upgrades: tokens from releases that showed the numeric `updated_at` no longer match. Read the object again before you try an update or delete again.
+
+## List options
+
+A `list` of `codertemplates` or `codertemplateversions` is always complete and current. The server gets the full list from Coder, then applies the selectors in memory.
+
+| Option | `codertemplates` | `codertemplateversions` |
+| --- | --- | --- |
+| `labelSelector` | Filters the list. Templates have no labels, so a selector that requires a label returns an empty list. | Filters the list. Versions have the labels `aggregation.coder.com/organization` and `aggregation.coder.com/template`. |
+| `fieldSelector` on `metadata.name` or `metadata.namespace` | Filters the list. | Filters the list. |
+| `fieldSelector` on other fields | `400` | `400` |
+| `limit` | Ignored. The list has all items and no `continue` token. | Ignored. The list has all items and no `continue` token. |
+| `continue` | `400` | `400` |
+| `resourceVersionMatch` | `400` or `422` | `400` or `422` |
+| `resourceVersion` | Accepted, with any value. The list is always current, so it is never older than the requested version. Informers can send a `resourceVersion` from an earlier response when they list again. | `400` if it is not `0`. |
+
+A rejected `list` sends no request to Coder. A `list` of `coderworkspaces` ignores all of these options.
+
+For example:
+
+```sh
+kubectl get codertemplates -n coder --field-selector metadata.name=acme.docker
+kubectl get codertemplateversions -n coder -l aggregation.coder.com/template=docker
+```
 
 ## Watch
 
