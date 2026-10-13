@@ -84,6 +84,8 @@ type fakeCoder struct {
 	workspaces map[uuid.UUID]*fakeWorkspace
 	faults     map[string][]fakeFault
 	requests   map[string]int // Route -> requests received.
+
+	aiProviders map[uuid.UUID]*fakeAIProvider // See fakecoder_ai_test.go.
 }
 
 func newFakeCoder(t *testing.T) *fakeCoder {
@@ -93,7 +95,7 @@ func newFakeCoder(t *testing.T) *fakeCoder {
 		users: map[uuid.UUID]codersdk.User{}, orgs: map[uuid.UUID]codersdk.Organization{},
 		orgRoles: map[uuid.UUID]map[uuid.UUID][]codersdk.SlimRole{}, templates: map[uuid.UUID]codersdk.Template{},
 		versions: map[uuid.UUID]codersdk.TemplateVersion{}, workspaces: map[uuid.UUID]*fakeWorkspace{},
-		faults: map[string][]fakeFault{}, requests: map[string]int{},
+		faults: map[string][]fakeFault{}, requests: map[string]int{}, aiProviders: map[uuid.UUID]*fakeAIProvider{},
 	}
 	f.operatorID = f.addUser("operator", codersdk.LoginTypePassword, codersdk.RoleOwner)
 
@@ -127,6 +129,7 @@ func newFakeCoder(t *testing.T) *fakeCoder {
 	f.route(mux, "GET /api/v2/workspaces/{id}/builds", routeWorkspaceBuilds, f.listBuilds)
 	f.route(mux, "POST /api/v2/workspaces/{id}/builds", routeCreateBuild, f.createBuild)
 	f.route(mux, "PATCH /api/v2/workspacebuilds/{id}/cancel", routeCancelBuild, f.cancelBuild)
+	f.registerAIProviderRoutes(mux)
 
 	f.server = httptest.NewServer(mux)
 	t.Cleanup(func() {
