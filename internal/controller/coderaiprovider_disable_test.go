@@ -24,7 +24,8 @@ func editSecret(ctx context.Context, t *testing.T, secret *corev1.Secret, edit f
 
 // #267: when the key Secret stops allowing the origin that Coder uses, the
 // controller disables the provider in Coder with one PATCH that holds no key
-// and no URL. The restored consent enables it again.
+// and no URL. The disable is a kill switch: the restored consent does not
+// undo it or a dashboard key change, and a spec edit enables the provider.
 func TestCoderAIProviderDisablesWithoutConsent(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -57,28 +58,53 @@ func TestCoderAIProviderDisablesWithoutConsent(t *testing.T) {
 			got, result := env.reconcile(ctx, t, provider)
 			require.Contains(t, requireAIProviderStep(t, got, false, tc.reason), "Coder can still send the key")
 			require.Equal(t, 30*time.Second, result.RequeueAfter)
-			require.Zero(t, got.Status.AppliedGeneration, "the re-arm is written before the PATCH")
 
 			writes := env.writes()
 			got, result = env.reconcile(ctx, t, got)
 			require.Contains(t, requireAIProviderStep(t, got, true, tc.reason), "The controller disabled provider openai in Coder")
-			require.Zero(t, result.RequeueAfter, "the Secret watch requeues the provider")
+			require.Equal(t, 10*time.Minute, result.RequeueAfter, "no Kubernetes event follows a dashboard enable")
+			require.Equal(t, got.Generation, got.Status.AppliedGeneration)
 			require.Equal(t, writes+1, env.writes(), "one PATCH")
 			stored, _ := env.fake.aiProvider("openai")
 			require.False(t, stored.enabled)
 			require.Equal(t, before.baseURL, stored.baseURL)
 			require.Equal(t, before.keys, stored.keys, "the PATCH held no key")
 
-			got, _ = env.reconcile(ctx, t, got)
+			got, result = env.reconcile(ctx, t, got)
 			require.Contains(t, requireAIProviderStep(t, got, true, tc.reason), "Provider openai is disabled in Coder.")
+			require.Equal(t, 10*time.Minute, result.RequeueAfter)
 			require.Equal(t, writes+1, env.writes(), "a disabled provider needs no write")
 
+			// A dashboard enable while consent is withdrawn is undone by the
+			// next resync.
+			dashboard := env.fake.client(t, 2*time.Second)
+			_, err := dashboard.UpdateAIProvider(ctx, got.Status.ProviderID, codersdk.UpdateAIProviderRequest{Enabled: ptrTo(true)})
+			require.NoError(t, err)
+			got, _ = env.reconcile(ctx, t, got)
+			require.Contains(t, requireAIProviderStep(t, got, true, tc.reason), "The controller disabled provider openai in Coder")
+			stored, _ = env.fake.aiProvider("openai")
+			require.False(t, stored.enabled)
+
+			// A dashboard key change and the restored consent stay kill
+			// switches.
+			_, err = dashboard.UpdateAIProvider(ctx, got.Status.ProviderID, codersdk.UpdateAIProviderRequest{
+				APIKeys: &[]codersdk.AIProviderKeyMutation{{APIKey: ptrTo("sk-dashboard-0123456789abcdef")}},
+			})
+			require.NoError(t, err)
 			editSecret(ctx, t, secret, func(s *corev1.Secret) { s.Labels, s.Annotations = consented.Labels, consented.Annotations })
+			writes = env.writes()
+			got, _ = env.reconcile(ctx, t, got)
+			requireAIProviderStep(t, got, true, "DisabledExternally")
+			require.Equal(t, writes, env.writes())
+			stored, _ = env.fake.aiProvider("openai")
+			require.Equal(t, "sk-dashboard-0123456789abcdef", stored.keys[0].plaintext)
+
+			got = editSpec(ctx, t, got, func(s *coderv1alpha1.CoderAIProviderSpec) { s.DisplayName = "OpenAI v2" })
 			got, _ = env.reconcile(ctx, t, got)
 			requireAIProviderReady(t, got)
 			stored, _ = env.fake.aiProvider("openai")
 			require.True(t, stored.enabled)
-			require.Equal(t, before.keys, stored.keys, "the key was not sent again")
+			require.Equal(t, testAIProviderKey, stored.keys[0].plaintext)
 		})
 	}
 }
@@ -115,6 +141,18 @@ func TestCoderAIProviderConsentWithdrawnWithoutDisable(t *testing.T) {
 		require.Contains(t, requireAIProviderStep(t, got, true, credentialsecret.ReasonDestinationNotAllowed), "The controller disabled provider openai in Coder")
 		stored, _ := env.fake.aiProvider("openai")
 		require.False(t, stored.enabled, "the new Secret cannot prove consent for the key that Coder holds")
+	})
+	t.Run("Secret recreated under the same name", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		env, secret, provider := newReadyAIProvider(ctx, t)
+		require.NoError(t, k8sClient.Delete(ctx, secret))
+		createSecret(ctx, t, env.keySecret(consentedObjectMeta("", "", testAIProviderOrigin), testAIProviderKeyRotated))
+		got := editSpec(ctx, t, provider, func(s *coderv1alpha1.CoderAIProviderSpec) { s.BaseURL = "https://llm.example.com/v1" })
+		got, _ = env.reconcile(ctx, t, got)
+		require.Contains(t, requireAIProviderStep(t, got, true, credentialsecret.ReasonDestinationNotAllowed), "The controller disabled provider openai in Coder")
+		stored, _ := env.fake.aiProvider("openai")
+		require.False(t, stored.enabled, "the new Secret did not consent for the key that Coder holds")
 	})
 	t.Run("disabled in the dashboard", func(t *testing.T) {
 		t.Parallel()

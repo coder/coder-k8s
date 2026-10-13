@@ -192,7 +192,7 @@ func (r *CoderAIProviderReconciler) check(
 	key, err := credentialsecret.Read(ctx, r.Client, provider.Namespace, provider.Spec.APIKeySecretRef, baseURL)
 	if credErr := (*credentialsecret.Error)(nil); errors.As(err, &credErr) {
 		if provider.Status.ProviderID != "" && aiProviderConsentWithdrawn(credErr) {
-			return r.disableWithoutConsent(ctx, provider, before, credErr)
+			return r.disableWithoutConsent(ctx, provider, credErr)
 		}
 		return aiProviderStalled(0, credErr.Reason, "%s", credErr.Message), nil
 	} else if err != nil {
