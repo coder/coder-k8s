@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -44,6 +45,8 @@ const (
 type CoderAIProviderReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	sentKeys sync.Map // types.UID -> SHA-256 of the key that Coder holds. Memory only.
 }
 
 // aiProviderStep is the outcome of one reconcile. A ready step reports that
@@ -201,21 +204,27 @@ func (r *CoderAIProviderReconciler) check(
 		return aiProviderWait(aiProviderRetry, wait.reason, "%s", wait.message), nil
 	}
 	var step *aiProviderStep
-	if provider.Status.ProviderID == "" {
+	recreate := provider.Status.ProviderID == ""
+	if !recreate {
+		if step, recreate, err = r.syncAIProvider(ctx, sdk, provider, key, before); err != nil {
+			return nil, err
+		}
+	}
+	if recreate {
 		if step, err = r.createOrConfirm(ctx, sdk, provider, key, before); err != nil {
 			return nil, err
 		}
 		if step == nil {
-			// Store the ID before the apply replaces the nonce: after that,
+			// Store the ID before the sync replaces the nonce: after that,
 			// only the stored ID proves that this object created the provider.
 			if err := r.writeStatus(ctx, provider, before); err != nil {
 				return nil, err
 			}
 			*before = *provider.Status.DeepCopy()
+			if step, _, err = r.syncAIProvider(ctx, sdk, provider, key, before); err != nil {
+				return nil, err
+			}
 		}
-	}
-	if step == nil {
-		step = applyAIProvider(ctx, sdk, provider, key)
 	}
 	// Coder messages can echo the request, so scrub the key from them.
 	step.message = credentialsecret.Redact(step.message, key)
