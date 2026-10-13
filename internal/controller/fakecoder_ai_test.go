@@ -164,9 +164,14 @@ func (f *fakeCoder) createAIProvider(r *http.Request) (int, any) {
 		id: uuid.New(), name: req.Name, providerType: req.Type, displayName: req.DisplayName, icon: req.Icon,
 		enabled: req.Enabled, baseURL: req.BaseURL, createdAt: now, updatedAt: now,
 	}
-	p.keys = insertFakeAIProviderKeys(nil, req.APIKeys, now)
+	// The answer lists the keys in request order, because Coder returns the
+	// inserted rows as is (coderd/ai_providers.go:221, :250). Later reads
+	// return them sorted.
+	p.keys = newFakeAIProviderKeys(req.APIKeys, now)
+	answer := p.view()
+	p.keys = sortFakeAIProviderKeys(slices.Clone(p.keys))
 	f.aiProviders[p.id] = p
-	return http.StatusCreated, p.view()
+	return http.StatusCreated, answer
 }
 
 // updateAIProvider mirrors aiProvidersUpdate (coderd/ai_providers.go:273-455)
@@ -210,7 +215,7 @@ func (f *fakeCoder) updateAIProvider(r *http.Request) (int, any) {
 			keep[*m.ID] = true
 		}
 		kept := slices.DeleteFunc(slices.Clone(p.keys), func(k fakeAIProviderKey) bool { return !keep[k.id] })
-		keys = insertFakeAIProviderKeys(kept, inserts, now)
+		keys = sortFakeAIProviderKeys(append(kept, newFakeAIProviderKeys(inserts, now)...))
 	}
 	if req.DisplayName != nil {
 		p.displayName = *req.DisplayName // Empty clears the column (coderd/ai_providers.go:363-367).
@@ -235,13 +240,19 @@ func (f *fakeCoder) deleteAIProvider(r *http.Request) (int, any) {
 	return http.StatusNoContent, nil
 }
 
-// insertFakeAIProviderKeys appends one key row with a new ID per plaintext,
-// then orders keys by created_at and ID
-// (coderd/database/queries/ai_provider_keys.sql:9-22).
-func insertFakeAIProviderKeys(keys []fakeAIProviderKey, plaintexts []string, now time.Time) []fakeAIProviderKey {
+// newFakeAIProviderKeys returns one key row with a new ID per plaintext, in
+// request order, like insertAIProviderKeys (coderd/ai_providers.go:671-690).
+func newFakeAIProviderKeys(plaintexts []string, now time.Time) []fakeAIProviderKey {
+	keys := make([]fakeAIProviderKey, 0, len(plaintexts))
 	for _, plaintext := range plaintexts {
 		keys = append(keys, fakeAIProviderKey{id: uuid.New(), plaintext: plaintext, createdAt: now})
 	}
+	return keys
+}
+
+// sortFakeAIProviderKeys orders keys as every read returns them: by
+// created_at, then ID (coderd/database/queries/ai_provider_keys.sql:9-22).
+func sortFakeAIProviderKeys(keys []fakeAIProviderKey) []fakeAIProviderKey {
 	slices.SortStableFunc(keys, func(a, b fakeAIProviderKey) int {
 		return cmp.Or(a.createdAt.Compare(b.createdAt), cmp.Compare(a.id.String(), b.id.String()))
 	})

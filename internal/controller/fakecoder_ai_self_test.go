@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -143,6 +144,34 @@ func TestFakeCoderAIProviderKeys(t *testing.T) {
 	cleared, err := c.UpdateAIProvider(ctx, "openai", codersdk.UpdateAIProviderRequest{APIKeys: &[]codersdk.AIProviderKeyMutation{}})
 	require.NoError(t, err)
 	require.Empty(t, cleared.APIKeys)
+}
+
+// The create answer lists keys in request order. Every later read sorts
+// keys that share a creation time by ID.
+func TestFakeCoderAIProviderKeyOrder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newFakeCoder(t)
+	c := f.client(t, 2*time.Second)
+	// Six keys: random IDs come out sorted by chance in 1 of 720 runs only.
+	var plaintexts, wantMasks []string
+	for _, letter := range "zamqbx" {
+		plaintexts = append(plaintexts, "sk-"+string(letter)+"-0123456789abcdef")
+		wantMasks = append(wantMasks, "sk-"+string(letter)+"...cdef")
+	}
+	created := createFakeAIProvider(ctx, t, c, "openai", plaintexts...)
+	var masks []string
+	for _, k := range created.APIKeys {
+		masks = append(masks, k.Masked)
+	}
+	require.Equal(t, wantMasks, masks)
+
+	got, err := c.AIProvider(ctx, "openai")
+	require.NoError(t, err)
+	require.ElementsMatch(t, created.APIKeys, got.APIKeys)
+	require.True(t, slices.IsSortedFunc(got.APIKeys, func(a, b codersdk.AIProviderKey) int {
+		return strings.Compare(a.ID.String(), b.ID.String())
+	}), "reads order keys of one creation time by ID")
 }
 
 // F5: names follow Coder's pattern and are unique among live providers.
