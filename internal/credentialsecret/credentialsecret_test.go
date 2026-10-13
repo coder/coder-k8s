@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 
@@ -338,20 +339,89 @@ func TestRead(t *testing.T) {
 	}
 }
 
-// controlPlaneUsing returns a control plane named coder in namespace that uses
-// secretName as its license or database Secret.
+// controlPlaneUsing returns a control plane named coder in namespace whose spec
+// references secretName in role.
 func controlPlaneUsing(namespace, role, secretName string) *coderv1alpha1.CoderControlPlane {
 	controlPlane := &coderv1alpha1.CoderControlPlane{ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: namespace}}
-	ref := coderv1alpha1.SecretKeySelector{Name: secretName, Key: "value"}
-	switch role {
-	case "license":
-		controlPlane.Spec.LicenseSecretRef = &ref
-	case "database":
-		controlPlane.Spec.Database = &coderv1alpha1.DatabaseSpec{ConnectionSecretRef: ref}
-	default:
-		panic("assertion failed: unknown control plane Secret role " + role)
-	}
+	credentialsecrettest.SetControlPlaneSecret(&controlPlane.Spec, role, secretName)
 	return controlPlane
+}
+
+// controlPlaneWithVolume returns a control plane named coder whose only
+// Secret reference is one volume with source.
+func controlPlaneWithVolume(source corev1.VolumeSource) *coderv1alpha1.CoderControlPlane {
+	controlPlane := &coderv1alpha1.CoderControlPlane{ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: testNamespace}}
+	controlPlane.Spec.Volumes = []corev1.Volume{{Name: "v", VolumeSource: source}}
+	return controlPlane
+}
+
+// Every role of a Secret that a control plane spec references refuses the
+// Secret, names the role, and refuses it in the same namespace only.
+func TestReadRefusesControlPlaneSpecSecrets(t *testing.T) {
+	t.Parallel()
+
+	for _, role := range credentialsecrettest.ControlPlaneSecretRoles {
+		for _, namespace := range []string{testNamespace, "other"} {
+			t.Run(role+"/"+namespace, func(t *testing.T) {
+				t.Parallel()
+				c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+					WithObjects(consentedSecret(), controlPlaneUsing(namespace, role, testSecret)).Build()
+				_, err := credentialsecret.Read(context.Background(), c, testNamespace,
+					coderv1alpha1.SecretKeySelector{Name: testSecret, Key: testKey}, mustURL(t, testOrigin))
+				if namespace != testNamespace {
+					if err != nil {
+						t.Fatalf("a control plane in another namespace must not refuse, got %v", err)
+					}
+					return
+				}
+				var credErr *credentialsecret.Error
+				want := fmt.Sprintf("Secret %q is the %s Secret of CoderControlPlane %q and cannot be used here.", testSecret, role, "coder")
+				if !errors.As(err, &credErr) || credErr.Reason != credentialsecret.ReasonRefused || !strings.Contains(credErr.Message, want) {
+					t.Fatalf("expected %s with %q, got %v", credentialsecret.ReasonRefused, want, err)
+				}
+				credentialsecrettest.RequireNoLeak(t, []string{testValue}, map[string]any{"error": err})
+			})
+		}
+	}
+}
+
+// Each Secret source of a pod volume counts, and other volume sources do not.
+func TestReadRefusesControlPlaneVolumeSecrets(t *testing.T) {
+	t.Parallel()
+
+	local := &corev1.LocalObjectReference{Name: testSecret}
+	refused := map[string]corev1.VolumeSource{
+		"secret":    {Secret: &corev1.SecretVolumeSource{SecretName: testSecret}},
+		"projected": {Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{{ConfigMap: &corev1.ConfigMapProjection{}}, {Secret: &corev1.SecretProjection{LocalObjectReference: *local}}}}},
+		"azureFile": {AzureFile: &corev1.AzureFileVolumeSource{SecretName: testSecret}},
+		"cephfs":    {CephFS: &corev1.CephFSVolumeSource{SecretRef: local}},
+		"cinder":    {Cinder: &corev1.CinderVolumeSource{SecretRef: local}},
+		"flex":      {FlexVolume: &corev1.FlexVolumeSource{SecretRef: local}},
+		"rbd":       {RBD: &corev1.RBDVolumeSource{SecretRef: local}},
+		"iscsi":     {ISCSI: &corev1.ISCSIVolumeSource{SecretRef: local}},
+		"scaleIO":   {ScaleIO: &corev1.ScaleIOVolumeSource{SecretRef: local}},
+		"storageOS": {StorageOS: &corev1.StorageOSVolumeSource{SecretRef: local}},
+		"csi":       {CSI: &corev1.CSIVolumeSource{NodePublishSecretRef: local}},
+		// API validation rejects two sources in one volume. The check still sees both.
+		"two sources": {ConfigMap: &corev1.ConfigMapVolumeSource{}, CSI: &corev1.CSIVolumeSource{NodePublishSecretRef: local}},
+	}
+	allowed := map[string]corev1.VolumeSource{
+		"configMap":     {ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: *local}},
+		"other Secret":  {Secret: &corev1.SecretVolumeSource{SecretName: "other"}},
+		"cephfs no ref": {CephFS: &corev1.CephFSVolumeSource{}},
+		"emptyDir":      {EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	}
+	for name, source := range refused {
+		names := credentialsecret.ControlPlaneSecretNames(controlPlaneWithVolume(source))
+		if !slices.Contains(names, testSecret) {
+			t.Errorf("volume source %s: expected %q in %v", name, testSecret, names)
+		}
+	}
+	for name, source := range allowed {
+		if names := credentialsecret.ControlPlaneSecretNames(controlPlaneWithVolume(source)); slices.Contains(names, testSecret) {
+			t.Errorf("volume source %s must not refuse %q, got %v", name, testSecret, names)
+		}
+	}
 }
 
 func TestControlPlaneSecretNames(t *testing.T) {
@@ -374,6 +444,14 @@ func TestControlPlaneSecretNames(t *testing.T) {
 	if got := credentialsecret.ControlPlaneSecretNames(controlPlane); fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("expected %v, got %v", want, got)
 	}
+	controlPlane.Spec.Expose = &coderv1alpha1.ExposeSpec{Ingress: &coderv1alpha1.IngressExposeSpec{
+		TLS: &coderv1alpha1.IngressTLSExposeSpec{SecretName: "ingress-tls", WildcardSecretName: "wildcard-tls"},
+	}}
+	want = []string{"coder-operator-token", "db", "ingress-tls", "license", "wildcard-tls"}
+	if got := credentialsecret.ControlPlaneSecretNames(controlPlane); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+	controlPlane.Spec.Expose = nil
 	controlPlane.Spec.LicenseSecretRef.Name = "  "
 	controlPlane.Spec.Database = nil
 	if got := credentialsecret.ControlPlaneSecretNames(controlPlane); fmt.Sprint(got) != "[coder-operator-token]" {

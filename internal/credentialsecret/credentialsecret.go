@@ -6,8 +6,8 @@
 //   - It has type Opaque.
 //   - The operator did not generate it: it has no owner in the coder.com API
 //     group, and it does not carry app.kubernetes.io/managed-by=coder-k8s.
-//   - No CoderControlPlane in the namespace uses it for its own access: as its
-//     operator token Secret, its license Secret, or its database Secret.
+//   - No CoderControlPlane in the namespace uses it: its operator token Secret,
+//     and every Secret that its spec references (see ControlPlaneSecretNames).
 //   - It carries the label coder.com/credential=true.
 //   - Its annotation coder.com/credential-destinations lists the origin of the
 //     destination that the caller sends the value to.
@@ -260,11 +260,19 @@ func isRefused(ctx context.Context, c client.Reader, secret *corev1.Secret) (*Er
 	return nil, nil
 }
 
-// Roles of the Secrets that a control plane uses for its own access.
+// Roles of the Secrets that a control plane uses. Each names the spec field in
+// the refusal message.
 const (
 	roleOperatorToken = "operator token"
 	roleLicense       = "license"
 	roleDatabase      = "database"
+	roleExtraEnv      = "extraEnv"
+	roleEnvFrom       = "envFrom"
+	roleImagePull     = "image pull"
+	roleTLS           = "TLS"
+	roleIngressTLS    = "Ingress TLS"
+	roleCACertificate = "CA certificate"
+	roleVolume        = "volume"
 )
 
 type controlPlaneSecret struct {
@@ -272,21 +280,52 @@ type controlPlaneSecret struct {
 	role string
 }
 
-// controlPlaneSecrets returns the Secrets that controlPlane uses for its own
-// access. Empty names are left out.
+// controlPlaneSecrets returns the Secrets that controlPlane uses: its operator
+// token Secret and every Secret that its spec references. Empty names are left
+// out. The first role of a name is the one that Read reports.
 func controlPlaneSecrets(controlPlane *coderv1alpha1.CoderControlPlane) []controlPlaneSecret {
 	if controlPlane == nil {
 		return nil
 	}
 	candidates := []controlPlaneSecret{{name: OperatorTokenSecretName(controlPlane), role: roleOperatorToken}}
+	add := func(name, role string) { candidates = append(candidates, controlPlaneSecret{name: name, role: role}) }
 	if ref := controlPlane.Status.OperatorTokenSecretRef; ref != nil {
-		candidates = append(candidates, controlPlaneSecret{name: ref.Name, role: roleOperatorToken})
+		add(ref.Name, roleOperatorToken)
 	}
-	if ref := controlPlane.Spec.LicenseSecretRef; ref != nil {
-		candidates = append(candidates, controlPlaneSecret{name: ref.Name, role: roleLicense})
+	spec := &controlPlane.Spec
+	if ref := spec.LicenseSecretRef; ref != nil {
+		add(ref.Name, roleLicense)
 	}
-	if db := controlPlane.Spec.Database; db != nil {
-		candidates = append(candidates, controlPlaneSecret{name: db.ConnectionSecretRef.Name, role: roleDatabase})
+	if db := spec.Database; db != nil {
+		add(db.ConnectionSecretRef.Name, roleDatabase)
+	}
+	for _, env := range spec.ExtraEnv {
+		if env.ValueFrom != nil && env.ValueFrom.SecretKeyRef != nil {
+			add(env.ValueFrom.SecretKeyRef.Name, roleExtraEnv)
+		}
+	}
+	for _, source := range spec.EnvFrom {
+		if source.SecretRef != nil {
+			add(source.SecretRef.Name, roleEnvFrom)
+		}
+	}
+	for _, ref := range spec.ImagePullSecrets {
+		add(ref.Name, roleImagePull)
+	}
+	for _, name := range spec.TLS.SecretNames {
+		add(name, roleTLS)
+	}
+	if spec.Expose != nil && spec.Expose.Ingress != nil && spec.Expose.Ingress.TLS != nil {
+		add(spec.Expose.Ingress.TLS.SecretName, roleIngressTLS)
+		add(spec.Expose.Ingress.TLS.WildcardSecretName, roleIngressTLS)
+	}
+	for _, cert := range spec.Certs.Secrets {
+		add(cert.Name, roleCACertificate)
+	}
+	for i := range spec.Volumes {
+		for _, name := range volumeSecretNames(&spec.Volumes[i].VolumeSource) {
+			add(name, roleVolume)
+		}
 	}
 	secrets := make([]controlPlaneSecret, 0, len(candidates))
 	for _, candidate := range candidates {
@@ -297,10 +336,65 @@ func controlPlaneSecrets(controlPlane *coderv1alpha1.CoderControlPlane) []contro
 	return secrets
 }
 
+// volumeSecretNames returns the Secrets that a pod volume source references, in
+// the same namespace. It covers the same sources as VisitPodSecretNames in
+// k8s.io/kubernetes/pkg/api/v1/pod.
+func volumeSecretNames(source *corev1.VolumeSource) []string {
+	var names []string
+	localRef := func(ref *corev1.LocalObjectReference) {
+		if ref != nil {
+			names = append(names, ref.Name)
+		}
+	}
+	// Independent checks, not a switch: a source that sets more than one
+	// field (rejected by API validation) still reports every name.
+	if source.Secret != nil {
+		names = append(names, source.Secret.SecretName)
+	}
+	if source.Projected != nil {
+		for _, projection := range source.Projected.Sources {
+			if projection.Secret != nil {
+				names = append(names, projection.Secret.Name)
+			}
+		}
+	}
+	if source.AzureFile != nil {
+		names = append(names, source.AzureFile.SecretName)
+	}
+	if source.CephFS != nil {
+		localRef(source.CephFS.SecretRef)
+	}
+	if source.Cinder != nil {
+		localRef(source.Cinder.SecretRef)
+	}
+	if source.FlexVolume != nil {
+		localRef(source.FlexVolume.SecretRef)
+	}
+	if source.RBD != nil {
+		localRef(source.RBD.SecretRef)
+	}
+	if source.ISCSI != nil {
+		localRef(source.ISCSI.SecretRef)
+	}
+	if source.ScaleIO != nil {
+		localRef(source.ScaleIO.SecretRef)
+	}
+	if source.StorageOS != nil {
+		localRef(source.StorageOS.SecretRef)
+	}
+	if source.CSI != nil {
+		localRef(source.CSI.NodePublishSecretRef)
+	}
+	return names
+}
+
 // ControlPlaneSecretNames returns the names of the Secrets that Read refuses
 // because of controlPlane: its operator token Secret (the configured or default
-// name, and the name in status), its license Secret, and its database Secret.
-// The names are sorted and unique. Controllers re-queue the resources that
+// name, and the name in status) and every Secret that its spec references:
+// spec.licenseSecretRef, spec.database.connectionSecretRef, spec.extraEnv
+// secretKeyRefs, spec.envFrom secretRefs, spec.imagePullSecrets,
+// spec.tls.secretNames, spec.expose.ingress.tls, spec.certs.secrets, and the
+// Secret sources of spec.volumes. The names are sorted and unique. Controllers re-queue the resources that
 // reference these names when a control plane changes.
 func ControlPlaneSecretNames(controlPlane *coderv1alpha1.CoderControlPlane) []string {
 	secrets := controlPlaneSecrets(controlPlane)

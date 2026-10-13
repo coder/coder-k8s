@@ -396,13 +396,11 @@ func TestCoderAIProviderWatches(t *testing.T) {
 	other.Spec.OperatorAccess.GeneratedTokenSecretName = secret.Name
 	require.NoError(t, k8sClient.Update(ctx, other))
 	requireReason(credentialsecret.ReasonRefused)
-	// The same holds when the control plane uses the key Secret as its license
-	// or database Secret, and stops using it (#249).
+	// The same holds when the control plane spec references the key Secret in
+	// any other field, and stops referencing it (#249, #260).
 	for _, role := range controlPlaneSecretRoles {
 		require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(other), other))
-		other.Spec.OperatorAccess.GeneratedTokenSecretName = ""
-		setControlPlaneSecret(&other.Spec, "license", "")
-		setControlPlaneSecret(&other.Spec, "database", "")
+		other.Spec = coderv1alpha1.CoderControlPlaneSpec{Image: "coder-control-plane:test"}
 		require.NoError(t, k8sClient.Update(ctx, other))
 		requireReason("Applied")
 
