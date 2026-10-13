@@ -150,8 +150,10 @@ type DeleteProvisionerKeyByIDRequest struct {
 
 // DeleteProvisionerKeyByID deletes the provisioner key with req.KeyID in the
 // organization req.OrganizationID. It does nothing when no key has that ID,
-// so a key that someone else created with the same name stays. Coder deletes
-// keys by name, so the key is looked up by ID first.
+// so a key that someone else created with the same name stays. The Coder API
+// deletes keys only by name, so the key is looked up by ID first. The lookup
+// and the delete are two requests: a key deleted and created again with the
+// same name between them is deleted too.
 func (c *SDKClient) DeleteProvisionerKeyByID(ctx context.Context, req DeleteProvisionerKeyByIDRequest) error {
 	if req.CoderURL == "" {
 		return xerrors.New("coder URL is required")

@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
@@ -115,4 +118,65 @@ func requireProvisionerGone(ctx context.Context, t *testing.T, name types.Namesp
 		}
 		return err == nil && !controllerutil.ContainsFinalizer(latest, coderv1alpha1.ProvisionerKeyCleanupFinalizer)
 	}, 5*time.Second, 100*time.Millisecond)
+}
+
+// TestCoderProvisionerKey_RecordedBeforePublished checks that a new key is in
+// status before its plaintext reaches the Secret, and that a failed status
+// write revokes the new key and publishes nothing.
+func TestCoderProvisionerKey_RecordedBeforePublished(t *testing.T) {
+	t.Parallel()
+
+	for _, failStatus := range []bool{false, true} {
+		name := "status written first"
+		if failStatus {
+			name = "status write fails"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			f := newProvisionerCredentialFixture(ctx, t, "cprov-key-order")
+			created := f.bootstrapClient.provisionerKeyResponses[0]
+			provisioner := f.createProvisioner(ctx, t, nil, nil)
+			keySecretName := types.NamespacedName{Name: provisioner.Name + "-provisioner-key", Namespace: provisioner.Namespace}
+
+			base, err := ctrlclient.NewWithWatch(cfg, ctrlclient.Options{Scheme: scheme})
+			require.NoError(t, err)
+			var statusAtSecretWrite string
+			ordered := interceptor.NewClient(base, interceptor.Funcs{
+				SubResourceUpdate: func(ctx context.Context, c ctrlclient.Client, sub string, obj ctrlclient.Object, opts ...ctrlclient.SubResourceUpdateOption) error {
+					if p, ok := obj.(*coderv1alpha1.CoderProvisioner); ok && failStatus && p.Status.ProvisionerKeyID == created.KeyID.String() {
+						return apierrors.NewConflict(coderv1alpha1.GroupVersion.WithResource("coderprovisioners").GroupResource(), p.Name, errors.New("injected"))
+					}
+					return c.SubResource(sub).Update(ctx, obj, opts...)
+				},
+				Create: func(ctx context.Context, c ctrlclient.WithWatch, obj ctrlclient.Object, opts ...ctrlclient.CreateOption) error {
+					if s, ok := obj.(*corev1.Secret); ok && s.Name == keySecretName.Name {
+						latest := &coderv1alpha1.CoderProvisioner{}
+						require.NoError(t, c.Get(ctx, types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}, latest))
+						statusAtSecretWrite = latest.Status.ProvisionerKeyID
+					}
+					return c.Create(ctx, obj, opts...)
+				},
+			})
+			f.reconciler.Client = ordered
+			request := ctrl.Request{NamespacedName: types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}}
+
+			_, err = f.reconciler.Reconcile(ctx, request) // adds the finalizer
+			require.NoError(t, err)
+			_, err = f.reconciler.Reconcile(ctx, request)
+
+			if !failStatus {
+				require.NoError(t, err)
+				require.Equal(t, created.KeyID.String(), statusAtSecretWrite, "status must record the key before the Secret holds it")
+				require.Empty(t, f.bootstrapClient.deleteKeyByIDRequests)
+				return
+			}
+			require.Error(t, err)
+			require.Len(t, f.bootstrapClient.deleteKeyByIDRequests, 1, "the unpublished key must be revoked")
+			require.Equal(t, created.KeyID, f.bootstrapClient.deleteKeyByIDRequests[0].KeyID)
+			require.Equal(t, created.OrganizationID, f.bootstrapClient.deleteKeyByIDRequests[0].OrganizationID)
+			err = k8sClient.Get(ctx, keySecretName, &corev1.Secret{})
+			require.True(t, apierrors.IsNotFound(err), "no Secret may hold the revoked key, got %v", err)
+		})
+	}
 }
