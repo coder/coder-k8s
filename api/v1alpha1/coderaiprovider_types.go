@@ -35,7 +35,7 @@ type CoderAIProviderSpec struct {
 	// its origin as an allowed destination.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=2048
-	// +kubebuilder:validation:XValidation:rule="isURL(self)",message="baseURL must be a valid URL"
+	// +kubebuilder:validation:XValidation:rule="isURL(self) && url(self).getHostname() != ''",message="baseURL must be a valid URL with a host"
 	// +kubebuilder:validation:XValidation:rule="self.matches('^https?://[^/?#@\\\\s]+([/?#].*)?$')",message="baseURL must be an http:// or https:// URL with a host and no user info"
 	BaseURL string `json:"baseURL"`
 	// DisplayName is the name that Coder shows. When empty, Coder shows the

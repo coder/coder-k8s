@@ -64,11 +64,17 @@ func TestCoderAIProviderAPIValidation(t *testing.T) {
 		{name: "base URL with a space in the host", wantErr: "baseURL must be an http:// or https:// URL", mutate: func(s *coderv1alpha1.CoderAIProviderSpec) {
 			s.BaseURL = "https://api openai.com/v1"
 		}},
-		{name: "base URL with a malformed escape in the host", wantErr: "baseURL must be a valid URL", mutate: func(s *coderv1alpha1.CoderAIProviderSpec) {
+		{name: "base URL with a malformed escape in the host", wantErr: "baseURL must be a valid URL with a host", mutate: func(s *coderv1alpha1.CoderAIProviderSpec) {
 			s.BaseURL = "https://api%.example.com"
 		}},
-		{name: "base URL with a malformed escape in the path", wantErr: "baseURL must be a valid URL", mutate: func(s *coderv1alpha1.CoderAIProviderSpec) {
+		{name: "base URL with a malformed escape in the path", wantErr: "baseURL must be a valid URL with a host", mutate: func(s *coderv1alpha1.CoderAIProviderSpec) {
 			s.BaseURL = "https://api.example.com/%zz"
+		}},
+		{name: "base URL with a port but no host", wantErr: "baseURL must be a valid URL with a host", mutate: func(s *coderv1alpha1.CoderAIProviderSpec) {
+			s.BaseURL = "https://:8080/v1"
+		}},
+		{name: "base URL with an IPv6 host", wantEnabled: true, mutate: func(s *coderv1alpha1.CoderAIProviderSpec) {
+			s.BaseURL = "http://[fd00::1]:8080/v1"
 		}},
 		{name: "base URL too long", wantErr: "spec.baseURL", mutate: func(s *coderv1alpha1.CoderAIProviderSpec) {
 			s.BaseURL = "https://api.openai.com/" + strings.Repeat("v", 2026)
