@@ -54,6 +54,7 @@ kubectl -n coder get codercontrolplane <name> -o jsonpath='{.status.url}{"\n"}'
 The operator also refuses these Secrets, even with the label and the annotation:
 
 - Secrets that the operator generates: Secrets owned by a `coder.com` resource, Secrets with the label `app.kubernetes.io/managed-by=coder-k8s`, and the operator token Secret of any `CoderControlPlane` in the namespace (for example `<control plane>-operator-token`).
+- The license Secret (`spec.licenseSecretRef`) and the database Secret (`spec.database.connectionSecretRef`) of any `CoderControlPlane` in the namespace. The message names the control plane, for example `Secret "coder-db" is the database Secret of CoderControlPlane "coder" and cannot be used here.`
 - Secrets with a type other than `Opaque`.
 - Values that are empty, larger than 8 KiB, or that start or end with whitespace (a trailing newline counts).
 
@@ -90,7 +91,7 @@ kubectl get coderworkspaceproxies,coderprovisioners -A -o jsonpath='{range .item
 | `CredentialKeyMissing` | The Secret does not have the referenced key. | Add the key, or fix the reference. |
 | `CredentialNotOptedIn` | The label or the annotation is missing. | Add both. |
 | `CredentialDestinationNotAllowed` | The annotation does not list the destination origin. | Add the origin that the message names. |
-| `CredentialRefused` | The operator generated the Secret, or the type is not `Opaque`. | Store the credential in its own `Opaque` Secret. For a proxy, create a dedicated Coder token instead of the operator token. |
+| `CredentialRefused` | The operator generated the Secret, a `CoderControlPlane` in the namespace uses it as its license or database Secret, or the type is not `Opaque`. | Store the credential in its own `Opaque` Secret. For a proxy, create a dedicated Coder token instead of the operator token. |
 | `CredentialMalformed` | The value or the annotation is not valid, or a URL or a required reference in the spec is missing or not valid. | Fix what the message names. |
 | `TokenSecretNotOwned` | The generated token Secret exists and another owner, or no owner, controls it. | Remove `generatedTokenSecretName` to use the default name, or set a name that does not exist yet. |
 | `KeySecretNotOwned` | The provisioner key Secret exists and another owner, or no owner, controls it. | Delete that Secret, or set `spec.key.secretName` to a name that does not exist yet. The operator then creates a new provisioner key in Coder. |
@@ -168,6 +169,21 @@ Do these steps before you upgrade the operator. Resources that fail a check afte
     ```
 
 5. If a proxy uses the operator token as `spec.bootstrap.credentialsSecretRef`, create a dedicated Coder API token for it. Store the token in its own labeled and annotated Secret, and point `credentialsSecretRef` at that Secret. No label makes the operator token usable.
+
+    The operator also refuses the license Secret and the database Secret of a `CoderControlPlane` in the same namespace. List the proxies and provisioners that reference one of them:
+
+    ```bash
+    kubectl get codercontrolplanes,coderworkspaceproxies,coderprovisioners -A -o json | jq -r '
+      [.items[] | select(.kind == "CoderControlPlane") | .metadata.namespace as $ns |
+        (.spec.licenseSecretRef.name?, .spec.database.connectionSecretRef.name?) | select(. != null) | "\($ns)/\(.)"] as $used |
+      .items[] | select(.kind == "CoderWorkspaceProxy" or .kind == "CoderProvisioner") |
+      .kind as $k | .metadata.namespace as $ns | .metadata.name as $cr |
+      ([.spec.bootstrap.credentialsSecretRef.name?, .spec.proxySessionTokenSecretRef.name?]
+        + [.spec.extraEnv[]?.valueFrom.secretKeyRef.name?]) | map(select(. != null) | "\($ns)/\(.)") | unique[] |
+      select(IN($used[])) | "ACTION \(.) (\($k) \($cr))"'
+    ```
+
+    For each `ACTION` line, copy the value that the resource needs into its own labeled and annotated Secret, and point the resource at that Secret.
 
 6. If a custom proxy image reads the Kubernetes API, change it. Proxy pods no longer get a service account token. Each proxy that passes the checks rolls out once after the upgrade because of this change.
 

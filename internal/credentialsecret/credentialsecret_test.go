@@ -77,6 +77,7 @@ func TestRead(t *testing.T) {
 		destination string
 		key         string
 		wantReason  string
+		wantMessage string
 	}{
 		{name: "consented secret passes", destination: testOrigin},
 		{name: "destination with path and default port passes", destination: "https://CODER.example.com:443/api/v2"},
@@ -251,6 +252,38 @@ func TestRead(t *testing.T) {
 			}},
 			destination: testOrigin,
 		},
+		{
+			name:        "license Secret of a control plane is refused",
+			objects:     []client.Object{controlPlaneUsing(testNamespace, "license", testSecret)},
+			destination: testOrigin,
+			wantReason:  credentialsecret.ReasonRefused,
+			wantMessage: `Secret "proxy-credentials" is the license Secret of CoderControlPlane "coder" and cannot be used here.`,
+		},
+		{
+			name:        "database Secret of a control plane is refused",
+			objects:     []client.Object{controlPlaneUsing(testNamespace, "database", testSecret)},
+			destination: testOrigin,
+			wantReason:  credentialsecret.ReasonRefused,
+			wantMessage: `Secret "proxy-credentials" is the database Secret of CoderControlPlane "coder" and cannot be used here.`,
+		},
+		{
+			// The refusal comes before the consent check, so the reason does not depend on the label.
+			name:        "unlabeled license Secret of a control plane is refused",
+			mutate:      func(s *corev1.Secret) { s.Labels, s.Annotations = nil, nil },
+			objects:     []client.Object{controlPlaneUsing(testNamespace, "license", testSecret)},
+			destination: testOrigin,
+			wantReason:  credentialsecret.ReasonRefused,
+		},
+		{
+			name:        "license Secret of a control plane in another namespace does not refuse",
+			objects:     []client.Object{controlPlaneUsing("other", "license", testSecret)},
+			destination: testOrigin,
+		},
+		{
+			name:        "database Secret of a control plane in another namespace does not refuse",
+			objects:     []client.Object{controlPlaneUsing("other", "database", testSecret)},
+			destination: testOrigin,
+		},
 	}
 
 	for _, tt := range tests {
@@ -297,8 +330,54 @@ func TestRead(t *testing.T) {
 			if !strings.Contains(credErr.Message, fmt.Sprintf("%q", secret.Name)) {
 				t.Fatalf("expected message to name the Secret, got %q", credErr.Message)
 			}
+			if !strings.Contains(credErr.Message, tt.wantMessage) {
+				t.Fatalf("expected message to contain %q, got %q", tt.wantMessage, credErr.Message)
+			}
 			credentialsecrettest.RequireNoLeak(t, []string{testValue}, map[string]any{"error": err})
 		})
+	}
+}
+
+// controlPlaneUsing returns a control plane named coder in namespace that uses
+// secretName as its license or database Secret.
+func controlPlaneUsing(namespace, role, secretName string) *coderv1alpha1.CoderControlPlane {
+	controlPlane := &coderv1alpha1.CoderControlPlane{ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: namespace}}
+	ref := coderv1alpha1.SecretKeySelector{Name: secretName, Key: "value"}
+	switch role {
+	case "license":
+		controlPlane.Spec.LicenseSecretRef = &ref
+	case "database":
+		controlPlane.Spec.Database = &coderv1alpha1.DatabaseSpec{ConnectionSecretRef: ref}
+	default:
+		panic("assertion failed: unknown control plane Secret role " + role)
+	}
+	return controlPlane
+}
+
+func TestControlPlaneSecretNames(t *testing.T) {
+	t.Parallel()
+
+	if got := credentialsecret.ControlPlaneSecretNames(nil); len(got) != 0 {
+		t.Fatalf("expected no names for a nil control plane, got %v", got)
+	}
+	controlPlane := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: testNamespace},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			LicenseSecretRef: &coderv1alpha1.SecretKeySelector{Name: " license ", Key: "license"},
+			Database:         &coderv1alpha1.DatabaseSpec{ConnectionSecretRef: coderv1alpha1.SecretKeySelector{Name: "db", Key: "url"}},
+		},
+		Status: coderv1alpha1.CoderControlPlaneStatus{
+			OperatorTokenSecretRef: &coderv1alpha1.SecretKeySelector{Name: "coder-operator-token", Key: "token"},
+		},
+	}
+	want := []string{"coder-operator-token", "db", "license"}
+	if got := credentialsecret.ControlPlaneSecretNames(controlPlane); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+	controlPlane.Spec.LicenseSecretRef.Name = "  "
+	controlPlane.Spec.Database = nil
+	if got := credentialsecret.ControlPlaneSecretNames(controlPlane); fmt.Sprint(got) != "[coder-operator-token]" {
+		t.Fatalf("expected only the operator token Secret, got %v", got)
 	}
 }
 

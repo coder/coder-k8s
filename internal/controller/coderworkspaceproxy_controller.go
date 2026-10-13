@@ -545,6 +545,10 @@ func (r *CoderWorkspaceProxyReconciler) SetupWithManager(mgr ctrl.Manager) error
 			handler.EnqueueRequestsFromMapFunc(r.reconcileRequestsForSecret),
 			builder.WithPredicates(credentialsecret.WatchPredicate()),
 		).
+		Watches(
+			&coderv1alpha1.CoderControlPlane{},
+			handler.EnqueueRequestsFromMapFunc(r.reconcileRequestsForControlPlane),
+		).
 		Named("coderworkspaceproxy").
 		Complete(r)
 }
@@ -585,6 +589,23 @@ func (r *CoderWorkspaceProxyReconciler) reconcileRequestsForSecret(ctx context.C
 	requests := make([]reconcile.Request, 0, len(workspaceProxies.Items))
 	for _, workspaceProxy := range workspaceProxies.Items {
 		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Name: workspaceProxy.Name, Namespace: workspaceProxy.Namespace}})
+	}
+	return requests
+}
+
+// reconcileRequestsForControlPlane re-queues the proxies that reference a
+// Secret that the control plane uses for its own access, because
+// credentialsecret.Read refuses those. On an update, controller-runtime maps
+// the old and the new object, so a name that the control plane stops using
+// re-queues its proxies too.
+func (r *CoderWorkspaceProxyReconciler) reconcileRequestsForControlPlane(ctx context.Context, obj client.Object) []reconcile.Request {
+	controlPlane, ok := obj.(*coderv1alpha1.CoderControlPlane)
+	if !ok || controlPlane.Namespace == "" {
+		return nil
+	}
+	var requests []reconcile.Request
+	for _, name := range credentialsecret.ControlPlaneSecretNames(controlPlane) {
+		requests = append(requests, r.reconcileRequestsForSecret(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: controlPlane.Namespace}})...)
 	}
 	return requests
 }

@@ -1453,6 +1453,11 @@ func (r *CoderProvisionerReconciler) reconcileRequestsForControlPlane(
 			Namespace: provisioner.Namespace,
 		}})
 	}
+	// credentialsecret.Read refuses the Secrets that a control plane uses for
+	// its own access, so re-queue every provisioner that references one of them.
+	for _, name := range credentialsecret.ControlPlaneSecretNames(controlPlane) {
+		requests = append(requests, r.reconcileRequestsForSecret(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: controlPlane.Namespace}})...)
+	}
 
 	return requests
 }

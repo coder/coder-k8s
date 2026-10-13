@@ -206,3 +206,76 @@ func TestReconcileRequestsForSecret(t *testing.T) {
 
 	require.Empty(t, proxyReconciler.reconcileRequestsForSecret(context.Background(), &corev1.ConfigMap{}))
 }
+
+// A control plane change re-queues the proxies and provisioners that reference
+// a Secret the control plane uses for its own access (#249).
+func TestReconcileRequestsForControlPlaneSecrets(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, coderv1alpha1.AddToScheme(scheme))
+
+	envRef := func(secret string) []corev1.EnvVar {
+		return []corev1.EnvVar{{Name: "A", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: secret}, Key: "k",
+		}}}}
+	}
+	var objects []runtime.Object
+	for _, secret := range []string{"license", "database", "unrelated"} {
+		objects = append(objects,
+			&coderv1alpha1.CoderWorkspaceProxy{
+				ObjectMeta: metav1.ObjectMeta{Name: "uses-" + secret, Namespace: "ns"},
+				Spec:       coderv1alpha1.WorkspaceProxySpec{ProxySessionTokenSecretRef: &coderv1alpha1.SecretKeySelector{Name: secret}},
+			},
+			&coderv1alpha1.CoderProvisioner{
+				// The provisioner references another control plane, so only the Secret name maps it.
+				ObjectMeta: metav1.ObjectMeta{Name: "uses-" + secret, Namespace: "ns"},
+				Spec: coderv1alpha1.CoderProvisionerSpec{
+					ControlPlaneRef: corev1.LocalObjectReference{Name: "elsewhere"}, ExtraEnv: envRef(secret),
+				},
+			},
+		)
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(objects...).
+		WithIndex(&coderv1alpha1.CoderWorkspaceProxy{}, credentialSecretNamesFieldIndex, indexWorkspaceProxyBySecretNames).
+		WithIndex(&coderv1alpha1.CoderProvisioner{}, credentialSecretNamesFieldIndex, indexProvisionerBySecretNames).
+		WithIndex(&coderv1alpha1.CoderProvisioner{}, provisionerControlPlaneRefNameFieldIndex, indexProvisionerByControlPlaneRefName).
+		Build()
+	proxyReconciler := &CoderWorkspaceProxyReconciler{Client: c, Scheme: scheme}
+	provisionerReconciler := &CoderProvisionerReconciler{Client: c, Scheme: scheme}
+
+	requestNames := func(requests []reconcile.Request) []string {
+		names := make([]string, 0, len(requests))
+		for _, request := range requests {
+			names = append(names, request.Name)
+		}
+		return sortedUnique(names)
+	}
+	for _, tc := range []struct {
+		name string
+		spec coderv1alpha1.CoderControlPlaneSpec
+		want []string
+	}{
+		{name: "no license or database", want: []string{}},
+		{
+			name: "license Secret",
+			spec: coderv1alpha1.CoderControlPlaneSpec{LicenseSecretRef: &coderv1alpha1.SecretKeySelector{Name: "license", Key: "license"}},
+			want: []string{"uses-license"},
+		},
+		{
+			name: "database Secret",
+			spec: coderv1alpha1.CoderControlPlaneSpec{Database: &coderv1alpha1.DatabaseSpec{
+				ConnectionSecretRef: coderv1alpha1.SecretKeySelector{Name: "database", Key: "url"},
+			}},
+			want: []string{"uses-database"},
+		},
+	} {
+		controlPlane := &coderv1alpha1.CoderControlPlane{ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: "ns"}, Spec: tc.spec}
+		require.Equal(t, tc.want, requestNames(proxyReconciler.reconcileRequestsForControlPlane(context.Background(), controlPlane)), "proxies, %s", tc.name)
+		require.Equal(t, tc.want, requestNames(provisionerReconciler.reconcileRequestsForControlPlane(context.Background(), controlPlane)), "provisioners, %s", tc.name)
+	}
+	require.Empty(t, proxyReconciler.reconcileRequestsForControlPlane(context.Background(), &corev1.ConfigMap{}))
+}

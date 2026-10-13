@@ -98,19 +98,17 @@ func (r *CoderAIProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // providersForControlPlane maps a control plane to the providers that use it,
-// and to the providers whose key Secret it names as its operator token
-// Secret, because credentialsecret.Read refuses those.
+// and to the providers whose key Secret it uses for its own access (operator
+// token, license or database Secret), because credentialsecret.Read refuses
+// those. On an update, controller-runtime maps the old and the new object, so
+// a name that the control plane stops using re-queues its providers too.
 func (r *CoderAIProviderReconciler) providersForControlPlane(ctx context.Context, obj client.Object) []reconcile.Request {
 	requests := r.providersWith(ctx, obj.GetNamespace(), aiProviderControlPlaneRefIndex, obj.GetName())
 	controlPlane, ok := obj.(*coderv1alpha1.CoderControlPlane)
 	if !ok {
 		return requests
 	}
-	tokenSecrets := []string{credentialsecret.OperatorTokenSecretName(controlPlane)}
-	if ref := controlPlane.Status.OperatorTokenSecretRef; ref != nil {
-		tokenSecrets = append(tokenSecrets, strings.TrimSpace(ref.Name))
-	}
-	for _, name := range sortedUnique(tokenSecrets) {
+	for _, name := range credentialsecret.ControlPlaneSecretNames(controlPlane) {
 		requests = append(requests, r.providersWith(ctx, obj.GetNamespace(), credentialSecretNamesFieldIndex, name)...)
 	}
 	return requests
