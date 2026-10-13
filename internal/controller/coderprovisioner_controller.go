@@ -564,8 +564,9 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	if keyMaterial != "" {
 		// A new key exists in Coder. Record its IDs in status before its
-		// plaintext reaches the Secret, so that deletion always finds the key
-		// to revoke. Only the IDs: the applied spec values stay as they are
+		// plaintext reaches the Secret, so that deletion can find the key to
+		// revoke (at status.controlPlaneURL or, during a control plane URL
+		// change, at the current control plane URL). Only the IDs: the applied spec values stay as they are
 		// until the Secret holds the key, so a failed Secret write is detected
 		// as drift (or missing metadata) and rotated again on the next try.
 		// A failed status write (for example a conflict because the
@@ -727,18 +728,27 @@ func (r *CoderProvisionerReconciler) reconcileDeletion(ctx context.Context, prov
 			log.Info("operator access is not ready during deletion, skipping remote key cleanup",
 				"reason", tokenReason, "message", tokenMessage)
 		default:
-			if deleteErr := r.BootstrapClient.DeleteProvisionerKeyByID(ctx, coderbootstrap.DeleteProvisionerKeyByIDRequest{
-				CoderURL:       controlPlaneURL,
-				SessionToken:   sessionToken,
-				OrganizationID: organizationID,
-				KeyID:          keyID,
-			}); deleteErr != nil {
-				// Treat key deletion failures as best-effort so the
-				// finalizer is still removed. Transient errors, auth
-				// issues, or org-lookup failures should not block CR
-				// cleanup.
-				log.Info("failed to delete remote provisioner key during deletion, proceeding with finalizer removal",
-					"keyName", keyName, "keyID", keyID, "error", deleteErr)
+			// During a control plane URL change, status can hold the new key's
+			// IDs while status.controlPlaneURL still names the old endpoint.
+			// Try the current endpoint too: the delete matches the key ID only.
+			coderURLs := []string{controlPlaneURL}
+			if currentURL := strings.TrimSpace(controlPlane.Status.URL); currentURL != "" && currentURL != controlPlaneURL {
+				coderURLs = append(coderURLs, currentURL)
+			}
+			for _, coderURL := range coderURLs {
+				if deleteErr := r.BootstrapClient.DeleteProvisionerKeyByID(ctx, coderbootstrap.DeleteProvisionerKeyByIDRequest{
+					CoderURL:       coderURL,
+					SessionToken:   sessionToken,
+					OrganizationID: organizationID,
+					KeyID:          keyID,
+				}); deleteErr != nil {
+					// Treat key deletion failures as best-effort so the
+					// finalizer is still removed. Transient errors, auth
+					// issues, or org-lookup failures should not block CR
+					// cleanup.
+					log.Info("failed to delete remote provisioner key during deletion, proceeding with finalizer removal",
+						"keyName", keyName, "keyID", keyID, "error", deleteErr)
+				}
 			}
 		}
 	}

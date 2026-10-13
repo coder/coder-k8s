@@ -235,3 +235,41 @@ func TestCoderProvisionerKey_FailedSecretUpdateRotatesAgain(t *testing.T) {
 	final := f.get(ctx, t, provisioner)
 	require.Equal(t, f.bootstrapClient.provisionerKeyResponses[2].KeyID.String(), final.Status.ProvisionerKeyID)
 }
+
+// TestCoderProvisionerDeletion_TriesCurrentControlPlaneURL checks the window
+// of a control plane URL change: status holds the new key's IDs but still the
+// old status.controlPlaneURL. Deletion must also try the current URL.
+func TestCoderProvisionerDeletion_TriesCurrentControlPlaneURL(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newProvisionerCredentialFixture(ctx, t, "cprov-delete-urldrift")
+	provisioner := f.createProvisioner(ctx, t, nil, nil)
+	f.reconcile(ctx, t, provisioner)
+	f.reconcile(ctx, t, provisioner)
+
+	newKey := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: uuid.New(), KeyID: uuid.New()}
+	latest := f.get(ctx, t, provisioner)
+	require.Equal(t, testCoderOrigin, latest.Status.ControlPlaneURL)
+	latest.Status.OrganizationID = newKey.OrganizationID.String()
+	latest.Status.ProvisionerKeyID = newKey.KeyID.String()
+	require.NoError(t, k8sClient.Status().Update(ctx, latest))
+
+	const newURL = "https://coder-new.example.com"
+	controlPlane := &coderv1alpha1.CoderControlPlane{}
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: f.controlPlane.Name, Namespace: f.namespace}, controlPlane))
+	controlPlane.Status.URL = newURL
+	require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
+
+	require.NoError(t, k8sClient.Delete(ctx, f.get(ctx, t, provisioner)))
+	f.reconcile(ctx, t, provisioner)
+
+	require.Len(t, f.bootstrapClient.deleteKeyByIDRequests, 2)
+	require.Equal(t, testCoderOrigin, f.bootstrapClient.deleteKeyByIDRequests[0].CoderURL)
+	require.Equal(t, newURL, f.bootstrapClient.deleteKeyByIDRequests[1].CoderURL)
+	for _, req := range f.bootstrapClient.deleteKeyByIDRequests {
+		require.Equal(t, newKey.OrganizationID, req.OrganizationID)
+		require.Equal(t, newKey.KeyID, req.KeyID)
+	}
+	require.Zero(t, f.bootstrapClient.deleteKeyCalls, "no name-based key deletion")
+	requireProvisionerGone(ctx, t, types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace})
+}
