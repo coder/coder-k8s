@@ -279,7 +279,20 @@ func TestMapCoderCreateError(t *testing.T) {
 		}
 	}
 
-	if err := MapCoderCreateError(nil, resource, name); err == nil || !strings.Contains(err.Error(), "assertion failed: error must not be nil") {
-		t.Fatalf("expected the nil-error assertion, got %v", err)
+	// The assertions run before the 2xx branch, so a 2xx error cannot hide them.
+	ok := codersdk.NewTestError(http.StatusOK, http.MethodPost, "https://coder.example.com")
+	for _, tc := range []struct {
+		err      error
+		resource schema.GroupResource
+		name     string
+		want     string
+	}{
+		{nil, resource, name, "assertion failed: error must not be nil"},
+		{ok, schema.GroupResource{}, name, "assertion failed: resource must not be empty"},
+		{ok, resource, "", "assertion failed: resource name must not be empty"},
+	} {
+		if err := MapCoderCreateError(tc.err, tc.resource, tc.name); err == nil || apierrors.IsTimeout(err) || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("expected %q, got %v", tc.want, err)
+		}
 	}
 }
