@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/credentialsecret"
@@ -41,15 +42,17 @@ func (r *CoderAIProviderReconciler) createOrConfirm(
 		// Coder rejected this spec. Only a spec change retries.
 		return aiProviderStalled(0, stalled.Reason, "%s", stalled.Message), nil
 	}
+	ready := meta.FindStatusCondition(provider.Status.Conditions, coderv1alpha1.CoderAIProviderConditionReady)
+	rejected := provider.Status.CreateAttemptTime != nil && ready != nil &&
+		ready.Reason == aiProviderConfirmingRejectedCreate && ready.ObservedGeneration == provider.Generation
 	found, err := sdk.AIProvider(ctx, provider.Name)
 	switch {
 	case isCoderNotFound(err):
 		if provider.Status.CreateAttemptTime != nil {
 			if step := requireSiteOwner(ctx, sdk); step != nil {
-				return step, nil
+				return keepRejectedCreate(step, rejected), nil
 			}
-			if ready := meta.FindStatusCondition(provider.Status.Conditions, coderv1alpha1.CoderAIProviderConditionReady); ready != nil &&
-				ready.Reason == aiProviderConfirmingRejectedCreate && ready.ObservedGeneration == provider.Generation {
+			if rejected {
 				// The last create of this spec was rejected, and now a read
 				// confirms that it created nothing. Do not send it again.
 				provider.Status.CreateAttemptTime, provider.Status.Credential = nil, nil
@@ -58,9 +61,18 @@ func (r *CoderAIProviderReconciler) createOrConfirm(
 		}
 		return r.createAIProvider(ctx, sdk, provider, key, before)
 	case err != nil:
-		return aiProviderWait(aiProviderRetry, "CoderUnavailable", "get provider %s: %s", provider.Name, coderErrorSummary(err)), nil
+		return keepRejectedCreate(aiProviderWait(aiProviderRetry, "CoderUnavailable", "get provider %s: %s", provider.Name, coderErrorSummary(err)), rejected), nil
 	}
-	return recordAIProvider(provider, found)
+	return recordAIProvider(ctx, provider, found)
+}
+
+// keepRejectedCreate keeps the memory of a rejected create in the reason of a
+// wait, so the create is not sent again once the wait ends (#268).
+func keepRejectedCreate(step *aiProviderStep, rejected bool) *aiProviderStep {
+	if rejected {
+		step.reason = aiProviderConfirmingRejectedCreate
+	}
+	return step
 }
 
 // requireSiteOwner returns a wait unless the operator user is a site owner.
@@ -81,8 +93,9 @@ func requireSiteOwner(ctx context.Context, sdk *codersdk.Client) *aiProviderStep
 // recordAIProvider decides whether found is the provider that this object
 // created. Only the nonce and the type prove it. Anything else is a provider
 // that the controller never touches (no adoption).
-func recordAIProvider(provider *coderv1alpha1.CoderAIProvider, found codersdk.AIProvider) (*aiProviderStep, error) {
+func recordAIProvider(ctx context.Context, provider *coderv1alpha1.CoderAIProvider, found codersdk.AIProvider) (*aiProviderStep, error) {
 	if err := coderAnswerFor("AI provider", provider.Name, found.Name); err != nil {
+		log.FromContext(ctx).Error(err, "Coder answered something other than the controller asked for")
 		return aiProviderStalled(aiProviderResync, "CoderAnswerMismatch", "%s", err.Error()), nil
 	}
 	if found.DisplayName != aiProviderNonce(provider) || string(found.Type) != provider.Spec.Type {
@@ -137,7 +150,7 @@ func (r *CoderAIProviderReconciler) createAIProvider(
 	status := coderStatus(err)
 	switch {
 	case err == nil:
-		if step, err := recordAIProvider(provider, created); step != nil || err != nil {
+		if step, err := recordAIProvider(ctx, provider, created); step != nil || err != nil {
 			// A wrong answer leaves the marker, so a read decides.
 			if step != nil {
 				provider.Status.CreateAttemptTime, provider.Status.Credential = before.CreateAttemptTime, before.Credential
@@ -170,7 +183,7 @@ func (r *CoderAIProviderReconciler) confirmRejectedCreate(
 	switch {
 	case err == nil:
 		// Ours (the create committed) or someone else's (NameConflict).
-		return recordAIProvider(provider, found)
+		return recordAIProvider(ctx, provider, found)
 	case !isCoderNotFound(err):
 		reason := "ConfirmingCreate"
 		if !aiProviderCreateRetryable(status) {
@@ -181,7 +194,7 @@ func (r *CoderAIProviderReconciler) confirmRejectedCreate(
 		return aiProviderWait(aiProviderRetry, reason, "get provider %s after a %d answer: %s", provider.Name, status, coderErrorSummary(err)), nil
 	}
 	if step := requireSiteOwner(ctx, sdk); step != nil {
-		return step, nil
+		return keepRejectedCreate(step, !aiProviderCreateRetryable(status)), nil
 	}
 	provider.Status.CreateAttemptTime, provider.Status.Credential = nil, nil
 	if aiProviderCreateRetryable(status) {

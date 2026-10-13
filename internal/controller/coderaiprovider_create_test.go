@@ -345,3 +345,29 @@ func TestCoderAIProviderConfirmNeedsSiteOwner(t *testing.T) {
 	requireAIProviderReady(t, got)
 	require.Equal(t, 2, env.fake.requestCount(routeCreateAIProvider))
 }
+
+// #268 item 3: a rejected create stays remembered across a failed site-owner
+// check and a failed read, so it is not sent again.
+func TestCoderAIProviderRejectedCreateOwnerCheckFails(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newAIProviderCreateEnv(ctx, t)
+	env.fake.failNext(routeCreateAIProvider, fakeFault{Status: http.StatusBadRequest})
+	env.fake.failNext(routeUser, fakeFault{Status: http.StatusBadGateway})
+	got, _ := env.reconcile(ctx, t, provider)
+	require.Contains(t, requireAIProviderStep(t, got, false, "ConfirmingRejectedCreate"), "get operator user")
+
+	env.fake.failNext(routeAIProvider, fakeFault{Status: http.StatusBadGateway})
+	got, _ = env.reconcile(ctx, t, got)
+	require.Contains(t, requireAIProviderStep(t, got, false, "ConfirmingRejectedCreate"), "get provider openai")
+
+	env.fake.updateUser(env.fake.operatorID, func(u *codersdk.User) { u.Roles = []codersdk.SlimRole{} })
+	got, _ = env.reconcile(ctx, t, got)
+	require.Contains(t, requireAIProviderStep(t, got, false, "ConfirmingRejectedCreate"), "not a site owner")
+
+	env.fake.updateUser(env.fake.operatorID, func(u *codersdk.User) { u.Roles = []codersdk.SlimRole{{Name: codersdk.RoleOwner}} })
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIProviderStep(t, got, true, "CoderRejected")
+	require.Nil(t, got.Status.CreateAttemptTime)
+	require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider), "the rejected create was not sent again")
+}

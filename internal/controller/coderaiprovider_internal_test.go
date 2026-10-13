@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/credentialsecret"
@@ -46,4 +47,50 @@ func TestAIProviderBadBaseURLMessage(t *testing.T) {
 	require.Equal(t, credentialsecret.ReasonMalformed, step.reason)
 	require.NotContains(t, step.message, "hunter2")
 	require.NotContains(t, step.message, "api%.example.com")
+}
+
+// Plan F9: the names that coderd seeds from env (Coder v2.37.3).
+func TestAIProviderNamesSeededByEnv(t *testing.T) {
+	t.Parallel()
+	fromSecret := &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "keys"}, Key: "key"}}
+	for _, tc := range []struct {
+		name string
+		env  []corev1.EnvVar
+		want map[string]string
+	}{
+		{name: "legacy OpenAI key", env: []corev1.EnvVar{{Name: "CODER_AIBRIDGE_OPENAI_KEY", ValueFrom: fromSecret}}, want: map[string]string{"openai": "CODER_AIBRIDGE_OPENAI_KEY"}},
+		{name: "legacy Anthropic key", env: []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_ANTHROPIC_KEY", Value: "sk-ant"}}, want: map[string]string{"anthropic": "CODER_AI_GATEWAY_ANTHROPIC_KEY"}},
+		{name: "legacy Bedrock region", env: []corev1.EnvVar{{Name: "CODER_AIBRIDGE_BEDROCK_REGION", Value: "us-east-1"}}, want: map[string]string{"anthropic": "CODER_AIBRIDGE_BEDROCK_REGION"}},
+		{name: "legacy base URL only", env: []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_OPENAI_BASE_URL", Value: "https://llm.example.com"}}, want: map[string]string{}},
+		{name: "empty legacy key", env: []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_OPENAI_KEY"}}, want: map[string]string{}},
+		{
+			name: "indexed type without name", env: []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_PROVIDER_0_TYPE", Value: "openai"}, {Name: "CODER_AI_GATEWAY_PROVIDER_0_NAME"}},
+			want: map[string]string{"openai": "CODER_AI_GATEWAY_PROVIDER_0_TYPE"},
+		},
+		{name: "indexed name", env: []corev1.EnvVar{
+			{Name: "CODER_AIBRIDGE_PROVIDER_0_TYPE", Value: "openai"},
+			{Name: "CODER_AIBRIDGE_PROVIDER_0_NAME", Value: "team-openai"},
+			{Name: "CODER_AIBRIDGE_PROVIDER_1_NAME", Value: "first"},
+			{Name: "CODER_AIBRIDGE_PROVIDER_1_NAME", Value: "last"},
+			{Name: "CODER_AIBRIDGE_PROVIDER_1_KEY", Value: "sk"},
+		}, want: map[string]string{"team-openai": "CODER_AIBRIDGE_PROVIDER_0_NAME", "last": "CODER_AIBRIDGE_PROVIDER_1_NAME"}},
+		{name: "other variables", env: []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_PROVIDERS", Value: "openai"}, {Name: "CODER_ACCESS_URL", Value: "https://coder.example.com"}}, want: map[string]string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, aiProviderNamesSeededByEnv(tc.env))
+		})
+	}
+}
+
+// coderMaskedKey matches Coder's mask (aibridge/utils/mask.go) at each
+// length boundary.
+func TestCoderMaskedKey(t *testing.T) {
+	t.Parallel()
+	for key, want := range map[string]string{
+		"": "", "abcd": "...", "abcde": "a...e", "abcdefghi": "a...i", "abcdefghij": "ab...ij",
+		"sk-ai-provider-7f3c9a1e5b2d": "sk-a...5b2d", "ключ-0123456789-ключ": "ключ...ключ",
+	} {
+		require.Equal(t, want, coderMaskedKey(key), key)
+	}
 }

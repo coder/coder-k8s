@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net/url"
 	"strings"
 	"sync"
@@ -172,7 +173,12 @@ func (r *CoderAIProviderReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err := r.writeStatus(ctx, provider, before); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{RequeueAfter: step.requeue}, nil
+	requeue := step.requeue
+	if requeue == aiProviderResync {
+		// Jitter spreads the resyncs of many objects (plan 4.1 item 10).
+		requeue = time.Duration(float64(requeue) * (0.8 + 0.4*rand.Float64())) //nolint:gosec // Jitter needs no secure randomness.
+	}
+	return ctrl.Result{RequeueAfter: requeue}, nil
 }
 
 // check validates the base URL, reads the key through the credential Secret
@@ -198,7 +204,7 @@ func (r *CoderAIProviderReconciler) check(
 	} else if err != nil {
 		return nil, err
 	}
-	sdk, _, wait, err := controlPlaneCoderClient(ctx, r.Client, provider.Namespace, provider.Spec.ControlPlaneRef.Name)
+	sdk, controlPlane, wait, err := controlPlaneCoderClient(ctx, r.Client, provider.Namespace, provider.Spec.ControlPlaneRef.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -215,6 +221,9 @@ func (r *CoderAIProviderReconciler) check(
 		}
 	}
 	if recreate {
+		if step := aiProviderReservedName(provider, controlPlane); step != nil {
+			return step, nil
+		}
 		if step, err = r.createOrConfirm(ctx, sdk, provider, key, before); err != nil {
 			return nil, err
 		}
@@ -266,9 +275,11 @@ func aiProviderBaseURL(raw string) (*url.URL, error) {
 // lost update.
 func (r *CoderAIProviderReconciler) patchFinalizer(ctx context.Context, provider *coderv1alpha1.CoderAIProvider, add bool) error {
 	base := provider.DeepCopy()
-	changed := controllerutil.RemoveFinalizer(provider, coderv1alpha1.CoderAIProviderCleanupFinalizer)
+	var changed bool
 	if add {
 		changed = controllerutil.AddFinalizer(provider, coderv1alpha1.CoderAIProviderCleanupFinalizer)
+	} else {
+		changed = controllerutil.RemoveFinalizer(provider, coderv1alpha1.CoderAIProviderCleanupFinalizer)
 	}
 	if !changed {
 		return nil
