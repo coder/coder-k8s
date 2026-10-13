@@ -32,7 +32,8 @@ spec:
       openAPIV3Schema:
         description: |-
           CoderAIProvider manages one AI provider in Coder. The object name is the
-          Coder provider name.
+          Coder provider name. It cannot be a UUID, because Coder looks up a
+          UUID-shaped name as a provider ID.
         properties:
           apiVersion:
             description: |-
@@ -260,6 +261,10 @@ spec:
         - message: 'metadata.name is the Coder provider name: at most 63 lowercase
             letters, digits, and single hyphens between them'
           rule: size(self.metadata.name) <= 63 && self.metadata.name.matches('^[a-z0-9]+(-[a-z0-9]+)*$')
+        - message: 'metadata.name must not be a UUID: Coder reads a UUID-shaped provider
+            name as a provider ID'
+          rule: '!self.metadata.name.matches(''^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'')
+            && !self.metadata.name.matches(''^[0-9a-f]{32}$'')'
     served: true
     storage: true
     subresources:

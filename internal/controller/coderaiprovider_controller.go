@@ -32,8 +32,9 @@ const (
 	// aiProviderResync re-reads Coder for objects that wait on Coder state,
 	// for example a name conflict that an admin can remove in the dashboard.
 	aiProviderResync = 10 * time.Minute
-	// aiProviderCoderRetry is the retry after a failed Coder call.
-	aiProviderCoderRetry = 30 * time.Second
+	// aiProviderRetry is the retry for waits that no watch ends: a failed
+	// Coder call, or an operator token Secret that is not readable yet.
+	aiProviderRetry = 30 * time.Second
 )
 
 // CoderAIProviderReconciler reconciles CoderAIProvider objects (#154). It is
@@ -85,28 +86,47 @@ func (r *CoderAIProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&coderv1alpha1.CoderAIProvider{}).
-		Watches(&coderv1alpha1.CoderControlPlane{}, handler.EnqueueRequestsFromMapFunc(r.providersFor(aiProviderControlPlaneRefIndex))).
-		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.providersFor(credentialSecretNamesFieldIndex)),
+		Watches(&coderv1alpha1.CoderControlPlane{}, handler.EnqueueRequestsFromMapFunc(r.providersForControlPlane)).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+			return r.providersWith(ctx, obj.GetNamespace(), credentialSecretNamesFieldIndex, obj.GetName())
+		}),
 			builder.WithPredicates(credentialsecret.WatchPredicate())).
 		Named("coderaiprovider").
 		Complete(r)
 }
 
-// providersFor maps an object to the providers in its namespace whose index
-// value is the object's name.
-func (r *CoderAIProviderReconciler) providersFor(index string) handler.MapFunc {
-	return func(ctx context.Context, obj client.Object) []reconcile.Request {
-		var providers coderv1alpha1.CoderAIProviderList
-		if err := r.List(ctx, &providers, client.InNamespace(obj.GetNamespace()), client.MatchingFields{index: obj.GetName()}); err != nil {
-			log.FromContext(ctx).Error(err, "list AI providers", "index", index, "name", obj.GetName())
-			return nil
-		}
-		requests := make([]reconcile.Request, 0, len(providers.Items))
-		for _, p := range providers.Items {
-			requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: p.Namespace, Name: p.Name}})
-		}
+// providersForControlPlane maps a control plane to the providers that use it,
+// and to the providers whose key Secret it names as its operator token
+// Secret, because credentialsecret.Read refuses those.
+func (r *CoderAIProviderReconciler) providersForControlPlane(ctx context.Context, obj client.Object) []reconcile.Request {
+	requests := r.providersWith(ctx, obj.GetNamespace(), aiProviderControlPlaneRefIndex, obj.GetName())
+	controlPlane, ok := obj.(*coderv1alpha1.CoderControlPlane)
+	if !ok {
 		return requests
 	}
+	tokenSecrets := []string{credentialsecret.OperatorTokenSecretName(controlPlane)}
+	if ref := controlPlane.Status.OperatorTokenSecretRef; ref != nil {
+		tokenSecrets = append(tokenSecrets, strings.TrimSpace(ref.Name))
+	}
+	for _, name := range sortedUnique(tokenSecrets) {
+		requests = append(requests, r.providersWith(ctx, obj.GetNamespace(), credentialSecretNamesFieldIndex, name)...)
+	}
+	return requests
+}
+
+// providersWith returns requests for the providers in namespace whose index
+// holds value.
+func (r *CoderAIProviderReconciler) providersWith(ctx context.Context, namespace, index, value string) []reconcile.Request {
+	var providers coderv1alpha1.CoderAIProviderList
+	if err := r.List(ctx, &providers, client.InNamespace(namespace), client.MatchingFields{index: value}); err != nil {
+		log.FromContext(ctx).Error(err, "list AI providers", "index", index, "value", value)
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(providers.Items))
+	for _, p := range providers.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: p.Namespace, Name: p.Name}})
+	}
+	return requests
 }
 
 // Reconcile runs the checks in order and reports the first one that fails.
@@ -171,7 +191,9 @@ func (r *CoderAIProviderReconciler) check(ctx context.Context, provider *coderv1
 		return nil, err
 	}
 	if wait != nil {
-		return aiProviderWait(0, wait.reason, "%s", wait.message), nil
+		// The control plane watch ends most waits. A retry also covers an
+		// operator token Secret that appears later.
+		return aiProviderWait(aiProviderRetry, wait.reason, "%s", wait.message), nil
 	}
 	step := checkAIProviderName(ctx, sdk, provider)
 	step.message = credentialsecret.Redact(step.message, key)
@@ -190,7 +212,7 @@ func checkAIProviderName(ctx context.Context, sdk *codersdk.Client, provider *co
 	case isCoderNotFound(err):
 		return aiProviderWait(aiProviderResync, "Pending", "Coder has no provider named %s. This controller version does not create it.", provider.Name)
 	case err != nil:
-		return aiProviderWait(aiProviderCoderRetry, "CoderUnavailable", "get provider %s: %s", provider.Name, coderErrorSummary(err))
+		return aiProviderWait(aiProviderRetry, "CoderUnavailable", "get provider %s: %s", provider.Name, coderErrorSummary(err))
 	}
 	if err := coderAnswerFor("AI provider", provider.Name, found.Name); err != nil {
 		return aiProviderStalled(aiProviderResync, "CoderAnswerMismatch", "%s", err.Error())

@@ -43,6 +43,9 @@ func TestCoderAIProviderAPIValidation(t *testing.T) {
 		{name: "name with 64 characters", objectName: strings.Repeat("a", 64), wantErr: "metadata.name is the Coder provider name"},
 		{name: "name with a dot", objectName: "open.ai", wantErr: "metadata.name is the Coder provider name"},
 		{name: "name with two hyphens", objectName: "open--ai", wantErr: "metadata.name is the Coder provider name"},
+		{name: "name shaped like a UUID", objectName: "0b6f6c2e-3a4d-4c55-9d2f-3f1b1f0c9a11", wantErr: "metadata.name must not be a UUID"},
+		{name: "name shaped like a UUID without hyphens", objectName: "0b6f6c2e3a4d4c559d2f3f1b1f0c9a11", wantErr: "metadata.name must not be a UUID"},
+		{name: "name with 32 characters that is not hex", objectName: "0b6f6c2e3a4d4c559d2f3f1b1f0c9a1z", wantEnabled: true},
 		{name: "unknown type", wantErr: "spec.type", mutate: func(s *coderv1alpha1.CoderAIProviderSpec) {
 			s.Type = "bedrock"
 		}},

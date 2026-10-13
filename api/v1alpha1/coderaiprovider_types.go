@@ -119,9 +119,11 @@ type CoderAIProviderStatus struct {
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63 && self.metadata.name.matches('^[a-z0-9]+(-[a-z0-9]+)*$')",message="metadata.name is the Coder provider name: at most 63 lowercase letters, digits, and single hyphens between them"
+// +kubebuilder:validation:XValidation:rule="!self.metadata.name.matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') && !self.metadata.name.matches('^[0-9a-f]{32}$')",message="metadata.name must not be a UUID: Coder reads a UUID-shaped provider name as a provider ID"
 
 // CoderAIProvider manages one AI provider in Coder. The object name is the
-// Coder provider name.
+// Coder provider name. It cannot be a UUID, because Coder looks up a
+// UUID-shaped name as a provider ID.
 type CoderAIProvider struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

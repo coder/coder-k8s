@@ -195,9 +195,26 @@ func TestCoderAIProviderControlPlaneNotReady(t *testing.T) {
 	ctx := context.Background()
 	env := newAIProviderEnv(ctx, t, false)
 	createSecret(ctx, t, env.keySecret(consentedObjectMeta("", "", testAIProviderOrigin), testAIProviderKey))
-	got, _ := env.reconcile(ctx, t, env.createProvider(ctx, t, nil))
+	provider := env.createProvider(ctx, t, nil)
+	got, result := env.reconcile(ctx, t, provider)
 	require.Equal(t, "CoderControlPlane coder does not exist.", requireAIProviderStep(t, got, false, "ControlPlaneNotReady"))
+	require.Equal(t, 30*time.Second, result.RequeueAfter)
+
+	// A ready control plane whose operator token Secret is missing: no watch
+	// sees the Secret appear, so the wait retries on a timer.
+	createTestControlPlane(ctx, t, env.namespace, "coder", env.fake.server.URL)
+	operatorToken := &corev1.Secret{}
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: env.namespace, Name: "coder-operator-token"}, operatorToken))
+	require.NoError(t, k8sClient.Delete(ctx, operatorToken))
+	got, result = env.reconcile(ctx, t, provider)
+	requireAIProviderStep(t, got, false, "OperatorAccessNotReady")
+	require.Equal(t, 30*time.Second, result.RequeueAfter)
 	require.Zero(t, env.fake.totalRequests())
+
+	operatorToken.ObjectMeta = metav1.ObjectMeta{Name: operatorToken.Name, Namespace: env.namespace}
+	require.NoError(t, k8sClient.Create(ctx, operatorToken))
+	got, _ = env.reconcile(ctx, t, provider)
+	requireAIProviderStep(t, got, false, "Pending")
 }
 
 // The name lookup only reads. A provider that this object did not create is a
@@ -293,7 +310,7 @@ func TestCoderAIProviderFinalizer(t *testing.T) {
 }
 
 // Plan S2 through the manager: a Secret update that removes the label, a
-// Secret delete, and a control plane change each requeue the provider at once.
+// Secret delete, and control plane changes each requeue the provider at once.
 func TestCoderAIProviderWatches(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -336,6 +353,19 @@ func TestCoderAIProviderWatches(t *testing.T) {
 	requireReason("ControlPlaneNotReady")
 
 	createTestControlPlane(ctx, t, env.namespace, "coder", env.fake.server.URL)
+	requireReason("Pending")
+
+	// Another control plane that names the key Secret as its operator token
+	// Secret makes the key unusable. Removing it makes the key usable again.
+	other := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: env.namespace},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image: "coder-control-plane:test", OperatorAccess: coderv1alpha1.OperatorAccessSpec{GeneratedTokenSecretName: secret.Name},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, other))
+	requireReason(credentialsecret.ReasonRefused)
+	require.NoError(t, k8sClient.Delete(ctx, other))
 	requireReason("Pending")
 
 	require.NoError(t, k8sClient.Delete(ctx, secret))
