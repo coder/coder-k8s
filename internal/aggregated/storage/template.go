@@ -181,18 +181,38 @@ func (s *TemplateStorage) Get(ctx context.Context, name string, _ *metav1.GetOpt
 	return obj, nil
 }
 
-// List fetches CoderTemplate objects from codersdk.
-func (s *TemplateStorage) List(ctx context.Context, _ *metainternalversion.ListOptions) (runtime.Object, error) {
+// List fetches CoderTemplate objects from codersdk and applies label and field selectors in memory.
+// limit is ignored: the list is always complete and has no continue token.
+func (s *TemplateStorage) List(ctx context.Context, opts *metainternalversion.ListOptions) (runtime.Object, error) {
 	if s == nil {
 		return nil, fmt.Errorf("assertion failed: template storage must not be nil")
 	}
 	if ctx == nil {
 		return nil, fmt.Errorf("assertion failed: context must not be nil")
 	}
+	// Unlike codertemplateversions, any resourceVersion is accepted: the list is always current, so
+	// it is never older than the requested version. client-go informers relist with the
+	// resourceVersion of an earlier response, and a 400 would make them retry that list forever.
+	if opts != nil && (opts.Continue != "" || opts.ResourceVersionMatch != "") {
+		return nil, apierrors.NewBadRequest(
+			"codertemplates lists are always complete and current: continue and resourceVersionMatch are not supported",
+		)
+	}
 
 	namespace, badNamespaceErr := namespaceFromRequestContext(ctx)
 	if badNamespaceErr != nil {
 		return nil, badNamespaceErr
+	}
+	filter, err := filterForListOptions(namespace, opts)
+	if err != nil {
+		return nil, apierrors.NewBadRequest(err.Error())
+	}
+	keep := func(template *aggregationv1alpha1.CoderTemplate) bool {
+		if filter == nil {
+			return true
+		}
+		_, ok := filter(watch.Event{Object: template})
+		return ok
 	}
 
 	if namespace == "" {
@@ -222,7 +242,9 @@ func (s *TemplateStorage) List(ctx context.Context, _ *metainternalversion.ListO
 				}
 
 				for _, template := range templates {
-					list.Items = append(list.Items, *convert.TemplateToK8s(eligibleNamespace, template))
+					if item := convert.TemplateToK8s(eligibleNamespace, template); keep(item) {
+						list.Items = append(list.Items, *item)
+					}
 				}
 			}
 
@@ -270,7 +292,9 @@ func (s *TemplateStorage) List(ctx context.Context, _ *metainternalversion.ListO
 	}
 
 	for _, template := range templates {
-		list.Items = append(list.Items, *convert.TemplateToK8s(responseNamespace, template))
+		if item := convert.TemplateToK8s(responseNamespace, template); keep(item) {
+			list.Items = append(list.Items, *item)
+		}
 	}
 
 	return list, nil
