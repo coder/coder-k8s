@@ -88,6 +88,7 @@ type fakeCoder struct {
 
 	aiProviders map[uuid.UUID]*fakeAIProvider // See fakecoder_ai_test.go.
 	aiGateway   fakeAIGatewayState            // AI Gateway key routes, see fakecoder_aigateway_test.go.
+	mcp         fakeMCPState                  // MCP server config routes, see fakecoder_mcp_test.go.
 }
 
 func newFakeCoder(t *testing.T) *fakeCoder {
@@ -134,6 +135,7 @@ func newFakeCoder(t *testing.T) *fakeCoder {
 	f.route(mux, "PATCH /api/v2/workspacebuilds/{id}/cancel", routeCancelBuild, f.cancelBuild)
 	f.registerAIProviderRoutes(mux)
 	f.registerAIGatewayKeyRoutes(mux)
+	f.registerMCPServerRoutes(mux)
 
 	f.server = httptest.NewServer(mux)
 	t.Cleanup(func() {
