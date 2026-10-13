@@ -50,17 +50,18 @@ func (r *CoderAIProviderReconciler) syncAIProvider(
 	keys := found.APIKeys
 	ownKey := len(keys) == 1 && keys[0].ID.String() == cred.KeyID
 	resending := cred.ResendAttemptTime != nil
-	// A pending resend can have committed with an answer that never came
-	// back. Then Coder holds the Secret's value under an unknown key ID, and
-	// the masked key matches. Another mask is a key changed in Coder.
-	resent := resending && len(keys) == 1 && keys[0].Masked == coderMaskedKey(key.Reveal())
 	// A delete, disable or key change in Coder is a kill switch also while a
 	// key resend is pending: a Secret rotation must not undo a revocation.
+	// Coder answers keys masked, so nothing proves that an unknown key is a
+	// resend that committed without an answer. Such a key stalls too.
 	switch {
 	case applied && enabled && !found.Enabled:
 		return aiProviderStalled(aiProviderResync, "DisabledExternally",
 			"Provider %s was disabled in Coder. The controller does not enable it again until the spec changes.", provider.Name), false, nil
-	case applied && !ownKey && !resent:
+	case applied && !ownKey && resending:
+		return aiProviderStalled(aiProviderResync, "KeyChangedExternally",
+			"The key of provider %s in Coder is not the recorded key: it was changed in Coder, or a key resend committed without an answer. The controller does not send its key again until the spec changes.", provider.Name), false, nil
+	case applied && !ownKey:
 		return aiProviderStalled(aiProviderResync, "KeyChangedExternally",
 			"The key of provider %s was changed in Coder. The controller does not send its key again until the spec changes.", provider.Name), false, nil
 	}
@@ -199,25 +200,4 @@ func (r *CoderAIProviderReconciler) rememberSentKey(provider *coderv1alpha1.Code
 func (r *CoderAIProviderReconciler) sentKeyMatches(provider *coderv1alpha1.CoderAIProvider, key credentialsecret.Value) bool {
 	sum, ok := r.sentKeys.Load(provider.UID)
 	return ok && sum.([sha256.Size]byte) == sha256.Sum256([]byte(key.Reveal()))
-}
-
-// coderMaskedKey renders key the way Coder masks a stored key in its answers
-// (aibridge/utils/mask.go:6-35).
-func coderMaskedKey(key string) string {
-	runes := []rune(key)
-	reveal := 0
-	switch n := len(runes); {
-	case n == 0:
-		return ""
-	case n >= 20:
-		reveal = 4
-	case n >= 10:
-		reveal = 2
-	case n >= 5:
-		reveal = 1
-	}
-	if len(runes) <= reveal*2 {
-		return "..."
-	}
-	return string(runes[:reveal]) + "..." + string(runes[len(runes)-reveal:])
 }

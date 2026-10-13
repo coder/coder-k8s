@@ -31,6 +31,14 @@ func TestCoderAIProviderNameReservedByEnv(t *testing.T) {
 	require.Zero(t, result.RequeueAfter, "the control plane watch requeues the provider")
 	require.Zero(t, env.fake.totalRequests())
 
+	// A name that needs a $(VAR) reference cannot be checked.
+	require.NoError(t, k8sClient.Get(ctx, key, controlPlane))
+	controlPlane.Spec.ExtraEnv = []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_PROVIDER_0_TYPE", Value: "openai"}, {Name: "CODER_AI_GATEWAY_PROVIDER_0_NAME", Value: "$(PROVIDER_NAME)"}}
+	require.NoError(t, k8sClient.Update(ctx, controlPlane))
+	got, _ = env.reconcile(ctx, t, got)
+	require.Contains(t, requireAIProviderStep(t, got, true, "NameReservedByEnv"), "cannot tell which provider name")
+	require.Zero(t, env.fake.totalRequests())
+
 	require.NoError(t, k8sClient.Get(ctx, key, controlPlane))
 	controlPlane.Spec.ExtraEnv = []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_PROVIDER_0_TYPE", Value: "openai"}, {Name: "CODER_AI_GATEWAY_PROVIDER_0_NAME", Value: "team-openai"}}
 	require.NoError(t, k8sClient.Update(ctx, controlPlane))
