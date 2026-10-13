@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -229,6 +230,40 @@ func TestCoderAIProviderResendCrash(t *testing.T) {
 	require.Equal(t, coder.keys[0].id.String(), got.Status.Credential.KeyID)
 }
 
+// A delete or disable in Coder while a key resend is pending is still a kill
+// switch: the Secret rotation does not undo it.
+func TestCoderAIProviderKillSwitchDuringResend(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		reason string
+		act    func(ctx context.Context, c *codersdk.Client, id string) error
+	}{
+		{reason: "DisabledExternally", act: func(ctx context.Context, c *codersdk.Client, id string) error {
+			_, err := c.UpdateAIProvider(ctx, id, codersdk.UpdateAIProviderRequest{Enabled: ptrTo(false)})
+			return err
+		}},
+		{reason: "DeletedExternally", act: func(ctx context.Context, c *codersdk.Client, id string) error {
+			return c.DeleteAIProvider(ctx, id)
+		}},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			env, secret, provider := newReadyAIProvider(ctx, t)
+			setSecretValue(ctx, t, secret, testAIProviderKeyRotated)
+			env.fake.failNext(routeUpdateAIProvider, fakeFault{Status: http.StatusBadGateway})
+			got, _ := env.reconcile(ctx, t, provider)
+			require.NotNil(t, got.Status.Credential.ResendAttemptTime, "a resend is pending")
+
+			require.NoError(t, tc.act(ctx, env.fake.client(t, 2*time.Second), got.Status.ProviderID))
+			writes := env.writes()
+			got, _ = env.reconcile(ctx, t, got)
+			requireAIProviderStep(t, got, true, tc.reason)
+			require.Equal(t, writes, env.writes())
+		})
+	}
+}
+
 // Plan S14: a dashboard delete, disable or key change after a full apply is a
 // kill switch: Stalled, and zero writes until a spec edit re-arms the object.
 func TestCoderAIProviderKillSwitches(t *testing.T) {
@@ -341,6 +376,37 @@ func TestCoderAIProviderSyncAnswers(t *testing.T) {
 		got, _ := env.reconcile(ctx, t, provider)
 		requireAIProviderStep(t, got, true, "CoderAnswerMismatch")
 		require.Zero(t, got.Status.AppliedGeneration)
+	})
+	t.Run("key answer with a zero key ID", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		env, secret, provider := newReadyAIProvider(ctx, t)
+		setSecretValue(ctx, t, secret, testAIProviderKeyRotated)
+		env.fake.failNext(routeUpdateAIProvider, fakeFault{Rewrite: func(answer any) any {
+			p := answer.(codersdk.AIProvider)
+			p.APIKeys[0].ID = uuid.Nil
+			return p
+		}})
+		got, _ := env.reconcile(ctx, t, provider)
+		requireAIProviderStep(t, got, false, "CoderAnswerMismatch")
+		require.NotNil(t, got.Status.Credential.ResendAttemptTime, "the marker stays")
+		require.NotEqual(t, uuid.Nil.String(), got.Status.Credential.KeyID)
+		got, _ = env.reconcile(ctx, t, got)
+		requireAIProviderReady(t, got)
+	})
+	t.Run("deleted right after the create", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		env, _, provider := newAIProviderCreateEnv(ctx, t)
+		// The name lookup passes. The read by ID after the create answers 404.
+		env.fake.failNext(routeAIProvider, fakeFault{Rewrite: func(answer any) any { return answer }})
+		env.fake.failNext(routeAIProvider, fakeFault{Status: http.StatusNotFound})
+		got, _ := env.reconcile(ctx, t, provider)
+		requireAIProviderStep(t, got, false, "Pending")
+		require.Empty(t, got.Status.ProviderID)
+		got, _ = env.reconcile(ctx, t, got)
+		requireAIProviderReady(t, got)
+		require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider), "the provider was still there, with the nonce")
 	})
 	t.Run("deleted before a full apply is created again", func(t *testing.T) {
 		t.Parallel()

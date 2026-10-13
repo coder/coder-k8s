@@ -221,8 +221,14 @@ func (r *CoderAIProviderReconciler) check(
 				return nil, err
 			}
 			*before = *provider.Status.DeepCopy()
-			if step, _, err = r.syncAIProvider(ctx, sdk, provider, key, before); err != nil {
+			var gone bool
+			if step, gone, err = r.syncAIProvider(ctx, sdk, provider, key, before); err != nil {
 				return nil, err
+			}
+			if gone {
+				// Deleted right after the create. The next reconcile looks
+				// up the name again and creates the provider if it is free.
+				step = aiProviderWait(aiProviderConfirmPoll, "Pending", "Provider %s disappeared from Coder right after the create. The controller checks the name again.", provider.Name)
 			}
 		}
 	}

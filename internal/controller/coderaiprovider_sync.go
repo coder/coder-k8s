@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
+	"github.com/google/uuid"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
@@ -48,15 +49,16 @@ func (r *CoderAIProviderReconciler) syncAIProvider(
 	keys := found.APIKeys
 	ownKey := len(keys) == 1 && keys[0].ID.String() == cred.KeyID
 	resending := cred.ResendAttemptTime != nil
-	if applied && !resending {
-		switch {
-		case enabled && !found.Enabled:
-			return aiProviderStalled(aiProviderResync, "DisabledExternally",
-				"Provider %s was disabled in Coder. The controller does not enable it again until the spec changes.", provider.Name), false, nil
-		case !ownKey:
-			return aiProviderStalled(aiProviderResync, "KeyChangedExternally",
-				"The key of provider %s was changed in Coder. The controller does not send its key again until the spec changes.", provider.Name), false, nil
-		}
+	// A delete or disable in Coder is a kill switch also while a key resend
+	// is pending: a Secret rotation must not undo a revocation. Only the key
+	// check waits for the resend, which changes the key itself.
+	switch {
+	case applied && enabled && !found.Enabled:
+		return aiProviderStalled(aiProviderResync, "DisabledExternally",
+			"Provider %s was disabled in Coder. The controller does not enable it again until the spec changes.", provider.Name), false, nil
+	case applied && !resending && !ownKey:
+		return aiProviderStalled(aiProviderResync, "KeyChangedExternally",
+			"The key of provider %s was changed in Coder. The controller does not send its key again until the spec changes.", provider.Name), false, nil
 	}
 
 	// A spec edit re-arms the object, so it also replaces a key that Coder
@@ -125,7 +127,7 @@ func (r *CoderAIProviderReconciler) syncAIProvider(
 			"Coder answered the update of provider %s without the requested display name, icon, enabled flag or base URL.", provider.Name), false, nil
 	}
 	if sendKey {
-		if len(updated.APIKeys) != 1 || updated.APIKeys[0].ID.String() == cred.KeyID {
+		if len(updated.APIKeys) != 1 || updated.APIKeys[0].ID == uuid.Nil || updated.APIKeys[0].ID.String() == cred.KeyID {
 			// The marker stays, so the next reconcile sends the key again.
 			return aiProviderWait(aiProviderRetry, "CoderAnswerMismatch",
 				"Coder answered the key update of provider %s without exactly one new key. The controller sends the key again.", provider.Name), false, nil
