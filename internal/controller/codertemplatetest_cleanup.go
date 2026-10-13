@@ -124,7 +124,7 @@ func (r *CoderTemplateTestReconciler) cleanupStep(ctx context.Context, tt *coder
 		markTemplateTestNotCreated(tt, r.Clock.Now())
 		return 0, nil
 	}
-	if gone, err := r.controlPlaneGone(ctx, tt); err != nil || gone {
+	if gone, err := controlPlaneGone(ctx, r.Client, tt.Namespace, tt.Spec.ControlPlaneRef.Name); err != nil || gone {
 		if gone {
 			step := templateTestControlPlaneGone(tt)
 			set(step.deleted.Status, step.deleted.Reason, step.deleted.Message)
@@ -206,19 +206,6 @@ func (r *CoderTemplateTestReconciler) retainAllowed(ctx context.Context, tt *cod
 		return false, fmt.Errorf("get codercontrolplane %s: %w", key, err)
 	}
 	return controlPlane.Spec.TemplateTests != nil && controlPlane.Spec.TemplateTests.AllowRetain, nil
-}
-
-// controlPlaneGone reports whether the referenced control plane is NotFound
-// or being deleted. Then nothing can clean up, so the finalizer goes (A1).
-func (r *CoderTemplateTestReconciler) controlPlaneGone(ctx context.Context, tt *coderv1alpha1.CoderTemplateTest) (bool, error) {
-	controlPlane := &coderv1alpha1.CoderControlPlane{}
-	key := types.NamespacedName{Namespace: tt.Namespace, Name: tt.Spec.ControlPlaneRef.Name}
-	if err := r.Get(ctx, key, controlPlane); apierrors.IsNotFound(err) {
-		return true, nil
-	} else if err != nil {
-		return false, fmt.Errorf("get codercontrolplane %s: %w", key, err)
-	}
-	return !controlPlane.DeletionTimestamp.IsZero(), nil
 }
 
 func templateTestControlPlaneGone(tt *coderv1alpha1.CoderTemplateTest) *templateTestStep {
