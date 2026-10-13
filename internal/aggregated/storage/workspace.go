@@ -458,7 +458,7 @@ func (s *WorkspaceStorage) Create(
 
 	createdWorkspace, err := sdk.CreateUserWorkspace(ctx, userName, request)
 	if err != nil {
-		return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), workspaceObj.Name)
+		return nil, coder.MapCoderCreateError(err, aggregationv1alpha1.Resource("coderworkspaces"), workspaceObj.Name)
 	}
 
 	if !workspaceObj.Spec.Running {
