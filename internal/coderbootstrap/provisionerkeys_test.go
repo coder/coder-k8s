@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -350,6 +351,51 @@ func TestEntitlements_Success(t *testing.T) {
 	require.Equal(t, codersdk.EntitlementEntitled, feature.Entitlement)
 }
 
+func TestEntitlements_RefusesCrossOriginRedirect(t *testing.T) {
+	t.Parallel()
+
+	var otherOriginRequests atomic.Int32
+	otherOrigin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		otherOriginRequests.Add(1)
+		writeEntitlementsResponse(t, w)
+	}))
+	defer otherOrigin.Close()
+
+	coderServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, otherOrigin.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer coderServer.Close()
+
+	client := coderbootstrap.NewSDKClient()
+	_, err := client.Entitlements(context.Background(), coderServer.URL, "session-token")
+	require.ErrorContains(t, err, "refusing redirect to a different origin")
+	require.Zero(t, otherOriginRequests.Load(), "the session token must not reach a different origin")
+}
+
+func TestEntitlements_FollowsSameOriginRedirect(t *testing.T) {
+	t.Parallel()
+
+	var redirectedToken atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/entitlements":
+			http.Redirect(w, r, "/moved/api/v2/entitlements", http.StatusTemporaryRedirect)
+		case "/moved/api/v2/entitlements":
+			redirectedToken.Store(r.Header.Get(codersdk.SessionTokenHeader))
+			writeEntitlementsResponse(t, w)
+		default:
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := coderbootstrap.NewSDKClient()
+	_, err := client.Entitlements(context.Background(), server.URL, "session-token")
+	require.NoError(t, err)
+	require.Equal(t, "session-token", redirectedToken.Load())
+}
+
 func TestEntitlements_ValidationErrors(t *testing.T) {
 	t.Parallel()
 
@@ -443,4 +489,21 @@ func writeJSONResponse(t *testing.T, w http.ResponseWriter, statusCode int, payl
 	w.WriteHeader(statusCode)
 	err := json.NewEncoder(w).Encode(payload)
 	require.NoError(t, err)
+}
+
+func writeEntitlementsResponse(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+
+	writeJSONResponse(t, w, http.StatusOK, map[string]any{
+		"features": map[string]any{
+			string(codersdk.FeatureExternalProvisionerDaemons): map[string]any{
+				"entitlement": string(codersdk.EntitlementEntitled),
+				"enabled":     true,
+			},
+		},
+		"warnings":     []string{},
+		"errors":       []string{},
+		"has_license":  true,
+		"refreshed_at": time.Now().UTC().Format(time.RFC3339),
+	})
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/google/uuid"
 	"golang.org/x/xerrors"
@@ -201,8 +202,80 @@ func newAuthenticatedClient(coderURL, sessionToken string) (*codersdk.Client, er
 	// connection pool across parallel test servers.
 	client.HTTPClient.Transport = bypassRateLimitRoundTripper{base: defaultTransport.Clone()}
 	client.HTTPClient.Timeout = coderSDKRequestTimeout
+	// net/http copies custom headers such as Coder-Session-Token to every
+	// redirect target, so refuse redirects that leave the configured origin.
+	client.HTTPClient.CheckRedirect = sameOriginRedirectPolicy(coderAPIURL)
 
 	return client, nil
+}
+
+// maxRedirects matches the limit of net/http's default redirect policy.
+const maxRedirects = 10
+
+func sameOriginRedirectPolicy(origin *url.URL) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if req == nil || req.URL == nil {
+			return xerrors.New("assertion failed: redirect request URL must not be nil")
+		}
+		if len(via) >= maxRedirects {
+			return xerrors.Errorf("stopped after %d redirects", maxRedirects)
+		}
+		if !sameOrigin(req.URL, origin) {
+			return xerrors.New("refusing redirect to a different origin than the coder URL")
+		}
+
+		return nil
+	}
+}
+
+// sameOrigin compares scheme, hostname and effective port, so that
+// "https://host" and "https://host:443" are the same origin.
+func sameOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		sameHostname(a.Hostname(), b.Hostname()) &&
+		effectivePort(a) == effectivePort(b)
+}
+
+// sameHostname folds ASCII case for the host but compares an IPv6 zone
+// exactly, because interface names are case-sensitive. Unicode case folding
+// is unsafe here: "σ" and "ς" fold equal but map to different IDNA hosts.
+func sameHostname(a, b string) bool {
+	aHost, aZone, _ := strings.Cut(a, "%")
+	bHost, bZone, _ := strings.Cut(b, "%")
+	return asciiEqualFold(aHost, bHost) && aZone == bZone
+}
+
+func asciiEqualFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		if asciiLower(a[i]) != asciiLower(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiLower(c byte) byte {
+	if 'A' <= c && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
+}
+
+func effectivePort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
 }
 
 func resolveOrganizationByName(ctx context.Context, client *codersdk.Client, organizationName string) (codersdk.Organization, error) {
