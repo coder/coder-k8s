@@ -461,8 +461,9 @@ func TestCoderAIGatewayKeyDryRunRejected(t *testing.T) {
 	ctx := context.Background()
 	gr := schema.GroupResource{Resource: "secrets"}
 	for name, rejection := range map[string]error{
-		"invalid":   apierrors.NewInvalid(schema.GroupKind{Kind: "Secret"}, testAIGatewaySecret, field.ErrorList{field.Forbidden(field.NewPath("data"), "server-text-must-not-leak")}),
-		"forbidden": apierrors.NewForbidden(gr, testAIGatewaySecret, errors.New("server-text-must-not-leak")),
+		"invalid":     apierrors.NewInvalid(schema.GroupKind{Kind: "Secret"}, testAIGatewaySecret, field.ErrorList{field.Forbidden(field.NewPath("data"), "server-text-must-not-leak")}),
+		"forbidden":   apierrors.NewForbidden(gr, testAIGatewaySecret, errors.New("server-text-must-not-leak")),
+		"bad request": apierrors.NewBadRequest("server-text-must-not-leak"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
