@@ -177,6 +177,21 @@ jobs:
             exit 1
           fi
 
+      - name: Verify the dormant CoderMCPServer CRD is not installed
+        # Remove this step when the CoderMCPServer controller ships (#155).
+        run: |
+          # grep exits 1 when nothing matches. Any other status (for example a missing file) fails the step.
+          status=0
+          grep -n -E '^[[:space:]]+kind: CoderMCPServer$|codermcpservers\.coder\.com' \
+            dist/install.yaml config/default/kustomization.yaml config/crd/bases/*.yaml || status=$?
+          if [[ "${status}" -eq 0 ]]; then
+            echo "assertion failed: the CoderMCPServer CRD must not ship before its controller" >&2
+            exit 1
+          elif [[ "${status}" -ne 1 ]]; then
+            echo "assertion failed: the CoderMCPServer CRD guard could not read the install manifests (grep exit ${status})" >&2
+            exit 1
+          fi
+
       - name: Run golangci-lint
         run: go tool golangci-lint run --timeout=5m ./...
 
