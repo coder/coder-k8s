@@ -563,6 +563,8 @@ func (f *fakeCoder) createWorkspace(r *http.Request) (int, any) {
 		return fakeError(http.StatusBadRequest, "template version import failed")
 	case req.TemplateVersionPresetID != uuid.Nil && !f.hasPreset(v.ID, req.TemplateVersionPresetID):
 		return fakeError(http.StatusBadRequest, "fake coder needs a preset of the requested version")
+	case ttlError(req.TTLMillis) != "":
+		return fakeTTLError(req.TTLMillis)
 	case f.liveWorkspace(owner.ID, req.Name) != nil:
 		return fakeError(http.StatusConflict, "workspace %q already exists", req.Name)
 	}

@@ -142,12 +142,37 @@ func (f *fakeCoder) hasPreset(versionID, presetID uuid.UUID) bool {
 	return slices.ContainsFunc(f.pool.presets[versionID], func(p codersdk.Preset) bool { return p.ID == presetID })
 }
 
-// createTTL mirrors validWorkspaceTTLMillis: no ttl_ms, or 0, takes the
-// template's default TTL, and a zero default leaves autostop off.
+// ttlError mirrors the checks of validWorkspaceTTLMillis on an explicit
+// ttl_ms: after truncation to whole minutes, at least one minute and at most
+// 30 days. Coder runs them before the name check.
+func ttlError(millis *int64) string {
+	if millis == nil || *millis == 0 {
+		return ""
+	}
+	switch d := (time.Duration(*millis) * time.Millisecond).Truncate(time.Minute); {
+	case d < time.Minute:
+		return "time until shutdown must be at least one minute"
+	case d > 30*24*time.Hour:
+		return "time until shutdown must be less than 30 days"
+	}
+	return ""
+}
+
+func fakeTTLError(millis *int64) (int, any) {
+	return http.StatusBadRequest, codersdk.Response{
+		Message:     "Invalid Workspace Time to Shutdown.",
+		Validations: []codersdk.ValidationError{{Field: "ttl_ms", Detail: ttlError(millis)}},
+	}
+}
+
+// createTTL mirrors validWorkspaceTTLMillis for a valid request: an explicit
+// ttl_ms is truncated to whole minutes. No ttl_ms, or 0, takes the template's
+// default TTL, and a zero default leaves autostop off.
 func createTTL(req codersdk.CreateWorkspaceRequest, tpl codersdk.Template) *int64 {
 	switch {
 	case req.TTLMillis != nil && *req.TTLMillis != 0:
-		return req.TTLMillis
+		ttl := (time.Duration(*req.TTLMillis) * time.Millisecond).Truncate(time.Minute).Milliseconds()
+		return &ttl
 	case tpl.DefaultTTLMillis > 0:
 		return &tpl.DefaultTTLMillis
 	}

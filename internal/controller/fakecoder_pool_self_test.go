@@ -60,13 +60,22 @@ func TestFakeCoderPoolDeadlines(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, want.Equal(ws.LatestBuild.Deadline.Time))
 
-	// An explicit ttl_ms wins over the template default.
-	ttl := (2 * time.Hour).Milliseconds()
-	custom, err := c.CreateUserWorkspace(ctx, fx.testerID.String(), codersdk.CreateWorkspaceRequest{
-		TemplateVersionID: fx.versionID, Name: "kwp-custom", TTLMillis: &ttl,
-	})
+	// An explicit ttl_ms wins over the template default, truncated to whole
+	// minutes. Coder refuses less than a minute and more than 30 days, even
+	// when the name is taken.
+	createWithTTL := func(name string, ttl time.Duration) (codersdk.Workspace, error) {
+		millis := ttl.Milliseconds()
+		return c.CreateUserWorkspace(ctx, fx.testerID.String(), codersdk.CreateWorkspaceRequest{
+			TemplateVersionID: fx.versionID, Name: name, TTLMillis: &millis,
+		})
+	}
+	custom, err := createWithTTL("kwp-custom", 2*time.Hour+30*time.Second)
 	require.NoError(t, err)
-	require.Equal(t, ttl, *custom.TTLMillis)
+	require.Equal(t, (2 * time.Hour).Milliseconds(), *custom.TTLMillis)
+	for _, ttl := range []time.Duration{59 * time.Second, -time.Hour, 30*24*time.Hour + time.Minute} {
+		_, err = createWithTTL("kwp-custom", ttl)
+		requireCoderStatus(t, err, http.StatusBadRequest)
+	}
 
 	// A stop build is latest: extensions answer 409.
 	stop := fx.fake.addExternalBuild(ws.ID, fx.testerID, codersdk.WorkspaceTransitionStop)
