@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/aggregated/servingcert"
 	"github.com/coder/coder-k8s/internal/credentialsecret"
 )
 
@@ -47,15 +49,18 @@ func TestReservedSecretName(t *testing.T) {
 	key := func(name string) coderv1alpha1.SecretKeySelector {
 		return coderv1alpha1.SecretKeySelector{Name: name, Key: "k"}
 	}
+	secretEnv := func(name string) corev1.EnvVar {
+		return corev1.EnvVar{Name: "X", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: "k",
+		}}}
+	}
 	cp := &coderv1alpha1.CoderControlPlane{
 		ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: "ns"},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			LicenseSecretRef: ptr.To(key("license")),
 			Database:         &coderv1alpha1.DatabaseSpec{ConnectionSecretRef: key("database")},
 			EnvFrom:          []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "env-from"}}}},
-			ExtraEnv: []corev1.EnvVar{{Name: "X", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: "extra-env"}, Key: "k",
-			}}}},
+			ExtraEnv:         []corev1.EnvVar{secretEnv("extra-env")},
 			// Builders trim these names, so the check trims them too.
 			TLS:              coderv1alpha1.TLSSpec{SecretNames: []string{" tls "}},
 			ImagePullSecrets: []corev1.LocalObjectReference{{Name: "pull"}},
@@ -72,6 +77,11 @@ func TestReservedSecretName(t *testing.T) {
 				{Name: "azure", VolumeSource: corev1.VolumeSource{AzureFile: &corev1.AzureFileVolumeSource{SecretName: "azure"}}},
 				{Name: "iscsi", VolumeSource: corev1.VolumeSource{ISCSI: &corev1.ISCSIVolumeSource{SecretRef: &corev1.LocalObjectReference{Name: "iscsi"}}}},
 				{Name: "flex", VolumeSource: corev1.VolumeSource{FlexVolume: &corev1.FlexVolumeSource{SecretRef: &corev1.LocalObjectReference{Name: "flex"}}}},
+				{Name: "cephfs", VolumeSource: corev1.VolumeSource{CephFS: &corev1.CephFSVolumeSource{SecretRef: &corev1.LocalObjectReference{Name: "cephfs"}}}},
+				{Name: "cinder", VolumeSource: corev1.VolumeSource{Cinder: &corev1.CinderVolumeSource{SecretRef: &corev1.LocalObjectReference{Name: "cinder"}}}},
+				{Name: "rbd", VolumeSource: corev1.VolumeSource{RBD: &corev1.RBDVolumeSource{SecretRef: &corev1.LocalObjectReference{Name: "rbd"}}}},
+				{Name: "scaleio", VolumeSource: corev1.VolumeSource{ScaleIO: &corev1.ScaleIOVolumeSource{SecretRef: &corev1.LocalObjectReference{Name: "scaleio"}}}},
+				{Name: "storageos", VolumeSource: corev1.VolumeSource{StorageOS: &corev1.StorageOSVolumeSource{SecretRef: &corev1.LocalObjectReference{Name: "storageos"}}}},
 			},
 			// Operator access is off, but turning it back on recreates the
 			// token Secret, so its name stays reserved.
@@ -84,15 +94,20 @@ func TestReservedSecretName(t *testing.T) {
 		&coderv1alpha1.CoderWorkspaceProxy{
 			ObjectMeta: metav1.ObjectMeta{Name: "proxy", Namespace: "ns"},
 			Spec: coderv1alpha1.WorkspaceProxySpec{
-				Bootstrap:        &coderv1alpha1.ProxyBootstrapSpec{CredentialsSecretRef: key("proxy-bootstrap")},
-				ImagePullSecrets: []corev1.LocalObjectReference{{Name: "proxy-pull"}},
+				Bootstrap:                  &coderv1alpha1.ProxyBootstrapSpec{CredentialsSecretRef: key("proxy-bootstrap")},
+				ProxySessionTokenSecretRef: ptr.To(key("proxy-session")),
+				ExtraEnv:                   []corev1.EnvVar{secretEnv("proxy-env")},
+				ImagePullSecrets:           []corev1.LocalObjectReference{{Name: "proxy-pull"}},
 			},
 			Status: coderv1alpha1.WorkspaceProxyStatus{ProxyTokenSecretRef: ptr.To(key("proxy-recorded"))},
 		},
 		&coderv1alpha1.CoderProvisioner{
 			ObjectMeta: metav1.ObjectMeta{Name: "prov", Namespace: "ns"},
-			Spec:       coderv1alpha1.CoderProvisionerSpec{ImagePullSecrets: []corev1.LocalObjectReference{{Name: "prov-pull"}}},
-			Status:     coderv1alpha1.CoderProvisionerStatus{SecretRef: ptr.To(key("prov-recorded"))},
+			Spec: coderv1alpha1.CoderProvisionerSpec{
+				ImagePullSecrets: []corev1.LocalObjectReference{{Name: "prov-pull"}},
+				ExtraEnv:         []corev1.EnvVar{secretEnv("prov-env")},
+			},
+			Status: coderv1alpha1.CoderProvisionerStatus{SecretRef: ptr.To(key("prov-recorded"))},
 		},
 		&coderv1alpha1.CoderAIProvider{ObjectMeta: metav1.ObjectMeta{Name: "openai", Namespace: "ns"}, Spec: coderv1alpha1.CoderAIProviderSpec{APIKeySecretRef: key("openai-key")}},
 		&coderv1alpha1.CoderMCPServer{ObjectMeta: metav1.ObjectMeta{Name: "mcp", Namespace: "ns"}, Spec: coderv1alpha1.CoderMCPServerSpec{Auth: coderv1alpha1.CoderMCPServerAuth{
@@ -112,18 +127,25 @@ func TestReservedSecretName(t *testing.T) {
 		"database": "CoderControlPlane", "env-from": "CoderControlPlane", "extra-env": "CoderControlPlane", "tls": "CoderControlPlane",
 		"pull": "CoderControlPlane", "ca": "CoderControlPlane", "ingress-tls": "CoderControlPlane", "wildcard-tls": "CoderControlPlane",
 		"volume": "CoderControlPlane", "projected": "CoderControlPlane", "csi": "CoderControlPlane", "azure": "CoderControlPlane",
-		"iscsi": "CoderControlPlane", "flex": "CoderControlPlane", "proxy-bootstrap": "CoderWorkspaceProxy",
+		"iscsi": "CoderControlPlane", "flex": "CoderControlPlane", "cephfs": "CoderControlPlane", "cinder": "CoderControlPlane",
+		"rbd": "CoderControlPlane", "scaleio": "CoderControlPlane", "storageos": "CoderControlPlane", "proxy-bootstrap": "CoderWorkspaceProxy",
+		"proxy-session": "CoderWorkspaceProxy", "proxy-env": "CoderWorkspaceProxy", "prov-env": "CoderProvisioner",
 		"proxy-proxy-token": "CoderWorkspaceProxy", "proxy-pull": "CoderWorkspaceProxy", "proxy-recorded": "CoderWorkspaceProxy",
 		"prov-pull": "CoderProvisioner", "prov-recorded": "CoderProvisioner",
 		provisionerKeySecret: "CoderProvisioner", "openai-key": "CoderAIProvider", "mcp-key": "CoderMCPServer",
 		"mcp-header": "CoderMCPServer", "mcp-oauth": "CoderMCPServer",
 	} {
-		err := reservedSecretName(ctx, c, owner, name)
+		err := reservedSecretName(ctx, c, owner, name, false)
 		requireReservedReason(t, err)
-		require.ErrorContains(t, err, kind, name)
+		require.ErrorContains(t, err, fmt.Sprintf("Secret name %q is used by %s", name, kind))
 	}
-	require.NoError(t, reservedSecretName(ctx, c, owner, "free"))
-	require.NoError(t, reservedSecretName(ctx, c, owner, "coder-ai-gateway-key"))
+	// The aggregated API server's serving Secret is reserved in every
+	// namespace (plan D13), without any object that names it.
+	err := reservedSecretName(ctx, c, owner, servingcert.SecretName, false)
+	requireReservedReason(t, err)
+	require.ErrorContains(t, err, `"coder-k8s-apiserver-tls" is the serving Secret of the coder-k8s aggregated API server`)
+	require.NoError(t, reservedSecretName(ctx, c, owner, "free", false))
+	require.NoError(t, reservedSecretName(ctx, c, owner, "coder-ai-gateway-key", false))
 
 	// A kind whose CRD is not installed is skipped. Other list errors stop.
 	for _, tc := range []struct {
@@ -141,7 +163,7 @@ func TestReservedSecretName(t *testing.T) {
 				return c.List(ctx, list, opts...)
 			},
 		}).Build()
-		err := reservedSecretName(ctx, failing, owner, "free")
+		err := reservedSecretName(ctx, failing, owner, "free", false)
 		require.Equal(t, tc.wantErr, err != nil, "%v", err)
 	}
 }
@@ -164,15 +186,28 @@ func TestReservedSecretNameGatewayKeyOrder(t *testing.T) {
 	newer := key("a-newer", "uid-3", metav1.NewTime(t0.Add(time.Minute)))
 	c := fake.NewClientBuilder().WithScheme(reservedNameScheme(t)).WithObjects(oldest, sameTimeLaterName, newer).Build()
 
-	require.NoError(t, reservedSecretName(ctx, c, oldest, "shared"), "the oldest object keeps the name")
-	err := reservedSecretName(ctx, c, sameTimeLaterName, "shared")
+	require.NoError(t, reservedSecretName(ctx, c, oldest, "shared", false), "the oldest object keeps the name")
+	err := reservedSecretName(ctx, c, sameTimeLaterName, "shared", false)
 	requireReservedReason(t, err)
 	require.ErrorContains(t, err, `CoderAIGatewayKey "b-oldest"`)
-	err = reservedSecretName(ctx, c, newer, "shared")
+	err = reservedSecretName(ctx, c, newer, "shared", false)
 	requireReservedReason(t, err)
 	require.ErrorContains(t, err, `"b-oldest", "c-same-time"`)
-	require.NoError(t, reservedSecretName(ctx, c, newer, "other"))
+	require.NoError(t, reservedSecretName(ctx, c, newer, "other", false))
 
-	require.ErrorContains(t, reservedSecretName(ctx, c, &coderv1alpha1.CoderAIGatewayKey{ObjectMeta: metav1.ObjectMeta{Namespace: "ns"}}, "shared"),
+	// An object that already controls the Secret keeps it, also against an
+	// object that ranks older (a same-second creation with a lower name).
+	// Other kinds still reserve the name.
+	require.NoError(t, reservedSecretName(ctx, c, sameTimeLaterName, "shared", true))
+	require.NoError(t, reservedSecretName(ctx, c, newer, "shared", true))
+	require.NoError(t, c.Create(ctx, &coderv1alpha1.CoderAIProvider{
+		ObjectMeta: metav1.ObjectMeta{Name: "openai", Namespace: "ns"},
+		Spec:       coderv1alpha1.CoderAIProviderSpec{APIKeySecretRef: coderv1alpha1.SecretKeySelector{Name: "shared", Key: "k"}},
+	}))
+	err = reservedSecretName(ctx, c, newer, "shared", true)
+	requireReservedReason(t, err)
+	require.ErrorContains(t, err, `CoderAIProvider "openai"`)
+
+	require.ErrorContains(t, reservedSecretName(ctx, c, &coderv1alpha1.CoderAIGatewayKey{ObjectMeta: metav1.ObjectMeta{Namespace: "ns"}}, "shared", false),
 		"assertion failed: a reserved Secret name check needs")
 }

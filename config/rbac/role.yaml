@@ -84,6 +84,14 @@ rules:
 - apiGroups:
   - coder.com
   resources:
+  - coderaigatewaykeys
+  - coderaiproviders
+  - codermcpservers
+  verbs:
+  - list
+- apiGroups:
+  - coder.com
+  resources:
   - codercontrolplanes
   - coderprovisioners
   - coderworkspaceproxies

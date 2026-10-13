@@ -12,8 +12,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/aggregated/servingcert"
 	"github.com/coder/coder-k8s/internal/credentialsecret"
 )
+
+// The reserved-name check lists these kinds with a live reader, so it needs
+// list but no watch.
+// +kubebuilder:rbac:groups=coder.com,resources=coderaiproviders;codermcpservers;coderaigatewaykeys,verbs=list
 
 // reasonSecretNameReserved means another coder.com object in the namespace
 // references or generates a Secret with the name a controller wants to
@@ -25,14 +30,27 @@ const reasonSecretNameReserved = "SecretNameReserved"
 // named name. Claiming such a name would hand that object a Secret it does
 // not expect: another controller could read a gateway key as its operator
 // token, or refuse its own Secret and stall. Among CoderAIGatewayKey objects
-// with the same secretName, the oldest one keeps the name. Kinds whose CRD is
-// not installed are skipped. It lists each kind once, so it costs a few
+// with the same secretName, the oldest one may claim the name. When claimed
+// is true, owner already controls the Secret, and the claimant keeps it: no
+// other CoderAIGatewayKey reserves it then. Creation times have one-second
+// precision, so without that rule an object created later in the same second
+// with a lower name could stall the claimant, while the Secret refuses that
+// object. Kinds whose CRD is not installed are skipped. It lists each kind once, so it costs a few
 // uncached reads.
-func reservedSecretName(ctx context.Context, reader client.Reader, owner client.Object, name string) error {
+func reservedSecretName(ctx context.Context, reader client.Reader, owner client.Object, name string, claimed bool) error {
 	if reader == nil || owner == nil || owner.GetNamespace() == "" || owner.GetName() == "" || name == "" {
 		return errors.New("assertion failed: a reserved Secret name check needs a reader, an owner with a name and namespace, and a Secret name")
 	}
+	if name == servingcert.SecretName {
+		// The aggregated API server can run in any namespace, so its fixed
+		// serving Secret name is reserved in every namespace (plan D13).
+		return &credentialsecret.Error{Reason: reasonSecretNameReserved, Message: fmt.Sprintf(
+			"Secret name %q is the serving Secret of the coder-k8s aggregated API server. Choose another secretName.", name)}
+	}
 	for _, source := range reservedSecretNameSources {
+		if claimed && source.kind == aiGatewayKeyKind {
+			continue
+		}
 		users, err := source.users(ctx, reader, owner, name)
 		if meta.IsNoMatchError(err) {
 			continue
