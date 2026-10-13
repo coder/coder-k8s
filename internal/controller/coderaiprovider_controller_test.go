@@ -89,6 +89,21 @@ func requireAIProviderStep(t *testing.T, provider *coderv1alpha1.CoderAIProvider
 	if stalled {
 		want["Reconciling"], want["Stalled"] = metav1.ConditionFalse, metav1.ConditionTrue
 	}
+	return requireAIProviderConditions(t, provider, want, reason)
+}
+
+// requireAIProviderReady checks that the provider reports Ready for its
+// current generation.
+func requireAIProviderReady(t *testing.T, provider *coderv1alpha1.CoderAIProvider) {
+	t.Helper()
+	want := map[string]metav1.ConditionStatus{"Ready": metav1.ConditionTrue, "Reconciling": metav1.ConditionFalse, "Stalled": metav1.ConditionFalse}
+	requireAIProviderConditions(t, provider, want, "Applied")
+	require.Equal(t, provider.Generation, provider.Status.AppliedGeneration)
+	require.Nil(t, provider.Status.CreateAttemptTime)
+}
+
+func requireAIProviderConditions(t *testing.T, provider *coderv1alpha1.CoderAIProvider, want map[string]metav1.ConditionStatus, reason string) string {
+	t.Helper()
 	for conditionType, status := range want {
 		condition := meta.FindStatusCondition(provider.Status.Conditions, conditionType)
 		require.NotNil(t, condition, conditionType)
@@ -115,6 +130,12 @@ func TestCoderAIProviderCredentialChecks(t *testing.T) {
 		{name: "consented", secret: func(env aiProviderEnv) *corev1.Secret { return env.keySecret(consented, testAIProviderKey) }},
 		{name: "uppercase host", baseURL: "https://API.OpenAI.com/v1", secret: func(env aiProviderEnv) *corev1.Secret { return env.keySecret(consented, testAIProviderKey) }},
 		{name: "explicit default port", baseURL: "https://api.openai.com:443/v1", secret: func(env aiProviderEnv) *corev1.Secret { return env.keySecret(consented, testAIProviderKey) }},
+		{name: "IPv6 host", baseURL: "https://[FD00::1]:8443/v1", secret: func(env aiProviderEnv) *corev1.Secret {
+			return env.keySecret(consentedObjectMeta("", "", "https://[fd00::1]:8443"), testAIProviderKey)
+		}},
+		{name: "IPv6 host, other port", baseURL: "https://[fd00::1]/v1", reason: credentialsecret.ReasonDestinationNotAllowed, secret: func(env aiProviderEnv) *corev1.Secret {
+			return env.keySecret(consentedObjectMeta("", "", "https://[fd00::1]:8443"), testAIProviderKey)
+		}},
 		{name: "missing Secret", reason: credentialsecret.ReasonSecretNotFound},
 		{name: "missing key", reason: credentialsecret.ReasonKeyMissing, secret: func(env aiProviderEnv) *corev1.Secret {
 			s := env.keySecret(consented, testAIProviderKey)
@@ -178,8 +199,9 @@ func TestCoderAIProviderCredentialChecks(t *testing.T) {
 			})
 			got, result := env.reconcile(ctx, t, provider)
 			if tc.reason == "" {
-				requireAIProviderStep(t, got, false, "Pending")
+				requireAIProviderReady(t, got)
 				require.Equal(t, 1, env.fake.requestCount(routeAIProvider), "a usable key reaches the name lookup")
+				require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider))
 				require.Equal(t, 10*time.Minute, result.RequeueAfter)
 				return
 			}
@@ -214,7 +236,7 @@ func TestCoderAIProviderControlPlaneNotReady(t *testing.T) {
 	operatorToken.ObjectMeta = metav1.ObjectMeta{Name: operatorToken.Name, Namespace: env.namespace}
 	require.NoError(t, k8sClient.Create(ctx, operatorToken))
 	got, _ = env.reconcile(ctx, t, provider)
-	requireAIProviderStep(t, got, false, "Pending")
+	requireAIProviderReady(t, got)
 }
 
 // The name lookup only reads. A provider that this object did not create is a
@@ -353,7 +375,7 @@ func TestCoderAIProviderWatches(t *testing.T) {
 	requireReason("ControlPlaneNotReady")
 
 	createTestControlPlane(ctx, t, env.namespace, "coder", env.fake.server.URL)
-	requireReason("Pending")
+	requireReason("Applied")
 
 	// Another control plane that names the key Secret as its operator token
 	// Secret makes the key unusable. Removing it makes the key usable again.
@@ -365,8 +387,17 @@ func TestCoderAIProviderWatches(t *testing.T) {
 	}
 	require.NoError(t, k8sClient.Create(ctx, other))
 	requireReason(credentialsecret.ReasonRefused)
+	// Renaming its operator token Secret frees the key Secret. The update
+	// event maps the old object too, so the provider is checked again.
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(other), other))
+	other.Spec.OperatorAccess.GeneratedTokenSecretName = "other-operator-token"
+	require.NoError(t, k8sClient.Update(ctx, other))
+	requireReason("Applied")
+	other.Spec.OperatorAccess.GeneratedTokenSecretName = secret.Name
+	require.NoError(t, k8sClient.Update(ctx, other))
+	requireReason(credentialsecret.ReasonRefused)
 	require.NoError(t, k8sClient.Delete(ctx, other))
-	requireReason("Pending")
+	requireReason("Applied")
 
 	require.NoError(t, k8sClient.Delete(ctx, secret))
 	requireReason(credentialsecret.ReasonSecretNotFound)
