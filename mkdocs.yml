@@ -40,6 +40,7 @@ nav:
   - How-to guides:
       - Deploy the controller: how-to/deploy-controller.md
       - Deploy the aggregated API server: how-to/deploy-aggregated-apiserver.md
+      - Configure credential Secrets for proxies and provisioners: how-to/workspace-proxy-credentials.md
       - Start, stop, and read logs of workspaces: how-to/start-stop-workspaces.md
       - Test a template version: how-to/test-templates.md
       - Gate template promotion with GitOps: how-to/gitops.md

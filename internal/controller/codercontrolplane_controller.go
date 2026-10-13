@@ -37,6 +37,7 @@ import (
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/coderbootstrap"
+	"github.com/coder/coder-k8s/internal/credentialsecret"
 )
 
 const (
@@ -54,7 +55,6 @@ const (
 	defaultOperatorAccessTokenLifetime = 365 * 24 * time.Hour
 
 	operatorAccessRetryInterval = 30 * time.Second
-	operatorTokenSecretSuffix   = "-operator-token"
 
 	workspaceRBACFinalizer          = "coder.com/workspace-rbac-cleanup"
 	workspaceRBACOwnerUIDAnnotation = "coder.com/workspace-rbac-owner-uid"
@@ -2569,30 +2569,10 @@ func operatorAccessDatabaseTokenName(coderControlPlane *coderv1alpha1.CoderContr
 	return fmt.Sprintf("%s-%016x", defaultOperatorAccessTokenName, hasher.Sum64())
 }
 
+// operatorAccessTokenSecretName names the operator token Secret. The credential
+// Secret contract refuses the same name, so both use one implementation.
 func operatorAccessTokenSecretName(coderControlPlane *coderv1alpha1.CoderControlPlane) string {
-	if coderControlPlane == nil {
-		return ""
-	}
-
-	configuredSecretName := strings.TrimSpace(coderControlPlane.Spec.OperatorAccess.GeneratedTokenSecretName)
-	if configuredSecretName != "" {
-		return configuredSecretName
-	}
-
-	candidate := coderControlPlane.Name + operatorTokenSecretSuffix
-	if len(candidate) <= 63 {
-		return candidate
-	}
-
-	hasher := fnv.New32a()
-	_, _ = hasher.Write([]byte(coderControlPlane.Name))
-	hashSuffix := fmt.Sprintf("%08x", hasher.Sum32())
-	available := 63 - len(operatorTokenSecretSuffix) - len(hashSuffix) - 1
-	if available < 1 {
-		available = 1
-	}
-
-	return fmt.Sprintf("%s-%s%s", coderControlPlane.Name[:available], hashSuffix, operatorTokenSecretSuffix)
+	return credentialsecret.OperatorTokenSecretName(coderControlPlane)
 }
 
 func volumeNameForSecret(prefix, secretName string) string {

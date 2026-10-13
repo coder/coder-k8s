@@ -16,6 +16,7 @@ spec:
   # key:
   #   name: my-provisioner-key    # Provisioner key name in coderd (defaults to CR name)
   #   secretName: my-key-secret   # K8s Secret to store the key (defaults to "{name}-provisioner-key")
+  #                               # It must not exist yet, or must be owned by this provisioner.
   #   secretKey: key              # Data key in the Secret (defaults to "key")
   # organizationName: default     # Coder organization (defaults to "default")
   # image: ghcr.io/coder/coder:latest  # Container image (defaults to control plane image)
@@ -25,6 +26,13 @@ spec:
   # extraEnv:
   #   - name: CODER_VERBOSE
   #     value: "true"
+  #   # A secretKeyRef must name a Secret with the label coder.com/credential=true
+  #   # and the annotation coder.com/credential-destinations=<control plane URL origin>.
+  #   - name: GIT_TOKEN
+  #     valueFrom:
+  #       secretKeyRef:
+  #         name: provisioner-git-token
+  #         key: token
   tags:
     scope: organization
   replicas: 1

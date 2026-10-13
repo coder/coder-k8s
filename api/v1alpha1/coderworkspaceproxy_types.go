@@ -10,6 +10,11 @@ const (
 	WorkspaceProxyPhasePending = "Pending"
 	// WorkspaceProxyPhaseReady indicates at least one proxy pod is ready.
 	WorkspaceProxyPhaseReady = "Ready"
+
+	// CoderWorkspaceProxyConditionCredentialsReady indicates whether every
+	// referenced credential Secret and setting passed the operator's checks.
+	// When it is False, the operator keeps the last applied Deployment.
+	CoderWorkspaceProxyConditionCredentialsReady = "CredentialsReady"
 )
 
 // ProxyBootstrapSpec configures optional registration with the Coder API.
