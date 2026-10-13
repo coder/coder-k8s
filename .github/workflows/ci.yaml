@@ -233,6 +233,22 @@ jobs:
             exit 1
           fi
 
+      - name: Verify the dormant CoderWorkspaceClaim CRD is not installed
+        # Remove this step when the CoderWorkspaceClaim controller ships (#153).
+        run: |
+          # grep exits 1 when nothing matches. Any other status (for example a missing file) fails the step.
+          status=0
+          # The third pattern matches the CRD path entry in config/default/kustomization.yaml.
+          grep -n -E '^[[:space:]]+kind: CoderWorkspaceClaim$|coderworkspaceclaims\.coder\.com|coder\.com_coderworkspaceclaims\.yaml' \
+            dist/install.yaml config/default/kustomization.yaml config/crd/bases/*.yaml || status=$?
+          if [[ "${status}" -eq 0 ]]; then
+            echo "assertion failed: the CoderWorkspaceClaim CRD must not ship before its controller" >&2
+            exit 1
+          elif [[ "${status}" -ne 1 ]]; then
+            echo "assertion failed: the CoderWorkspaceClaim CRD guard could not read the install manifests (grep exit ${status})" >&2
+            exit 1
+          fi
+
       - name: Run golangci-lint
         run: go tool golangci-lint run --timeout=5m ./...
 
