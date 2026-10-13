@@ -236,12 +236,32 @@ func sameOrigin(a, b *url.URL) bool {
 		effectivePort(a) == effectivePort(b)
 }
 
-// sameHostname folds case for the host but compares an IPv6 zone exactly,
-// because interface names are case-sensitive.
+// sameHostname folds ASCII case for the host but compares an IPv6 zone
+// exactly, because interface names are case-sensitive. Unicode case folding
+// is unsafe here: "σ" and "ς" fold equal but map to different IDNA hosts.
 func sameHostname(a, b string) bool {
 	aHost, aZone, _ := strings.Cut(a, "%")
 	bHost, bZone, _ := strings.Cut(b, "%")
-	return strings.EqualFold(aHost, bHost) && aZone == bZone
+	return asciiEqualFold(aHost, bHost) && aZone == bZone
+}
+
+func asciiEqualFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		if asciiLower(a[i]) != asciiLower(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiLower(c byte) byte {
+	if 'A' <= c && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
 }
 
 func effectivePort(u *url.URL) string {
