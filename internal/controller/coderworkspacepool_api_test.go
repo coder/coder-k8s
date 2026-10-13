@@ -65,6 +65,13 @@ func TestCoderWorkspacePoolAPIValidation(t *testing.T) {
 		{name: "prebuilds strategy", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Strategy = "Prebuilds" }, wantErr: "spec.strategy"},
 		{name: "share mode", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Claims.Mode = "Share" }, wantErr: "spec.claims.mode"},
 		{name: "owner not a UUID", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.OwnerUserID = "alice" }, wantErr: "spec.ownerUserID"},
+		{name: "prebuilds owner", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) {
+			s.OwnerUserID = "c42fdf75-3097-471c-8c33-fb52454d81c0"
+		}, wantErr: "ownerUserID must not be the Coder prebuilds system user"},
+		// format: uuid accepts upper case and no hyphens, and so does Coder.
+		{name: "prebuilds owner in upper case without hyphens", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) {
+			s.OwnerUserID = "C42FDF753097471C8C33FB52454D81C0"
+		}, wantErr: "ownerUserID must not be the Coder prebuilds system user"},
 		{name: "template without organization", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Template = "ci-runner" }, wantErr: "spec.template"},
 		{name: "reserved template name", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Template = "default.new" }, wantErr: "must not be new or create"},
 		{name: "negative replicas", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = ptrTo(int32(-1)) }, wantErr: "spec.replicas"},

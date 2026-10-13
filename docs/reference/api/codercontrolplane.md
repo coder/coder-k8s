@@ -42,6 +42,7 @@
 | `topologySpreadConstraints` | [TopologySpreadConstraint](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#topologyspreadconstraint-v1-core) array | TopologySpreadConstraints control pod topology spread. |
 | `mcpServers` | [MCPServersSpec](#mcpserversspec) | MCPServers configures CoderMCPServer objects that use this control plane. It has no effect yet: the CoderMCPServer controller is not shipped. |
 | `aiGateway` | [AIGatewaySpec](#aigatewayspec) | AIGateway configures CoderAIGatewayKey objects that use this control plane. It has no effect yet: the CoderAIGatewayKey controller is not shipped. |
+| `workspacePools` | [WorkspacePoolsSpec](#workspacepoolsspec) | WorkspacePools configures CoderWorkspacePool objects that use this control plane. It has no effect yet: the CoderWorkspacePool controller is not shipped. |
 | `templateTests` | [TemplateTestsSpec](#templatetestsspec) | TemplateTests configures CoderTemplateTest runs against this control plane. |
 
 ## Status
@@ -238,6 +239,25 @@ TemplateTestsSpec configures CoderTemplateTest runs against a control plane.
 | --- | --- | --- |
 | `ownerUserID` | string | OwnerUserID is the UUID of the Coder user that owns every test workspace. Use a dedicated low-privilege tester user: each start build gives the owner's API token to the template's Terraform. Tests stay pending until this is set. |
 | `allowRetain` | boolean | AllowRetain lets the annotation coder.com/deletion-policy: retain on a CoderTemplateTest release the test without deleting its workspace. This delegates that power to everyone who can create tests against this control plane: they can leave workspaces, and their owner's session keys, in Coder. When false (the default), the controller ignores retain and deletes the workspace. |
+
+### WorkspacePoolOwner
+
+WorkspacePoolOwner allows one Coder user as the owner of pool workspaces.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `userID` | string | UserID is the UUID of the Coder user. Coder's prebuilds system user is refused: Coder's prebuild reconciler can delete or hand out the workspaces it owns. |
+| `templates` | string array | Templates are the only Coder templates, as `<organization>.<template>`, that pools of this owner can build. |
+| `maxWorkspaces` | integer | MaxWorkspaces caps the workspaces of this owner across all pools of this control plane: unclaimed, bound, and used. |
+
+### WorkspacePoolsSpec
+
+WorkspacePoolsSpec configures CoderWorkspacePool objects that use a
+CoderControlPlane (CoderControlPlane.spec.workspacePools).
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `owners` | [WorkspacePoolOwner](#workspacepoolowner) array | Owners are the Coder users that pools on this control plane can use as owners, each with the templates it can build and a workspace cap. They are the admin's consent that pools make Coder build these templates as this owner. Every start build gives the owner's API token to the template's Terraform. A pool whose owner or template is not listed creates no workspace. This field has no effect yet: the CoderWorkspacePool controller is not shipped. |
 
 ## Source
 

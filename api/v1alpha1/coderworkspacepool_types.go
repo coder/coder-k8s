@@ -32,6 +32,53 @@ const (
 	CoderWorkspacePoolSelectorLabel = "coder.com/workspace-pool-uid"
 )
 
+// WorkspacePoolsSpec configures CoderWorkspacePool objects that use a
+// CoderControlPlane (CoderControlPlane.spec.workspacePools).
+type WorkspacePoolsSpec struct {
+	// Owners are the Coder users that pools on this control plane can use as
+	// owners, each with the templates it can build and a workspace cap. They
+	// are the admin's consent that pools make Coder build these templates as
+	// this owner. Every start build gives the owner's API token to the
+	// template's Terraform. A pool whose owner or template is not listed
+	// creates no workspace.
+	//
+	// This field has no effect yet: the CoderWorkspacePool controller is not
+	// shipped.
+	// +kubebuilder:validation:MaxItems=16
+	// +listType=map
+	// +listMapKey=userID
+	// +optional
+	Owners []WorkspacePoolOwner `json:"owners,omitempty"`
+}
+
+// WorkspacePoolOwner allows one Coder user as the owner of pool workspaces.
+type WorkspacePoolOwner struct {
+	// UserID is the UUID of the Coder user. Coder's prebuilds system user is
+	// refused: Coder's prebuild reconciler can delete or hand out the
+	// workspaces it owns.
+	// +kubebuilder:validation:Format=uuid
+	// +kubebuilder:validation:MaxLength=36
+	// +kubebuilder:validation:XValidation:rule="self.lowerAscii().replace('-', '') != 'c42fdf753097471c8c33fb52454d81c0'",message="userID must not be the Coder prebuilds system user"
+	UserID string `json:"userID"`
+	// Templates are the only Coder templates, as `<organization>.<template>`,
+	// that pools of this owner can build.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MaxLength=65
+	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*\.[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$`
+	// +kubebuilder:validation:XValidation:rule="self.all(t, t.matches('^[^.]{1,32}[.][^.]{1,32}$'))",message="organization and template names must each have at most 32 characters"
+	// +kubebuilder:validation:XValidation:rule="self.all(t, !t.matches('^(new|create)[.]') && !t.matches('[.](new|create)$'))",message="organization and template names must not be new or create"
+	// +listType=set
+	Templates []string `json:"templates"`
+	// MaxWorkspaces caps the workspaces of this owner across all pools of
+	// this control plane: unclaimed, bound, and used.
+	// +kubebuilder:default=10
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	// +optional
+	MaxWorkspaces *int32 `json:"maxWorkspaces,omitempty"`
+}
+
 // CoderWorkspacePoolVersion selects the template version of new members. Set
 // exactly one field.
 // +kubebuilder:validation:XValidation:rule="(has(self.name) ? 1 : 0) + (has(self.id) ? 1 : 0) + (has(self.active) ? 1 : 0) == 1",message="set exactly one of name, id, or active"
@@ -100,6 +147,7 @@ type CoderWorkspacePoolSpec struct {
 	// +kubebuilder:validation:Format=uuid
 	// +kubebuilder:validation:MaxLength=36
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="ownerUserID is immutable"
+	// +kubebuilder:validation:XValidation:rule="self.lowerAscii().replace('-', '') != 'c42fdf753097471c8c33fb52454d81c0'",message="ownerUserID must not be the Coder prebuilds system user"
 	OwnerUserID string `json:"ownerUserID"`
 	// Template is the Coder template as `<organization>.<template>`, the same
 	// format as aggregated CoderTemplate names. Each name has at most 32

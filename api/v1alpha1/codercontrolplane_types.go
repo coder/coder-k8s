@@ -137,6 +137,12 @@ type CoderControlPlaneSpec struct {
 	// +optional
 	AIGateway *AIGatewaySpec `json:"aiGateway,omitempty"`
 
+	// WorkspacePools configures CoderWorkspacePool objects that use this
+	// control plane. It has no effect yet: the CoderWorkspacePool controller
+	// is not shipped.
+	// +optional
+	WorkspacePools *WorkspacePoolsSpec `json:"workspacePools,omitempty"`
+
 	// TemplateTests configures CoderTemplateTest runs against this control plane.
 	// +optional
 	TemplateTests *TemplateTestsSpec `json:"templateTests,omitempty"`

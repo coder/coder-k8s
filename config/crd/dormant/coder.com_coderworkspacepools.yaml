@@ -117,6 +117,8 @@ spec:
                 x-kubernetes-validations:
                 - message: ownerUserID is immutable
                   rule: self == oldSelf
+                - message: ownerUserID must not be the Coder prebuilds system user
+                  rule: self.lowerAscii().replace('-', '') != 'c42fdf753097471c8c33fb52454d81c0'
               parameters:
                 description: Parameters are rich parameter values for the start builds.
                 items:

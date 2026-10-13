@@ -4327,6 +4327,77 @@ spec:
                   - name
                   type: object
                 type: array
+              workspacePools:
+                description: |-
+                  WorkspacePools configures CoderWorkspacePool objects that use this
+                  control plane. It has no effect yet: the CoderWorkspacePool controller
+                  is not shipped.
+                properties:
+                  owners:
+                    description: |-
+                      Owners are the Coder users that pools on this control plane can use as
+                      owners, each with the templates it can build and a workspace cap. They
+                      are the admin's consent that pools make Coder build these templates as
+                      this owner. Every start build gives the owner's API token to the
+                      template's Terraform. A pool whose owner or template is not listed
+                      creates no workspace.
+
+                      This field has no effect yet: the CoderWorkspacePool controller is not
+                      shipped.
+                    items:
+                      description: WorkspacePoolOwner allows one Coder user as the
+                        owner of pool workspaces.
+                      properties:
+                        maxWorkspaces:
+                          default: 10
+                          description: |-
+                            MaxWorkspaces caps the workspaces of this owner across all pools of
+                            this control plane: unclaimed, bound, and used.
+                          format: int32
+                          maximum: 100
+                          minimum: 1
+                          type: integer
+                        templates:
+                          description: |-
+                            Templates are the only Coder templates, as `<organization>.<template>`,
+                            that pools of this owner can build.
+                          items:
+                            maxLength: 65
+                            pattern: ^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*\.[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$
+                            type: string
+                          maxItems: 16
+                          minItems: 1
+                          type: array
+                          x-kubernetes-list-type: set
+                          x-kubernetes-validations:
+                          - message: organization and template names must each have
+                              at most 32 characters
+                            rule: self.all(t, t.matches('^[^.]{1,32}[.][^.]{1,32}$'))
+                          - message: organization and template names must not be new
+                              or create
+                            rule: self.all(t, !t.matches('^(new|create)[.]') && !t.matches('[.](new|create)$'))
+                        userID:
+                          description: |-
+                            UserID is the UUID of the Coder user. Coder's prebuilds system user is
+                            refused: Coder's prebuild reconciler can delete or hand out the
+                            workspaces it owns.
+                          format: uuid
+                          maxLength: 36
+                          type: string
+                          x-kubernetes-validations:
+                          - message: userID must not be the Coder prebuilds system
+                              user
+                            rule: self.lowerAscii().replace('-', '') != 'c42fdf753097471c8c33fb52454d81c0'
+                      required:
+                      - templates
+                      - userID
+                      type: object
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - userID
+                    x-kubernetes-list-type: map
+                type: object
             type: object
             x-kubernetes-validations:
             - message: spec.extraEnv must not set CODER_PG_CONNECTION_URL when spec.database.connectionSecretRef
