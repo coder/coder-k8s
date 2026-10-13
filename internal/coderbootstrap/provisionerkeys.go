@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/google/uuid"
 	"golang.org/x/xerrors"
@@ -201,8 +202,30 @@ func newAuthenticatedClient(coderURL, sessionToken string) (*codersdk.Client, er
 	// connection pool across parallel test servers.
 	client.HTTPClient.Transport = bypassRateLimitRoundTripper{base: defaultTransport.Clone()}
 	client.HTTPClient.Timeout = coderSDKRequestTimeout
+	// net/http copies custom headers such as Coder-Session-Token to every
+	// redirect target, so refuse redirects that leave the configured origin.
+	client.HTTPClient.CheckRedirect = sameOriginRedirectPolicy(coderAPIURL)
 
 	return client, nil
+}
+
+// maxRedirects matches the limit of net/http's default redirect policy.
+const maxRedirects = 10
+
+func sameOriginRedirectPolicy(origin *url.URL) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if req == nil || req.URL == nil {
+			return xerrors.New("assertion failed: redirect request URL must not be nil")
+		}
+		if len(via) >= maxRedirects {
+			return xerrors.Errorf("stopped after %d redirects", maxRedirects)
+		}
+		if !strings.EqualFold(req.URL.Scheme, origin.Scheme) || !strings.EqualFold(req.URL.Host, origin.Host) {
+			return xerrors.New("refusing redirect to a different origin than the coder URL")
+		}
+
+		return nil
+	}
 }
 
 func resolveOrganizationByName(ctx context.Context, client *codersdk.Client, organizationName string) (codersdk.Organization, error) {
