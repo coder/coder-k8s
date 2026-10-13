@@ -5,8 +5,9 @@
 // A Secret is usable only when all of these are true:
 //   - It has type Opaque.
 //   - The operator did not generate it: it has no owner in the coder.com API
-//     group, it does not carry app.kubernetes.io/managed-by=coder-k8s, and no
-//     CoderControlPlane in the namespace names it as its operator token Secret.
+//     group, and it does not carry app.kubernetes.io/managed-by=coder-k8s.
+//   - No CoderControlPlane in the namespace uses it for its own access: as its
+//     operator token Secret, its license Secret, or its database Secret.
 //   - It carries the label coder.com/credential=true.
 //   - Its annotation coder.com/credential-destinations lists the origin of the
 //     destination that the caller sends the value to.
@@ -168,9 +169,8 @@ func Read(ctx context.Context, c client.Reader, namespace string, ref coderv1alp
 	if err != nil {
 		return Value{}, err
 	}
-	if refused {
-		return Value{}, newError(ReasonRefused,
-			"Secret %q is managed by coder-k8s and cannot be used here. Create a dedicated credential and store it in its own Secret.", ref.Name)
+	if refused != nil {
+		return Value{}, refused
 	}
 	if secret.Type != "" && secret.Type != corev1.SecretTypeOpaque {
 		return Value{}, newError(ReasonRefused,
@@ -216,33 +216,93 @@ func Read(ctx context.Context, c client.Reader, namespace string, ref coderv1alp
 	}, nil
 }
 
-// isRefused reports whether secret is one that the operator generates.
-func isRefused(ctx context.Context, c client.Reader, secret *corev1.Secret) (bool, error) {
+// isRefused returns a ReasonRefused error when the operator generates secret
+// or a CoderControlPlane in its namespace uses it for its own access.
+func isRefused(ctx context.Context, c client.Reader, secret *corev1.Secret) (*Error, error) {
+	generated := newError(ReasonRefused,
+		"Secret %q is managed by coder-k8s and cannot be used here. Create a dedicated credential and store it in its own Secret.", secret.Name)
 	if secret.Labels[managedByLabelKey] == managedByLabelValue {
-		return true, nil
+		return generated, nil
 	}
 	for _, owner := range secret.OwnerReferences {
 		// An owner whose apiVersion does not parse is refused too (fail closed).
 		if group, ok := apiGroup(owner.APIVersion); !ok || group == coderv1alpha1.GroupVersion.Group {
-			return true, nil
+			return generated, nil
 		}
 	}
 
 	controlPlanes := &coderv1alpha1.CoderControlPlaneList{}
 	if err := c.List(ctx, controlPlanes, client.InNamespace(secret.Namespace)); err != nil {
-		return false, fmt.Errorf("list codercontrolplanes to check credential Secret %q: %w", secret.Name, err)
+		return nil, fmt.Errorf("list codercontrolplanes to check credential Secret %q: %w", secret.Name, err)
 	}
 	for i := range controlPlanes.Items {
 		controlPlane := &controlPlanes.Items[i]
-		if OperatorTokenSecretName(controlPlane) == secret.Name {
-			return true, nil
-		}
-		if ref := controlPlane.Status.OperatorTokenSecretRef; ref != nil && strings.TrimSpace(ref.Name) == secret.Name {
-			return true, nil
+		for _, used := range controlPlaneSecrets(controlPlane) {
+			if used.name != secret.Name {
+				continue
+			}
+			if used.role == roleOperatorToken {
+				return generated, nil
+			}
+			return newError(ReasonRefused,
+				"Secret %q is the %s Secret of CoderControlPlane %q and cannot be used here. Create a dedicated credential and store it in its own Secret.",
+				secret.Name, used.role, controlPlane.Name), nil
 		}
 	}
 
-	return false, nil
+	return nil, nil
+}
+
+// Roles of the Secrets that a control plane uses for its own access.
+const (
+	roleOperatorToken = "operator token"
+	roleLicense       = "license"
+	roleDatabase      = "database"
+)
+
+type controlPlaneSecret struct {
+	name string
+	role string
+}
+
+// controlPlaneSecrets returns the Secrets that controlPlane uses for its own
+// access. Empty names are left out.
+func controlPlaneSecrets(controlPlane *coderv1alpha1.CoderControlPlane) []controlPlaneSecret {
+	if controlPlane == nil {
+		return nil
+	}
+	candidates := []controlPlaneSecret{{name: OperatorTokenSecretName(controlPlane), role: roleOperatorToken}}
+	if ref := controlPlane.Status.OperatorTokenSecretRef; ref != nil {
+		candidates = append(candidates, controlPlaneSecret{name: ref.Name, role: roleOperatorToken})
+	}
+	if ref := controlPlane.Spec.LicenseSecretRef; ref != nil {
+		candidates = append(candidates, controlPlaneSecret{name: ref.Name, role: roleLicense})
+	}
+	if db := controlPlane.Spec.Database; db != nil {
+		candidates = append(candidates, controlPlaneSecret{name: db.ConnectionSecretRef.Name, role: roleDatabase})
+	}
+	secrets := make([]controlPlaneSecret, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.name = strings.TrimSpace(candidate.name); candidate.name != "" {
+			secrets = append(secrets, candidate)
+		}
+	}
+	return secrets
+}
+
+// ControlPlaneSecretNames returns the names of the Secrets that Read refuses
+// because of controlPlane: its operator token Secret (the configured or default
+// name, and the name in status), its license Secret, and its database Secret.
+// The names are sorted and unique. Controllers re-queue the resources that
+// reference these names when a control plane changes.
+func ControlPlaneSecretNames(controlPlane *coderv1alpha1.CoderControlPlane) []string {
+	secrets := controlPlaneSecrets(controlPlane)
+	names := make([]string, 0, len(secrets))
+	for _, secret := range secrets {
+		names = append(names, secret.name)
+	}
+	slices.Sort(names)
+	return slices.Compact(names)
 }
 
 func apiGroup(apiVersion string) (string, bool) {
