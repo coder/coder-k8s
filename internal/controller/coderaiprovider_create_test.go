@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -230,6 +231,45 @@ func TestCoderAIProviderCreateRejectedAfterCommit(t *testing.T) {
 			require.Equal(t, stored.id.String(), got.Status.ProviderID)
 		})
 	}
+}
+
+// A rejected create is not sent again when the read that confirms absence
+// fails once.
+func TestCoderAIProviderRejectedCreateConfirmFails(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newAIProviderCreateEnv(ctx, t)
+	env.fake.failNext(routeAIProvider, fakeFault{Rewrite: func(answer any) any { return answer }}) // The name lookup passes.
+	env.fake.failNext(routeAIProvider, fakeFault{Status: http.StatusBadGateway})                   // The confirmation read fails.
+	env.fake.failNext(routeCreateAIProvider, fakeFault{Status: http.StatusBadRequest})
+	got, _ := env.reconcile(ctx, t, provider)
+	requireAIProviderStep(t, got, false, "ConfirmingRejectedCreate")
+	require.NotNil(t, got.Status.CreateAttemptTime)
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIProviderStep(t, got, true, "CoderRejected")
+	require.Nil(t, got.Status.CreateAttemptTime)
+	require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider), "the rejected create was not sent again")
+}
+
+// A create answer without a provider ID is impossible, so it fails fast.
+// The marker stays, and a read decides on the next reconcile.
+func TestCoderAIProviderCreateAnswerWithoutID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newAIProviderCreateEnv(ctx, t)
+	env.fake.failNext(routeCreateAIProvider, fakeFault{Rewrite: func(answer any) any {
+		p := answer.(codersdk.AIProvider)
+		p.ID = uuid.Nil
+		return p
+	}})
+	_, err := env.r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(provider)})
+	require.ErrorContains(t, err, "assertion failed: Coder answered AI provider openai without an ID")
+	stored := &coderv1alpha1.CoderAIProvider{}
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(provider), stored))
+	require.NotNil(t, stored.Status.CreateAttemptTime)
+	got, _ := env.reconcile(ctx, t, stored)
+	requireAIProviderReady(t, got)
+	require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider))
 }
 
 // Plan S4: a provider that someone else creates between the lookup and the

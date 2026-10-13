@@ -48,6 +48,13 @@ func (r *CoderAIProviderReconciler) createOrConfirm(
 			if step := requireSiteOwner(ctx, sdk); step != nil {
 				return step, nil
 			}
+			if ready := meta.FindStatusCondition(provider.Status.Conditions, coderv1alpha1.CoderAIProviderConditionReady); ready != nil &&
+				ready.Reason == aiProviderConfirmingRejectedCreate && ready.ObservedGeneration == provider.Generation {
+				// The last create of this spec was rejected, and now a read
+				// confirms that it created nothing. Do not send it again.
+				provider.Status.CreateAttemptTime, provider.Status.Credential = nil, nil
+				return aiProviderStalled(0, "CoderRejected", "Coder rejected the create request of provider %s, and a read confirmed that nothing was created.", provider.Name), nil
+			}
 		}
 		return r.createAIProvider(ctx, sdk, provider, key, before)
 	case err != nil:
@@ -87,7 +94,7 @@ func recordAIProvider(provider *coderv1alpha1.CoderAIProvider, found codersdk.AI
 			provider.Name, found.ID), nil
 	}
 	if found.ID == uuid.Nil {
-		return aiProviderStalled(aiProviderResync, "CoderAnswerMismatch", "Coder answered provider %s without an ID.", provider.Name), nil
+		return nil, fmt.Errorf("assertion failed: Coder answered AI provider %s without an ID", provider.Name)
 	}
 	if provider.Status.Credential == nil {
 		// A create of this object committed after its marker was cleared, so
@@ -165,18 +172,36 @@ func (r *CoderAIProviderReconciler) confirmRejectedCreate(
 		// Ours (the create committed) or someone else's (NameConflict).
 		return recordAIProvider(provider, found)
 	case !isCoderNotFound(err):
-		return aiProviderWait(aiProviderRetry, "ConfirmingCreate", "get provider %s after a %d answer: %s", provider.Name, status, coderErrorSummary(err)), nil
+		reason := "ConfirmingCreate"
+		if !aiProviderCreateRetryable(status) {
+			// Remember the rejection, so a later read that confirms absence
+			// stalls instead of sending the rejected create again.
+			reason = aiProviderConfirmingRejectedCreate
+		}
+		return aiProviderWait(aiProviderRetry, reason, "get provider %s after a %d answer: %s", provider.Name, status, coderErrorSummary(err)), nil
 	}
 	if step := requireSiteOwner(ctx, sdk); step != nil {
 		return step, nil
 	}
 	provider.Status.CreateAttemptTime, provider.Status.Credential = nil, nil
+	if aiProviderCreateRetryable(status) {
+		return aiProviderWait(aiProviderRetry, "CreateRetrying", "The create request had no effect: %s", coderErrorSummary(createErr)), nil
+	}
+	return aiProviderStalled(0, "CoderRejected", "Coder rejected the create request: %s", coderErrorSummary(createErr)), nil
+}
+
+// aiProviderConfirmingRejectedCreate is the wait reason after a create that
+// Coder rejected, while the read that confirms absence fails.
+const aiProviderConfirmingRejectedCreate = "ConfirmingRejectedCreate"
+
+// aiProviderCreateRetryable reports 4xx create answers that a retry can fix
+// without a spec change.
+func aiProviderCreateRetryable(status int) bool {
 	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden, http.StatusConflict, http.StatusTooManyRequests:
-		return aiProviderWait(aiProviderRetry, "CreateRetrying", "The create request had no effect: %s", coderErrorSummary(createErr)), nil
-	default:
-		return aiProviderStalled(0, "CoderRejected", "Coder rejected the create request: %s", coderErrorSummary(createErr)), nil
+		return true
 	}
+	return false
 }
 
 // isCoderAuthFailure reports 401 and 403. An expired operator token or a
