@@ -37,7 +37,8 @@ var (
 // to the variable that seeds it. A legacy variable counts when it has a value
 // or a valueFrom source. The controller does not resolve a valueFrom source
 // or a $(VAR) reference, so an indexed name that needs one is returned as
-// unresolved: then coderd can seed any name. envFrom is not inspected.
+// unresolved: then coderd can seed any name. envFrom and the seeding flags in
+// spec.extraArgs are not inspected (#287).
 func aiProviderNamesSeededByEnv(env []corev1.EnvVar) (names map[string]string, unresolved string) {
 	names = map[string]string{}
 	type field struct {
@@ -48,10 +49,12 @@ func aiProviderNamesSeededByEnv(env []corev1.EnvVar) (names map[string]string, u
 	providers := map[string]*indexed{}
 	var order []string
 	// Kubernetes keeps the last of two variables with one name, also an
-	// empty one, so only the last entry counts.
+	// empty one, so only the last entry counts. Coder uppercases each name
+	// before it matches (serpent.ParseEnviron), so the check does too.
 	last := map[string]corev1.EnvVar{}
 	var variables []string
 	for _, e := range env {
+		e.Name = strings.ToUpper(e.Name)
 		if _, ok := last[e.Name]; !ok {
 			variables = append(variables, e.Name)
 		}
