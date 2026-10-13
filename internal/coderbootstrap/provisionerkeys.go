@@ -232,8 +232,16 @@ func sameOriginRedirectPolicy(origin *url.URL) func(*http.Request, []*http.Reque
 // "https://host" and "https://host:443" are the same origin.
 func sameOrigin(a, b *url.URL) bool {
 	return strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		sameHostname(a.Hostname(), b.Hostname()) &&
 		effectivePort(a) == effectivePort(b)
+}
+
+// sameHostname folds case for the host but compares an IPv6 zone exactly,
+// because interface names are case-sensitive.
+func sameHostname(a, b string) bool {
+	aHost, aZone, _ := strings.Cut(a, "%")
+	bHost, bZone, _ := strings.Cut(b, "%")
+	return strings.EqualFold(aHost, bHost) && aZone == bZone
 }
 
 func effectivePort(u *url.URL) string {

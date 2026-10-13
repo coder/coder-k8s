@@ -24,6 +24,8 @@ func TestSameOriginRedirectPolicy(t *testing.T) {
 		{name: "different host", origin: "https://coder.example.com", target: "https://attacker.example.com/api/v2/x"},
 		{name: "different port", origin: "https://coder.example.com", target: "https://coder.example.com:8443/api/v2/x"},
 		{name: "different scheme", origin: "http://coder.example.com", target: "https://coder.example.com/api/v2/x"},
+		{name: "same IPv6 zone", origin: "https://[fe80::1%25eth0]", target: "https://[FE80::1%25eth0]/api/v2/x", allowed: true},
+		{name: "IPv6 zone case differs", origin: "https://[fe80::1%25eth0]", target: "https://[fe80::1%25ETH0]/api/v2/x"},
 	}
 
 	for _, tt := range tests {
