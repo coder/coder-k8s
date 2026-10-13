@@ -1,9 +1,13 @@
 package controller
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/credentialsecret"
 )
 
 // The controller repeats Coder's base_url check on the exact spec value.
@@ -27,4 +31,19 @@ func TestAIProviderBaseURL(t *testing.T) {
 		_, err := aiProviderBaseURL(raw)
 		require.Equal(t, wantErr, err != nil, "%q: %v", raw, err)
 	}
+}
+
+// The status message for a bad base URL is fixed: the parse error repeats
+// the URL, which can hold user info.
+func TestAIProviderBadBaseURLMessage(t *testing.T) {
+	t.Parallel()
+	r := &CoderAIProviderReconciler{}
+	provider := &coderv1alpha1.CoderAIProvider{}
+	provider.Spec.BaseURL = "https://user:hunter2-password@api%.example.com/v1"
+	step, err := r.check(context.Background(), provider, provider.Status.DeepCopy())
+	require.NoError(t, err)
+	require.True(t, step.stalled)
+	require.Equal(t, credentialsecret.ReasonMalformed, step.reason)
+	require.NotContains(t, step.message, "hunter2")
+	require.NotContains(t, step.message, "api%.example.com")
 }

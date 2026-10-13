@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/coder/coder/v2/codersdk"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -39,16 +38,19 @@ const (
 
 // CoderAIProviderReconciler reconciles CoderAIProvider objects (#154). It is
 // not registered yet. It checks the spec, the credential Secret and the
-// control plane, and it reports a Coder provider name that something else
-// already uses. It does not write to Coder.
+// control plane, creates the Coder provider when the name is free, and sets
+// the spec values on the provider that it created. It never changes a
+// provider that it did not create.
 type CoderAIProviderReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
 
-// aiProviderStep is the outcome of one reconcile. A stalled step waits for a
-// change of the spec or an input. Any other step waits for progress.
+// aiProviderStep is the outcome of one reconcile. A ready step reports that
+// Coder matches the spec. A stalled step waits for a change of the spec or an
+// input. Any other step waits for progress.
 type aiProviderStep struct {
+	ready   bool
 	stalled bool
 	reason  string
 	message string
@@ -161,7 +163,7 @@ func (r *CoderAIProviderReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err := r.patchFinalizer(ctx, provider, true); err != nil {
 		return ctrl.Result{}, err
 	}
-	step, err := r.check(ctx, provider)
+	step, err := r.check(ctx, provider, before)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -173,12 +175,17 @@ func (r *CoderAIProviderReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 }
 
 // check validates the base URL, reads the key through the credential Secret
-// contract, gets Coder access, and looks up the provider name. Every check
-// before the lookup sends nothing to Coder.
-func (r *CoderAIProviderReconciler) check(ctx context.Context, provider *coderv1alpha1.CoderAIProvider) (*aiProviderStep, error) {
+// contract, gets Coder access, and then creates or applies the provider. The
+// checks before Coder access send nothing to Coder.
+func (r *CoderAIProviderReconciler) check(
+	ctx context.Context, provider *coderv1alpha1.CoderAIProvider, before *coderv1alpha1.CoderAIProviderStatus,
+) (*aiProviderStep, error) {
 	baseURL, err := aiProviderBaseURL(provider.Spec.BaseURL)
 	if err != nil {
-		return aiProviderStalled(0, credentialsecret.ReasonMalformed, "spec.baseURL is not a URL that Coder accepts: %v", err), nil
+		// A fixed message: the parse error repeats the URL, which can hold
+		// user info. A bad spec value stalls the object, not the reconcile.
+		return aiProviderStalled(0, credentialsecret.ReasonMalformed, //nolint:nilerr // Reported in status.
+			"spec.baseURL is not a URL that Coder accepts: it must be an http or https URL with a host, without user info, surrounding whitespace, or invalid percent escapes."), nil
 	}
 	key, err := credentialsecret.Read(ctx, r.Client, provider.Namespace, provider.Spec.APIKeySecretRef, baseURL)
 	if credErr := (*credentialsecret.Error)(nil); errors.As(err, &credErr) {
@@ -195,31 +202,26 @@ func (r *CoderAIProviderReconciler) check(ctx context.Context, provider *coderv1
 		// operator token Secret that appears later.
 		return aiProviderWait(aiProviderRetry, wait.reason, "%s", wait.message), nil
 	}
-	step := checkAIProviderName(ctx, sdk, provider)
+	var step *aiProviderStep
+	if provider.Status.ProviderID == "" {
+		if step, err = r.createOrConfirm(ctx, sdk, provider, key, before); err != nil {
+			return nil, err
+		}
+		if step == nil {
+			// Store the ID before the apply replaces the nonce: after that,
+			// only the stored ID proves that this object created the provider.
+			if err := r.writeStatus(ctx, provider, before); err != nil {
+				return nil, err
+			}
+			*before = *provider.Status.DeepCopy()
+		}
+	}
+	if step == nil {
+		step = applyAIProvider(ctx, sdk, provider, key)
+	}
+	// Coder messages can echo the request, so scrub the key from them.
 	step.message = credentialsecret.Redact(step.message, key)
 	return step, nil
-}
-
-// checkAIProviderName reports whether the provider name is free in Coder. It
-// only reads. A provider that this object never tried to create is not ours,
-// because Coder providers carry no owner (no adoption).
-func checkAIProviderName(ctx context.Context, sdk *codersdk.Client, provider *coderv1alpha1.CoderAIProvider) *aiProviderStep {
-	if provider.Status.ProviderID != "" || provider.Status.CreateAttemptTime != nil {
-		return aiProviderWait(aiProviderResync, "Pending", "Provider %s has a Coder ID or a create attempt. This controller version does not change it.", provider.Name)
-	}
-	found, err := sdk.AIProvider(ctx, provider.Name)
-	switch {
-	case isCoderNotFound(err):
-		return aiProviderWait(aiProviderResync, "Pending", "Coder has no provider named %s. This controller version does not create it.", provider.Name)
-	case err != nil:
-		return aiProviderWait(aiProviderRetry, "CoderUnavailable", "get provider %s: %s", provider.Name, coderErrorSummary(err))
-	}
-	if err := coderAnswerFor("AI provider", provider.Name, found.Name); err != nil {
-		return aiProviderStalled(aiProviderResync, "CoderAnswerMismatch", "%s", err.Error())
-	}
-	return aiProviderStalled(aiProviderResync, "NameConflict",
-		"Coder already has a provider named %s (ID %s) that this resource did not create. The controller never changes it. Choose another name, or delete that provider in Coder.",
-		provider.Name, found.ID)
 }
 
 // aiProviderBaseURL parses the exact spec value the way Coder validates
@@ -264,15 +266,18 @@ func (r *CoderAIProviderReconciler) patchFinalizer(ctx context.Context, provider
 // to the CoderTemplateTest limit.
 func applyAIProviderStep(provider *coderv1alpha1.CoderAIProvider, step *aiProviderStep) {
 	message := truncateTemplateTestMessage(step.message)
-	reconciling, stalled := metav1.ConditionTrue, metav1.ConditionFalse
-	if step.stalled {
+	ready, reconciling, stalled := metav1.ConditionFalse, metav1.ConditionTrue, metav1.ConditionFalse
+	switch {
+	case step.ready:
+		ready, reconciling = metav1.ConditionTrue, metav1.ConditionFalse
+	case step.stalled:
 		reconciling, stalled = metav1.ConditionFalse, metav1.ConditionTrue
 	}
 	for _, c := range []struct {
 		conditionType string
 		status        metav1.ConditionStatus
 	}{
-		{coderv1alpha1.CoderAIProviderConditionReady, metav1.ConditionFalse},
+		{coderv1alpha1.CoderAIProviderConditionReady, ready},
 		{coderv1alpha1.CoderAIProviderConditionReconciling, reconciling},
 		{coderv1alpha1.CoderAIProviderConditionStalled, stalled},
 	} {
