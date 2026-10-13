@@ -220,11 +220,33 @@ func sameOriginRedirectPolicy(origin *url.URL) func(*http.Request, []*http.Reque
 		if len(via) >= maxRedirects {
 			return xerrors.Errorf("stopped after %d redirects", maxRedirects)
 		}
-		if !strings.EqualFold(req.URL.Scheme, origin.Scheme) || !strings.EqualFold(req.URL.Host, origin.Host) {
+		if !sameOrigin(req.URL, origin) {
 			return xerrors.New("refusing redirect to a different origin than the coder URL")
 		}
 
 		return nil
+	}
+}
+
+// sameOrigin compares scheme, hostname and effective port, so that
+// "https://host" and "https://host:443" are the same origin.
+func sameOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectivePort(a) == effectivePort(b)
+}
+
+func effectivePort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
 	}
 }
 
