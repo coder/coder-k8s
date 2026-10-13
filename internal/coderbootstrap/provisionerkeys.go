@@ -139,6 +139,79 @@ func (c *SDKClient) DeleteProvisionerKey(ctx context.Context, coderURL, sessionT
 	return xerrors.Errorf("delete provisioner key %q: %w", keyName, err)
 }
 
+// DeleteProvisionerKeyByIDRequest identifies one provisioner key by the IDs
+// that the caller recorded when it applied the key.
+type DeleteProvisionerKeyByIDRequest struct {
+	CoderURL       string
+	SessionToken   string
+	OrganizationID uuid.UUID
+	KeyID          uuid.UUID
+}
+
+// DeleteProvisionerKeyByID deletes the provisioner key with req.KeyID in the
+// organization req.OrganizationID. It does nothing when no key has that ID,
+// so a key that someone else created with the same name stays. The Coder API
+// deletes keys only by name, so the key is looked up by ID first. The lookup
+// and the delete are two requests: a key deleted and created again with the
+// same name between them is deleted too.
+func (c *SDKClient) DeleteProvisionerKeyByID(ctx context.Context, req DeleteProvisionerKeyByIDRequest) error {
+	if req.CoderURL == "" {
+		return xerrors.New("coder URL is required")
+	}
+	if req.SessionToken == "" {
+		return xerrors.New("session token is required")
+	}
+	if req.OrganizationID == uuid.Nil {
+		return xerrors.New("organization ID is required")
+	}
+	if req.KeyID == uuid.Nil {
+		return xerrors.New("provisioner key ID is required")
+	}
+
+	client, err := newAuthenticatedClient(req.CoderURL, req.SessionToken)
+	if err != nil {
+		return err
+	}
+
+	keys, err := withOptionalRateLimitBypass(ctx, func(requestCtx context.Context) ([]codersdk.ProvisionerKey, error) {
+		return client.ListProvisionerKeys(requestCtx, req.OrganizationID)
+	})
+	if isNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return xerrors.Errorf("list provisioner keys for organization %q: %w", req.OrganizationID, err)
+	}
+
+	var match *codersdk.ProvisionerKey
+	for i := range keys {
+		if keys[i].ID == req.KeyID {
+			match = &keys[i]
+			break
+		}
+	}
+	if match == nil {
+		return nil
+	}
+	if match.Name == "" {
+		return xerrors.Errorf("assertion failed: provisioner key %q has an empty name", req.KeyID)
+	}
+
+	_, err = withOptionalRateLimitBypass(ctx, func(requestCtx context.Context) (struct{}, error) {
+		return struct{}{}, client.DeleteProvisionerKey(requestCtx, req.OrganizationID, match.Name)
+	})
+	if err != nil && !isNotFound(err) {
+		return xerrors.Errorf("delete provisioner key %q: %w", match.Name, err)
+	}
+
+	return nil
+}
+
+func isNotFound(err error) bool {
+	var apiErr *codersdk.Error
+	return errors.As(err, &apiErr) && apiErr.StatusCode() == http.StatusNotFound
+}
+
 // Entitlements returns deployment entitlements for the given coderd instance.
 func (c *SDKClient) Entitlements(ctx context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error) {
 	if coderURL == "" {

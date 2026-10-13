@@ -562,6 +562,28 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		)
 	}
 
+	if keyMaterial != "" {
+		// A new key exists in Coder. Record its IDs in status before its
+		// plaintext reaches the Secret, so that deletion can find the key to
+		// revoke (at status.controlPlaneURL or, during a control plane URL
+		// change, at the current control plane URL). Only the IDs: the applied spec values stay as they are
+		// until the Secret holds the key, so a failed Secret write is detected
+		// as drift (or missing metadata) and rotated again on the next try.
+		// A failed status write (for example a conflict because the
+		// provisioner is being deleted) revokes the new key before anyone can
+		// read it.
+		provisioner.Status.OrganizationID = organizationID
+		provisioner.Status.ProvisionerKeyID = provisionerKeyID
+		if err := r.Status().Update(ctx, provisioner); err != nil {
+			r.revokeUnpublishedKey(ctx, controlPlane.Status.URL, sessionToken, organizationID, provisionerKeyID)
+			return ctrl.Result{}, fmt.Errorf("record new provisioner key in status: %w", err)
+		}
+		statusSnapshot = provisioner.Status.DeepCopy()
+		if statusSnapshot == nil {
+			return ctrl.Result{}, fmt.Errorf("assertion failed: status snapshot must not be nil after new key status update")
+		}
+	}
+
 	provisionerKeySecret, err := r.ensureProvisionerKeySecret(ctx, provisioner, keySecretName, keySecretKey, keyMaterial)
 	if err != nil {
 		if credErr, ok := asCredentialError(err); ok {
@@ -594,13 +616,8 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if keyStatusSnapshot == nil {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: key status snapshot must not be nil")
 	}
-	provisioner.Status.OrganizationID = organizationID
-	provisioner.Status.OrganizationName = appliedOrgName
-	provisioner.Status.ProvisionerKeyID = provisionerKeyID
-	provisioner.Status.ProvisionerKeyName = provisionerKeyName
-	provisioner.Status.TagsHash = appliedTagsHash
-	provisioner.Status.ControlPlaneRefName = appliedControlPlaneRefName
-	provisioner.Status.ControlPlaneURL = appliedControlPlaneURL
+	recordAppliedKeyStatus(provisioner, organizationID, appliedOrgName, provisionerKeyID, provisionerKeyName,
+		appliedTagsHash, appliedControlPlaneRefName, appliedControlPlaneURL)
 	provisioner.Status.SecretRef = &coderv1alpha1.SecretKeySelector{Name: keySecretName, Key: keySecretKey}
 	if !equality.Semantic.DeepEqual(*keyStatusSnapshot, provisioner.Status) {
 		if err := r.Status().Update(ctx, provisioner); err != nil {
@@ -666,17 +683,15 @@ func (r *CoderProvisionerReconciler) reconcileDeletion(ctx context.Context, prov
 
 	log := ctrl.LoggerFrom(ctx)
 
-	// Use the last-applied organization name from status so we target the
-	// correct org even if spec was changed but never successfully rotated.
-	// Fall back to the spec-derived name only when status is empty.
-	organizationName := provisioner.Status.OrganizationName
-	if organizationName == "" {
-		organizationName = provisionerOrganizationName(provisioner.Spec.OrganizationName)
+	// Delete only the key that status records for this resource. A provisioner
+	// that never applied a key (refused, not entitled, never ready) must not
+	// delete a Coder key that happens to have the name from its spec.
+	organizationID, keyID, recorded := recordedProvisionerKey(provisioner.Status)
+	if !recorded {
+		log.Info("status records no Coder provisioner key, removing the finalizer without a Coder call")
+		return r.removeCleanupFinalizer(ctx, provisioner)
 	}
 	keyName := provisioner.Status.ProvisionerKeyName
-	if keyName == "" {
-		keyName, _, _ = provisionerKeyConfig(provisioner)
-	}
 
 	// Best-effort remote key cleanup: if the referenced control plane,
 	// its URL, operator access token, or any other prerequisite is
@@ -713,29 +728,92 @@ func (r *CoderProvisionerReconciler) reconcileDeletion(ctx context.Context, prov
 			log.Info("operator access is not ready during deletion, skipping remote key cleanup",
 				"reason", tokenReason, "message", tokenMessage)
 		default:
-			if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
-				ctx,
-				controlPlaneURL,
-				sessionToken,
-				organizationName,
-				keyName,
-			); deleteErr != nil {
-				// Treat key deletion failures as best-effort so the
-				// finalizer is still removed. Transient errors, auth
-				// issues, or org-lookup failures should not block CR
-				// cleanup.
-				log.Info("failed to delete remote provisioner key during deletion, proceeding with finalizer removal",
-					"keyName", keyName, "error", deleteErr)
+			// During a control plane URL change, status can hold the new key's
+			// IDs while status.controlPlaneURL still names the old endpoint.
+			// Try the current endpoint too: the delete matches the key ID only.
+			coderURLs := []string{controlPlaneURL}
+			if currentURL := strings.TrimSpace(controlPlane.Status.URL); currentURL != "" && currentURL != controlPlaneURL {
+				coderURLs = append(coderURLs, currentURL)
+			}
+			for _, coderURL := range coderURLs {
+				if deleteErr := r.BootstrapClient.DeleteProvisionerKeyByID(ctx, coderbootstrap.DeleteProvisionerKeyByIDRequest{
+					CoderURL:       coderURL,
+					SessionToken:   sessionToken,
+					OrganizationID: organizationID,
+					KeyID:          keyID,
+				}); deleteErr != nil {
+					// Treat key deletion failures as best-effort so the
+					// finalizer is still removed. Transient errors, auth
+					// issues, or org-lookup failures should not block CR
+					// cleanup.
+					log.Info("failed to delete remote provisioner key during deletion, proceeding with finalizer removal",
+						"keyName", keyName, "keyID", keyID, "error", deleteErr)
+				}
 			}
 		}
 	}
 
+	return r.removeCleanupFinalizer(ctx, provisioner)
+}
+
+// recordAppliedKeyStatus sets the status fields that describe the key applied
+// in Coder.
+func recordAppliedKeyStatus(
+	provisioner *coderv1alpha1.CoderProvisioner,
+	organizationID, organizationName, keyID, keyName, tagsHash, controlPlaneRefName, controlPlaneURL string,
+) {
+	provisioner.Status.OrganizationID = organizationID
+	provisioner.Status.OrganizationName = organizationName
+	provisioner.Status.ProvisionerKeyID = keyID
+	provisioner.Status.ProvisionerKeyName = keyName
+	provisioner.Status.TagsHash = tagsHash
+	provisioner.Status.ControlPlaneRefName = controlPlaneRefName
+	provisioner.Status.ControlPlaneURL = controlPlaneURL
+}
+
+// revokeUnpublishedKey deletes a key whose plaintext was never written to a
+// Secret. It is best-effort: the key is unknown outside this reconcile.
+func (r *CoderProvisionerReconciler) revokeUnpublishedKey(ctx context.Context, coderURL, sessionToken, organizationID, keyID string) {
+	log := ctrl.LoggerFrom(ctx)
+	orgID, orgErr := uuid.Parse(organizationID)
+	parsedKeyID, keyErr := uuid.Parse(keyID)
+	if orgErr != nil || keyErr != nil || orgID == uuid.Nil || parsedKeyID == uuid.Nil {
+		log.Info("cannot revoke the unpublished provisioner key: Coder returned no key ID")
+		return
+	}
+	if err := r.BootstrapClient.DeleteProvisionerKeyByID(ctx, coderbootstrap.DeleteProvisionerKeyByIDRequest{
+		CoderURL:       coderURL,
+		SessionToken:   sessionToken,
+		OrganizationID: orgID,
+		KeyID:          parsedKeyID,
+	}); err != nil {
+		log.Info("failed to revoke the unpublished provisioner key", "keyID", parsedKeyID, "error", err)
+	}
+}
+
+func (r *CoderProvisionerReconciler) removeCleanupFinalizer(ctx context.Context, provisioner *coderv1alpha1.CoderProvisioner) (ctrl.Result, error) {
 	controllerutil.RemoveFinalizer(provisioner, coderv1alpha1.ProvisionerKeyCleanupFinalizer)
 	if err := r.Update(ctx, provisioner); err != nil {
 		return ctrl.Result{}, fmt.Errorf("remove finalizer from coderprovisioner %s/%s: %w", provisioner.Namespace, provisioner.Name, err)
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// recordedProvisionerKey returns the organization and key IDs that status
+// records for the key this provisioner created. ok is false when status does
+// not record valid IDs.
+func recordedProvisionerKey(status coderv1alpha1.CoderProvisionerStatus) (organizationID, keyID uuid.UUID, ok bool) {
+	organizationID, err := uuid.Parse(status.OrganizationID)
+	if err != nil || organizationID == uuid.Nil {
+		return uuid.Nil, uuid.Nil, false
+	}
+	keyID, err = uuid.Parse(status.ProvisionerKeyID)
+	if err != nil || keyID == uuid.Nil {
+		return uuid.Nil, uuid.Nil, false
+	}
+
+	return organizationID, keyID, true
 }
 
 func (r *CoderProvisionerReconciler) ensureCleanupFinalizer(ctx context.Context, provisioner *coderv1alpha1.CoderProvisioner) (bool, error) {
