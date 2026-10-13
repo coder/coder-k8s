@@ -122,7 +122,8 @@ spec:
               parameters:
                 description: |-
                   Parameters are the rich parameter values of the start build, in plain
-                  text.
+                  text. Leave the field out when there are none: typed clients drop an
+                  empty list, and the immutability rule would then refuse their updates.
                 items:
                   description: |-
                     CoderWorkspacePoolParameter is one rich parameter value for the start
@@ -141,6 +142,7 @@ spec:
                   - name
                   type: object
                 maxItems: 64
+                minItems: 1
                 type: array
                 x-kubernetes-list-map-keys:
                 - name

@@ -93,9 +93,11 @@ type CoderWorkspacePoolMemberSpec struct {
 	// +optional
 	PresetID string `json:"presetID,omitempty"`
 	// Parameters are the rich parameter values of the start build, in plain
-	// text.
+	// text. Leave the field out when there are none: typed clients drop an
+	// empty list, and the immutability rule would then refuse their updates.
 	// +listType=map
 	// +listMapKey=name
+	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=64
 	// +optional
 	Parameters []CoderWorkspacePoolParameter `json:"parameters,omitempty"`

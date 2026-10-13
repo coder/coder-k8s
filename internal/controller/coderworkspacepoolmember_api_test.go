@@ -10,6 +10,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
@@ -98,6 +99,19 @@ func TestCoderWorkspacePoolMemberAPIValidation(t *testing.T) {
 		member.SetNamespace(namespace)
 		member.SetName("no-spec")
 		requireInvalid(t, k8sClient.Create(ctx, member), "spec: Required value")
+	})
+	// A stored empty list would make every later typed update look like a
+	// parameters change, the claimRef bind included.
+	t.Run("empty parameters list", func(t *testing.T) {
+		member := &unstructured.Unstructured{}
+		member.SetGroupVersionKind(coderv1alpha1.GroupVersion.WithKind("CoderWorkspacePoolMember"))
+		member.SetNamespace(namespace)
+		member.SetName("empty-parameters")
+		spec, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&newPoolMember(namespace, "", nil).Spec)
+		require.NoError(t, err)
+		spec["parameters"] = []any{}
+		require.NoError(t, unstructured.SetNestedMap(member.Object, spec, "spec"))
+		requireInvalid(t, k8sClient.Create(ctx, member), "spec.parameters")
 	})
 	t.Run("unknown phase", func(t *testing.T) {
 		member := newPoolMember(namespace, "phase", nil)
