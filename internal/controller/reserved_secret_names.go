@@ -21,17 +21,19 @@ import (
 const reasonSecretNameReserved = "SecretNameReserved"
 
 // reservedSecretName returns a SecretNameReserved failure when another
-// coder.com object in namespace references or generates a Secret named name.
-// Claiming such a name would hand that object a Secret it does not expect:
-// another controller could read a gateway key as its operator token, or
-// refuse its own Secret and stall. Kinds whose CRD is not installed are
-// skipped. It lists each kind once, so it costs a few uncached reads.
-func reservedSecretName(ctx context.Context, reader client.Reader, namespace, name string) error {
-	if reader == nil || namespace == "" || name == "" {
-		return errors.New("assertion failed: a reserved Secret name check needs a reader, a namespace and a name")
+// coder.com object in owner's namespace references or generates a Secret
+// named name. Claiming such a name would hand that object a Secret it does
+// not expect: another controller could read a gateway key as its operator
+// token, or refuse its own Secret and stall. Among CoderAIGatewayKey objects
+// with the same secretName, the oldest one keeps the name. Kinds whose CRD is
+// not installed are skipped. It lists each kind once, so it costs a few
+// uncached reads.
+func reservedSecretName(ctx context.Context, reader client.Reader, owner client.Object, name string) error {
+	if reader == nil || owner == nil || owner.GetNamespace() == "" || owner.GetName() == "" || name == "" {
+		return errors.New("assertion failed: a reserved Secret name check needs a reader, an owner with a name and namespace, and a Secret name")
 	}
 	for _, source := range reservedSecretNameSources {
-		users, err := source.users(ctx, reader, namespace, name)
+		users, err := source.users(ctx, reader, owner, name)
 		if meta.IsNoMatchError(err) {
 			continue
 		}
@@ -48,7 +50,7 @@ func reservedSecretName(ctx context.Context, reader client.Reader, namespace, na
 
 type reservedSecretNameSource struct {
 	kind  string
-	users func(ctx context.Context, reader client.Reader, namespace, name string) ([]string, error)
+	users func(ctx context.Context, reader client.Reader, owner client.Object, name string) ([]string, error)
 }
 
 var reservedSecretNameSources = []reservedSecretNameSource{
@@ -65,28 +67,57 @@ var reservedSecretNameSources = []reservedSecretNameSource{
 		func(p *coderv1alpha1.CoderAIProvider) []string { return []string{p.Spec.APIKeySecretRef.Name} })},
 	{kind: "CoderMCPServer", users: secretUsers(
 		func(l *coderv1alpha1.CoderMCPServerList) []coderv1alpha1.CoderMCPServer { return l.Items }, mcpServerSecretNames)},
+	{kind: "CoderAIGatewayKey", users: secretUsersFor(
+		func(l *coderv1alpha1.CoderAIGatewayKeyList) []coderv1alpha1.CoderAIGatewayKey { return l.Items }, olderGatewayKeySecretName)},
 }
 
-// secretUsers lists one kind in a namespace and returns the names of the
-// objects whose Secret names include the given name. L is the list type and
-// T the item type, so the compiler checks every conversion.
+// olderGatewayKeySecretName returns key's output Secret name when key is a
+// CoderAIGatewayKey that is older than owner (by creation time, then name).
+// The oldest object keeps a shared name, so two objects never reserve it
+// from each other. No object is older than itself, so owner never reserves
+// its own name.
+func olderGatewayKeySecretName(owner client.Object, key *coderv1alpha1.CoderAIGatewayKey) []string {
+	ownerCreated, keyCreated := owner.GetCreationTimestamp(), key.CreationTimestamp
+	older := keyCreated.Before(&ownerCreated) || (keyCreated.Equal(&ownerCreated) && key.Name < owner.GetName())
+	if !older {
+		return nil
+	}
+	return []string{key.Spec.SecretName}
+}
+
+// secretUsers is secretUsersFor for kinds whose Secret names do not depend
+// on the owner.
 func secretUsers[L, T any, PL interface {
 	*L
 	client.ObjectList
 }, PT interface {
 	*T
 	client.Object
-}](items func(PL) []T, secretNames func(PT) []string) func(context.Context, client.Reader, string, string) ([]string, error) {
-	return func(ctx context.Context, reader client.Reader, namespace, name string) ([]string, error) {
+}](items func(PL) []T, secretNames func(PT) []string) func(context.Context, client.Reader, client.Object, string) ([]string, error) {
+	return secretUsersFor[L, T, PL, PT](items, func(_ client.Object, obj PT) []string { return secretNames(obj) })
+}
+
+// secretUsersFor lists one kind in owner's namespace and returns the names of
+// the objects whose Secret names include the given name. Names are compared
+// after trimming spaces, as the controllers that use them trim. L is the list
+// type and T the item type, so the compiler checks every conversion.
+func secretUsersFor[L, T any, PL interface {
+	*L
+	client.ObjectList
+}, PT interface {
+	*T
+	client.Object
+}](items func(PL) []T, secretNames func(client.Object, PT) []string) func(context.Context, client.Reader, client.Object, string) ([]string, error) {
+	return func(ctx context.Context, reader client.Reader, owner client.Object, name string) ([]string, error) {
 		list := PL(new(L))
-		if err := reader.List(ctx, list, client.InNamespace(namespace)); err != nil {
+		if err := reader.List(ctx, list, client.InNamespace(owner.GetNamespace())); err != nil {
 			return nil, err
 		}
 		var users []string
 		all := items(list)
 		for i := range all {
 			obj := PT(&all[i])
-			if slices.Contains(secretNames(obj), name) {
+			if slices.ContainsFunc(secretNames(owner, obj), func(n string) bool { return strings.TrimSpace(n) == name }) {
 				users = append(users, fmt.Sprintf("%q", obj.GetName()))
 			}
 		}
@@ -142,20 +173,52 @@ func provisionerSecretNames(provisioner *coderv1alpha1.CoderProvisioner) []strin
 	return sortedUnique(names)
 }
 
-// volumeSecretNames returns the Secrets that volumes mount, directly or
-// through a projected volume.
+// volumeSecretNames returns every Secret that volumes reference: Secret and
+// projected volumes, and the credential Secrets of storage volume sources.
 func volumeSecretNames(volumes []corev1.Volume) []string {
 	var names []string
-	for _, volume := range volumes {
-		if volume.Secret != nil {
-			names = append(names, volume.Secret.SecretName)
+	ref := func(r *corev1.LocalObjectReference) {
+		if r != nil {
+			names = append(names, r.Name)
 		}
-		if volume.Projected != nil {
-			for _, source := range volume.Projected.Sources {
+	}
+	for _, v := range volumes {
+		if v.Secret != nil {
+			names = append(names, v.Secret.SecretName)
+		}
+		if v.Projected != nil {
+			for _, source := range v.Projected.Sources {
 				if source.Secret != nil {
 					names = append(names, source.Secret.Name)
 				}
 			}
+		}
+		if v.AzureFile != nil {
+			names = append(names, v.AzureFile.SecretName)
+		}
+		if v.CSI != nil {
+			ref(v.CSI.NodePublishSecretRef)
+		}
+		if v.CephFS != nil {
+			ref(v.CephFS.SecretRef)
+		}
+		if v.Cinder != nil {
+			ref(v.Cinder.SecretRef)
+		}
+		if v.FlexVolume != nil {
+			ref(v.FlexVolume.SecretRef)
+		}
+		if v.ISCSI != nil {
+			ref(v.ISCSI.SecretRef)
+		}
+		if v.RBD != nil {
+			ref(v.RBD.SecretRef)
+		}
+		if v.ScaleIO != nil {
+			ref(v.ScaleIO.SecretRef)
+		}
+		if v.StorageOS != nil {
+			ref(v.StorageOS.SecretRef)
 		}
 	}
 	return names
