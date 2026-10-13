@@ -17,7 +17,7 @@ The aggregated API server serves `coderworkspaces`, `codertemplates` and `codert
 | [Template versions](#template-versions) | Read-only: `get` and `list`, no watch. Reads never download template source. |
 | [Promote a template version](#promote-a-template-version) | `codertemplates/<name>/promote` (`create`) makes a version active. A rollback promotes an older version. It needs its own RBAC grant. `dryRun=All` previews it. An unconfirmed result returns `503`, and a concurrent change returns `409`. |
 | [Template builds](#template-builds) | Create and update with `spec.files` wait until Coder completes the import. The full request must complete within 34 seconds. |
-| [Coder timeouts](#coder-timeouts) | A Coder call that runs out of time returns `504` on every resource. A create whose `2xx` answer is not JSON also returns `504`. After a `504` on a write, re-read before you retry. |
+| [Coder timeouts](#coder-timeouts) | A Coder call that runs out of time returns `504` on every resource. Most broken `2xx` answers to a create also return `504`. After a `504` on a write, re-read before you retry. |
 | [Workspace build log](#workspace-build-log) | `coderworkspaces/log` returns the latest build log as text. It needs its own RBAC grant and has fixed size, time, and concurrency limits. |
 | [Start and stop](#start-and-stop) | `coderworkspaces/start` and `coderworkspaces/stop` start or stop a workspace. Each needs its own RBAC grant. A repeated request does not queue a second build while one is active. |
 
@@ -225,7 +225,7 @@ A Coder call that runs out of time returns `504 Gateway Timeout` on every aggreg
 - the request deadline ends first (see [The 34-second write budget](#the-34-second-write-budget), the [log limits](#workspace-build-log), and the [start and stop budget](#time-limit-and-retries)), or
 - Coder itself answers `504`.
 
-A create of a workspace or a template also returns `504` when the answer to the create request has a `2xx` status, but its body is not the JSON that Coder sends. For example, a proxy in front of Coder sends an HTML page or an empty body. Coder can have created the object, so the message says that the result is uncertain.
+A create of a workspace or a template also returns `504` when the answer to the create request has a `2xx` status, but is not the answer that Coder sends. For example, a proxy in front of Coder sends an HTML page, an empty body, or a status other than `201`. Coder can have created the object, so the message says that the result is uncertain. Some broken `2xx` answers still return `500`: a `200` with malformed JSON, and a connection that breaks while the server reads the answer. Coder can have created the object in these cases too, so re-read before you retry.
 
 The message does not include the Coder URL.
 

@@ -72,11 +72,12 @@ func MapCoderError(err error, resource schema.GroupResource, name string) error 
 
 // MapCoderCreateError maps the error of the Coder POST that creates name. A 2xx *codersdk.Error
 // means that the POST got through, but the answer is not the one that Coder sends: the SDK returns
-// this error for a 2xx other than the expected one, and since codersdk v2.37 also for a 2xx whose
-// body is not JSON (for example a proxy page or an empty body). Coder can have created the object,
-// so this is a 504 that says the result is uncertain, like any other write that times out. It has
-// no Retry-After, so clients do not send the create again on their own. Every other error maps as
-// in MapCoderError, also a body that breaks off while the SDK reads it: that is a plain error.
+// this error for a 2xx other than the expected one, and since codersdk v2.37 also for the expected
+// 2xx with a body that is not JSON (for example a proxy page or an empty body). Coder can have
+// created the object, so this is a 504 that says the result is uncertain, like any other write
+// that times out. It has no Retry-After, so clients do not send the create again on their own.
+// Every other error maps as in MapCoderError. That includes the SDK's plain errors for a body that
+// breaks off while it is read and for malformed JSON on an unexpected 2xx (#242).
 func MapCoderCreateError(err error, resource schema.GroupResource, name string) error {
 	if err == nil {
 		return fmt.Errorf("assertion failed: error must not be nil")
@@ -92,7 +93,7 @@ func MapCoderCreateError(err error, resource schema.GroupResource, name string) 
 	if errors.As(err, &coderErr) && coderErr.StatusCode() >= http.StatusOK && coderErr.StatusCode() < http.StatusMultipleChoices {
 		// The message leaves out the Coder URL.
 		return apierrors.NewTimeoutError(fmt.Sprintf(
-			"the result is uncertain: the Coder API answered the create of %s %q with status %d but not with the JSON that Coder sends; re-read the object with kubectl get before you retry",
+			"the result is uncertain: the Coder API answered the create of %s %q with status %d, but not with the answer that Coder sends; re-read the object with kubectl get before you retry",
 			resource.Resource, name, coderErr.StatusCode(),
 		), 0)
 	}

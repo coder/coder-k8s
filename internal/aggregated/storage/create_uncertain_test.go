@@ -23,8 +23,9 @@ type creator interface {
 }
 
 // proxyAfterCreate fronts the mock Coder like a misbehaving proxy: Coder handles the create POST
-// at createPath, but the client gets a 2xx HTML page instead of Coder's JSON answer.
-func proxyAfterCreate(t *testing.T, coder *httptest.Server, createPath string, status int) *httptest.Server {
+// at createPath, but the client gets status instead of Coder's 201. With keepJSON the body is
+// Coder's JSON answer, otherwise an HTML page.
+func proxyAfterCreate(t *testing.T, coder *httptest.Server, createPath string, status int, keepJSON bool) *httptest.Server {
 	t.Helper()
 
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -36,6 +37,12 @@ func proxyAfterCreate(t *testing.T, coder *httptest.Server, createPath string, s
 		coder.Config.Handler.ServeHTTP(recorder, r)
 		if recorder.Code != http.StatusCreated {
 			t.Errorf("mock Coder answered the create with %d: %s", recorder.Code, recorder.Body.String())
+		}
+		if keepJSON {
+			w.Header().Set("Content-Type", recorder.Header().Get("Content-Type"))
+			w.WriteHeader(status)
+			_, _ = w.Write(recorder.Body.Bytes())
+			return
 		}
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(status)
@@ -99,22 +106,26 @@ func TestCreateWithUnreadable2xxAnswerIsUncertain(t *testing.T) {
 			},
 		},
 	} {
-		for _, status := range []int{http.StatusOK, http.StatusCreated} {
+		for _, answer := range []struct {
+			status   int
+			keepJSON bool
+		}{{http.StatusOK, false}, {http.StatusCreated, false}, {http.StatusOK, true}} {
+			status := answer.status
 			coderServer, state := newMockCoderServer(t)
 			t.Cleanup(coderServer.Close)
 			createPath := tc.createPath
 			if createPath == "" {
 				createPath = "/api/v2/organizations/" + state.organization.ID.String() + "/templates"
 			}
-			proxy := proxyAfterCreate(t, coderServer, createPath, status)
+			proxy := proxyAfterCreate(t, coderServer, createPath, status, answer.keepJSON)
 			storage := tc.storage(t, proxy.URL)
 
 			_, err := storage.Create(namespacedContext("control-plane"), tc.object.DeepCopyObject(), rest.ValidateAllObjectFunc, nil)
 			if !apierrors.IsTimeout(err) || !strings.Contains(err.Error(), "uncertain") || strings.Contains(err.Error(), proxy.URL) {
-				t.Fatalf("%s, proxy status %d: expected an uncertain 504 without the Coder URL, got %v", tc.name, status, err)
+				t.Fatalf("%s, proxy answer %+v: expected an uncertain 504 without the Coder URL, got %v", tc.name, answer, err)
 			}
 			if !tc.created(state) {
-				t.Fatalf("%s, proxy status %d: the mock Coder must have created the object", tc.name, status)
+				t.Fatalf("%s, proxy answer %+v: the mock Coder must have created the object", tc.name, answer)
 			}
 		}
 	}
