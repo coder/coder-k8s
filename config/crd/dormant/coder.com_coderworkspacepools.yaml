@@ -1,0 +1,421 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: coderworkspacepools.coder.com
+spec:
+  group: coder.com
+  names:
+    kind: CoderWorkspacePool
+    listKind: CoderWorkspacePoolList
+    plural: coderworkspacepools
+    singular: coderworkspacepool
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.replicas
+      name: Desired
+      type: integer
+    - jsonPath: .status.readyReplicas
+      name: Ready
+      type: integer
+    - jsonPath: .status.boundReplicas
+      name: Bound
+      type: integer
+    - jsonPath: .status.resolved.templateVersionName
+      name: Version
+      type: string
+    - jsonPath: .status.reason
+      name: Reason
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          CoderWorkspacePool keeps a number of ready Coder workspaces from one
+          template for one Coder owner, and hands them out through claims (#153).
+          The scale subresource lets kubectl scale, HPA, and KEDA resize it.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              CoderWorkspacePoolSpec defines a pool of ready Coder workspaces from one
+              template for one Coder owner.
+            properties:
+              claims:
+                default: {}
+                description: Claims configures how the pool hands out workspaces.
+                properties:
+                  mode:
+                    default: Reserve
+                    description: |-
+                      Mode is how a claim gets its workspace. Reserve binds a ready workspace
+                      to the claim, and the workspace stays with the pool owner.
+                    enum:
+                    - Reserve
+                    type: string
+                    x-kubernetes-validations:
+                    - message: claims.mode is immutable
+                      rule: self == oldSelf
+                type: object
+              controlPlaneRef:
+                description: |-
+                  ControlPlaneRef names the CoderControlPlane in the same namespace. The
+                  controller calls Coder with that control plane's operator token.
+                properties:
+                  name:
+                    description: Name is the CoderControlPlane name.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                required:
+                - name
+                type: object
+                x-kubernetes-validations:
+                - message: controlPlaneRef is immutable
+                  rule: self == oldSelf
+              maxInFlight:
+                default: 5
+                description: |-
+                  MaxInFlight is the number of members of this pool that build at the
+                  same time.
+                format: int32
+                maximum: 20
+                minimum: 1
+                type: integer
+              ownerUserID:
+                description: |-
+                  OwnerUserID is the UUID of the Coder user who owns every workspace of
+                  the pool. The control plane's admin must allow this owner and the
+                  template. Every start build gives the owner's API token to the
+                  template's Terraform, so use a dedicated low-privilege user.
+                format: uuid
+                maxLength: 36
+                type: string
+                x-kubernetes-validations:
+                - message: ownerUserID is immutable
+                  rule: self == oldSelf
+              parameters:
+                description: Parameters are rich parameter values for the start builds.
+                items:
+                  description: |-
+                    CoderWorkspacePoolParameter is one rich parameter value for the start
+                    builds. Values are stored in plain text, so never put secrets here.
+                  properties:
+                    name:
+                      description: Name is the parameter name.
+                      maxLength: 128
+                      minLength: 1
+                      type: string
+                    value:
+                      description: Value is the parameter value.
+                      maxLength: 4096
+                      type: string
+                  required:
+                  - name
+                  type: object
+                maxItems: 64
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              presetName:
+                description: |-
+                  PresetName is the name of a preset of the selected version. The start
+                  builds use its parameter values.
+                maxLength: 64
+                minLength: 1
+                type: string
+              readyTimeoutSeconds:
+                default: 900
+                description: |-
+                  ReadyTimeoutSeconds bounds the time from a member's creation until its
+                  workspace is ready. A member that is not ready in time fails, and the
+                  controller replaces it.
+                format: int32
+                maximum: 7200
+                minimum: 60
+                type: integer
+              replicas:
+                default: 1
+                description: |-
+                  Replicas is the number of unclaimed ready workspaces to keep. Waiting
+                  claims get a workspace built on demand on top of this number. The scale
+                  subresource writes this field, so kubectl scale, HPA, and KEDA can
+                  resize the pool within the same bounds.
+                format: int32
+                maximum: 100
+                minimum: 0
+                type: integer
+              strategy:
+                default: Managed
+                description: |-
+                  Strategy is how the pool keeps its workspaces. Managed is the only
+                  strategy: the operator creates the workspaces itself.
+                enum:
+                - Managed
+                type: string
+                x-kubernetes-validations:
+                - message: strategy is immutable
+                  rule: self == oldSelf
+              template:
+                description: |-
+                  Template is the Coder template as `<organization>.<template>`, the same
+                  format as aggregated CoderTemplate names. Each name has at most 32
+                  characters and is not one of Coder's reserved names new or create.
+                maxLength: 65
+                pattern: ^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*\.[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$
+                type: string
+                x-kubernetes-validations:
+                - message: organization and template names must each have at most
+                    32 characters
+                  rule: self.matches('^[^.]{1,32}[.][^.]{1,32}$')
+                - message: organization and template names must not be new or create
+                  rule: '!self.matches(''^(new|create)[.]'') && !self.matches(''[.](new|create)$'')'
+                - message: template is immutable
+                  rule: self == oldSelf
+              version:
+                description: |-
+                  Version selects the template version of new members. A change replaces
+                  the unclaimed members, new before old.
+                properties:
+                  active:
+                    description: |-
+                      Active follows the template's active version. After a promotion, the
+                      controller replaces unclaimed members, new before old.
+                    type: boolean
+                  id:
+                    description: ID is the UUID of a version of the template.
+                    format: uuid
+                    maxLength: 36
+                    type: string
+                  name:
+                    description: |-
+                      Name is the name of a version of the template. It follows Coder's
+                      template version name rules.
+                    maxLength: 64
+                    minLength: 1
+                    pattern: ^[a-zA-Z0-9]+([_.-][a-zA-Z0-9]+)*$
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: set exactly one of name, id, or active
+                  rule: '(has(self.name) ? 1 : 0) + (has(self.id) ? 1 : 0) + (has(self.active)
+                    ? 1 : 0) == 1'
+                - message: active must be true when set
+                  rule: '!has(self.active) || self.active'
+            required:
+            - controlPlaneRef
+            - ownerUserID
+            - template
+            - version
+            type: object
+          status:
+            description: CoderWorkspacePoolStatus defines the observed state of a
+              CoderWorkspacePool.
+            properties:
+              boundReplicas:
+                description: BoundReplicas is the number of members that claims hold.
+                format: int32
+                type: integer
+              conditions:
+                description: Conditions are Ready, Reconciling, and Stalled.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              consecutiveFailures:
+                description: |-
+                  ConsecutiveFailures is the number of member failures in a row. A ready
+                  member resets it.
+                format: int32
+                type: integer
+              lastFailure:
+                description: LastFailure is the newest member failure.
+                properties:
+                  member:
+                    description: Member is the name of the failed CoderWorkspacePoolMember.
+                    type: string
+                  message:
+                    description: |-
+                      Message explains Reason. It never holds Coder error details, build
+                      logs, parameter values, or tokens.
+                    type: string
+                  reason:
+                    description: Reason is the member's failure reason.
+                    type: string
+                  time:
+                    description: Time is when the controller recorded the failure.
+                    format: date-time
+                    type: string
+                type: object
+              message:
+                description: |-
+                  Message explains Reason. It never holds Coder error details, build
+                  logs, parameter values, or tokens.
+                type: string
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the generation the controller last processed.
+                  Every scale change bumps metadata.generation.
+                format: int64
+                type: integer
+              pendingClaims:
+                description: PendingClaims is the number of claims that wait for a
+                  workspace.
+                format: int32
+                type: integer
+              readyReplicas:
+                description: ReadyReplicas is the number of those members whose workspace
+                  is ready.
+                format: int32
+                type: integer
+              reason:
+                description: Reason is the current wait reason.
+                type: string
+              replicas:
+                description: |-
+                  Replicas is the number of unclaimed members that count toward
+                  spec.replicas: current and outdated, not failed, not used, not being
+                  deleted. The scale subresource reads this field.
+                format: int32
+                type: integer
+              resolved:
+                description: Resolved holds the inputs that the controller resolved
+                  in Coder.
+                properties:
+                  organizationID:
+                    description: OrganizationID is the UUID of the template's organization.
+                    type: string
+                  ownerID:
+                    description: OwnerID is the UUID of the owner the controller checked.
+                    type: string
+                  parametersHash:
+                    description: |-
+                      ParametersHash identifies spec.parameters, so the controller can tell
+                      current members from outdated ones without storing values twice.
+                    type: string
+                  presetID:
+                    description: PresetID is the UUID of the preset named by spec.presetName.
+                    type: string
+                  resolvedTime:
+                    description: ResolvedTime is when the controller last changed
+                      these values.
+                    format: date-time
+                    type: string
+                  templateID:
+                    description: TemplateID is the UUID of the template.
+                    type: string
+                  templateVersionID:
+                    description: TemplateVersionID is the UUID of the selected version.
+                    type: string
+                  templateVersionName:
+                    description: TemplateVersionName is the name of the selected version.
+                    type: string
+                type: object
+              selector:
+                description: |-
+                  Selector is the label selector of the scale subresource, in string
+                  form: coder.com/workspace-pool-uid=<pool UID>. It matches no pods
+                  unless a template sets that label, so autoscalers must use External or
+                  Object metrics with target type AverageValue.
+                type: string
+              updatedReplicas:
+                description: |-
+                  UpdatedReplicas is the number of those members that use the resolved
+                  inputs.
+                format: int32
+                type: integer
+              usedReplicas:
+                description: |-
+                  UsedReplicas is the number of members that someone used without a
+                  claim. They no longer count toward the pool, and the controller never
+                  deletes their workspaces.
+                format: int32
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      scale:
+        labelSelectorPath: .status.selector
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
+      status: {}
