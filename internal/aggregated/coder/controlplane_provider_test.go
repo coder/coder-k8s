@@ -23,7 +23,7 @@ func TestControlPlaneClientProviderClientForNamespaceHappyPath(t *testing.T) {
 
 	controlPlane := eligibleControlPlane("team-a", "coder")
 	controlPlane.Status.OperatorTokenSecretRef.Key = "api-token"
-	controlPlane.Status.URL = "https://coder.team-a.example.com"
+	controlPlane.Status.URL = "http://coder.team-a.svc.cluster.local:80"
 
 	provider, secretReader := newControlPlaneProviderForTest(
 		t,
@@ -45,11 +45,38 @@ func TestControlPlaneClientProviderClientForNamespaceHappyPath(t *testing.T) {
 	if got, want := resolvedClient.SessionToken(), "session-token"; got != want {
 		t.Fatalf("expected session token %q, got %q", want, got)
 	}
-	if got, want := resolvedClient.URL.String(), "https://coder.team-a.example.com"; got != want {
+	if got, want := resolvedClient.URL.String(), "http://coder.team-a.svc.cluster.local:80"; got != want {
 		t.Fatalf("expected URL %q, got %q", want, got)
 	}
 	if got, want := secretReader.getCalls, 1; got != want {
 		t.Fatalf("expected %d secret read, got %d", want, got)
+	}
+}
+
+// With TLS, status.url is HTTPS on the Service name. The provider must use
+// the internal HTTP URL instead, like the controllers do.
+func TestControlPlaneClientProviderClientForNamespaceTLSUsesInternalHTTPURL(t *testing.T) {
+	t.Parallel()
+
+	controlPlane := eligibleControlPlane("team-a", "coder")
+	controlPlane.Spec.TLS.SecretNames = []string{"coder-tls"}
+	controlPlane.Spec.Service.Port = 8080
+	controlPlane.Status.URL = "https://coder.team-a.svc.cluster.local:443"
+
+	provider, _ := newControlPlaneProviderForTest(
+		t,
+		[]coderv1alpha1.CoderControlPlane{controlPlane},
+		[]corev1.Secret{
+			secretWithStringData("team-a", "operator-token", map[string]string{"token": "session-token"}),
+		},
+	)
+
+	resolvedClient, err := provider.ClientForNamespace(context.Background(), "team-a")
+	if err != nil {
+		t.Fatalf("resolve client: %v", err)
+	}
+	if got, want := resolvedClient.URL.String(), "http://coder.team-a.svc.cluster.local:8080"; got != want {
+		t.Fatalf("expected URL %q, got %q", want, got)
 	}
 }
 

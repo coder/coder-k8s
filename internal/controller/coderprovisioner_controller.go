@@ -35,6 +35,7 @@ import (
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/coderbootstrap"
+	"github.com/coder/coder-k8s/internal/controlplaneurl"
 	"github.com/coder/coder-k8s/internal/credentialsecret"
 )
 
@@ -224,6 +225,11 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		operatorAccessMessage,
 	)
 
+	coderURL, err := coderAPIURL(controlPlane)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	entitlementResult, entitlementErr := r.reconcileExternalProvisionerEntitlement(ctx, provisioner, controlPlane, sessionToken)
 	if entitlementErr != nil {
 		if statusSnapshot == nil {
@@ -294,10 +300,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if oldKeyName == "" {
 			oldKeyName = keyName
 		}
-		oldControlPlaneURL := provisioner.Status.ControlPlaneURL
-		if oldControlPlaneURL == "" {
-			oldControlPlaneURL = controlPlane.Status.URL
-		}
+		oldControlPlaneURL := recordedCoderAPIURL(provisioner.Status.ControlPlaneURL, controlPlane, coderURL)
 
 		if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
 			ctx,
@@ -311,7 +314,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 
 		response, ensureErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
-			CoderURL:         controlPlane.Status.URL,
+			CoderURL:         coderURL,
 			SessionToken:     sessionToken,
 			OrganizationName: organizationName,
 			KeyName:          keyName,
@@ -339,7 +342,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				"keyName", keyName)
 
 			if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
-				ctx, controlPlane.Status.URL, sessionToken, organizationName, keyName,
+				ctx, coderURL, sessionToken, organizationName, keyName,
 			); deleteErr != nil {
 				setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
 					metav1.ConditionFalse, "ProvisionerKeyFailed",
@@ -348,7 +351,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				return ctrl.Result{}, fmt.Errorf("delete provisioner key %q for drift recovery: %w", keyName, deleteErr)
 			}
 			rotated, rotateErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
-				CoderURL:         controlPlane.Status.URL,
+				CoderURL:         coderURL,
 				SessionToken:     sessionToken,
 				OrganizationName: organizationName,
 				KeyName:          keyName,
@@ -392,7 +395,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		)
 	} else if !secretUsable {
 		response, ensureErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
-			CoderURL:         controlPlane.Status.URL,
+			CoderURL:         coderURL,
 			SessionToken:     sessionToken,
 			OrganizationName: organizationName,
 			KeyName:          keyName,
@@ -424,7 +427,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				"keyName", keyName, "secretName", keySecretName)
 
 			if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
-				ctx, controlPlane.Status.URL, sessionToken, organizationName, keyName,
+				ctx, coderURL, sessionToken, organizationName, keyName,
 			); deleteErr != nil {
 				setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
 					metav1.ConditionFalse, "ProvisionerKeyFailed",
@@ -433,7 +436,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				return ctrl.Result{}, fmt.Errorf("delete stale provisioner key %q for rotation: %w", keyName, deleteErr)
 			}
 			rotated, rotateErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
-				CoderURL:         controlPlane.Status.URL,
+				CoderURL:         coderURL,
 				SessionToken:     sessionToken,
 				OrganizationName: organizationName,
 				KeyName:          keyName,
@@ -482,7 +485,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// returned), rotate it best-effort so desired tags are applied before
 		// stamping the metadata baseline.
 		response, ensureErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
-			CoderURL:         controlPlane.Status.URL,
+			CoderURL:         coderURL,
 			SessionToken:     sessionToken,
 			OrganizationName: organizationName,
 			KeyName:          keyName,
@@ -513,12 +516,12 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			log.Info("existing key found during metadata backfill, rotating to ensure desired tags",
 				"keyName", keyName)
 			if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
-				ctx, controlPlane.Status.URL, sessionToken, organizationName, keyName,
+				ctx, coderURL, sessionToken, organizationName, keyName,
 			); deleteErr != nil {
 				return ctrl.Result{}, fmt.Errorf("delete provisioner key %q for metadata backfill rotation: %w", keyName, deleteErr)
 			}
 			rotated, rotateErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
-				CoderURL:         controlPlane.Status.URL,
+				CoderURL:         coderURL,
 				SessionToken:     sessionToken,
 				OrganizationName: organizationName,
 				KeyName:          keyName,
@@ -575,7 +578,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		provisioner.Status.OrganizationID = organizationID
 		provisioner.Status.ProvisionerKeyID = provisionerKeyID
 		if err := r.Status().Update(ctx, provisioner); err != nil {
-			r.revokeUnpublishedKey(ctx, controlPlane.Status.URL, sessionToken, organizationID, provisionerKeyID)
+			r.revokeUnpublishedKey(ctx, coderURL, sessionToken, organizationID, provisionerKeyID)
 			return ctrl.Result{}, fmt.Errorf("record new provisioner key in status: %w", err)
 		}
 		statusSnapshot = provisioner.Status.DeepCopy()
@@ -728,11 +731,16 @@ func (r *CoderProvisionerReconciler) reconcileDeletion(ctx context.Context, prov
 			log.Info("operator access is not ready during deletion, skipping remote key cleanup",
 				"reason", tokenReason, "message", tokenMessage)
 		default:
+			currentURL, urlErr := coderAPIURL(controlPlane)
+			if urlErr != nil {
+				log.Info("unable to derive the Coder API URL during deletion, skipping remote key cleanup", "error", urlErr)
+				break
+			}
 			// During a control plane URL change, status can hold the new key's
 			// IDs while status.controlPlaneURL still names the old endpoint.
 			// Try the current endpoint too: the delete matches the key ID only.
-			coderURLs := []string{controlPlaneURL}
-			if currentURL := strings.TrimSpace(controlPlane.Status.URL); currentURL != "" && currentURL != controlPlaneURL {
+			coderURLs := []string{recordedCoderAPIURL(provisioner.Status.ControlPlaneURL, controlPlane, currentURL)}
+			if currentURL != coderURLs[0] {
 				coderURLs = append(coderURLs, currentURL)
 			}
 			for _, coderURL := range coderURLs {
@@ -754,6 +762,30 @@ func (r *CoderProvisionerReconciler) reconcileDeletion(ctx context.Context, prov
 	}
 
 	return r.removeCleanupFinalizer(ctx, provisioner)
+}
+
+// coderAPIURL returns the URL for Coder API calls with the operator token.
+// With TLS it is the internal HTTP URL, not status.url (see
+// controlplaneurl.CoderAPIURL). The provisioner Deployment and the recorded
+// status.controlPlaneURL still use status.url.
+func coderAPIURL(controlPlane *coderv1alpha1.CoderControlPlane) (string, error) {
+	coderURL, err := controlplaneurl.CoderAPIURL(controlPlane)
+	if err != nil {
+		return "", fmt.Errorf("derive the Coder API URL of CoderControlPlane %s/%s: %w", controlPlane.Namespace, controlPlane.Name, err)
+	}
+	return coderURL.String(), nil
+}
+
+// recordedCoderAPIURL maps a status.url that status.controlPlaneURL recorded
+// to the URL for Coder API calls. An empty recorded URL, or one equal to the
+// control plane's current status.url, maps to currentAPIURL. Any other URL
+// names an earlier endpoint and is used as recorded.
+func recordedCoderAPIURL(recordedURL string, controlPlane *coderv1alpha1.CoderControlPlane, currentAPIURL string) string {
+	recordedURL = strings.TrimSpace(recordedURL)
+	if recordedURL == "" || recordedURL == strings.TrimSpace(controlPlane.Status.URL) {
+		return currentAPIURL
+	}
+	return recordedURL
 }
 
 // recordAppliedKeyStatus sets the status fields that describe the key applied
@@ -986,7 +1018,11 @@ func (r *CoderProvisionerReconciler) reconcileExternalProvisionerEntitlement(
 		}
 	}
 
-	entitlements, err := r.BootstrapClient.Entitlements(ctx, controlPlane.Status.URL, sessionToken)
+	coderURL, err := coderAPIURL(controlPlane)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	entitlements, err := r.BootstrapClient.Entitlements(ctx, coderURL, sessionToken)
 	if err != nil {
 		reason := "EntitlementsQueryFailed"
 		message := "Failed to query Coder entitlements; retrying."

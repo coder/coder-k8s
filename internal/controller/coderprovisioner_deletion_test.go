@@ -105,7 +105,7 @@ func TestCoderProvisionerDeletion_DeletesRecordedKey(t *testing.T) {
 	deleted := f.bootstrapClient.deleteKeyByIDRequests[0]
 	require.Equal(t, recorded.OrganizationID, deleted.OrganizationID)
 	require.Equal(t, recorded.KeyID, deleted.KeyID)
-	require.Equal(t, testCoderOrigin, deleted.CoderURL)
+	require.Equal(t, internalCoderURL(f), deleted.CoderURL, "status.url is HTTPS, so the call uses the internal HTTP URL")
 	require.Equal(t, testOperatorToken, deleted.SessionToken)
 	requireProvisionerGone(ctx, t, types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace})
 }
@@ -264,8 +264,10 @@ func TestCoderProvisionerDeletion_TriesCurrentControlPlaneURL(t *testing.T) {
 	f.reconcile(ctx, t, provisioner)
 
 	require.Len(t, f.bootstrapClient.deleteKeyByIDRequests, 2)
+	// The recorded URL names an earlier endpoint and is used as recorded. The
+	// current endpoint is HTTPS, so the call uses the internal HTTP URL.
 	require.Equal(t, testCoderOrigin, f.bootstrapClient.deleteKeyByIDRequests[0].CoderURL)
-	require.Equal(t, newURL, f.bootstrapClient.deleteKeyByIDRequests[1].CoderURL)
+	require.Equal(t, internalCoderURL(f), f.bootstrapClient.deleteKeyByIDRequests[1].CoderURL)
 	for _, req := range f.bootstrapClient.deleteKeyByIDRequests {
 		require.Equal(t, newKey.OrganizationID, req.OrganizationID)
 		require.Equal(t, newKey.KeyID, req.KeyID)

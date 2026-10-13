@@ -89,6 +89,8 @@ jobs:
               - 'internal/controller/controlplane_access.go'
               - 'internal/controller/coder_access.go'
               - 'internal/controller/coder_workspace_steps.go'
+              # The URL that the aggregated API server and the controllers use for Coder API calls.
+              - 'internal/controlplaneurl/**'
               - 'internal/app/controllerapp/**'
               - 'config/e2e/**'
               - 'deploy/**'

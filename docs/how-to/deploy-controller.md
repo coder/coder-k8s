@@ -159,6 +159,14 @@ To fix `TokenSecretNotOwned`, do one of these steps. The controller checks again
 - If the Secret is a leftover operator token Secret, for example from a control plane that you deleted with `--cascade=orphan` and created again, delete it. The controller creates a new Secret and a new operator token.
 - If the Secret belongs to something else, set `spec.operatorAccess.generatedTokenSecretName` to a name that does not exist yet.
 
+### Where the operator token goes
+
+The controller, provisioners, template tests and the aggregated API server send the operator token to Coder. With built-in TLS (`spec.tls.secretNames`), `status.url` is `https://<control plane>.<namespace>.svc.cluster.local:443`. Certificates for an external hostname rarely cover that name. So these components do not use `status.url` for their Coder API calls. They use the plain HTTP URL of the Service instead: `http://<control plane>.<namespace>.svc.cluster.local:<port>`.
+
+The operator token therefore crosses the cluster network without TLS. If you need encryption inside the cluster, use a service mesh. Use a `NetworkPolicy` to limit which pods can reach the control plane Service.
+
+Provisioner pods are not affected. They still connect to `status.url`.
+
 ### Upgrade from a version that took over the Secret
 
 Earlier versions set the control plane as the controller owner of this Secret on every reconcile. So a Secret that an earlier version used already has the right owner, and the control plane keeps working after the upgrade. A control plane fails the check only when its Secret lost that owner after the last reconcile of the earlier version.
