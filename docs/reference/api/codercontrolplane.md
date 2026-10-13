@@ -40,6 +40,7 @@
 | `tolerations` | [Toleration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#toleration-v1-core) array | Tolerations are applied to the control plane pod. |
 | `affinity` | [Affinity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#affinity-v1-core) | Affinity configures pod affinity/anti-affinity rules. |
 | `topologySpreadConstraints` | [TopologySpreadConstraint](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#topologyspreadconstraint-v1-core) array | TopologySpreadConstraints control pod topology spread. |
+| `mcpServers` | [MCPServersSpec](#mcpserversspec) | MCPServers configures CoderMCPServer objects that use this control plane. It has no effect yet: the CoderMCPServer controller is not shipped. |
 | `aiGateway` | [AIGatewaySpec](#aigatewayspec) | AIGateway configures CoderAIGatewayKey objects that use this control plane. It has no effect yet: the CoderAIGatewayKey controller is not shipped. |
 | `templateTests` | [TemplateTestsSpec](#templatetestsspec) | TemplateTests configures CoderTemplateTest runs against this control plane. |
 
@@ -147,6 +148,16 @@ IngressTLSExposeSpec defines TLS configuration for the Ingress.
 | --- | --- | --- |
 | `secretName` | string | SecretName is the TLS Secret for the primary host. |
 | `wildcardSecretName` | string | WildcardSecretName is the TLS Secret for the wildcard host. |
+
+### MCPServersSpec
+
+MCPServersSpec configures CoderMCPServer objects that use a
+CoderControlPlane (CoderControlPlane.spec.mcpServers).
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `organizations` | string array | Organizations are the names of the Coder organizations whose MCP server configs CoderMCPServer objects can create, change and delete with this control plane's operator token. This delegates Coder organization-admin power over MCP servers in these organizations to everyone who can create CoderMCPServer objects here. A CoderMCPServer for an organization outside this list sends no MCP request. Removing an organization stops further changes to its servers. Deleting a CoderMCPServer still deletes the config it created. This field has no effect yet: the CoderMCPServer controller is not shipped. |
+| `allowForceOn` | boolean | AllowForceOn lets CoderMCPServer objects use availability: force_on, which adds a server to every new chat of each user who can read it, without that user's choice. When false (the default), such objects send no MCP request. This field has no effect yet: the CoderMCPServer controller is not shipped. |
 
 ### OperatorAccessSpec
 
