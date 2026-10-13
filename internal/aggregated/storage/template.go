@@ -473,7 +473,7 @@ func (s *TemplateStorage) Create(
 			Icon:        templateObj.Spec.Icon,
 		})
 		if err != nil {
-			return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
+			return nil, coder.MapCoderCreateError(err, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
 		}
 
 		result := convert.TemplateToK8s(namespace, createdTemplate)
@@ -493,7 +493,7 @@ func (s *TemplateStorage) Create(
 
 	createdTemplate, err := sdk.CreateTemplate(ctx, org.ID, request)
 	if err != nil {
-		return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
+		return nil, coder.MapCoderCreateError(err, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
 	}
 
 	result := convert.TemplateToK8s(namespace, createdTemplate)

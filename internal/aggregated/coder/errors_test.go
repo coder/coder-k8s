@@ -236,3 +236,50 @@ func withCoderMessage(err *codersdk.Error, message string) *codersdk.Error {
 
 	return err
 }
+
+func TestMapCoderCreateError(t *testing.T) {
+	t.Parallel()
+
+	resource := aggregationv1alpha1.Resource("codertemplates")
+	name := "acme.docker"
+
+	// Since codersdk v2.37, a 2xx whose body is not JSON (for example a proxy page) is a
+	// *codersdk.Error with that status. Coder can have created the object.
+	for _, status := range []int{http.StatusOK, http.StatusCreated, http.StatusNoContent} {
+		err := MapCoderCreateError(fmt.Errorf("create: %w", codersdk.NewTestError(status, http.MethodPost, "https://coder.example.com")), resource, name)
+		var statusErr *apierrors.StatusError
+		if !errors.As(err, &statusErr) || !apierrors.IsTimeout(err) {
+			t.Fatalf("status %d: expected a 504 Timeout, got %T %v", status, err, err)
+		}
+		message := statusErr.ErrStatus.Message
+		for _, want := range []string{"uncertain", "re-read", `codertemplates "acme.docker"`, fmt.Sprint(status)} {
+			if !strings.Contains(message, want) {
+				t.Fatalf("status %d: message %q does not contain %q", status, message, want)
+			}
+		}
+		if strings.Contains(message, "coder.example.com") {
+			t.Fatalf("status %d: message %q must not contain the Coder URL", status, message)
+		}
+		if details := statusErr.ErrStatus.Details; details != nil && details.RetryAfterSeconds != 0 {
+			t.Fatalf("status %d: an uncertain create must not ask clients to retry on their own, got Retry-After %d", status, details.RetryAfterSeconds)
+		}
+	}
+
+	// Every other error maps as in MapCoderError.
+	for _, err := range []error{
+		codersdk.NewTestError(http.StatusConflict, http.MethodPost, "https://coder.example.com"),
+		codersdk.NewTestError(http.StatusBadRequest, http.MethodPost, "https://coder.example.com"),
+		codersdk.NewTestError(http.StatusBadGateway, http.MethodPost, "https://coder.example.com"),
+		codersdk.NewTestError(http.StatusMultipleChoices, http.MethodPost, "https://coder.example.com"),
+		errors.New("transport failed"),
+	} {
+		got, want := MapCoderCreateError(err, resource, name), MapCoderError(err, resource, name)
+		if got.Error() != want.Error() || apierrors.ReasonForError(got) != apierrors.ReasonForError(want) {
+			t.Fatalf("%v: expected the MapCoderError mapping %v, got %v", err, want, got)
+		}
+	}
+
+	if err := MapCoderCreateError(nil, resource, name); err == nil || !strings.Contains(err.Error(), "assertion failed: error must not be nil") {
+		t.Fatalf("expected the nil-error assertion, got %v", err)
+	}
+}
