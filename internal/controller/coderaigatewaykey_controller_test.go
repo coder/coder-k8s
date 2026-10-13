@@ -49,8 +49,13 @@ func newAIGatewayKeyEnv(ctx context.Context, t *testing.T, allowKeys *bool) aiGa
 
 func (env aiGatewayKeyEnv) createKey(ctx context.Context, t *testing.T, controlPlane, secretName string) *coderv1alpha1.CoderAIGatewayKey {
 	t.Helper()
+	return env.createNamedKey(ctx, t, "gateway", controlPlane, secretName)
+}
+
+func (env aiGatewayKeyEnv) createNamedKey(ctx context.Context, t *testing.T, name, controlPlane, secretName string) *coderv1alpha1.CoderAIGatewayKey {
+	t.Helper()
 	key := &coderv1alpha1.CoderAIGatewayKey{
-		ObjectMeta: metav1.ObjectMeta{Name: "gateway", Namespace: env.namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: env.namespace},
 		Spec: coderv1alpha1.CoderAIGatewayKeySpec{
 			ControlPlaneRef: coderv1alpha1.CoderControlPlaneReference{Name: controlPlane}, SecretName: secretName,
 		},
@@ -281,8 +286,29 @@ func TestCoderAIGatewayKeyClaimsSecret(t *testing.T) {
 	require.Equal(t, got.UID, secret.OwnerReferences[0].UID)
 	require.True(t, *secret.OwnerReferences[0].Controller)
 
-	again, _ := env.reconcile(ctx, t, got)
-	require.Equal(t, got.ResourceVersion, again.ResourceVersion, "a reconcile with no change writes no status")
+	// A reconcile with no change sends no write: no status update and no
+	// finalizer patch.
+	writes := 0
+	base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+	counting := env
+	counting.client = interceptor.NewClient(base, interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			writes++
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			writes++
+			return c.Update(ctx, obj, opts...)
+		},
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subResource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			writes++
+			return c.SubResource(subResource).Update(ctx, obj, opts...)
+		},
+	})
+	again, _ := counting.reconcile(ctx, t, got)
+	require.Zero(t, writes)
+	require.Equal(t, got.ResourceVersion, again.ResourceVersion)
 	after := &corev1.Secret{}
 	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(secret), after))
 	require.Equal(t, secret.ResourceVersion, after.ResourceVersion)
@@ -309,6 +335,39 @@ func TestCoderAIGatewayKeyKeepsFinalizerAfterCreate(t *testing.T) {
 	require.Equal(t, []string{coderv1alpha1.CoderAIGatewayKeyCleanupFinalizer}, kept.Finalizers)
 	requireAIGatewayKeyStep(t, kept, false, "DeletePending")
 	require.Equal(t, requests, env.fake.totalRequests())
+}
+
+// The object that claimed a shared Secret keeps it. An object created later
+// in the same second with a lower name ranks older, but it must not stall
+// the claimant: it reports SecretNotOwned, and the claimant goes on. The
+// client reports one creation time for every listed key, so the tie does
+// not depend on timing.
+func TestCoderAIGatewayKeyClaimantKeepsSharedSecret(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+	first := env.createNamedKey(ctx, t, "z-gateway", "coder", testAIGatewaySecret)
+	base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+	env.client = interceptor.NewClient(base, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if err := c.List(ctx, list, opts...); err != nil {
+				return err
+			}
+			if keys, ok := list.(*coderv1alpha1.CoderAIGatewayKeyList); ok {
+				for i := range keys.Items {
+					keys.Items[i].CreationTimestamp = first.CreationTimestamp
+				}
+			}
+			return nil
+		},
+	})
+	claimant, _ := env.reconcile(ctx, t, first)
+	requireAIGatewayKeyStep(t, claimant, false, "IssuingKey")
+	later, _ := env.reconcile(ctx, t, env.createNamedKey(ctx, t, "a-gateway", "coder", testAIGatewaySecret))
+	requireAIGatewayKeyStep(t, later, true, "SecretNotOwned")
+	claimant, _ = env.reconcile(ctx, t, claimant)
+	requireAIGatewayKeyStep(t, claimant, false, "IssuingKey")
 }
 
 // Plan 5.1: a Secret create that the API server rejects as Invalid stalls

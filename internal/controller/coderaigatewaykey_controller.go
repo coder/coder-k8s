@@ -193,7 +193,7 @@ func (r *CoderAIGatewayKeyReconciler) observe(ctx context.Context, key *coderv1a
 	} else if err != nil {
 		return nil, err
 	}
-	err = reservedSecretName(ctx, r.APIReader, key, key.Spec.SecretName)
+	err = reservedSecretName(ctx, r.APIReader, key, key.Spec.SecretName, secret != nil)
 	if credErr := (*credentialsecret.Error)(nil); errors.As(err, &credErr) {
 		return aiGatewayKeyStalled(credErr.Reason, "%s", credErr.Message), nil
 	} else if err != nil {
@@ -354,9 +354,11 @@ func aiGatewayKeyListed(keys []codersdk.AIGatewayKey, id string) bool {
 // an optimistic lock, so a concurrent change gives a conflict.
 func (r *CoderAIGatewayKeyReconciler) patchFinalizer(ctx context.Context, key *coderv1alpha1.CoderAIGatewayKey, add bool) error {
 	base := key.DeepCopy()
-	changed := controllerutil.RemoveFinalizer(key, coderv1alpha1.CoderAIGatewayKeyCleanupFinalizer)
+	var changed bool
 	if add {
 		changed = controllerutil.AddFinalizer(key, coderv1alpha1.CoderAIGatewayKeyCleanupFinalizer)
+	} else {
+		changed = controllerutil.RemoveFinalizer(key, coderv1alpha1.CoderAIGatewayKeyCleanupFinalizer)
 	}
 	if !changed {
 		return nil

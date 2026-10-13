@@ -135,17 +135,17 @@ func TestReservedSecretName(t *testing.T) {
 		provisionerKeySecret: "CoderProvisioner", "openai-key": "CoderAIProvider", "mcp-key": "CoderMCPServer",
 		"mcp-header": "CoderMCPServer", "mcp-oauth": "CoderMCPServer",
 	} {
-		err := reservedSecretName(ctx, c, owner, name)
+		err := reservedSecretName(ctx, c, owner, name, false)
 		requireReservedReason(t, err)
 		require.ErrorContains(t, err, fmt.Sprintf("Secret name %q is used by %s", name, kind))
 	}
 	// The aggregated API server's serving Secret is reserved in every
 	// namespace (plan D13), without any object that names it.
-	err := reservedSecretName(ctx, c, owner, servingcert.SecretName)
+	err := reservedSecretName(ctx, c, owner, servingcert.SecretName, false)
 	requireReservedReason(t, err)
 	require.ErrorContains(t, err, `"coder-k8s-apiserver-tls" is the serving Secret of the coder-k8s aggregated API server`)
-	require.NoError(t, reservedSecretName(ctx, c, owner, "free"))
-	require.NoError(t, reservedSecretName(ctx, c, owner, "coder-ai-gateway-key"))
+	require.NoError(t, reservedSecretName(ctx, c, owner, "free", false))
+	require.NoError(t, reservedSecretName(ctx, c, owner, "coder-ai-gateway-key", false))
 
 	// A kind whose CRD is not installed is skipped. Other list errors stop.
 	for _, tc := range []struct {
@@ -163,7 +163,7 @@ func TestReservedSecretName(t *testing.T) {
 				return c.List(ctx, list, opts...)
 			},
 		}).Build()
-		err := reservedSecretName(ctx, failing, owner, "free")
+		err := reservedSecretName(ctx, failing, owner, "free", false)
 		require.Equal(t, tc.wantErr, err != nil, "%v", err)
 	}
 }
@@ -186,15 +186,28 @@ func TestReservedSecretNameGatewayKeyOrder(t *testing.T) {
 	newer := key("a-newer", "uid-3", metav1.NewTime(t0.Add(time.Minute)))
 	c := fake.NewClientBuilder().WithScheme(reservedNameScheme(t)).WithObjects(oldest, sameTimeLaterName, newer).Build()
 
-	require.NoError(t, reservedSecretName(ctx, c, oldest, "shared"), "the oldest object keeps the name")
-	err := reservedSecretName(ctx, c, sameTimeLaterName, "shared")
+	require.NoError(t, reservedSecretName(ctx, c, oldest, "shared", false), "the oldest object keeps the name")
+	err := reservedSecretName(ctx, c, sameTimeLaterName, "shared", false)
 	requireReservedReason(t, err)
 	require.ErrorContains(t, err, `CoderAIGatewayKey "b-oldest"`)
-	err = reservedSecretName(ctx, c, newer, "shared")
+	err = reservedSecretName(ctx, c, newer, "shared", false)
 	requireReservedReason(t, err)
 	require.ErrorContains(t, err, `"b-oldest", "c-same-time"`)
-	require.NoError(t, reservedSecretName(ctx, c, newer, "other"))
+	require.NoError(t, reservedSecretName(ctx, c, newer, "other", false))
 
-	require.ErrorContains(t, reservedSecretName(ctx, c, &coderv1alpha1.CoderAIGatewayKey{ObjectMeta: metav1.ObjectMeta{Namespace: "ns"}}, "shared"),
+	// An object that already controls the Secret keeps it, also against an
+	// object that ranks older (a same-second creation with a lower name).
+	// Other kinds still reserve the name.
+	require.NoError(t, reservedSecretName(ctx, c, sameTimeLaterName, "shared", true))
+	require.NoError(t, reservedSecretName(ctx, c, newer, "shared", true))
+	require.NoError(t, c.Create(ctx, &coderv1alpha1.CoderAIProvider{
+		ObjectMeta: metav1.ObjectMeta{Name: "openai", Namespace: "ns"},
+		Spec:       coderv1alpha1.CoderAIProviderSpec{APIKeySecretRef: coderv1alpha1.SecretKeySelector{Name: "shared", Key: "k"}},
+	}))
+	err = reservedSecretName(ctx, c, newer, "shared", true)
+	requireReservedReason(t, err)
+	require.ErrorContains(t, err, `CoderAIProvider "openai"`)
+
+	require.ErrorContains(t, reservedSecretName(ctx, c, &coderv1alpha1.CoderAIGatewayKey{ObjectMeta: metav1.ObjectMeta{Namespace: "ns"}}, "shared", false),
 		"assertion failed: a reserved Secret name check needs")
 }
