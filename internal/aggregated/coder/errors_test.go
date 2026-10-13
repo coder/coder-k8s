@@ -301,3 +301,76 @@ func TestMapCoderCreateError(t *testing.T) {
 		}
 	}
 }
+
+// TestMapCoderErrorHidesCoderURL checks that a Coder 403, 5xx, unexpected status, transport
+// error or 4xx without a message reaches the Kubernetes client without the Coder URL or Coder's
+// own message, and keeps its status code.
+func TestMapCoderErrorHidesCoderURL(t *testing.T) {
+	t.Parallel()
+
+	resource := aggregationv1alpha1.Resource("coderworkspaces")
+	const (
+		name       = "acme.alice.dev"
+		coderURL   = "https://coder.internal.example.com/api/v2/workspaces/1234"
+		coderHost  = "coder.internal.example.com"
+		coderInner = "pq: relation workspaces_internal does not exist"
+	)
+	withMessage := func(status int) error {
+		coderErr := codersdk.NewTestError(status, http.MethodGet, coderURL)
+		coderErr.Message = coderInner
+		coderErr.Detail = coderInner
+		return fmt.Errorf("get workspace: %w", coderErr)
+	}
+
+	tests := []struct {
+		name        string
+		err         error
+		wantCode    int32
+		wantMessage string
+	}{
+		{name: "403", err: withMessage(http.StatusForbidden), wantCode: http.StatusForbidden, wantMessage: `coderworkspaces.aggregation.coder.com "acme.alice.dev" is forbidden: the Coder API denied the request`},
+		{name: "500", err: withMessage(http.StatusInternalServerError), wantCode: http.StatusInternalServerError, wantMessage: `the Coder API failed the request for coderworkspaces "acme.alice.dev" with status 500`},
+		{name: "502", err: withMessage(http.StatusBadGateway), wantCode: http.StatusInternalServerError, wantMessage: `the Coder API failed the request for coderworkspaces "acme.alice.dev" with status 502`},
+		{name: "503", err: withMessage(http.StatusServiceUnavailable), wantCode: http.StatusInternalServerError, wantMessage: "with status 503"},
+		{name: "unexpected 3xx", err: withMessage(http.StatusMultipleChoices), wantCode: http.StatusInternalServerError, wantMessage: "with status 300"},
+		{
+			name:        "transport error",
+			err:         fmt.Errorf("get workspace: %w", &url.Error{Op: "Get", URL: coderURL, Err: errors.New("dial tcp 10.0.0.7:443: connect: connection refused")}),
+			wantCode:    http.StatusInternalServerError,
+			wantMessage: `the Coder API could not be reached for coderworkspaces "acme.alice.dev"`,
+		},
+		{
+			name:        "400 without a Coder message",
+			err:         fmt.Errorf("get workspace: %w", codersdk.NewTestError(http.StatusBadRequest, http.MethodGet, coderURL)),
+			wantCode:    http.StatusBadRequest,
+			wantMessage: "the Coder API rejected the request with status 400",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if !strings.Contains(tt.err.Error(), coderHost) {
+				t.Fatalf("assertion failed: the test input must contain the Coder URL, got %q", tt.err.Error())
+			}
+
+			mapped := MapCoderError(tt.err, resource, name)
+			var status apierrors.APIStatus
+			if !errors.As(mapped, &status) {
+				t.Fatalf("expected a Kubernetes API status error, got %T: %v", mapped, mapped)
+			}
+			if got := status.Status().Code; got != tt.wantCode {
+				t.Fatalf("expected status code %d, got %d (%v)", tt.wantCode, got, mapped)
+			}
+			text := mapped.Error() + " " + status.Status().Message
+			for _, leak := range []string{coderHost, "/api/v2", coderInner, "10.0.0.7"} {
+				if strings.Contains(text, leak) {
+					t.Fatalf("Kubernetes error contains %q: %q", leak, text)
+				}
+			}
+			if !strings.Contains(mapped.Error(), tt.wantMessage) {
+				t.Fatalf("expected message containing %q, got %q", tt.wantMessage, mapped.Error())
+			}
+		})
+	}
+}

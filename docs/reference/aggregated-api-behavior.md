@@ -232,7 +232,7 @@ A create of a workspace or a template can also get a broken `2xx` answer, for ex
 
 After a `504` or a `500` on a create, re-read the object before you retry.
 
-The message does not include the Coder URL.
+The message does not include the Coder URL. The same is true for a `403` that Coder answers, a `500` for a Coder server error, and a `500` when the server cannot reach Coder. These messages name only the resource, the object and the Coder status code. The server log keeps the full Coder error, on a line from the `coder-errors` logger.
 
 - After a `504` on a read, try again later.
 - After a `504` on a write (create, update, patch, or delete), the result is not certain. Coder can have applied the change before the call timed out. Re-read the object with `kubectl get` before you retry.
