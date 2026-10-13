@@ -4,6 +4,8 @@
   "words": [
     "allapp",
     "automount",
+    "prebuild",
+    "prebuilds",
     "elif",
     "esac",
     "Diátaxis",
@@ -84,9 +86,7 @@
     "livez",
     "requestheader",
     "subjectaccessreviews",
-    "cabundle",
-    "prebuild",
-    "prebuilds"
+    "cabundle"
   ],
   "ignorePaths": [
     ".git/**",
