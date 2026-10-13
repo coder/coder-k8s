@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"net"
 	"net/http"
 	"time"
@@ -16,11 +15,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
-)
-
-const (
-	templateTestBackoffBase = 2 * time.Second
-	templateTestBackoffCap  = 2 * time.Minute
 )
 
 // createWorkspace writes the create marker, then sends the only create
@@ -115,8 +109,8 @@ func templateTestFailNotCreated(reason, format string, args ...any) *templateTes
 }
 
 // retryAfter returns the requeue delay for a step that waits. After HTTP 429
-// it backs off from 2 s to 2 m with 20 % jitter, like the CoderProvisioner
-// controller. The attempt count lives in memory, so a restart starts over.
+// it backs off from 2 s to 2 m with 20 % jitter (coderBackoff). The attempt
+// count lives in memory, so a restart starts over.
 // Reconcile forgets it after any outcome other than a wait after 429.
 func (r *CoderTemplateTestReconciler) retryAfter(key types.NamespacedName, tt *coderv1alpha1.CoderTemplateTest, step *templateTestStep) time.Duration {
 	// A 429 backoff wins over a step's own poll (r4173060957).
@@ -129,15 +123,5 @@ func (r *CoderTemplateTestReconciler) retryAfter(key types.NamespacedName, tt *c
 		}
 		return templateTestPendingPoll
 	}
-	attempts := 0
-	if v, ok := r.rateLimited.Load(key); ok {
-		attempts = v.(int)
-	}
-	r.rateLimited.Store(key, attempts+1)
-	backoff := templateTestBackoffCap
-	if attempts < 6 { // 2 s * 2^6 passes the cap.
-		backoff = min(templateTestBackoffBase<<attempts, templateTestBackoffCap)
-	}
-	jittered := time.Duration(float64(backoff) * (0.8 + 0.4*rand.Float64())) //nolint:gosec // Jitter needs no secure randomness.
-	return min(jittered, templateTestBackoffCap)
+	return r.rateLimited.next(key)
 }

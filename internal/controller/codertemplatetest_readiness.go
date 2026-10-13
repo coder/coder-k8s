@@ -49,59 +49,8 @@ func (r *CoderTemplateTestReconciler) checkReadiness(
 		return templateTestFail("WorkspaceChangedExternally", "Someone else started build %d of workspace %s.", build.BuildNumber, name), nil
 	}
 
-	switch build.Job.Status {
-	case codersdk.ProvisionerJobSucceeded:
-	case codersdk.ProvisionerJobFailed:
-		// Only the error code: Job.Error can hold Terraform output and secrets.
-		if build.Job.ErrorCode == "" {
-			return templateTestFail("BuildFailed", "The start build of workspace %s failed.", name), nil
-		}
-		return templateTestFail("BuildFailed", "The start build of workspace %s failed (error code %s).", name, build.Job.ErrorCode), nil
-	case codersdk.ProvisionerJobCanceling, codersdk.ProvisionerJobCanceled:
-		// This controller cancels only during cleanup, which comes with plan PR 5.
-		return templateTestFail("BuildCanceled", "Someone else canceled the start build of workspace %s.", name), nil
-	default:
-		return templateTestWait("WaitingForBuild", "The start build of workspace %s is %s.", name, build.Job.Status), nil
-	}
-
-	var agents []codersdk.WorkspaceAgent
-	for _, resource := range build.Resources {
-		for _, agent := range resource.Agents {
-			if !agent.ParentID.Valid { // Devcontainer sub-agents have a parent.
-				agents = append(agents, agent)
-			}
-		}
-	}
-	if len(agents) == 0 {
-		// Coder reports a workspace without agents as healthy: a false pass.
-		return templateTestFail("NoAgents", "Workspace %s has no agents, so nothing proves that it works.", name), nil
-	}
-	// Messages name agents by ID: a template can derive agent names from
-	// parameter values, which never go into status.
-	var waiting *codersdk.WorkspaceAgent
-	for i := range agents {
-		agent := &agents[i]
-		switch agent.LifecycleState {
-		case codersdk.WorkspaceAgentLifecycleStartError:
-			return templateTestFail("AgentStartError", "The startup script of agent %s failed.", agent.ID), nil
-		case codersdk.WorkspaceAgentLifecycleStartTimeout:
-			return templateTestFail("AgentStartTimeout", "The startup script of agent %s timed out.", agent.ID), nil
-		case codersdk.WorkspaceAgentLifecycleShuttingDown, codersdk.WorkspaceAgentLifecycleShutdownTimeout,
-			codersdk.WorkspaceAgentLifecycleShutdownError, codersdk.WorkspaceAgentLifecycleOff:
-			return templateTestFail("AgentStopped", "Agent %s is %s.", agent.ID, agent.LifecycleState), nil
-		}
-		switch {
-		case agent.Status == codersdk.WorkspaceAgentTimeout:
-			return templateTestFail("AgentConnectionTimeout", "Agent %s did not connect in time.", agent.ID), nil
-		case waiting == nil && (agent.Status != codersdk.WorkspaceAgentConnected || agent.LifecycleState != codersdk.WorkspaceAgentLifecycleReady):
-			waiting = agent
-		}
-	}
-	// An agent that was ready and then disconnects makes the test wait, not
-	// fail: disconnects can be short, and the deadline bounds the wait. After
-	// the pass, the controller reads no agents again (plan A10).
-	if waiting != nil {
-		return templateTestWait("WaitingForAgents", "Agent %s is %s and %s.", waiting.ID, waiting.Status, waiting.LifecycleState), nil
+	if step := workspaceBuildReadiness(build, name); step != nil {
+		return templateTestStepFrom(step), nil
 	}
 	tt.Status.AgentsReadyTime = &metav1.Time{Time: now}
 	return templateTestWait("AgentsReady", "Every agent of workspace %s is ready. The controller deletes the workspace next.", name), nil

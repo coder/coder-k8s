@@ -88,6 +88,7 @@ jobs:
               # Shared Coder access that CoderTemplateTest and later pool controllers call.
               - 'internal/controller/controlplane_access.go'
               - 'internal/controller/coder_access.go'
+              - 'internal/controller/coder_workspace_steps.go'
               - 'internal/app/controllerapp/**'
               - 'config/e2e/**'
               - 'deploy/**'

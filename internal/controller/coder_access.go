@@ -23,6 +23,43 @@ import (
 // and version resolution. CoderTemplateTest uses them today, and
 // CoderWorkspacePool (#153) will too.
 
+// coderAnswerFor is the rule for every Coder answer a controller trusts:
+// the answer names the ID or name that the controller asked for. Anything else
+// means Coder, a proxy, or the SDK is broken, so it is an assertion failure.
+func coderAnswerFor(kind, asked, answered string) error {
+	if asked == answered {
+		return nil
+	}
+	return &coderAnswerError{msg: fmt.Sprintf("assertion failed: Coder answered %s %q when asked for %q", kind, answered, asked)}
+}
+
+type coderAnswerError struct{ msg string }
+
+func (e *coderAnswerError) Error() string { return e.msg }
+
+func isCoderNotFound(err error) bool {
+	return coderStatus(err) == http.StatusNotFound
+}
+
+// coderErrorSummary holds the status and Coder's short message only, never
+// details, validation errors, or job logs.
+func coderErrorSummary(err error) string {
+	var sdkErr *codersdk.Error
+	if errors.As(err, &sdkErr) {
+		return fmt.Sprintf("Coder answered %d: %s", sdkErr.StatusCode(), sdkErr.Message)
+	}
+	return err.Error()
+}
+
+// coderStatus returns the HTTP status of a Coder answer, or 0 without one.
+func coderStatus(err error) int {
+	var sdkErr *codersdk.Error
+	if errors.As(err, &sdkErr) {
+		return sdkErr.StatusCode()
+	}
+	return 0
+}
+
 // coderStep is the outcome of a shared lookup that cannot go on: a wait,
 // when the input can still appear, or a failure, when it never will. Each
 // controller turns it into its own status.
