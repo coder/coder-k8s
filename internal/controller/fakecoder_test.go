@@ -87,6 +87,7 @@ type fakeCoder struct {
 	requests   map[string]int // Route -> requests received.
 
 	aiProviders map[uuid.UUID]*fakeAIProvider // See fakecoder_ai_test.go.
+	aiGateway   fakeAIGatewayState            // AI Gateway key routes, see fakecoder_aigateway_test.go.
 }
 
 func newFakeCoder(t *testing.T) *fakeCoder {
@@ -132,6 +133,7 @@ func newFakeCoder(t *testing.T) *fakeCoder {
 	f.route(mux, "POST /api/v2/workspaces/{id}/builds", routeCreateBuild, f.createBuild)
 	f.route(mux, "PATCH /api/v2/workspacebuilds/{id}/cancel", routeCancelBuild, f.cancelBuild)
 	f.registerAIProviderRoutes(mux)
+	f.registerAIGatewayKeyRoutes(mux)
 
 	f.server = httptest.NewServer(mux)
 	t.Cleanup(func() {
