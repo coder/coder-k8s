@@ -30,10 +30,12 @@ type CoderMCPServerSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="controlPlaneRef is immutable"
 	ControlPlaneRef CoderControlPlaneReference `json:"controlPlaneRef"`
 	// Organization is the name of the Coder organization that holds the
-	// config. Coder cannot move a config to another organization.
+	// config. Coder cannot move a config to another organization. Coder
+	// reserves the names new and create.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=32
 	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*$`
+	// +kubebuilder:validation:XValidation:rule="self != 'new' && self != 'create'",message="organization must not be new or create"
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="organization is immutable"
 	Organization string `json:"organization"`
 	// Slug is the Coder slug of the config, unique in its organization. The
@@ -216,8 +218,9 @@ type CoderMCPServerOAuth2Auth struct {
 type CoderMCPServerAccess struct {
 	// Groups are Coder group names in the server's organization. Everyone is
 	// the group of all organization members. An empty list leaves the server
-	// to organization admins.
+	// to organization admins. Coder reserves the names new and create.
 	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:XValidation:rule="self.all(g, g != 'new' && g != 'create')",message="access.groups must not hold new or create"
 	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=255
 	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*$`

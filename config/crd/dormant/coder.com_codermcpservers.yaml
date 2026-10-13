@@ -73,7 +73,7 @@ spec:
                     description: |-
                       Groups are Coder group names in the server's organization. Everyone is
                       the group of all organization members. An empty list leaves the server
-                      to organization admins.
+                      to organization admins. Coder reserves the names new and create.
                     items:
                       maxLength: 255
                       minLength: 1
@@ -82,6 +82,9 @@ spec:
                     maxItems: 64
                     type: array
                     x-kubernetes-list-type: set
+                    x-kubernetes-validations:
+                    - message: access.groups must not hold new or create
+                      rule: self.all(g, g != 'new' && g != 'create')
                 type: object
               allowInPlanMode:
                 description: AllowInPlanMode offers the server in plan-mode chats.
@@ -359,12 +362,15 @@ spec:
               organization:
                 description: |-
                   Organization is the name of the Coder organization that holds the
-                  config. Coder cannot move a config to another organization.
+                  config. Coder cannot move a config to another organization. Coder
+                  reserves the names new and create.
                 maxLength: 32
                 minLength: 1
                 pattern: ^[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*$
                 type: string
                 x-kubernetes-validations:
+                - message: organization must not be new or create
+                  rule: self != 'new' && self != 'create'
                 - message: organization is immutable
                   rule: self == oldSelf
               slug:

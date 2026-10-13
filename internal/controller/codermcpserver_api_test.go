@@ -107,6 +107,15 @@ func TestCoderMCPServerAPIValidation(t *testing.T) {
 		{name: "organization with 33 characters", wantErr: "spec.organization", mutate: func(s *coderv1alpha1.CoderMCPServerSpec) {
 			s.Organization = strings.Repeat("o", 33)
 		}},
+		{name: "organization new", wantErr: "organization must not be new or create", mutate: func(s *coderv1alpha1.CoderMCPServerSpec) {
+			s.Organization = "new"
+		}},
+		{name: "organization create", wantErr: "organization must not be new or create", mutate: func(s *coderv1alpha1.CoderMCPServerSpec) {
+			s.Organization = "create"
+		}},
+		{name: "organization New, which Coder allows", mutate: func(s *coderv1alpha1.CoderMCPServerSpec) {
+			s.Organization = "New"
+		}},
 		{name: "slug with 33 characters", wantErr: "spec.slug", mutate: func(s *coderv1alpha1.CoderMCPServerSpec) {
 			s.Slug = strings.Repeat("a", 33)
 		}},
@@ -235,6 +244,12 @@ func TestCoderMCPServerAPIValidation(t *testing.T) {
 		}},
 		{name: "access group with an underscore", wantErr: "spec.access.groups", mutate: func(s *coderv1alpha1.CoderMCPServerSpec) {
 			s.Access = &coderv1alpha1.CoderMCPServerAccess{Groups: []string{"data_science"}}
+		}},
+		{name: "access group create", wantErr: "access.groups must not hold new or create", mutate: func(s *coderv1alpha1.CoderMCPServerSpec) {
+			s.Access = &coderv1alpha1.CoderMCPServerAccess{Groups: []string{"Everyone", "create"}}
+		}},
+		{name: "access group new", wantErr: "access.groups must not hold new or create", mutate: func(s *coderv1alpha1.CoderMCPServerSpec) {
+			s.Access = &coderv1alpha1.CoderMCPServerAccess{Groups: []string{"new"}}
 		}},
 		{name: "65 access groups", wantErr: "spec.access.groups", mutate: func(s *coderv1alpha1.CoderMCPServerSpec) {
 			s.Access = &coderv1alpha1.CoderMCPServerAccess{Groups: manyGroups}
