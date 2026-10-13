@@ -82,6 +82,7 @@ type fakeCoder struct {
 	templates  map[uuid.UUID]codersdk.Template
 	versions   map[uuid.UUID]codersdk.TemplateVersion
 	workspaces map[uuid.UUID]*fakeWorkspace
+	pool       fakePoolState // Workspace pool routes, see fakecoder_pool_test.go.
 	faults     map[string][]fakeFault
 	requests   map[string]int // Route -> requests received.
 
@@ -126,6 +127,7 @@ func newFakeCoder(t *testing.T) *fakeCoder {
 	f.route(mux, "POST /api/v2/users/{user}/workspaces", routeCreateWorkspace, f.createWorkspace)
 	f.route(mux, "GET /api/v2/users/{user}/workspace/{name}", routeWorkspaceByName, f.getWorkspaceByOwnerAndName)
 	f.route(mux, "GET /api/v2/workspaces/{id}", routeWorkspace, f.getWorkspace)
+	f.registerPoolRoutes(mux)
 	f.route(mux, "GET /api/v2/workspaces/{id}/builds", routeWorkspaceBuilds, f.listBuilds)
 	f.route(mux, "POST /api/v2/workspaces/{id}/builds", routeCreateBuild, f.createBuild)
 	f.route(mux, "PATCH /api/v2/workspacebuilds/{id}/cancel", routeCancelBuild, f.cancelBuild)
@@ -363,14 +365,18 @@ func (f *fakeCoder) promoteVersion(versionID uuid.UUID) {
 	f.templates[tpl.ID] = tpl
 }
 
-// setBuildJob moves a build's job to status. A succeeded delete build deletes
-// the workspace, which frees its name.
+// setBuildJob moves a build's job to status. A succeeded start build gets its
+// deadlines (applyAutostop). A succeeded delete build deletes the workspace,
+// which frees its name.
 func (f *fakeCoder) setBuildJob(buildID uuid.UUID, status codersdk.ProvisionerJobStatus) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	fw, b := f.findBuild(buildID)
 	require.NotNil(f.t, b, "assertion failed: unknown build %s", buildID)
 	f.setJob(b, status)
+	if status == codersdk.ProvisionerJobSucceeded && b.Transition == codersdk.WorkspaceTransitionStart {
+		f.applyAutostop(fw, b)
+	}
 	if status == codersdk.ProvisionerJobSucceeded && b.Transition == codersdk.WorkspaceTransitionDelete {
 		fw.deleted = true
 	}
@@ -555,6 +561,8 @@ func (f *fakeCoder) createWorkspace(r *http.Request) (int, any) {
 		return fakeError(http.StatusNotAcceptable, "template version import is still running")
 	case v.Job.Status != codersdk.ProvisionerJobSucceeded:
 		return fakeError(http.StatusBadRequest, "template version import failed")
+	case req.TemplateVersionPresetID != uuid.Nil && !f.hasPreset(v.ID, req.TemplateVersionPresetID):
+		return fakeError(http.StatusBadRequest, "fake coder needs a preset of the requested version")
 	case f.liveWorkspace(owner.ID, req.Name) != nil:
 		return fakeError(http.StatusConflict, "workspace %q already exists", req.Name)
 	}
@@ -563,8 +571,13 @@ func (f *fakeCoder) createWorkspace(r *http.Request) (int, any) {
 		ID: uuid.New(), CreatedAt: now, UpdatedAt: now, OwnerID: owner.ID, OwnerName: owner.Username,
 		OrganizationID: tpl.OrganizationID, OrganizationName: tpl.OrganizationName,
 		TemplateID: tpl.ID, TemplateName: tpl.Name, Name: req.Name, AutomaticUpdates: req.AutomaticUpdates,
+		TTLMillis: createTTL(req, tpl), LastUsedAt: now,
 	}}
 	f.appendBuild(fw, v.ID, codersdk.WorkspaceTransitionStart)
+	if req.TemplateVersionPresetID != uuid.Nil {
+		presetID := req.TemplateVersionPresetID
+		fw.builds[0].TemplateVersionPresetID = &presetID
+	}
 	f.workspaces[fw.workspace.ID] = fw
 	return http.StatusCreated, fw.view()
 }
