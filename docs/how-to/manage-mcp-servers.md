@@ -32,7 +32,7 @@ spec:
 
 - `organizations` lists 1 to 64 Coder organization names. The operator resolves each name to its Coder organization ID and compares IDs, so the letter case of a name does not matter. A name that does not resolve yet allows nothing. The operator checks again every 10 minutes.
 - `allowForceOn` lets objects use `availability: force_on`. A `force_on` server joins every new chat of each user who can read it, without that user's choice. The default is `false`. Then a `force_on` object stalls with `ForceOnNotAllowed`.
-- When you remove an organization, remove `spec.mcpServers`, or set `allowForceOn` back to `false`, the operator disables each affected server in Coder. It sends one update that holds only `enabled: false`, and it reads no credential. Then it changes nothing more. The object stalls with `MCPServersNotAllowed` or `ForceOnNotAllowed`. After you restore the opt-in, edit the object's spec (any change, for example `description`) to enable the server again.
+- When you remove an organization, remove `spec.mcpServers`, or set `allowForceOn` back to `false`, the operator disables each affected server in Coder. It sends one update that holds only `enabled: false`, and it reads no credential. Then it changes nothing more. The object stalls with `MCPServersNotAllowed` or `ForceOnNotAllowed`. After you restore the opt-in, the object reports `DisabledExternally` until you edit its spec. Edit the spec (any change, for example `description`) to enable the server again.
 - Deleting a `CoderMCPServer` still deletes its config when the opt-in is gone.
 
 ## 2. Prepare the credential Secret
@@ -121,7 +121,7 @@ The object has the conditions `Ready`, `Reconciling` and `Stalled`. A stalled ob
 | `GroupNotFound` | A name in `access.groups` is not a Coder group yet. See [Access](#access). |
 | `CoderRejected` | Coder rejected the request. Fix the spec. |
 | `CoderAnswerMismatch` | Coder's answer does not match the request, for example an answer for another config. The operator checks Coder again later. |
-| `DisabledExternally`, `DeletedExternally`, `CredentialClearedExternally` | Someone disabled the server, deleted it, or cleared a credential. See [Kill switches](#kill-switches). |
+| `DisabledExternally`, `DeletedExternally`, `CredentialClearedExternally` | Someone disabled the server, deleted it, or cleared a credential. `DisabledExternally` also follows a disable by the operator itself, after the opt-in or the credential consent came back. See [Kill switches](#kill-switches). |
 
 ## Access
 
@@ -182,7 +182,7 @@ Coder sends no events. The operator sees a dashboard change at its next read: at
 
 For a server that the operator created, every credential error disables the server in Coder: the Secret is deleted, loses its label, no longer lists an origin that Coder sends the credential to, is refused, has no such key, or holds a malformed value. The update holds only `enabled: false`, with no credential and no URL. The operator first checks what Coder holds. When every credential that Coder holds comes from a recorded Secret that still allows the URLs that Coder holds, the operator disables nothing and sends nothing. This is the case during a URL change to an origin that the Secret does not list yet.
 
-The object stalls with the credential reason. Repairing the Secret does not enable the server again. To enable it, fix the Secret, then edit the spec. When the disable fails, the operator retries every 30 seconds, and the condition message starts with `Coder can still send the credentials`.
+The object stalls with the credential reason. Repairing the Secret does not enable the server again: the object then reports `DisabledExternally`. To enable it, fix the Secret, then edit the spec. When the disable fails, the operator retries every 30 seconds, and the condition message starts with `Coder can still send the credentials`.
 
 ### The disable window
 
