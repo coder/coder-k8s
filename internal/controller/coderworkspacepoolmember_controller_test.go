@@ -202,8 +202,8 @@ func TestPoolMemberCreatesWorkspace(t *testing.T) {
 	requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, "WaitingForBuild", "")
 	require.Equal(t, 1, e.fake.requestCount(routeCreateWorkspace), "never a second create request")
 
-	// A member whose workspace can exist keeps its finalizer on deletion
-	// until the delete steps run.
+	// A member whose workspace exists keeps its finalizer on deletion until
+	// the workspace is deleted.
 	require.NoError(t, k8sClient.Delete(e.ctx, member))
 	require.NotNil(t, e.reconcileMember(t, key, 2))
 }
