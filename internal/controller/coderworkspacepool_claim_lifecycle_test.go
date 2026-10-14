@@ -1,6 +1,8 @@
 package controller_test
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -9,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/controller"
@@ -108,7 +111,53 @@ func TestPoolClaimLostWhenWorkspaceDeleted(t *testing.T) {
 	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(1)) })
 	spare := e.createMember(t, nil)
 	e.setMemberStatus(t, spare, readyWithWorkspace("kwp-spare"))
+	// The cache still shows the claim without its Lost status: the pool
+	// reads the claim again without the cache before a bind.
+	stale := &controller.CoderWorkspacePoolReconciler{Client: staleClaims{k8sClient}, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	_, err := stale.Reconcile(e.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}})
+	require.NoError(t, err)
+	require.Nil(t, e.reconcileMember(t, spare, 0).Spec.ClaimRef)
 	e.reconcilePool(t, 1)
 	require.Nil(t, e.reconcileMember(t, spare, 0).Spec.ClaimRef)
 	require.Equal(t, coderv1alpha1.CoderWorkspaceClaimPhaseLost, e.claim(t, claimKey).Status.Phase)
+}
+
+// crashAfterBind lets the first member update land, then reports an
+// error, as a crash right after the bind would end the reconcile.
+type crashAfterBind struct{ client.Client }
+
+func (c crashAfterBind) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if err := c.Client.Update(ctx, obj, opts...); err != nil {
+		return err
+	}
+	if _, ok := obj.(*coderv1alpha1.CoderWorkspacePoolMember); ok {
+		return errors.New("crash after the bind")
+	}
+	return nil
+}
+
+// TestPoolOrphanClaimKeepsOwnerName: the pool crashes right after a bind,
+// before the claim status, and the pool is deleted before the next
+// reconcile. The claim still shows Bound with the owner's Coder username,
+// which the pool stored in the claim status before the bind.
+func TestPoolOrphanClaimKeepsOwnerName(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	member := e.createMember(t, nil)
+	e.setMemberStatus(t, member, readyWithWorkspace("kwp-crash"))
+	claimKey := e.createClaim(t, "build-1")
+	key := types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}
+	r := &controller.CoderWorkspacePoolReconciler{Client: crashAfterBind{k8sClient}, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+	require.ErrorContains(t, err, "crash after the bind")
+	e.requireBound(t, member, claimKey)
+
+	require.NoError(t, k8sClient.Delete(e.ctx, e.reconcilePool(t, 0)))
+	r = &controller.CoderWorkspacePoolReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	_, err = r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+	claim := e.claim(t, claimKey)
+	requireClaim(t, claim, coderv1alpha1.CoderWorkspaceClaimPhaseBound, "WorkspaceReady", true)
+	require.Equal(t, "tester", claim.Status.OwnerName)
+	require.Equal(t, "kwp-crash", claim.Status.WorkspaceName)
 }
