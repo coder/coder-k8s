@@ -60,12 +60,16 @@ func TestCoderAIProviderSyncNoDifference(t *testing.T) {
 			got, _ := env.reconcile(ctx, t, provider)
 			requireAIProviderReady(t, got)
 			writes := env.writes()
+			requeues := map[time.Duration]bool{}
 			for range 3 {
 				env.restart()
-				again, _ := env.reconcile(ctx, t, got)
+				again, result := env.reconcile(ctx, t, got)
 				require.Equal(t, got.ResourceVersion, again.ResourceVersion)
+				requireAIProviderRequeue(t, 10*time.Minute, result.RequeueAfter)
+				requeues[result.RequeueAfter] = true
 			}
 			require.Equal(t, writes, env.writes())
+			require.Greater(t, len(requeues), 1, "the resync has jitter")
 		})
 	}
 }
@@ -201,8 +205,9 @@ func TestCoderAIProviderKeyAndURLTogether(t *testing.T) {
 	require.Equal(t, "llm-api-key", got.Status.Credential.SecretName)
 }
 
-// Plan 5.3 rule 5: a crash after the key PATCH leaves the resend marker, and
-// the next reconcile sends the key once more. Coder ends with that key only.
+// Plan 5.3 rule 5: a crash after the key PATCH leaves the resend marker. When
+// the PATCH committed, the key in Coder is unknown, so the object stalls until
+// a spec edit sends the key once more. Coder ends with that key only.
 func TestCoderAIProviderResendCrash(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -219,19 +224,26 @@ func TestCoderAIProviderResendCrash(t *testing.T) {
 	require.NotNil(t, stored.Status.Credential.ResendAttemptTime, "the marker was written before the PATCH")
 	credentialsecrettest.RequireNoLeak(t, []string{testAIProviderKey, testAIProviderKeyRotated}, map[string]any{"error": err, "status": stored.Status})
 
+	// Coder masks its keys, so the unknown key can also be a dashboard
+	// change: the object stalls with zero writes (#268).
 	env.restart()
 	got, _ := env.reconcile(ctx, t, stored)
+	require.Contains(t, requireAIProviderStep(t, got, true, "KeyChangedExternally"), "or a key resend committed without an answer")
+	require.Equal(t, updates+1, env.fake.requestCount(routeUpdateAIProvider))
+
+	got = editSpec(ctx, t, got, func(s *coderv1alpha1.CoderAIProviderSpec) { s.DisplayName = "OpenAI v2" })
+	got, _ = env.reconcile(ctx, t, got)
 	requireAIProviderReady(t, got)
 	require.Nil(t, got.Status.Credential.ResendAttemptTime)
-	require.Equal(t, updates+2, env.fake.requestCount(routeUpdateAIProvider), "the key was sent twice")
+	require.Equal(t, updates+2, env.fake.requestCount(routeUpdateAIProvider), "a spec edit sends the key once more")
 	coder, _ := env.fake.aiProvider("openai")
 	require.Len(t, coder.keys, 1)
 	require.Equal(t, testAIProviderKeyRotated, coder.keys[0].plaintext)
 	require.Equal(t, coder.keys[0].id.String(), got.Status.Credential.KeyID)
 }
 
-// A delete or disable in Coder while a key resend is pending is still a kill
-// switch: the Secret rotation does not undo it.
+// A delete, disable or key change in Coder while a key resend is pending is
+// still a kill switch: the Secret rotation does not undo it (#268).
 func TestCoderAIProviderKillSwitchDuringResend(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -244,6 +256,12 @@ func TestCoderAIProviderKillSwitchDuringResend(t *testing.T) {
 		}},
 		{reason: "DeletedExternally", act: func(ctx context.Context, c *codersdk.Client, id string) error {
 			return c.DeleteAIProvider(ctx, id)
+		}},
+		{reason: "KeyChangedExternally", act: func(ctx context.Context, c *codersdk.Client, id string) error {
+			_, err := c.UpdateAIProvider(ctx, id, codersdk.UpdateAIProviderRequest{
+				APIKeys: &[]codersdk.AIProviderKeyMutation{{APIKey: ptrTo("sk-a-dashboard-key-with-same-mask-2b6f")}}, // Masked like the rotated key.
+			})
+			return err
 		}},
 	} {
 		t.Run(tc.reason, func(t *testing.T) {
@@ -391,6 +409,11 @@ func TestCoderAIProviderSyncAnswers(t *testing.T) {
 		requireAIProviderStep(t, got, false, "CoderAnswerMismatch")
 		require.NotNil(t, got.Status.Credential.ResendAttemptTime, "the marker stays")
 		require.NotEqual(t, uuid.Nil.String(), got.Status.Credential.KeyID)
+		// The PATCH committed, so Coder holds a key that the controller
+		// cannot identify: a kill switch until a spec edit.
+		got, _ = env.reconcile(ctx, t, got)
+		requireAIProviderStep(t, got, true, "KeyChangedExternally")
+		got = editSpec(ctx, t, got, func(s *coderv1alpha1.CoderAIProviderSpec) { s.DisplayName = "OpenAI v2" })
 		got, _ = env.reconcile(ctx, t, got)
 		requireAIProviderReady(t, got)
 	})
@@ -457,4 +480,85 @@ func TestCoderAIProviderNonceWithoutCredential(t *testing.T) {
 	require.Equal(t, stored.id.String(), got.Status.ProviderID)
 	require.Equal(t, testAIProviderKey, stored.keys[0].plaintext, "the current key replaced the unknown one")
 	require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider), "only the late commit")
+}
+
+// Plan 5.3 rule 5: a key PATCH that failed before it committed leaves the
+// marker and Coder's recorded key, so the next reconcile sends the key again.
+func TestCoderAIProviderResendAfterFailedPatch(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, secret, provider := newReadyAIProvider(ctx, t)
+	setSecretValue(ctx, t, secret, testAIProviderKeyRotated)
+	env.fake.failNext(routeUpdateAIProvider, fakeFault{Status: http.StatusBadGateway})
+	got, _ := env.reconcile(ctx, t, provider)
+	require.NotNil(t, got.Status.Credential.ResendAttemptTime)
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIProviderReady(t, got)
+	stored, _ := env.fake.aiProvider("openai")
+	require.Equal(t, testAIProviderKeyRotated, stored.keys[0].plaintext)
+}
+
+// #268 item 1: a PATCH without a key checks the key list of the answer. A
+// key that changed in Coder between the read and the PATCH does not count
+// as applied, so the re-armed object sends its key on the next reconcile.
+func TestCoderAIProviderKeyChangedDuringUpdate(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newReadyAIProvider(ctx, t)
+	got := editSpec(ctx, t, provider, func(s *coderv1alpha1.CoderAIProviderSpec) { s.DisplayName = "OpenAI v2" })
+	env.fake.failNext(routeUpdateAIProvider, fakeFault{Rewrite: func(answer any) any {
+		p := answer.(codersdk.AIProvider)
+		p.APIKeys = []codersdk.AIProviderKey{{ID: uuid.New(), Masked: "sk-d...cdef"}}
+		return p
+	}})
+	got, result := env.reconcile(ctx, t, got)
+	requireAIProviderStep(t, got, false, "KeyChangedDuringUpdate")
+	require.Equal(t, 5*time.Second, result.RequeueAfter)
+	require.NotEqual(t, got.Generation, got.Status.AppliedGeneration)
+
+	_, err := env.fake.client(t, 2*time.Second).UpdateAIProvider(ctx, got.Status.ProviderID, codersdk.UpdateAIProviderRequest{
+		APIKeys: &[]codersdk.AIProviderKeyMutation{{APIKey: ptrTo("sk-dashboard-0123456789abcdef")}},
+	})
+	require.NoError(t, err)
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIProviderReady(t, got)
+	stored, _ := env.fake.aiProvider("openai")
+	require.Len(t, stored.keys, 1)
+	require.Equal(t, testAIProviderKey, stored.keys[0].plaintext)
+	require.Equal(t, stored.keys[0].id.String(), got.Status.Credential.KeyID)
+}
+
+// #268 item 4: a mismatched Coder answer is logged, as in CoderTemplateTest,
+// and reported in status.
+func TestCoderAIProviderAnswerMismatchIsLogged(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		ready bool
+		route string
+		edit  func(*codersdk.AIProvider)
+	}{
+		{name: "read by ID", ready: true, route: routeAIProvider, edit: func(p *codersdk.AIProvider) { p.Type = codersdk.AIProviderTypeAnthropic }},
+		{name: "create answer", route: routeCreateAIProvider, edit: func(p *codersdk.AIProvider) { p.Name = "other" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			env, _, provider := newAIProviderCreateEnv(ctx, t)
+			if tc.ready {
+				provider, _ = env.reconcile(ctx, t, provider)
+				requireAIProviderReady(t, provider)
+			}
+			env.fake.failNext(tc.route, fakeFault{Rewrite: func(answer any) any {
+				p := answer.(codersdk.AIProvider)
+				tc.edit(&p)
+				return p
+			}})
+			logCtx, logs := capturingContext(ctx)
+			_, err := env.r.Reconcile(logCtx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(provider)})
+			require.NoError(t, err)
+			require.Contains(t, logs.String(), "Coder answered something other than the controller asked for")
+			require.Contains(t, logs.String(), "assertion failed: Coder answered AI provider")
+		})
+	}
 }

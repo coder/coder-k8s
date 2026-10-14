@@ -3,6 +3,7 @@ package controller_test
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
@@ -90,6 +92,18 @@ func requireAIProviderStep(t *testing.T, provider *coderv1alpha1.CoderAIProvider
 		want["Reconciling"], want["Stalled"] = metav1.ConditionFalse, metav1.ConditionTrue
 	}
 	return requireAIProviderConditions(t, provider, want, reason)
+}
+
+// requireAIProviderRequeue checks a requeue. The 10-minute resync has 20 %
+// jitter.
+func requireAIProviderRequeue(t *testing.T, want, got time.Duration) {
+	t.Helper()
+	if want == 10*time.Minute {
+		require.GreaterOrEqual(t, got, 8*time.Minute)
+		require.LessOrEqual(t, got, 12*time.Minute)
+		return
+	}
+	require.Equal(t, want, got)
 }
 
 // requireAIProviderReady checks that the provider reports Ready for its
@@ -202,7 +216,7 @@ func TestCoderAIProviderCredentialChecks(t *testing.T) {
 				requireAIProviderReady(t, got)
 				require.Equal(t, 2, env.fake.requestCount(routeAIProvider), "a usable key reaches the name lookup, then the read by ID")
 				require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider))
-				require.Equal(t, 10*time.Minute, result.RequeueAfter)
+				requireAIProviderRequeue(t, 10*time.Minute, result.RequeueAfter)
 				return
 			}
 			requireAIProviderStep(t, got, true, tc.reason)
@@ -293,7 +307,7 @@ func TestCoderAIProviderNameLookup(t *testing.T) {
 			before := env.fake.totalRequests()
 			got, result := env.reconcile(ctx, t, env.createProvider(ctx, t, nil))
 			require.Contains(t, requireAIProviderStep(t, got, tc.stalled, tc.reason), tc.message)
-			require.Equal(t, tc.requeue, result.RequeueAfter)
+			requireAIProviderRequeue(t, tc.requeue, result.RequeueAfter)
 			require.Equal(t, 1, env.fake.totalRequests()-before, "one GET and no write")
 
 			// A reconcile without a change sends no Coder write and leaves the
@@ -329,6 +343,32 @@ func TestCoderAIProviderFinalizer(t *testing.T) {
 	require.Equal(t, []string{coderv1alpha1.CoderAIProviderCleanupFinalizer}, kept.Finalizers)
 	requireAIProviderStep(t, kept, false, "DeletePending")
 	require.Zero(t, env.fake.totalRequests())
+}
+
+// A reconcile of an object that has the finalizer sends no finalizer patch,
+// and it keeps the order of other finalizers.
+func TestCoderAIProviderFinalizerPatchedOnce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newAIProviderEnv(ctx, t, false)
+	base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+	var patches atomic.Int32
+	env.r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			patches.Add(1)
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	got, _ := env.reconcile(ctx, t, env.createProvider(ctx, t, nil))
+	require.Equal(t, int32(1), patches.Load())
+	got.Finalizers = append(got.Finalizers, "example.com/other")
+	require.NoError(t, k8sClient.Update(ctx, got))
+	got, _ = env.reconcile(ctx, t, got)
+	require.Equal(t, int32(1), patches.Load(), "the finalizer is present, so no patch")
+	require.Equal(t, []string{coderv1alpha1.CoderAIProviderCleanupFinalizer, "example.com/other"}, got.Finalizers)
+	got.Finalizers = []string{coderv1alpha1.CoderAIProviderCleanupFinalizer}
+	require.NoError(t, k8sClient.Update(ctx, got))
 }
 
 // Plan S2 through the manager: a Secret update that removes the label, a

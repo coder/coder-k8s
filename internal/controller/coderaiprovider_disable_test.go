@@ -62,7 +62,7 @@ func TestCoderAIProviderDisablesWithoutConsent(t *testing.T) {
 			writes := env.writes()
 			got, result = env.reconcile(ctx, t, got)
 			require.Contains(t, requireAIProviderStep(t, got, true, tc.reason), "The controller disabled provider openai in Coder")
-			require.Equal(t, 10*time.Minute, result.RequeueAfter, "no Kubernetes event follows a dashboard enable")
+			requireAIProviderRequeue(t, 10*time.Minute, result.RequeueAfter)
 			require.Equal(t, got.Generation, got.Status.AppliedGeneration)
 			require.Equal(t, writes+1, env.writes(), "one PATCH")
 			stored, _ := env.fake.aiProvider("openai")
@@ -72,7 +72,7 @@ func TestCoderAIProviderDisablesWithoutConsent(t *testing.T) {
 
 			got, result = env.reconcile(ctx, t, got)
 			require.Contains(t, requireAIProviderStep(t, got, true, tc.reason), "Provider openai is disabled in Coder.")
-			require.Equal(t, 10*time.Minute, result.RequeueAfter)
+			requireAIProviderRequeue(t, 10*time.Minute, result.RequeueAfter)
 			require.Equal(t, writes+1, env.writes(), "a disabled provider needs no write")
 
 			// A dashboard enable while consent is withdrawn is undone by the

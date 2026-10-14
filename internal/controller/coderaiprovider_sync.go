@@ -12,6 +12,7 @@ import (
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/credentialsecret"
@@ -41,7 +42,7 @@ func (r *CoderAIProviderReconciler) syncAIProvider(
 	case err != nil:
 		return aiProviderWait(aiProviderRetry, "CoderUnavailable", "get provider %s: %s", provider.Name, coderErrorSummary(err)), false, nil
 	}
-	if step := checkAIProviderAnswer(provider, found); step != nil {
+	if step := checkAIProviderAnswer(ctx, provider, found); step != nil {
 		return step, false, nil
 	}
 
@@ -49,14 +50,18 @@ func (r *CoderAIProviderReconciler) syncAIProvider(
 	keys := found.APIKeys
 	ownKey := len(keys) == 1 && keys[0].ID.String() == cred.KeyID
 	resending := cred.ResendAttemptTime != nil
-	// A delete or disable in Coder is a kill switch also while a key resend
-	// is pending: a Secret rotation must not undo a revocation. Only the key
-	// check waits for the resend, which changes the key itself.
+	// A delete, disable or key change in Coder is a kill switch also while a
+	// key resend is pending: a Secret rotation must not undo a revocation.
+	// Coder answers keys masked, so nothing proves that an unknown key is a
+	// resend that committed without an answer. Such a key stalls too.
 	switch {
 	case applied && enabled && !found.Enabled:
 		return aiProviderStalled(aiProviderResync, "DisabledExternally",
 			"Provider %s was disabled in Coder. The controller does not enable it again until the spec changes.", provider.Name), false, nil
-	case applied && !resending && !ownKey:
+	case applied && !ownKey && resending:
+		return aiProviderStalled(aiProviderResync, "KeyChangedExternally",
+			"The key of provider %s in Coder is not the recorded key: it was changed in Coder, or a key resend committed without an answer. The controller does not send its key again until the spec changes.", provider.Name), false, nil
+	case applied && !ownKey:
 		return aiProviderStalled(aiProviderResync, "KeyChangedExternally",
 			"The key of provider %s was changed in Coder. The controller does not send its key again until the spec changes.", provider.Name), false, nil
 	}
@@ -126,7 +131,7 @@ func (r *CoderAIProviderReconciler) syncAIProvider(
 	case err != nil:
 		return aiProviderWait(aiProviderRetry, "CoderUnavailable", "update provider %s: %s", provider.Name, coderErrorSummary(err)), false, nil
 	}
-	if step := checkAIProviderAnswer(provider, updated); step != nil {
+	if step := checkAIProviderAnswer(ctx, provider, updated); step != nil {
 		return step, false, nil
 	}
 	if updated.DisplayName != cmp.Or(provider.Spec.DisplayName, provider.Name) || updated.Icon != provider.Spec.Icon ||
@@ -143,6 +148,11 @@ func (r *CoderAIProviderReconciler) syncAIProvider(
 		cred.KeyID, cred.ResendAttemptTime = updated.APIKeys[0].ID.String(), nil
 		setAIProviderToken(cred, key.Token)
 		r.rememberSentKey(provider, key)
+	} else if len(updated.APIKeys) != 1 || updated.APIKeys[0].ID.String() != cred.KeyID {
+		// The key changed in Coder between the read and this PATCH. The next
+		// reconcile decides: a kill switch, or a resend after a spec edit.
+		return aiProviderWait(aiProviderConfirmPoll, "KeyChangedDuringUpdate",
+			"The key of provider %s changed in Coder during the update. The controller reads the provider again.", provider.Name), false, nil
 	}
 	provider.Status.AppliedGeneration = provider.Generation
 	return aiProviderReady(provider), false, nil
@@ -162,10 +172,15 @@ func (r *CoderAIProviderReconciler) providerGone(provider *coderv1alpha1.CoderAI
 
 // checkAIProviderAnswer checks that Coder answered for the provider that
 // this object created, with the type it cannot change.
-func checkAIProviderAnswer(provider *coderv1alpha1.CoderAIProvider, answer codersdk.AIProvider) *aiProviderStep {
+// A mismatch is an assertion failure. As in CoderTemplateTest
+// (waitOnWrongAnswer), it is logged and reported, not returned: a returned
+// error retries after a short backoff and sends more requests to a Coder that
+// answers wrongly.
+func checkAIProviderAnswer(ctx context.Context, provider *coderv1alpha1.CoderAIProvider, answer codersdk.AIProvider) *aiProviderStep {
 	if err := errors.Join(coderAnswerFor("AI provider", provider.Status.ProviderID, answer.ID.String()),
 		coderAnswerFor("AI provider", provider.Name, answer.Name),
 		coderAnswerFor("AI provider type", provider.Spec.Type, string(answer.Type))); err != nil {
+		log.FromContext(ctx).Error(err, "Coder answered something other than the controller asked for")
 		return aiProviderStalled(aiProviderResync, "CoderAnswerMismatch", "%s", err.Error())
 	}
 	return nil

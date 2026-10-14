@@ -56,7 +56,7 @@ func (r *CoderAIProviderReconciler) disableWithoutConsent(
 	case err != nil:
 		return unchecked("get provider: %s", coderErrorSummary(err)), nil
 	}
-	if step := checkAIProviderAnswer(provider, found); step != nil {
+	if step := checkAIProviderAnswer(ctx, provider, found); step != nil {
 		return step, nil
 	}
 	if !found.Enabled {
@@ -90,7 +90,7 @@ func (r *CoderAIProviderReconciler) disableWithoutConsent(
 	if err != nil {
 		return unchecked("the disable failed: %s", coderErrorSummary(err)), nil
 	}
-	if step := checkAIProviderAnswer(provider, updated); step != nil {
+	if step := checkAIProviderAnswer(ctx, provider, updated); step != nil {
 		return step, nil
 	}
 	if updated.Enabled {
