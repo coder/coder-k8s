@@ -234,8 +234,12 @@ type CoderAIGatewayKeyStatus struct {
 // CoderAIGatewayKey manages a Coder AI Gateway key for standalone AI Gateway
 // replicas and stores it in a Secret that this object owns. A gateway key
 // lets its holder load the API key of every enabled AI provider, so write
-// access to this kind is admin-only. Deleting the object revokes every key
-// that it created at once, and gateways that use them stop within a minute.
+// access to this kind is admin-only. Deleting the object deletes every key
+// that it created in Coder: after the 5-minute settle window of its last key
+// create, and only while the control plane can reach Coder. A failed
+// deletion keeps the object and retries. When the control plane is gone, the
+// object goes and its keys stay valid in Coder. A gateway stops within a
+// minute after its key is deleted.
 type CoderAIGatewayKey struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
