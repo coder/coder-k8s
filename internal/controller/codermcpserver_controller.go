@@ -46,10 +46,14 @@ const (
 	mcpServerNoncePrefix = "coder-k8s:"
 )
 
-// CoderMCPServerReconciler reconciles CoderMCPServer objects (#155). It is not
-// registered yet. It checks the control plane, the organization and its
-// opt-in, and the credential Secrets, reports a slug that a config of
-// someone else holds, creates the config, and syncs it on every reconcile.
+// +kubebuilder:rbac:groups=coder.com,resources=codermcpservers,verbs=get;list;watch;patch
+// +kubebuilder:rbac:groups=coder.com,resources=codermcpservers/status,verbs=get;update
+// +kubebuilder:rbac:groups=coder.com,resources=codermcpservers/finalizers,verbs=update
+
+// CoderMCPServerReconciler reconciles CoderMCPServer objects (#155). It checks
+// the control plane, the organization and its opt-in, and the credential
+// Secrets, reports a slug that a config of someone else holds, creates the
+// config, and syncs it on every reconcile.
 type CoderMCPServerReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -78,9 +82,9 @@ func mcpServerStalled(requeue time.Duration, reason, format string, args ...any)
 	return &mcpServerStep{stalled: true, reason: reason, message: fmt.Sprintf(format, args...), requeue: requeue}
 }
 
-// SetupWithManager wires the reconciler into controller-runtime. Nothing calls
-// it until activation. The controller watches its own kind without a
-// generation predicate, so an annotation change also triggers a reconcile.
+// SetupWithManager wires the reconciler into controller-runtime. The
+// controller watches its own kind without a generation predicate, so an
+// annotation change also triggers a reconcile.
 // A change of the referenced control plane or of a credential Secret requeues
 // the object.
 func (r *CoderMCPServerReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -163,15 +167,16 @@ func (r *CoderMCPServerReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		if !controllerutil.ContainsFinalizer(server, coderv1alpha1.CoderMCPServerCleanupFinalizer) {
 			return ctrl.Result{}, nil
 		}
-		if server.Status.ConfigID == "" && server.Status.CreateAttemptTime == nil {
-			// Nothing of this object can exist in Coder.
+		release, step, err := r.deleteStep(ctx, server)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if release {
+			r.sentCredentials.Delete(server.UID)
 			return ctrl.Result{}, r.patchFinalizer(ctx, server, false)
 		}
-		// Keep the finalizer: this controller version cannot prove what Coder
-		// holds, so it neither deletes nor forgets the config.
-		applyMCPServerStep(server, mcpServerWait(0, "DeletePending",
-			"MCP server config %s can exist in Coder. This controller version keeps the finalizer and deletes nothing.", server.Spec.Slug))
-		return ctrl.Result{}, r.writeStatus(ctx, server, before)
+		applyMCPServerStep(server, step)
+		return ctrl.Result{RequeueAfter: step.requeue}, r.writeStatus(ctx, server, before)
 	}
 
 	if err := r.patchFinalizer(ctx, server, true); err != nil {

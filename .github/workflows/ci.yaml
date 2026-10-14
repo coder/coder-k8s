@@ -87,6 +87,7 @@ jobs:
               - 'internal/controller/codertemplatetest*'
               - 'internal/controller/coderaiprovider*'
               - 'internal/controller/coderaigatewaykey*'
+              - 'internal/controller/codermcpserver*'
               - 'internal/controller/owned_secret.go'
               - 'internal/controller/reserved_secret_names.go'
               - 'internal/controller/credential_checks.go'
@@ -106,6 +107,7 @@ jobs:
               - 'deploy/**'
               - 'examples/cloudnativepg/**'
               - 'hack/e2e-workspace-lifecycle*.sh'
+              - 'hack/e2e/mcpstub/**'
               - '.github/workflows/ci.yaml'
               # Coder SDK bumps change how every aggregated-API call reaches the backend.
               - 'vendor/github.com/coder/coder/v2/**'
@@ -169,22 +171,6 @@ jobs:
           if [[ -n "${UNTRACKED_GENERATED}" ]]; then
             echo "assertion failed: generated installer artifacts must be tracked" >&2
             printf '%s\n' "${UNTRACKED_GENERATED}" >&2
-            exit 1
-          fi
-
-      - name: Verify the dormant CoderMCPServer CRD is not installed
-        # Remove this step when the CoderMCPServer controller ships (#155).
-        run: |
-          # grep exits 1 when nothing matches. Any other status (for example a missing file) fails the step.
-          status=0
-          # The third pattern matches the CRD path entry in config/default/kustomization.yaml.
-          grep -n -E '^[[:space:]]+kind: CoderMCPServer$|codermcpservers\.coder\.com|coder\.com_codermcpservers\.yaml' \
-            dist/install.yaml config/default/kustomization.yaml config/crd/bases/*.yaml || status=$?
-          if [[ "${status}" -eq 0 ]]; then
-            echo "assertion failed: the CoderMCPServer CRD must not ship before its controller" >&2
-            exit 1
-          elif [[ "${status}" -ne 1 ]]; then
-            echo "assertion failed: the CoderMCPServer CRD guard could not read the install manifests (grep exit ${status})" >&2
             exit 1
           fi
 
@@ -436,6 +422,21 @@ jobs:
           echo "Built image ID: ${image_id}"
           echo "image_id=${image_id}" >> "$GITHUB_OUTPUT"
           kind load docker-image ghcr.io/coder/coder-k8s:e2e --name e2e
+
+      # The CoderMCPServer E2E stub (#155): an MCP server and an OpenAI-compatible LLM, standard library only.
+      - name: Build and load the MCP stub image
+        if: env.E2E_FULL == 'true'
+        env:
+          GOFLAGS: -mod=vendor
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          stub_dir="${RUNNER_TEMP}/mcpstub"
+          mkdir -p "$stub_dir"
+          go build -o "${stub_dir}/mcpstub" ./hack/e2e/mcpstub
+          docker build -f hack/e2e/mcpstub/Dockerfile -t e2e.local/mcpstub:e2e "$stub_dir"
+          kind load docker-image e2e.local/mcpstub:e2e --name e2e
 
       # Workspace pod image of config/e2e/codertemplate-agent.yaml (imagePullPolicy Never): pulled once by
       # its linux/amd64 manifest digest, so workspace builds never contact a registry.

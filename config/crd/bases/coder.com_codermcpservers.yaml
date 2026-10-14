@@ -382,7 +382,7 @@ spec:
               slug:
                 description: |-
                   Slug is the Coder slug of the config, unique in its organization. The
-                  model sees the server's tools as <slug>__<tool>.
+                  model sees the server's tools as `<slug>__<tool>`.
                 maxLength: 32
                 minLength: 1
                 pattern: ^[a-z0-9]+(-[a-z0-9]+)*$
@@ -513,7 +513,7 @@ spec:
                     field:
                       description: |-
                         Field names the credential: apiKey, oauth2ClientSecret, or
-                        header:<name>.
+                        `header:<name>`.
                       maxLength: 160
                       minLength: 1
                       type: string

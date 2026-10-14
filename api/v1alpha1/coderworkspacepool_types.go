@@ -292,13 +292,26 @@ type CoderWorkspacePoolStatus struct {
 	// Resolved holds the inputs that the controller resolved in Coder.
 	// +optional
 	Resolved *CoderWorkspacePoolResolved `json:"resolved,omitempty"`
-	// ConsecutiveFailures is the number of member failures in a row. A ready
-	// member resets it.
+	// ConsecutiveFailures is the number of member failures in a row: the
+	// length of RunFailures. A ready member, a spec change, and a new
+	// version reset it.
 	// +optional
 	ConsecutiveFailures int32 `json:"consecutiveFailures,omitempty"`
 	// LastFailure is the newest member failure.
 	// +optional
 	LastFailure *CoderWorkspacePoolFailure `json:"lastFailure,omitempty"`
+	// FailureRunStart is the start of the current run of failures: the
+	// latest of the last spec or version change and the newest ready time
+	// of a member. Failures at or before it do not count.
+	// +optional
+	FailureRunStart *metav1.Time `json:"failureRunStart,omitempty"`
+	// RunFailures are the member failures of the current run, oldest first,
+	// at most 5. The controller stores each one before it deletes the
+	// failed member, so it counts every failure once.
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=5
+	// +optional
+	RunFailures []CoderWorkspacePoolFailure `json:"runFailures,omitempty"`
 	// Reason is the current wait reason.
 	// +optional
 	Reason string `json:"reason,omitempty"`

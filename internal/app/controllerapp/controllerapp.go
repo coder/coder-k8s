@@ -147,6 +147,14 @@ func SetupControllers(mgr manager.Manager) error {
 		return fmt.Errorf("unable to create AI Gateway key controller: %w", err)
 	}
 
+	mcpServerReconciler := &controller.CoderMCPServerReconciler{
+		Client: client,
+		Scheme: managerScheme,
+	}
+	if err := mcpServerReconciler.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create MCP server controller: %w", err)
+	}
+
 	return nil
 }
 
