@@ -89,6 +89,8 @@ jobs:
               - 'internal/controller/coderaigatewaykey*'
               - 'internal/controller/owned_secret.go'
               - 'internal/controller/reserved_secret_names.go'
+              - 'internal/controller/credential_checks.go'
+              - 'internal/credentialsecret/**'
               # Shared Coder access that CoderTemplateTest and later pool controllers call.
               - 'internal/controller/controlplane_access.go'
               - 'internal/controller/coder_access.go'
