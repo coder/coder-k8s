@@ -1,0 +1,16 @@
+# Lets the operator write its cleanup records (#353): ConfigMaps named ck8s-cleanup-<object UID> in its own
+# namespace. The namespaced Role manager-role comes from the kubebuilder RBAC markers in role.yaml. No other
+# subject gets write access to these ConfigMaps.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: coder-k8s-cleanup-records
+  namespace: coder-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: manager-role
+subjects:
+  - kind: ServiceAccount
+    name: coder-k8s
+    namespace: coder-system

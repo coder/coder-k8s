@@ -76,7 +76,7 @@ graph TD
 | Path | Contents |
 | --- | --- |
 | `config/crd/bases/` | The generated CRDs for `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy`, `CoderTemplateTest`, `CoderAIProvider`, `CoderAIGatewayKey`, and `CoderMCPServer` |
-| `config/rbac/` | The `coder-k8s` ServiceAccount, the `manager-role` ClusterRole, and the bindings (including auth-delegator) |
+| `config/rbac/` | The `coder-k8s` ServiceAccount, the `manager-role` ClusterRole, the `manager-role` Role in `coder-system` (write access to the cleanup-record ConfigMaps there), and the bindings (including auth-delegator) |
 | `config/admission/` | Opt-in admission policies that the install bundle does not apply, for example the operator-only status write policy for `CoderMCPServer` |
 | `config/apiserver-standalone/` | For standalone `--app=aggregated-apiserver`: the `coder-k8s-apiserver` ServiceAccount, its RBAC, and the placeholder Secret for the serving CA |
 | `deploy/deployment.yaml` | The `coder-k8s` Deployment (default `--app=all`) |

@@ -42,6 +42,7 @@ const (
 // +kubebuilder:rbac:groups=coder.com,resources=coderaiproviders,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=coder.com,resources=coderaiproviders/status,verbs=get;update
 // +kubebuilder:rbac:groups=coder.com,resources=coderaiproviders/finalizers,verbs=update
+// +kubebuilder:rbac:groups="",namespace=coder-system,resources=configmaps,verbs=get;list;watch;create;update;delete
 
 // CoderAIProviderReconciler reconciles CoderAIProvider objects (#154). It
 // checks the spec, the credential Secret and the
@@ -51,6 +52,13 @@ const (
 type CoderAIProviderReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// OperatorNamespace holds the cleanup records (#353): the operator's own
+	// namespace, which only the operator can write ConfigMaps in.
+	OperatorNamespace string
+	// APIReader reads the cleanup records live: a record written moments ago
+	// can be missing from the cache.
+	APIReader client.Reader
 
 	sentKeys sync.Map // types.UID -> SHA-256 of the key that Coder holds. Memory only.
 }
@@ -77,8 +85,8 @@ func aiProviderStalled(requeue time.Duration, reason, format string, args ...any
 // SetupWithManager wires the reconciler into controller-runtime. A change of
 // the referenced control plane or of the key Secret requeues the provider.
 func (r *CoderAIProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if mgr == nil || r.Client == nil || r.Scheme == nil {
-		return fmt.Errorf("assertion failed: AI provider reconciler needs a manager, a client, and a scheme")
+	if mgr == nil || r.Client == nil || r.Scheme == nil || r.OperatorNamespace == "" || r.APIReader == nil {
+		return fmt.Errorf("assertion failed: AI provider reconciler needs a manager, a client, a scheme, the operator namespace and an API reader")
 	}
 	indexes := map[string]func(*coderv1alpha1.CoderAIProvider) string{
 		aiProviderControlPlaneRefIndex:  func(p *coderv1alpha1.CoderAIProvider) string { return p.Spec.ControlPlaneRef.Name },
@@ -139,8 +147,8 @@ func (r *CoderAIProviderReconciler) providersWith(ctx context.Context, namespace
 
 // Reconcile runs the checks in order and reports the first one that fails.
 func (r *CoderAIProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	if r.Client == nil || r.Scheme == nil {
-		return ctrl.Result{}, fmt.Errorf("assertion failed: AI provider reconciler needs a client and a scheme")
+	if r.Client == nil || r.Scheme == nil || r.OperatorNamespace == "" || r.APIReader == nil {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: AI provider reconciler needs a client, a scheme, the operator namespace and an API reader")
 	}
 	provider := &coderv1alpha1.CoderAIProvider{}
 	if err := r.Get(ctx, req.NamespacedName, provider); err != nil {
@@ -194,10 +202,12 @@ func (r *CoderAIProviderReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 // check validates the base URL, reads the key through the credential Secret
 // contract, gets Coder access, and then creates or applies the provider. The
 // checks before Coder access send nothing to Coder, except the disable of a
-// provider whose key Secret fails the credential contract (#267, #290).
+// provider whose key Secret fails the credential contract (#267, #290), and
+// the deployment ID read of a record backfill.
 func (r *CoderAIProviderReconciler) check(
 	ctx context.Context, provider *coderv1alpha1.CoderAIProvider, before *coderv1alpha1.CoderAIProviderStatus,
 ) (*aiProviderStep, error) {
+	r.backfillAIProviderRecord(ctx, provider)
 	baseURL, err := aiProviderBaseURL(provider.Spec.BaseURL)
 	if err != nil {
 		// A fixed message: the parse error repeats the URL, which can hold
@@ -223,6 +233,11 @@ func (r *CoderAIProviderReconciler) check(
 		// operator token Secret that appears later.
 		return aiProviderWait(aiProviderRetry, wait.reason, "%s", wait.message), nil
 	}
+	// The record carries the provider ID before the sync replaces the
+	// nonce, so a later sweep can still find the provider (#353).
+	if step, err := r.ensureAIProviderRecord(ctx, sdk, provider); step != nil || err != nil {
+		return step, err
+	}
 	var step *aiProviderStep
 	recreate := provider.Status.ProviderID == ""
 	if !recreate {
@@ -243,6 +258,9 @@ func (r *CoderAIProviderReconciler) check(
 		if step == nil {
 			// Store the ID before the sync replaces the nonce: after that,
 			// only the stored ID proves that this object created the provider.
+			if step, err := r.ensureAIProviderRecord(ctx, sdk, provider); step != nil || err != nil {
+				return step, err
+			}
 			if err := r.writeStatus(ctx, provider, before); err != nil {
 				return nil, err
 			}
