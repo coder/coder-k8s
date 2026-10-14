@@ -225,6 +225,14 @@ spec:
               CoderWorkspacePoolMemberStatus defines the observed state of a
               CoderWorkspacePoolMember.
             properties:
+              bindExtendDeadline:
+                description: |-
+                  BindExtendDeadline is the deadline that the extension at bind asks
+                  Coder for. The controller stores it before the first extend request.
+                  While BindExtended is false, a Coder deadline at or after it proves
+                  that the extension happened.
+                format: date-time
+                type: string
               bindExtended:
                 description: BindExtended is true after the one deadline extension
                   at bind.

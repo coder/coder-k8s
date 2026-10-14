@@ -1588,6 +1588,10 @@ func (in *CoderWorkspacePoolMemberStatus) DeepCopyInto(out *CoderWorkspacePoolMe
 		in, out := &in.LastExtendTime, &out.LastExtendTime
 		*out = (*in).DeepCopy()
 	}
+	if in.BindExtendDeadline != nil {
+		in, out := &in.BindExtendDeadline, &out.BindExtendDeadline
+		*out = (*in).DeepCopy()
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]v1.Condition, len(*in))

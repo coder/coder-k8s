@@ -111,6 +111,16 @@ func TestPoolMemberReadinessFailures(t *testing.T) {
 			member.Status.WorkspaceID, member.Status.StartBuildID = other.ID.String(), other.LatestBuild.ID.String()
 			require.NoError(t, k8sClient.Status().Update(e.ctx, member))
 		}, reason: "OwnershipUnknown", message: "is not the workspace of this member", deleted: metav1.ConditionUnknown},
+		// A status writer names a start build that the owner, not the
+		// operator, started on the member's own kwp- workspace.
+		{name: "start build by someone else in status", setup: func(t *testing.T, key types.NamespacedName, workspaceID, _ uuid.UUID) {
+			build := e.fake.addExternalBuild(workspaceID, e.tester, codersdk.WorkspaceTransitionStart)
+			e.fake.setBuildJob(build.ID, codersdk.ProvisionerJobSucceeded)
+			e.fake.setAgents(build.ID, agent("main", codersdk.WorkspaceAgentConnected, codersdk.WorkspaceAgentLifecycleReady))
+			member := e.reconcileMember(t, key, 0)
+			member.Status.StartBuildID = build.ID.String()
+			require.NoError(t, k8sClient.Status().Update(e.ctx, member))
+		}, reason: "OwnershipUnknown", message: "Nothing proves that the controller started build 2", deleted: metav1.ConditionUnknown},
 	} {
 		key, workspaceID, buildID := e.createdMember(t, nil)
 		tc.setup(t, key, workspaceID, buildID)
