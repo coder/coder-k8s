@@ -586,6 +586,17 @@ func TestCoderMCPServerWatches(t *testing.T) {
 		}, 30*time.Second, 100*time.Millisecond, reason)
 	}
 	requireReason("Applied")
+	// A withdrawn consent disables the config in Coder (plan G8), so only a
+	// spec edit applies it again.
+	rearm := func(description string) {
+		t.Helper()
+		requireReason("DisabledExternally")
+		got := &coderv1alpha1.CoderMCPServer{}
+		require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(server), got))
+		got.Spec.Description = description
+		require.NoError(t, k8sClient.Update(ctx, got))
+		requireReason("Applied")
+	}
 
 	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(tenant), tenant))
 	tenant.Labels = nil
@@ -593,7 +604,7 @@ func TestCoderMCPServerWatches(t *testing.T) {
 	requireReason(credentialsecret.ReasonNotOptedIn)
 	tenant.Labels = map[string]string{credentialsecret.LabelKey: credentialsecret.LabelValue}
 	require.NoError(t, k8sClient.Update(ctx, tenant))
-	requireReason("Applied")
+	rearm("one")
 
 	env.setOptIn(ctx, t, nil)
 	requireReason("MCPServersNotAllowed")
@@ -605,7 +616,7 @@ func TestCoderMCPServerWatches(t *testing.T) {
 	other := createControlPlaneUsing(ctx, t, env.namespace, "license", tenant.Name)
 	requireReason(credentialsecret.ReasonRefused)
 	require.NoError(t, k8sClient.Delete(ctx, &coderv1alpha1.CoderControlPlane{ObjectMeta: metav1.ObjectMeta{Name: other, Namespace: env.namespace}}))
-	requireReason("Applied")
+	rearm("two")
 
 	require.NoError(t, k8sClient.Delete(ctx, key))
 	requireReason(credentialsecret.ReasonSecretNotFound)

@@ -80,7 +80,7 @@ While the test waits, the condition `Reconciling` is `True` with the same reason
 | `TemplateVersionNotFound` | The version in `spec.version` does not exist. | Check `spec.version`, or push the version. |
 | `TemplateVersionImporting` | The version is still importing. | Wait. |
 | `CreatingWorkspace`, `CreateRetrying` | The controller sends the create request, or sends it again after a request that had no effect. | Wait. |
-| `ConfirmingCreate` | The answer to the create request was lost. The controller reads Coder until the workspace appears. | Wait. |
+| `ConfirmingCreate` | The answer to the create request was lost, or does not prove what Coder did, for example a proxy's 408, 499 or 5xx. The controller reads Coder until the workspace appears. | Wait. |
 | `WaitingForBuild`, `WaitingForAgents` | The start build runs, or an agent is not yet `connected` and `ready`. | Wait. The message names the agent. |
 | `AgentsReady`, `DeletingWorkspace` | Every top-level agent was ready. The controller does not check devcontainer sub-agents. The controller deletes the workspace. | Wait. |
 | `CoderUnavailable` | A Coder request failed. After HTTP 429, the controller retries with backoff. | Check Coder and its logs. |

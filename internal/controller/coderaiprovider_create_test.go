@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -284,7 +286,7 @@ func TestCoderAIProviderCreateConflict(t *testing.T) {
 	require.NoError(t, err)
 	setupPosts := env.fake.requestCount(routeCreateAIProvider)
 	// The lookup does not see it yet.
-	env.fake.failNext(routeAIProvider, fakeFault{Status: http.StatusNotFound})
+	env.fake.failNext(routeAIProvider, fakeFault{Status: http.StatusNotFound, Message: coderResourceNotFound})
 
 	got, _ := env.reconcile(ctx, t, provider)
 	require.Contains(t, requireAIProviderStep(t, got, true, "NameConflict"), foreign.ID.String())
@@ -370,4 +372,66 @@ func TestCoderAIProviderRejectedCreateOwnerCheckFails(t *testing.T) {
 	requireAIProviderStep(t, got, true, "CoderRejected")
 	require.Nil(t, got.Status.CreateAttemptTime)
 	require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider), "the rejected create was not sent again")
+}
+
+// #338: a 404 that Coder did not send on the name lookup proves nothing. A
+// pending create keeps its marker and sends no create, a new create is not
+// sent, and the next reconcile with Coder's own answer decides.
+func TestCoderAIProviderCreateLookupNotCoder404(t *testing.T) {
+	t.Parallel()
+	for name, fault := range notCoder404s {
+		for _, pending := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/pending=%v", name, pending), func(t *testing.T) {
+				t.Parallel()
+				ctx := context.Background()
+				env, secret, provider := newAIProviderCreateEnv(ctx, t)
+				if pending {
+					// A create that committed, but whose answer was lost.
+					_, err := env.fake.client(t, 2*time.Second).CreateAIProvider(ctx, codersdk.CreateAIProviderRequest{
+						Type: codersdk.AIProviderTypeOpenAI, Name: provider.Name, DisplayName: "coder-k8s:" + string(provider.UID),
+						BaseURL: provider.Spec.BaseURL, APIKeys: []string{testAIProviderKey},
+					})
+					require.NoError(t, err)
+					provider.Status.CreateAttemptTime = &metav1.Time{Time: time.Now()}
+					provider.Status.Credential = &coderv1alpha1.CoderAIProviderCredentialStatus{SecretName: secret.Name, SecretKey: "api-key"}
+					require.NoError(t, k8sClient.Status().Update(ctx, provider))
+				}
+				posts := env.fake.requestCount(routeCreateAIProvider)
+				env.fake.failNext(routeAIProvider, fault)
+				got, result := env.reconcile(ctx, t, provider)
+				requireAIProviderStep(t, got, false, "CoderUnavailable")
+				require.Equal(t, 30*time.Second, result.RequeueAfter)
+				require.Equal(t, posts, env.fake.requestCount(routeCreateAIProvider), "no create is sent")
+				require.Equal(t, pending, got.Status.CreateAttemptTime != nil, "a pending create keeps its marker")
+
+				got, _ = env.reconcile(ctx, t, got)
+				requireAIProviderReady(t, got)
+				require.Equal(t, 1, env.fake.aiProviderCount(), "one provider in Coder")
+			})
+		}
+	}
+}
+
+// #338: after a rejected create, the read that confirms absence also needs
+// Coder's own 404. Otherwise the marker stays and the create is not sent
+// again.
+func TestCoderAIProviderRejectedCreateNotCoder404(t *testing.T) {
+	t.Parallel()
+	for name, fault := range notCoder404s {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			env, _, provider := newAIProviderCreateEnv(ctx, t)
+			env.fake.failNext(routeAIProvider, fakeFault{Rewrite: func(answer any) any { return answer }}) // The name lookup passes.
+			env.fake.failNext(routeAIProvider, fault)                                                      // The confirmation read.
+			env.fake.failNext(routeCreateAIProvider, fakeFault{Status: http.StatusBadRequest})
+			got, _ := env.reconcile(ctx, t, provider)
+			requireAIProviderStep(t, got, false, "ConfirmingRejectedCreate")
+			require.NotNil(t, got.Status.CreateAttemptTime, "the marker stays")
+			got, _ = env.reconcile(ctx, t, got)
+			requireAIProviderStep(t, got, true, "CoderRejected")
+			require.Nil(t, got.Status.CreateAttemptTime)
+			require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider), "the rejected create was not sent again")
+		})
+	}
 }

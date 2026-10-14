@@ -131,7 +131,9 @@ func (r *CoderAIProviderReconciler) syncAIProvider(
 	case isCoderAuthFailure(status) || status == http.StatusTooManyRequests:
 		// No Kubernetes event follows a repaired token or role, so retry.
 		return aiProviderWait(aiProviderRetry, "CoderUnavailable", "update provider %s: %s", provider.Name, coderErrorSummary(err)), false, nil
-	case status >= 400 && status < 500:
+	case createRejected(status):
+		// The create rule: a proxy can answer 408 or 499 after it forwarded
+		// the PATCH, so those are retried below.
 		return aiProviderStalled(0, "CoderRejected", "Coder rejected the update: %s", coderErrorSummary(err)), false, nil
 	case err != nil:
 		return aiProviderWait(aiProviderRetry, "CoderUnavailable", "update provider %s: %s", provider.Name, coderErrorSummary(err)), false, nil

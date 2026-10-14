@@ -148,8 +148,8 @@ func requireMember(t *testing.T, member *coderv1alpha1.CoderWorkspacePoolMember,
 	require.Equal(t, phase, member.Status.Phase, member.Status.Message)
 	require.Equal(t, reason, member.Status.Reason, member.Status.Message)
 	require.Contains(t, member.Status.Message, messagePart)
-	require.Equal(t, phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseReady,
-		meta.IsStatusConditionTrue(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionReady), "Ready=True exactly in phase Ready")
+	require.Equal(t, phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseReady && reason != "AgentNotReady",
+		meta.IsStatusConditionTrue(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionReady), "Ready=True exactly in phase Ready, unless an agent is not ready")
 	require.True(t, controllerutil.ContainsFinalizer(member, coderv1alpha1.CoderWorkspacePoolMemberCleanupFinalizer))
 }
 
@@ -202,8 +202,8 @@ func TestPoolMemberCreatesWorkspace(t *testing.T) {
 	requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, "WaitingForBuild", "")
 	require.Equal(t, 1, e.fake.requestCount(routeCreateWorkspace), "never a second create request")
 
-	// A member whose workspace can exist keeps its finalizer on deletion
-	// until the delete steps run.
+	// A member whose workspace exists keeps its finalizer on deletion until
+	// the workspace is deleted.
 	require.NoError(t, k8sClient.Delete(e.ctx, member))
 	require.NotNil(t, e.reconcileMember(t, key, 2))
 }
@@ -232,6 +232,9 @@ func TestPoolMemberCreateResults(t *testing.T) {
 		{name: "502 before commit", fault: fakeFault{Status: 502}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate", message: "Coder answered 502", confirmed: "ConfirmingCreate"},
 		{name: "504 after commit", fault: fakeFault{Status: 504, AfterCommit: true}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate", confirmed: "WaitingForBuild"},
 		{name: "connection reset", fault: fakeFault{Reset: true}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate", confirmed: "ConfirmingCreate"},
+		// A proxy can answer 408 or 499 after it forwarded the request.
+		{name: "408 after commit", fault: fakeFault{Status: 408, AfterCommit: true}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate", message: "Coder answered 408", confirmed: "WaitingForBuild"},
+		{name: "499 after commit", fault: fakeFault{Status: 499, AfterCommit: true}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate", message: "Coder answered 499", confirmed: "WaitingForBuild"},
 		{name: "201 proxy page after commit", fault: fakeFault{Status: 201, AfterCommit: true, HTML: "<html>proxy</html>"}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate", confirmed: "WaitingForBuild"},
 		{name: "wrong workspace in the answer", fault: fakeFault{Rewrite: func(a any) any {
 			ws := a.(codersdk.Workspace)

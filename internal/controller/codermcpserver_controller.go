@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -52,6 +53,10 @@ const (
 type CoderMCPServerReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// sentCredentials maps types.UID -> credential field -> SHA-256 of the
+	// value that Coder holds. Memory only (plan 4.6 item 4).
+	sentCredentials sync.Map
 }
 
 // mcpServerStep is the outcome of one reconcile. A ready step reports that
@@ -213,6 +218,10 @@ func (r *CoderMCPServerReconciler) check(
 		return step, err
 	}
 	values, step, err := readMCPServerCredentials(ctx, r.Client, server)
+	if step != nil && step.stalled && server.Status.ConfigID != "" {
+		// Fail closed when consent goes (plan G8).
+		step, err = r.disableMCPServerWithoutConsent(ctx, sdk, server, org.ID, step)
+	}
 	if step != nil || err != nil {
 		return step, err
 	}
@@ -230,7 +239,7 @@ func (r *CoderMCPServerReconciler) check(
 			*before = *server.Status.DeepCopy()
 		}
 		var recreate bool
-		if step, recreate, err = syncMCPServer(ctx, sdk, server, org.ID, values); err != nil || !recreate {
+		if step, recreate, err = r.syncMCPServer(ctx, sdk, server, org.ID, values); err != nil || !recreate {
 			break
 		}
 	}
@@ -406,20 +415,26 @@ func readMCPServerCredentials(
 					"Secret %s changed during the reconcile. The controller reads it again.", c.ref.Name), nil
 			}
 			seen[c.ref.Name] = token
-			// Coder receives every credential inside a JSON string, and
-			// encoding/json replaces invalid UTF-8 with U+FFFD, so Coder would
-			// store another value.
-			if !utf8.ValidString(value.Reveal()) {
+			if problem := mcpServerValueProblem(value, c.headerValue); problem != "" {
 				return nil, mcpServerStalled(0, credentialsecret.ReasonMalformed,
-					"%s: the value of key %s in Secret %s is not valid UTF-8.", c.field, c.ref.Key, c.ref.Name), nil
-			}
-			if c.headerValue && !isHTTPFieldValue(value.Reveal()) {
-				return nil, mcpServerStalled(0, credentialsecret.ReasonMalformed,
-					"%s: the value of key %s in Secret %s is not a valid HTTP header value.", c.field, c.ref.Key, c.ref.Name), nil
+					"%s: the value of key %s in Secret %s %s.", c.field, c.ref.Key, c.ref.Name, problem), nil
 			}
 		}
 	}
 	return values, nil, nil
+}
+
+// mcpServerValueProblem says why Coder cannot store value, or returns "".
+// Coder receives every credential inside a JSON string, and encoding/json
+// replaces invalid UTF-8 with U+FFFD, so Coder would store another value.
+func mcpServerValueProblem(value credentialsecret.Value, headerValue bool) string {
+	switch {
+	case !utf8.ValidString(value.Reveal()):
+		return "is not valid UTF-8"
+	case headerValue && !isHTTPFieldValue(value.Reveal()):
+		return "is not a valid HTTP header value"
+	}
+	return ""
 }
 
 // isHTTPFieldValue reports whether every byte of s may appear in an RFC 9110

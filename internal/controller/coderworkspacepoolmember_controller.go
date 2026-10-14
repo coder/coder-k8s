@@ -67,12 +67,13 @@ func (r *CoderWorkspacePoolMemberReconciler) Reconcile(ctx context.Context, req 
 		return ctrl.Result{}, err
 	}
 	if !member.DeletionTimestamp.IsZero() {
-		// The delete steps (plan 6.5) come later. Until then, a member whose
-		// workspace can exist keeps its finalizer.
-		if poolMemberMayHaveWorkspace(member) {
+		if !controllerutil.ContainsFinalizer(member, coderv1alpha1.CoderWorkspacePoolMemberCleanupFinalizer) {
+			// Removing the finalizer is the way to release a member: the
+			// controller then never touches its workspace, even while another
+			// finalizer keeps the object.
 			return ctrl.Result{}, nil
 		}
-		return ctrl.Result{}, r.releaseFinalizer(ctx, member)
+		return r.cleanup(ctx, member)
 	}
 	switch member.Status.Phase {
 	case coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed:
@@ -131,8 +132,10 @@ func (r *CoderWorkspacePoolMemberReconciler) Reconcile(ctx context.Context, req 
 	}
 	keepBackoff = step.rateLimited && !step.failed
 	switch {
-	case step.failed, member.Spec.ClaimRef != nil && member.Status.BindExtended:
-		// The watch rules of a bound member (plan 6.2 step 11 rule 3) come later.
+	case step.failed, member.Spec.ClaimRef != nil && member.Status.BindExtended,
+		meta.IsStatusConditionTrue(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed):
+		// The watch rules of a bound member (plan 6.2 step 11 rule 3) come
+		// with claims. A used member waits for a person to delete it.
 		return ctrl.Result{}, nil
 	case member.Status.Phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseReady:
 		return ctrl.Result{RequeueAfter: r.retryAfter(req.NamespacedName, member, step)}, nil
@@ -410,7 +413,7 @@ func (r *CoderWorkspacePoolMemberReconciler) createWorkspace(
 		// the name. The controller never adopts that workspace.
 		member.Status.CreateAttemptTime = nil
 		return coderFail("WorkspaceNameConflict", "Workspace %s already exists: %s", name, coderErrorSummary(err)), nil
-	case status >= 400 && status < 500:
+	case createRejected(status):
 		member.Status.CreateAttemptTime = nil
 		return coderFail("CreateRejected", "Coder rejected the create request: %s", coderErrorSummary(err)), nil
 	default:
@@ -445,6 +448,9 @@ func applyPoolMemberStep(member *coderv1alpha1.CoderWorkspacePoolMember, now tim
 	switch {
 	case !step.failed && member.Status.ReadyTime != nil:
 		member.Status.Phase, ready = coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, metav1.ConditionTrue
+		if step.reason == "AgentNotReady" {
+			ready = metav1.ConditionFalse // Watch rule 3: the phase stays.
+		}
 	case !step.failed && poolMemberMayHaveWorkspace(member):
 		member.Status.Phase = coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating
 	case !step.failed:
