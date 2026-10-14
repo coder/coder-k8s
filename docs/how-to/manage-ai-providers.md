@@ -118,17 +118,42 @@ These limits remain:
 
 Deleting the object deletes the provider in Coder. With only an unconfirmed create, the operator reads Coder first and deletes only a provider that this object created. A create request can still commit for a short time, so within 2 minutes of that request the operator reads again before it trusts that the provider is absent.
 
-- When Coder is unreachable, or the control plane has no operator access, the finalizer `coder.com/ai-provider-cleanup` stays and the operator retries every 60 seconds.
+- When Coder is unreachable, or the control plane has no operator access, the finalizer `coder.com/ai-provider-cleanup` stays and the operator retries every 60 seconds. See [Stuck finalizer](#stuck-finalizer).
 - When the control plane is gone, nothing can delete the provider. The finalizer goes at once, and the operator logs the provider ID. Delete the provider in the Coder dashboard.
 - While the control plane is being deleted and its operator access still works, the operator sends one delete with a 10-second limit, then removes the finalizer. Without working access, the finalizer goes without a delete. Either way a namespace deletion finishes. When the delete did not succeed, the operator logs the provider ID: delete the provider in the Coder dashboard.
 
 Delete `CoderAIProvider` objects before their control plane. Coder deletes a provider even while chat models use it. Those models stop working.
 
-To release an object by hand, for example when the control plane will never get operator access again:
+### Stuck finalizer
 
-```bash
-kubectl -n coder patch coderaiprovider openai --type=merge -p '{"metadata":{"finalizers":null}}'
-```
+A deleted `CoderAIProvider` stays `Terminating` while the operator cannot prove that Coder no longer holds its provider. Two cases never end by themselves:
+
+- **An endless `CoderUnavailable` wait.** The `Ready` condition message starts with `delete provider <name>` or `get provider <name>`, and the operator retries every 60 seconds. Coder is unreachable, or the delete got a 404 that Coder did not send, for example an HTML page from a proxy or `Route not found.` from a wrong URL. The operator trusts only Coder's own answer `Resource not found or you do not have access to this resource`.
+- **An `assertion failed:` error.** `status.providerID` is not a UUID, so the operator sends no request to Coder. The status does not change. The error is in the operator log:
+
+  ```bash
+  kubectl -n coder-system logs deploy/coder-k8s | grep -F 'assertion failed: AI provider coder/openai'
+  ```
+
+Fix the cause if you can (Coder access, the proxy, the base URL), and the next retry deletes the provider. Otherwise release the object by hand:
+
+1. Note the provider name (the object name) and the provider ID from the condition message or from the `ControlPlaneGone` and `assertion failed:` log lines. After an `assertion failed:` error, do not trust `status.providerID`.
+2. Find the index of the finalizer:
+
+   ```bash
+   kubectl -n coder get coderaiprovider openai -o jsonpath='{.metadata.finalizers}{"\n"}'
+   ```
+
+3. Remove it with a JSON patch. The `test` operation makes the patch fail, with no change, if another finalizer is at that index. Replace `0` with the index from step 2:
+
+   ```bash
+   kubectl -n coder patch coderaiprovider openai --type=json -p '[
+     {"op": "test", "path": "/metadata/finalizers/0", "value": "coder.com/ai-provider-cleanup"},
+     {"op": "remove", "path": "/metadata/finalizers/0"}
+   ]'
+   ```
+
+4. Check Coder for a leftover provider: open **AI settings > Providers** in the dashboard (`/ai/settings/providers`) as an owner, and look for the provider name. If it is there and nothing else uses it, delete it in the dashboard.
 
 ## Grant access
 
