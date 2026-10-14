@@ -8,6 +8,7 @@ import (
 
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/stretchr/testify/require"
+	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -48,7 +49,7 @@ func (e *poolMemberEnv) readyAt(at time.Time) func(*coderv1alpha1.CoderWorkspace
 func (e *poolMemberEnv) tick() { e.clock.SetTime(e.clock.Now().Add(time.Second)) }
 
 // TestPoolFailureBackoffAndLimit: the pool counts each failed member once,
-// deletes it, backs off, and stops after 5 failures in a row until its spec
+// deletes it, backs off, and stops after 5 failures in a row until an input
 // changes. A member that becomes ready resets the count.
 func TestPoolFailureBackoffAndLimit(t *testing.T) {
 	t.Parallel()
@@ -88,9 +89,9 @@ func TestPoolFailureBackoffAndLimit(t *testing.T) {
 	e.reconcilePool(t, 1)
 	require.Empty(t, e.poolMembers(t, e.pool.Name), "the limit holds")
 
-	// A spec change lifts the limit, and a ready member resets the count.
-	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.MaxInFlight = new(int32(4)) })
-	pool := e.reconcilePool(t, 1)
+	// An input change lifts the limit, and a ready member resets the count.
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.ReadyTimeoutSeconds = new(int32(1800)) })
+	pool := e.reconcilePool(t, 2) // Publishes the new inputs, then creates.
 	require.Zero(t, pool.Status.ConsecutiveFailures)
 	failNewest(t)
 	require.Equal(t, int32(1), e.reconcilePool(t, 1).Status.ConsecutiveFailures)
@@ -159,7 +160,7 @@ func TestPoolFailureRunOrder(t *testing.T) {
 	require.Zero(t, pool.Status.ConsecutiveFailures)
 }
 
-// TestPoolFailureRunResets: failures from before a spec change or a new
+// TestPoolFailureRunResets: failures from before an input change or a new
 // version never count, also when their members are still there at the
 // change, and a failed member with old inputs never counts.
 func TestPoolFailureRunResets(t *testing.T) {
@@ -171,9 +172,9 @@ func TestPoolFailureRunResets(t *testing.T) {
 		e.setMemberStatus(t, e.createMember(t, nil), e.failedStatus("BuildFailed"))
 	}
 	e.tick()
-	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.MaxInFlight = new(int32(3)) })
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.ReadyTimeoutSeconds = new(int32(1800)) })
 	pool := e.reconcilePool(t, 1)
-	require.Zero(t, pool.Status.ConsecutiveFailures, "the spec change started a new run")
+	require.Zero(t, pool.Status.ConsecutiveFailures, "the input change started a new run")
 
 	e.tick()
 	outdated := e.createMember(t, func(m *coderv1alpha1.CoderWorkspacePoolMember) {
@@ -196,6 +197,74 @@ func TestPoolFailureRunResets(t *testing.T) {
 	e.tick()
 	e.fake.promoteVersion(e.fake.addVersion(e.tplID, "v2", codersdk.ProvisionerJobSucceeded))
 	require.Zero(t, e.reconcilePool(t, 1).Status.ConsecutiveFailures, "the new version started a new run")
+}
+
+// TestPoolFailureRunSurvivesRescale: only an input that can fix a failure
+// starts a new run. A replicas change through /scale, as an HPA sends it,
+// a maxInFlight change, and a new name of the same version keep the run, so
+// a pool that keeps rescaling still stops at the failure limit. A new
+// readyTimeoutSeconds can fix a DeadlineExceeded failure, so it starts a
+// new run, and a member that still has the old timeout does not count in it.
+func TestPoolFailureRunSurvivesRescale(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.reconcilePool(t, 1)
+	e.tick()
+	e.setMemberStatus(t, memberKey(e.poolMembers(t, e.pool.Name)[0]), e.failedStatus("DeadlineExceeded"))
+	require.Equal(t, int32(1), e.reconcilePool(t, 1).Status.ConsecutiveFailures)
+
+	scale := &autoscalingv1.Scale{}
+	require.NoError(t, k8sClient.SubResource("scale").Get(e.ctx, e.pool, scale))
+	scale.Spec.Replicas = 2
+	require.NoError(t, k8sClient.SubResource("scale").Update(e.ctx, e.pool, client.WithSubResourceBody(scale)))
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) {
+		s.MaxInFlight, s.Version = new(int32(4)), coderv1alpha1.CoderWorkspacePoolVersion{ID: e.v1.String()}
+	})
+	e.tick()
+	pool := e.reconcilePool(t, 1)
+	require.Equal(t, pool.Generation, pool.Status.ObservedGeneration)
+	require.Equal(t, int32(1), pool.Status.ConsecutiveFailures, "a rescale keeps the run")
+	requirePool(t, pool, "FailureBackoff", false, false)
+	e.fake.renameVersion(e.v1, "v1-renamed")
+	e.tick()
+	pool = e.reconcilePool(t, 1)
+	require.Equal(t, "v1-renamed", pool.Status.Resolved.TemplateVersionName)
+	require.Equal(t, int32(1), pool.Status.ConsecutiveFailures, "a new name of the same version keeps the run")
+
+	building := e.createMember(t, nil) // Pins the old timeout of 900 s.
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.ReadyTimeoutSeconds = new(int32(1800)) })
+	e.tick()
+	pool = e.reconcilePool(t, 1)
+	require.Zero(t, pool.Status.ConsecutiveFailures, "a new readyTimeoutSeconds starts a new run")
+	require.Equal(t, int32(1800), pool.Status.Resolved.ReadyTimeoutSeconds)
+	e.tick()
+	e.setMemberStatus(t, building, e.failedStatus("DeadlineExceeded"))
+	require.Zero(t, e.reconcilePool(t, 1).Status.ConsecutiveFailures, "a failure at the old timeout does not count")
+	require.True(t, e.gone(t, building))
+	e.reconcilePool(t, 1)
+	members := e.poolMembers(t, e.pool.Name)
+	require.Len(t, members, 2)
+	for _, m := range members {
+		require.Equal(t, int32(1800), m.Spec.ReadyTimeoutSeconds, "new members pin the resolved timeout")
+	}
+}
+
+// TestPoolFailuresUncountedWhileUnresolved: a spec edit that does not
+// resolve leaves status.resolved as it was. Members that fail meanwhile are
+// deleted without counting, so reverting the edit, which starts no new run,
+// leaves no failures behind.
+func TestPoolFailuresUncountedWhileUnresolved(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	pending := e.createMember(t, nil) // The one replica.
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Version.Name = "nope" })
+	requirePool(t, e.reconcilePool(t, 1), "TemplateVersionNotFound", false, false)
+	e.tick()
+	e.setMemberStatus(t, pending, e.failedStatus("DeadlineExceeded"))
+	require.Zero(t, e.reconcilePool(t, 1).Status.ConsecutiveFailures)
+	require.True(t, e.gone(t, pending), "deleted without counting")
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Version.Name = "v1" })
+	require.Zero(t, e.reconcilePool(t, 1).Status.ConsecutiveFailures)
 }
 
 // deleteHookClient runs hook before each member delete and fails the pool

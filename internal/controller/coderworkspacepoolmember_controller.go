@@ -272,7 +272,48 @@ func (r *CoderWorkspacePoolMemberReconciler) checkCreate(
 	case !isCoderNotFound(err):
 		return nil, coderStepUnavailable("get workspace by name", err), nil
 	}
+	// Last, after the Coder reads: the owner cap and the consent again.
+	if step, err := r.checkOwnerCap(ctx, member, pool.Spec.Template); step != nil || err != nil {
+		return nil, step, err
+	}
 	return sdk, nil, nil
+}
+
+// checkOwnerCap reads the control plane again without the cache, right
+// before the create marker, and counts, also without the cache, the owner's
+// other members on it that may have a workspace. At maxWorkspaces the member
+// waits, so a member that the pool created under a higher cap creates
+// nothing above a cap that an admin lowered since (Codex 4271920249 and
+// 4274565367). The consent check runs again on the same read.
+func (r *CoderWorkspacePoolMemberReconciler) checkOwnerCap(
+	ctx context.Context, member *coderv1alpha1.CoderWorkspacePoolMember, template string,
+) (*coderStep, error) {
+	controlPlane := &coderv1alpha1.CoderControlPlane{}
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: member.Namespace, Name: member.Spec.ControlPlaneRef.Name}, controlPlane); err != nil {
+		return nil, fmt.Errorf("get CoderControlPlane %s/%s: %w", member.Namespace, member.Spec.ControlPlaneRef.Name, err)
+	}
+	if !controlPlane.DeletionTimestamp.IsZero() {
+		return coderWait("ControlPlaneDeleting", "CoderControlPlane %s is being deleted.", controlPlane.Name), nil
+	}
+	if step := workspacePoolConsent(controlPlane, member.Spec.OwnerID, template); step != nil {
+		return step, nil
+	}
+	owner := workspacePoolOwner(controlPlane, member.Spec.OwnerID)
+	if owner.MaxWorkspaces == nil {
+		return nil, fmt.Errorf("assertion failed: CoderControlPlane %s has no defaulted maxWorkspaces for Coder user %s", controlPlane.Name, member.Spec.OwnerID)
+	}
+	all := &coderv1alpha1.CoderWorkspacePoolMemberList{}
+	if err := r.APIReader.List(ctx, all, client.InNamespace(member.Namespace)); err != nil {
+		return nil, fmt.Errorf("list pool members in namespace %s: %w", member.Namespace, err)
+	}
+	created := poolOwnerLiveMembers(all.Items, member.Spec.OwnerID, controlPlane.Name, func(m *coderv1alpha1.CoderWorkspacePoolMember) bool {
+		return m.UID != member.UID && poolMemberMayHaveWorkspace(m)
+	})
+	if created >= *owner.MaxWorkspaces {
+		return coderWait("OwnerWorkspaceLimit", "Coder user %s has %d of at most %d workspaces on CoderControlPlane %s.",
+			member.Spec.OwnerID, created, *owner.MaxWorkspaces, controlPlane.Name), nil
+	}
+	return nil, nil
 }
 
 // poolMemberInputMismatch names the first pinned input that differs from the
