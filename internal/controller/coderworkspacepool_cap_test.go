@@ -18,6 +18,12 @@ func (e *poolMemberEnv) setOwnerCap(t *testing.T, maxWorkspaces int32) {
 	require.NoError(t, k8sClient.Update(e.ctx, cp))
 }
 
+// gone reports whether the member no longer exists.
+func (e *poolMemberEnv) gone(t *testing.T, key types.NamespacedName) bool {
+	t.Helper()
+	return e.reconcileMember(t, key, 0) == nil
+}
+
 // TestPoolLoweredOwnerCap: an admin lowers maxWorkspaces while members of
 // the pool wait for their create (Codex 4271920249). No member creates a
 // workspace above the new cap: each member checks the cap again, without
@@ -55,4 +61,31 @@ func TestPoolLoweredOwnerCap(t *testing.T) {
 	requirePool(t, e.reconcilePool(t, 1), "OwnerWorkspaceLimit", false, false)
 	require.Len(t, e.poolMembers(t, e.pool.Name), 3, "no new member: the deleting members wait for their finalizers")
 	require.Equal(t, 1, e.fake.workspaceCount())
+}
+
+// TestPoolLoweredOwnerCapDeletesOnce: members that the pool deleted above
+// the cap count no longer while their finalizers run, so the next reconcile
+// deletes no more of them.
+func TestPoolLoweredOwnerCapDeletesOnce(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) {
+		s.Replicas, s.MaxInFlight = new(int32(3)), new(int32(3))
+	})
+	e.reconcilePool(t, 2)
+	members := e.poolMembers(t, e.pool.Name)
+	require.Len(t, members, 3)
+	for _, m := range members {
+		e.reconcileMember(t, memberKey(m), 1) // The finalizer only.
+	}
+	e.setOwnerCap(t, 1)
+	e.reconcilePool(t, 2)
+	deleting := 0
+	for _, m := range e.poolMembers(t, e.pool.Name) {
+		if !m.DeletionTimestamp.IsZero() {
+			deleting++
+		}
+	}
+	require.Equal(t, 2, deleting, "one member stays at maxWorkspaces 1")
+	require.Len(t, e.poolMembers(t, e.pool.Name), 3, "no new member")
 }

@@ -201,9 +201,10 @@ func TestPoolFailureRunResets(t *testing.T) {
 
 // TestPoolFailureRunSurvivesRescale: only an input that can fix a failure
 // starts a new run. A replicas change through /scale, as an HPA sends it,
-// and a maxInFlight change keep the run, so a pool that keeps rescaling
-// still stops at the failure limit. A new readyTimeoutSeconds can fix a
-// DeadlineExceeded failure, so it starts a new run.
+// a maxInFlight change, and a new name of the same version keep the run, so
+// a pool that keeps rescaling still stops at the failure limit. A new
+// readyTimeoutSeconds can fix a DeadlineExceeded failure, so it starts a
+// new run, and a member that still has the old timeout does not count in it.
 func TestPoolFailureRunSurvivesRescale(t *testing.T) {
 	t.Parallel()
 	e := newPoolMemberEnv(t)
@@ -216,18 +217,30 @@ func TestPoolFailureRunSurvivesRescale(t *testing.T) {
 	require.NoError(t, k8sClient.SubResource("scale").Get(e.ctx, e.pool, scale))
 	scale.Spec.Replicas = 2
 	require.NoError(t, k8sClient.SubResource("scale").Update(e.ctx, e.pool, client.WithSubResourceBody(scale)))
-	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.MaxInFlight = new(int32(4)) })
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) {
+		s.MaxInFlight, s.Version = new(int32(4)), coderv1alpha1.CoderWorkspacePoolVersion{ID: e.v1.String()}
+	})
 	e.tick()
 	pool := e.reconcilePool(t, 1)
 	require.Equal(t, pool.Generation, pool.Status.ObservedGeneration)
 	require.Equal(t, int32(1), pool.Status.ConsecutiveFailures, "a rescale keeps the run")
 	requirePool(t, pool, "FailureBackoff", false, false)
+	e.fake.renameVersion(e.v1, "v1-renamed")
+	e.tick()
+	pool = e.reconcilePool(t, 1)
+	require.Equal(t, "v1-renamed", pool.Status.Resolved.TemplateVersionName)
+	require.Equal(t, int32(1), pool.Status.ConsecutiveFailures, "a new name of the same version keeps the run")
 
+	building := e.createMember(t, nil) // Pins the old timeout of 900 s.
 	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.ReadyTimeoutSeconds = new(int32(1800)) })
 	e.tick()
 	pool = e.reconcilePool(t, 1)
 	require.Zero(t, pool.Status.ConsecutiveFailures, "a new readyTimeoutSeconds starts a new run")
 	require.Equal(t, int32(1800), pool.Status.Resolved.ReadyTimeoutSeconds)
+	e.tick()
+	e.setMemberStatus(t, building, e.failedStatus("DeadlineExceeded"))
+	require.Zero(t, e.reconcilePool(t, 1).Status.ConsecutiveFailures, "a failure at the old timeout does not count")
+	require.True(t, e.gone(t, building))
 	e.reconcilePool(t, 1)
 	members := e.poolMembers(t, e.pool.Name)
 	require.Len(t, members, 2)

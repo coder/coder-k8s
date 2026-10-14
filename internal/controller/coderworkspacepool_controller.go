@@ -89,7 +89,7 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		pool.Status.Resolved = resolved
 	}
 	resolvedChanged := !poolResolvedEqual(before.Resolved, pool.Status.Resolved)
-	if resolvedChanged && before.Resolved != nil {
+	if before.Resolved != nil && pool.Status.Resolved != nil && poolRunInputsChanged(before.Resolved, pool.Status.Resolved) {
 		// Only an input that can fix a failure starts a new run of failures:
 		// the template, the version, the preset, the parameters, the owner,
 		// or readyTimeoutSeconds. A rescale, for example by an HPA through
@@ -190,7 +190,10 @@ func (r *CoderWorkspacePoolReconciler) deleteFailedMembers(
 	})
 	for _, m := range failed {
 		at := poolMemberFailedAt(m)
-		if poolMemberInputMismatch(m, pool) != "" || !at.After(runStart) ||
+		// A member with an old readyTimeoutSeconds is current for claims, but
+		// its failure says nothing about the new timeout.
+		oldTimeout := st.Resolved != nil && m.Spec.ReadyTimeoutSeconds != st.Resolved.ReadyTimeoutSeconds
+		if poolMemberInputMismatch(m, pool) != "" || oldTimeout || !at.After(runStart) ||
 			slices.ContainsFunc(run, func(f coderv1alpha1.CoderWorkspacePoolFailure) bool { return f.Member == m.Name }) {
 			continue
 		}
@@ -299,7 +302,8 @@ func (r *CoderWorkspacePoolReconciler) createMembers(
 }
 
 // poolOwnerLiveMembers counts the members of one owner on one control plane
-// whose workspace is not deleted, and that match, if match is set.
+// whose workspace is not deleted, and that match, if match is set. A
+// deleting member that sent no create request never gets a workspace.
 func poolOwnerLiveMembers(
 	all []coderv1alpha1.CoderWorkspacePoolMember, ownerID, controlPlane string, match func(*coderv1alpha1.CoderWorkspacePoolMember) bool,
 ) int32 {
@@ -309,6 +313,7 @@ func poolOwnerLiveMembers(
 		m := &all[i]
 		id, err := uuid.Parse(m.Spec.OwnerID)
 		if err == nil && id == want && m.Spec.ControlPlaneRef.Name == controlPlane && (match == nil || match(m)) &&
+			(m.DeletionTimestamp.IsZero() || poolMemberMayHaveWorkspace(m)) &&
 			!meta.IsStatusConditionTrue(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionWorkspaceDeleted) {
 			live++
 		}
@@ -320,7 +325,9 @@ func poolOwnerLiveMembers(
 // newest first, while the owner has more live members than maxWorkspaces
 // allows, because an admin lowered it (Codex 4271920249). Such a member only
 // waits at its own cap check until its deadline fails it. The preconditions
-// keep a member that wrote its create marker after the list.
+// keep a member that wrote its create marker after the list. A deleted
+// member is marked deleting in all, so the later steps of this reconcile
+// skip it.
 func (r *CoderWorkspacePoolReconciler) trimToOwnerCap(
 	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, all []coderv1alpha1.CoderWorkspacePoolMember,
 ) error {
@@ -354,7 +361,9 @@ func (r *CoderWorkspacePoolReconciler) trimToOwnerCap(
 		uid, version := m.UID, m.ResourceVersion
 		if err := r.Delete(ctx, m, client.Preconditions{UID: &uid, ResourceVersion: &version}); client.IgnoreNotFound(err) != nil {
 			errs = append(errs, fmt.Errorf("delete pool member %s/%s above the owner cap: %w", m.Namespace, m.Name, err))
+			continue
 		}
+		m.DeletionTimestamp = &metav1.Time{Time: r.Clock.Now()}
 	}
 	return errors.Join(errs...)
 }
@@ -447,6 +456,15 @@ func (r *CoderWorkspacePoolReconciler) resolve(
 		TemplateVersionID: version.ID.String(), TemplateVersionName: version.Name, PresetID: presetID,
 		OwnerID: ownerID.String(), ParametersHash: workspacePoolParametersHash(params), ReadyTimeoutSeconds: *spec.ReadyTimeoutSeconds,
 	}, nil, nil
+}
+
+// poolRunInputsChanged reports a change of the resolved inputs that a build
+// uses. A new name of the same version (Coder can rename a version) changes
+// no build, so it does not start a new run of failures.
+func poolRunInputsChanged(a, b *coderv1alpha1.CoderWorkspacePoolResolved) bool {
+	a, b = a.DeepCopy(), b.DeepCopy()
+	a.TemplateVersionName, b.TemplateVersionName = "", ""
+	return !poolResolvedEqual(a, b)
 }
 
 // poolResolvedEqual compares two resolved inputs without their time.

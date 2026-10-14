@@ -340,6 +340,17 @@ func (f *fakeCoder) archiveVersion(versionID uuid.UUID) {
 	f.versions[versionID] = v
 }
 
+// renameVersion gives a version a new name, as PATCH /templateversions/{id}
+// does.
+func (f *fakeCoder) renameVersion(versionID uuid.UUID, name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.versions[versionID]
+	require.True(f.t, ok, "assertion failed: unknown version %s", versionID)
+	v.Name = name
+	f.versions[versionID] = v
+}
+
 // updateUser edits a user, for example to suspend it.
 func (f *fakeCoder) updateUser(userID uuid.UUID, edit func(*codersdk.User)) {
 	f.mu.Lock()
