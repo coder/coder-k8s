@@ -257,16 +257,26 @@ func (r *CoderAIProviderReconciler) check(
 // readKey reads the key through the credential Secret contract for
 // destination. It also refuses a value that is not valid UTF-8: Coder receives
 // the key inside a JSON string, and encoding/json replaces invalid UTF-8 with
-// U+FFFD, so Coder would store another value (#277).
+// U+FFFD, so Coder would store another value (#277). Coder sends the key to
+// the provider in an HTTP header, so a NUL, CR, LF or other control byte is
+// refused too, as for CoderMCPServer header values.
 func (r *CoderAIProviderReconciler) readKey(ctx context.Context, provider *coderv1alpha1.CoderAIProvider, destination *url.URL) (credentialsecret.Value, error) {
 	key, err := credentialsecret.Read(ctx, r.Client, provider.Namespace, provider.Spec.APIKeySecretRef, destination)
-	if err == nil && !utf8.ValidString(key.Reveal()) {
-		ref := provider.Spec.APIKeySecretRef
+	if err != nil {
+		return credentialsecret.Value{}, err
+	}
+	ref := provider.Spec.APIKeySecretRef
+	if !utf8.ValidString(key.Reveal()) {
 		return credentialsecret.Value{}, &credentialsecret.Error{
 			Reason: credentialsecret.ReasonMalformed, Message: fmt.Sprintf("The value of key %s in Secret %s is not valid UTF-8.", ref.Key, ref.Name),
 		}
 	}
-	return key, err
+	if !isHTTPFieldValue(key.Reveal()) {
+		return credentialsecret.Value{}, &credentialsecret.Error{
+			Reason: credentialsecret.ReasonMalformed, Message: fmt.Sprintf("The value of key %s in Secret %s is not a valid HTTP header value.", ref.Key, ref.Name),
+		}
+	}
+	return key, nil
 }
 
 // aiProviderBaseURL parses the exact spec value the way Coder validates
