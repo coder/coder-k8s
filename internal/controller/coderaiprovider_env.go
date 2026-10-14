@@ -3,123 +3,94 @@ package controller
 import (
 	"strings"
 
-	corev1 "k8s.io/api/core/v1"
-
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 )
 
-// Environment variables with which coderd seeds AI providers at startup
-// (Coder v2.37.3 codersdk/deployment.go:1941-2021, :4455-4561 and
-// cli/server.go:3174-3176). A seeded provider row with another config stops
-// coderd from starting (coderd/ai_providers_migrate.go:76-146).
+// coderd seeds AI providers from env and flags at startup (Coder v2.37.3
+// codersdk/deployment.go:1929-2021, :4440-4561 and cli/server.go:3174-3176).
+// A seeded provider row with another config stops coderd from starting
+// (coderd/ai_providers_migrate.go:76-146).
+//
+// The check fails closed instead of resolving values (#296): Coder
+// uppercases variable names, applies alias and duplicate rules, and the
+// kubelet expands references, so a resolved value can differ from what
+// coderd sees.
 var (
+	// A legacy key or Bedrock setting seeds the provider of its name, with
+	// any value or none.
 	aiProviderLegacyEnv = map[string]string{
 		"CODER_AI_GATEWAY_OPENAI_KEY":    "openai",
 		"CODER_AIBRIDGE_OPENAI_KEY":      "openai",
 		"CODER_AI_GATEWAY_ANTHROPIC_KEY": "anthropic",
 		"CODER_AIBRIDGE_ANTHROPIC_KEY":   "anthropic",
 	}
-	// A legacy Bedrock base URL, region or access key seeds the "anthropic"
-	// provider. The model variables have defaults, so they do not
-	// (coderd/ai_providers_migrate.go:320-357, codersdk/aiproviders_bedrock.go:82-127).
-	aiProviderBedrockEnv = map[string]bool{
-		"CODER_AI_GATEWAY_BEDROCK_BASE_URL": true, "CODER_AI_GATEWAY_BEDROCK_REGION": true,
-		"CODER_AI_GATEWAY_BEDROCK_ACCESS_KEY": true, "CODER_AI_GATEWAY_BEDROCK_ACCESS_KEY_SECRET": true,
-		"CODER_AIBRIDGE_BEDROCK_BASE_URL": true, "CODER_AIBRIDGE_BEDROCK_REGION": true,
-		"CODER_AIBRIDGE_BEDROCK_ACCESS_KEY": true, "CODER_AIBRIDGE_BEDROCK_ACCESS_KEY_SECRET": true,
+	aiProviderBedrockEnvPrefixes = []string{"CODER_AI_GATEWAY_BEDROCK_", "CODER_AIBRIDGE_BEDROCK_"}
+	// The same settings as flags (#287).
+	aiProviderLegacyFlags = map[string]string{
+		"ai-gateway-openai-key":    "openai",
+		"aibridge-openai-key":      "openai",
+		"ai-gateway-anthropic-key": "anthropic",
+		"aibridge-anthropic-key":   "anthropic",
 	}
-	// CODER_..._PROVIDER_<N>_NAME names provider N. Without a NAME, its TYPE
-	// is the name (cli/server.go:3274-3276).
+	aiProviderBedrockFlagPrefixes = []string{"ai-gateway-bedrock-", "aibridge-bedrock-"}
+	// CODER_..._PROVIDER_<N>_* configures an indexed provider, whose name
+	// any of its variables can set. These have no flags.
 	aiProviderIndexedEnvPrefixes = []string{"CODER_AI_GATEWAY_PROVIDER_", "CODER_AIBRIDGE_PROVIDER_"}
 )
 
-// aiProviderNamesSeededByEnv maps each provider name that env seeds in coderd
-// to the variable that seeds it. A legacy variable counts when it has a value
-// or a valueFrom source. The controller does not resolve a valueFrom source
-// or a $(VAR) reference, so an indexed name that needs one is returned as
-// unresolved: then coderd can seed any name. envFrom and the seeding flags in
-// spec.extraArgs are not inspected (#287).
-func aiProviderNamesSeededByEnv(env []corev1.EnvVar) (names map[string]string, unresolved string) {
+// aiProviderSeededNames maps each provider name that the control plane can
+// seed in coderd to the setting that seeds it. blocker names a setting that
+// can seed any name. envFrom sources and config files are not inspected.
+func aiProviderSeededNames(controlPlane *coderv1alpha1.CoderControlPlane) (names map[string]string, blocker string) {
 	names = map[string]string{}
-	type field struct {
-		value, variable string
-		unknown         bool
-	}
-	type indexed struct{ name, typ field }
-	providers := map[string]*indexed{}
-	var order []string
-	// Kubernetes keeps the last of two variables with one name, also an
-	// empty one, so only the last entry counts. Coder uppercases each name
-	// before it matches (serpent.ParseEnviron), so the check does too.
-	last := map[string]corev1.EnvVar{}
-	var variables []string
-	for _, e := range env {
-		e.Name = strings.ToUpper(e.Name)
-		if _, ok := last[e.Name]; !ok {
-			variables = append(variables, e.Name)
+	for _, e := range controlPlane.Spec.ExtraEnv {
+		name := strings.ToUpper(e.Name)
+		if seeded, ok := aiProviderLegacyEnv[name]; ok {
+			names[seeded] = "spec.extraEnv sets " + e.Name
 		}
-		last[e.Name] = e
-	}
-	for _, variable := range variables {
-		e := last[variable]
-		if e.Value == "" && e.ValueFrom == nil {
-			continue
-		}
-		if name, ok := aiProviderLegacyEnv[e.Name]; ok {
-			names[name] = e.Name
-		}
-		if aiProviderBedrockEnv[e.Name] {
-			names["anthropic"] = e.Name
+		for _, prefix := range aiProviderBedrockEnvPrefixes {
+			if strings.HasPrefix(name, prefix) {
+				names["anthropic"] = "spec.extraEnv sets " + e.Name
+			}
 		}
 		for _, prefix := range aiProviderIndexedEnvPrefixes {
-			index, key, ok := strings.Cut(strings.TrimPrefix(e.Name, prefix), "_")
-			if !strings.HasPrefix(e.Name, prefix) || !ok || (key != "NAME" && key != "TYPE") {
-				continue
-			}
-			p := providers[prefix+index]
-			if p == nil {
-				p = &indexed{}
-				providers[prefix+index] = p
-				order = append(order, prefix+index)
-			}
-			f := field{value: e.Value, variable: e.Name, unknown: e.ValueFrom != nil || strings.Contains(e.Value, "$(")}
-			if key == "NAME" {
-				p.name = f
-			} else {
-				p.typ = f
+			if strings.HasPrefix(name, prefix) && blocker == "" {
+				blocker = "spec.extraEnv sets " + e.Name
 			}
 		}
 	}
-	for _, key := range order {
-		p := providers[key]
-		f := p.name
-		if f.variable == "" {
-			f = p.typ
+	// Only the flag name goes into a message: an argument can hold a key.
+	for _, arg := range controlPlane.Spec.ExtraArgs {
+		flag, _, _ := strings.Cut(strings.ToLower(strings.TrimLeft(arg, "-")), "=")
+		if seeded, ok := aiProviderLegacyFlags[flag]; ok {
+			names[seeded] = "spec.extraArgs passes --" + flag
 		}
-		switch {
-		case f.unknown:
-			unresolved = f.variable
-		case f.value != "":
-			names[f.value] = f.variable
+		for _, prefix := range aiProviderBedrockFlagPrefixes {
+			if strings.HasPrefix(flag, prefix) {
+				names["anthropic"] = "spec.extraArgs passes --" + flag
+			}
 		}
 	}
-	return names, unresolved
+	return names, blocker
 }
 
-// aiProviderReservedName returns a stall when the control plane's
-// spec.extraEnv seeds a provider with the name of this object, or with a name
-// that the controller cannot resolve (F9).
+// aiProviderReservedName returns a stall when the control plane can seed a
+// provider with the name of this object (F9). It runs before a create only.
+// A seeding setting added after the controller created its provider is not
+// guarded: the control plane rolls coderd at once, before this controller can
+// act, and coderd then refuses to start if the configs differ. Remove the
+// setting, or rename the CoderAIProvider.
 func aiProviderReservedName(provider *coderv1alpha1.CoderAIProvider, controlPlane *coderv1alpha1.CoderControlPlane) *aiProviderStep {
-	names, unresolved := aiProviderNamesSeededByEnv(controlPlane.Spec.ExtraEnv)
-	if variable, ok := names[provider.Name]; ok {
+	names, blocker := aiProviderSeededNames(controlPlane)
+	if source, ok := names[provider.Name]; ok {
 		return aiProviderStalled(0, "NameReservedByEnv",
-			"spec.extraEnv of CoderControlPlane %s sets %s, so coderd seeds a provider named %s at startup. The controller does not create a provider with that name, because coderd then fails to start. Choose another name.",
-			controlPlane.Name, variable, provider.Name)
+			"CoderControlPlane %s %s, so coderd can seed a provider named %s at startup. The controller does not create a provider with that name, because coderd then fails to start. Choose another name.",
+			controlPlane.Name, source, provider.Name)
 	}
-	if unresolved != "" {
+	if blocker != "" {
 		return aiProviderStalled(0, "NameReservedByEnv",
-			"spec.extraEnv of CoderControlPlane %s sets %s from a valueFrom source or a $(VAR) reference, so the controller cannot tell which provider name coderd seeds. It creates no provider until that variable has a literal value.",
-			controlPlane.Name, unresolved)
+			"CoderControlPlane %s %s, an indexed AI provider setting that can seed any provider name. The controller creates no provider while it is set.",
+			controlPlane.Name, blocker)
 	}
 	return nil
 }

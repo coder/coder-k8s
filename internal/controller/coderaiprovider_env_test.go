@@ -31,16 +31,27 @@ func TestCoderAIProviderNameReservedByEnv(t *testing.T) {
 	require.Zero(t, result.RequeueAfter, "the control plane watch requeues the provider")
 	require.Zero(t, env.fake.totalRequests())
 
-	// A name that needs a $(VAR) reference cannot be checked.
-	require.NoError(t, k8sClient.Get(ctx, key, controlPlane))
-	controlPlane.Spec.ExtraEnv = []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_PROVIDER_0_TYPE", Value: "openai"}, {Name: "CODER_AI_GATEWAY_PROVIDER_0_NAME", Value: "$(PROVIDER_NAME)"}}
-	require.NoError(t, k8sClient.Update(ctx, controlPlane))
-	got, _ = env.reconcile(ctx, t, got)
-	require.Contains(t, requireAIProviderStep(t, got, true, "NameReservedByEnv"), "cannot tell which provider name")
-	require.Zero(t, env.fake.totalRequests())
+	// An indexed provider variable can seed any name, so it blocks every
+	// create. A seeding flag in spec.extraArgs reserves its name (#287), and
+	// the message names the flag but not its value.
+	for _, edit := range []func(*coderv1alpha1.CoderControlPlaneSpec){
+		func(s *coderv1alpha1.CoderControlPlaneSpec) {
+			s.ExtraEnv = []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_PROVIDER_0_TYPE", Value: "openai"}, {Name: "CODER_AI_GATEWAY_PROVIDER_0_NAME", Value: "team-openai"}}
+		},
+		func(s *coderv1alpha1.CoderControlPlaneSpec) {
+			s.ExtraEnv, s.ExtraArgs = nil, []string{"--ai-gateway-openai-key=sk-legacy-flag-value"}
+		},
+	} {
+		require.NoError(t, k8sClient.Get(ctx, key, controlPlane))
+		edit(&controlPlane.Spec)
+		require.NoError(t, k8sClient.Update(ctx, controlPlane))
+		got, _ = env.reconcile(ctx, t, got)
+		require.NotContains(t, requireAIProviderStep(t, got, true, "NameReservedByEnv"), "sk-legacy-flag-value")
+		require.Zero(t, env.fake.totalRequests())
+	}
 
 	require.NoError(t, k8sClient.Get(ctx, key, controlPlane))
-	controlPlane.Spec.ExtraEnv = []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_PROVIDER_0_TYPE", Value: "openai"}, {Name: "CODER_AI_GATEWAY_PROVIDER_0_NAME", Value: "team-openai"}}
+	controlPlane.Spec.ExtraEnv, controlPlane.Spec.ExtraArgs = []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_OPENAI_BASE_URL", Value: "https://llm.example.com"}}, nil
 	require.NoError(t, k8sClient.Update(ctx, controlPlane))
 	got, _ = env.reconcile(ctx, t, got)
 	requireAIProviderReady(t, got)
