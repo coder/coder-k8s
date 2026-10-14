@@ -142,11 +142,12 @@ func adoptAIGatewayKey(key *coderv1alpha1.CoderAIGatewayKey, own []codersdk.AIGa
 	if pending := key.Status.PendingKey; pending != nil && pending.Serial == decision.serial {
 		key.Status.PendingKey = nil
 	}
-	// The last status write was the attempt's marker write. When the spec
-	// changed since then, the key was issued for an older spec: a new
-	// trigger stays unhandled, so it still starts its rotation.
-	applied := key.Status.ObservedGeneration == key.Generation
-	return setAIGatewayKeyCurrent(key, decision.serial, decision.key.ID, decision.key.Name, now, applied)
+	// Status does not record which spec the attempt ran for, and the spec
+	// can change between the attempt and this recovery. So the recovery never
+	// counts the current trigger as handled or the generation as applied: a
+	// newer trigger still starts its rotation. At worst one extra rotation
+	// runs, which is safe, while a consumed trigger would not be.
+	return setAIGatewayKeyCurrent(key, decision.serial, decision.key.ID, decision.key.Name, now, false)
 }
 
 // sweepOrphan deletes one orphan (plan 4.5) after the I1 live read: a key

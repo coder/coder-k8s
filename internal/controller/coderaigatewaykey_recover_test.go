@@ -91,10 +91,16 @@ func TestCoderAIGatewayKeyLostStatusWrite(t *testing.T) {
 	require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: env.namespace, Name: testAIGatewaySecret}, secret))
 	require.Equal(t, []byte(keys[0].plaintext), secret.Data["key"])
 
-	// The spec changes before the recovery. The adopted key was issued for
-	// the older spec, so the new trigger stays unhandled.
+	// The spec changes before the recovery, and a reconcile that cannot
+	// reach the recovery (a failed LIST) writes status in between. The
+	// adopted key was issued for the older spec, so the new trigger stays
+	// unhandled.
 	got.Spec.Rotation.Trigger = "rotate-me"
 	require.NoError(t, k8sClient.Update(ctx, got))
+	env.fake.failNext(routeAIGatewayKeys, fakeFault{Status: http.StatusBadGateway})
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyStep(t, got, false, "CoderUnavailable")
+	require.Equal(t, got.Generation, got.Status.ObservedGeneration)
 	got, _ = env.reconcile(ctx, t, got)
 	requireAIGatewayKeyReady(t, got)
 	require.Nil(t, got.Status.PendingKey)
@@ -192,7 +198,7 @@ func TestCoderAIGatewayKeyLateSecretWrite(t *testing.T) {
 	got, _ = env.reconcile(ctx, t, got)
 	requireAIGatewayKeyReady(t, got)
 	require.Equal(t, orphan.id.String(), got.Status.CurrentKey.ID)
-	require.Equal(t, got.Generation, got.Status.AppliedGeneration, "the spec did not change since the attempt")
+	require.Zero(t, got.Status.AppliedGeneration, "a recovery never marks a generation applied")
 	got, _ = env.reconcile(ctx, t, got)
 	requireAIGatewayKeyReady(t, got)
 	require.Zero(t, env.fake.requestCount(routeDeleteAIGatewayKey))
