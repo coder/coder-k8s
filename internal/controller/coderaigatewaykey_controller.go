@@ -272,6 +272,14 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 	}
 
 	decision := nextAIGatewayKeyAction(key, prefix, own, aiGatewayKeySecretHolds(secret, own), now)
+	if due, blocked := aiGatewayKeyRotationDue(key, now); decision.healthy && (due || blocked != nil) {
+		if stall := aiGatewayKeyIssueBlocked(key); stall != nil {
+			// The rotation's create waits for a spec change. Every steady-state
+			// row (retire step, sweep, rotation, Ready) keeps the stall, which
+			// only the condition stores: a dropped one retries the create.
+			return aiGatewayKeyKeepReady(key, r.deleteOnly(ctx, sdk, key, decision, stall, now), true), nil
+		}
+	}
 	switch decision.action {
 	case aiGatewayKeyAdopt:
 		return adoptAIGatewayKey(key, own, decision, now)

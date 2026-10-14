@@ -3,13 +3,16 @@ package controller_test
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder/v2/codersdk"
 )
 
 // Plan R13: one requested rotation with a fresh reconciler at every step
@@ -127,4 +130,69 @@ func TestCoderAIGatewayKeyMalformedSecretValue(t *testing.T) {
 	require.Equal(t, int64(1), got.Status.CurrentKey.Serial)
 	require.Equal(t, []string{first.ID}, retiringIDs(got))
 	require.Equal(t, env.clock.Now().Unix(), got.Status.RetiringKeys[0].ReplacedAt.Unix())
+}
+
+// requireReadyStalled checks that the Secret's key still works (Ready=True)
+// while a person must act (Stalled=True), and returns the message.
+func requireReadyStalled(t *testing.T, key *coderv1alpha1.CoderAIGatewayKey, reason string) string {
+	t.Helper()
+	for conditionType, status := range map[string]metav1.ConditionStatus{"Ready": metav1.ConditionTrue, "Reconciling": metav1.ConditionFalse, "Stalled": metav1.ConditionTrue} {
+		condition := meta.FindStatusCondition(key.Status.Conditions, conditionType)
+		require.NotNil(t, condition, conditionType)
+		require.Equal(t, status, condition.Status, conditionType)
+		require.Equal(t, reason, condition.Reason, conditionType)
+	}
+	message := meta.FindStatusCondition(key.Status.Conditions, "Ready").Message
+	require.Equal(t, 1, strings.Count(message, "still works"), message)
+	return message
+}
+
+// Plan 4.3 step 5 during a rotation: a create answer that does not match
+// keeps the old key Ready, stalls with CoderAnswerMismatch, and stays
+// stalled while the sweep deletes the mismatched key (delete-only mode). No
+// further create runs until the spec changes, for a requested and for a
+// scheduled rotation.
+func TestCoderAIGatewayKeyAnswerMismatchDuringRotation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for name, arm := range map[string]func(*aiGatewayKeyEnv, *coderv1alpha1.CoderAIGatewayKey){
+		"requested": func(_ *aiGatewayKeyEnv, key *coderv1alpha1.CoderAIGatewayKey) {
+			key.Spec.Rotation.Trigger = "rotate-1"
+			require.NoError(t, k8sClient.Update(ctx, key))
+		},
+		"scheduled": func(env *aiGatewayKeyEnv, _ *coderv1alpha1.CoderAIGatewayKey) { env.clock.Step(24 * time.Hour) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+			key := env.createKey(ctx, t, "coder", testAIGatewaySecret)
+			key.Spec.Rotation.IntervalSeconds = ptrTo(int32(86400))
+			require.NoError(t, k8sClient.Update(ctx, key))
+			got, _ := env.reconcile(ctx, t, key)
+			requireAIGatewayKeyReady(t, got)
+			first := got.Status.CurrentKey
+
+			arm(&env, got)
+			env.fake.failNext(routeCreateAIGatewayKey, fakeFault{Rewrite: func(a any) any {
+				answer := a.(codersdk.CreateAIGatewayKeyResponse)
+				answer.KeyPrefix = "00000000000"
+				return answer
+			}})
+			for _, step := range []time.Duration{0, 0, 5 * time.Minute, time.Hour} {
+				env.clock.Step(step)
+				got, _ = env.reconcile(ctx, t, got)
+				requireReadyStalled(t, got, "CoderAnswerMismatch")
+				require.Equal(t, first.ID, got.Status.CurrentKey.ID)
+			}
+			require.Equal(t, 2, env.fake.requestCount(routeCreateAIGatewayKey), "no create after the mismatch")
+			require.Equal(t, 1, env.fake.requestCount(routeDeleteAIGatewayKey), "the sweep deleted the mismatched key")
+			require.Len(t, env.fake.aiGatewayKeys(), 1)
+
+			got.Spec.Rotation.Trigger = "after-the-fix"
+			require.NoError(t, k8sClient.Update(ctx, got))
+			got, _ = env.reconcile(ctx, t, got)
+			require.Equal(t, int64(2), got.Status.CurrentKey.Serial, "the spec change re-arms the rotation")
+			require.Equal(t, 3, env.fake.requestCount(routeCreateAIGatewayKey))
+		})
+	}
 }

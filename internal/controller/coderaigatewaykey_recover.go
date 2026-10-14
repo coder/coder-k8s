@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
@@ -310,8 +311,9 @@ func aiGatewayKeyKeepReady(key *coderv1alpha1.CoderAIGatewayKey, step *aiGateway
 		return step
 	}
 	step.ready, step.inProgress = true, !step.stalled
-	if step.stalled {
-		step.message = fmt.Sprintf("The key in Secret %q still works. %s", key.Spec.SecretName, step.message)
+	// A stall read back from its condition already has the note.
+	if note := fmt.Sprintf("The key in Secret %q still works. ", key.Spec.SecretName); step.stalled && !strings.HasPrefix(step.message, note) {
+		step.message = note + step.message
 	}
 	return step
 }
