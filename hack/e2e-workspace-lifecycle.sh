@@ -46,7 +46,7 @@ k() { kubectl --request-timeout=30s "$@"; } # every non-streaming kubectl reques
 cleanup() {
   local p
   for p in "${BG_PIDS[@]}"; do kill "$p" 2>/dev/null || true; done
-  rm -f "$WORK/coder.hdr" "$WORK/coder-body.json" "$WORK/tester.json"
+  rm -f "$WORK/coder.hdr" "$WORK/coder-body.json" "$WORK/tester.json" "$WORK"/ai-key-* "$WORK"/secret-*.json "$WORK/ai-leak.txt"
   [[ $RESULT == PASS || -z $CURRENT ]] || CASES+=("case: $CURRENT = FAILED")
   # Sanitized evidence receipt: identifiers only, never the token.
   printf '%s\n' "=== RECEIPT ($RESULT) ===" "source_sha=$SOURCE_SHA" "run_id=${GITHUB_RUN_ID:-unset}" \
@@ -561,11 +561,136 @@ step "tester API keys after the template tests (plan A4: recorded, not enforced)
 KEYS_AFTER=$(db_count api_keys user_id "$TESTER_ID") || fail "cannot count the api_keys rows of the tester after the tests"
 log "tester api_keys: before=$KEYS_BEFORE after=$KEYS_AFTER delta=$((KEYS_AFTER - KEYS_BEFORE))"
 
+# CoderAIProvider phases (#154, plan 8.2 P1-P4, P6). Keys are synthetic and stay in 0600 files: never argv or output.
+AI=e2e-openai AI_SECRET=e2e-ai-key AI_ORIGIN=http://ai-upstream.invalid:8080
+gone_obj() { ! k -n "$NS" get "$1" "$2" -o name >/dev/null 2>"$WORK/obj.err" && grep -q NotFound "$WORK/obj.err"; }
+new_key() { # <file>: 48 random hex characters
+  head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$WORK/$1" && [[ $(wc -c <"$WORK/$1") == 48 ]] || return 1
+  [[ ${GITHUB_ACTIONS:-} != true ]] || echo "::add-mask::$(<"$WORK/$1")"
+}
+key_secret() { # <create|replace> <name> <key file> <labels JSON>: an Opaque Secret for $AI_ORIGIN that holds the key file
+  jq -n --arg n "$2" --arg ns "$NS" --rawfile v "$WORK/$3" --argjson l "$4" --arg o "$AI_ORIGIN" '{apiVersion: "v1", kind: "Secret",
+    metadata: {name: $n, namespace: $ns, labels: $l, annotations: {"coder.com/credential-destinations": $o}}, type: "Opaque",
+    data: {"api-key": ($v | @base64)}}' >"$WORK/secret-$2.json" && k "$1" -f "$WORK/secret-$2.json" >/dev/null
+}
+ai_provider() { # <name> <Secret> <key> [baseURL]: kubectl apply of an openai-compat CoderAIProvider
+  jq -n --arg n "$1" --arg ns "$NS" --arg s "$2" --arg k "$3" --arg u "${4:-$AI_ORIGIN/v1}" '{apiVersion: "coder.com/v1alpha1",
+    kind: "CoderAIProvider", metadata: {name: $n, namespace: $ns}, spec: {controlPlaneRef: {name: "coder"}, type: "openai-compat",
+    baseURL: $u, displayName: ("E2E " + $n), apiKeySecretRef: {name: $s, key: $k}}}' >"$WORK/ai-$1.json" || fail "cannot render CoderAIProvider $1"
+  apply_manifest "$WORK/ai-$1.json"
+}
+AI_SEEN="" AI_S=""
+ai_state() { # <name>: reads the object into $WORK/ai-<name>.state.json; sets AI_S to "<Ready status> <reason> stalled=<status>"
+  k -n "$NS" get coderaiprovider "$1" -o json >"$WORK/ai-$1.state.json" 2>"$WORK/ai.err" || return 1
+  AI_S=$(jq -r '.metadata.generation as $g | [.status.conditions[]? | select(.observedGeneration == $g)] as $c |
+    "\([$c[] | select(.type == "Ready") | "\(.status) \(.reason)"][0] // "- -") stalled=\([$c[] | select(.type == "Stalled") | .status][0] // "-")"' \
+    "$WORK/ai-$1.state.json") || return 1
+  [[ "$1 $AI_S" == "$AI_SEEN" ]] || { AI_SEEN="$1 $AI_S" && log "AI provider $1: $AI_S"; }
+}
+ai_is() { # <name> <Ready status> <reason>: true once Ready has them for the current generation; another stall fails at once
+  ai_state "$1" || return 1
+  [[ $AI_S == "$2 $3 "* ]] && return 0
+  [[ $AI_S != *stalled=True ]] || fail "AI provider $1 stalled with $AI_S, want Ready=$2 $3: $(jq -r '.status.conditions[0].message' "$WORK/ai-$1.state.json")"
+  return 1
+}
+ai_matches() { # <key file> <display name>: Coder's provider $AI_ID is enabled with the spec and only that key; sets AI_KEY_ID
+  coder_api GET "/api/v2/ai/providers/$AI_ID" >"$WORK/ai-coder.json" || return 1
+  AI_KEY_ID=$(jq -er --arg n "$AI" --arg d "$2" --arg u "$AI_ORIGIN/v1" --rawfile v "$WORK/$1" 'select(.name == $n and
+    .type == "openai-compat" and .enabled and .display_name == $d and .base_url == $u and (.api_keys | length) == 1 and
+    .api_keys[0].masked == $v[0:4] + "..." + $v[-4:]) | .api_keys[0].id' "$WORK/ai-coder.json")
+}
+ai_coder_seen() { jq -c 'del(.api_keys[]?.masked)' "$WORK/ai-coder.json"; } # the answer without key masks, for messages
+ai_list() { coder_api GET /api/v2/ai/providers | jq -ce 'map({id, name, enabled, display_name, base_url, updated_at,
+  keys: [.api_keys[]?.id]}) | sort_by(.name)'; }
+
+step "CoderAIProvider: a provider on an opted-in Secret is Ready; Coder holds the spec and the masked key (plan 8.2 P1)"
+T0=$SECONDS
+new_key ai-key-1 || fail "cannot generate the first AI provider key"
+key_secret create "$AI_SECRET" ai-key-1 '{"coder.com/credential": "true"}' || fail "cannot create Secret $AI_SECRET"
+ai_provider "$AI" "$AI_SECRET" api-key
+wait_until "AI provider $AI Ready" ai_is "$AI" True Applied
+AI_ID=$(jq -er '.status.providerID' "$WORK/ai-$AI.state.json") || fail "AI provider $AI is Ready without status.providerID"
+ai_matches ai-key-1 "E2E $AI" || fail "Coder provider $AI_ID does not match the spec and the first key: $(ai_coder_seen)"
+FIRST_KEY_ID=$AI_KEY_ID
+{ cat "$WORK/ai-key-1" && echo && jq -r '.api_keys[0].masked' "$WORK/ai-coder.json"; } >"$WORK/ai-leak.txt"
+! grep -qFf "$WORK/ai-leak.txt" "$WORK/ai-$AI.state.json" || fail "CoderAIProvider $AI holds its key or the key mask"
+phase ai-provider
+
+step "CoderAIProvider rotation: a new Secret value sends one new key; a metadata-only change sends none (plan 8.2 P2)"
+T0=$SECONDS
+new_key ai-key-2 || fail "cannot generate the second AI provider key"
+key_secret replace "$AI_SECRET" ai-key-2 '{"coder.com/credential": "true"}' || fail "cannot write the second key to Secret $AI_SECRET"
+rotated() { ai_matches ai-key-2 "E2E $AI" && [[ $AI_KEY_ID != "$FIRST_KEY_ID" ]]; }
+wait_until "Coder to hold the second key of $AI" rotated
+ROTATED_KEY_ID=$AI_KEY_ID
+key_recorded() { ai_state "$AI" && jq -e --arg id "$ROTATED_KEY_ID" '.status.credential.keyID == $id' "$WORK/ai-$AI.state.json" >/dev/null; }
+wait_until "AI provider $AI to record key $ROTATED_KEY_ID" key_recorded
+SECRET_RV=$(k -n "$NS" annotate secret "$AI_SECRET" e2e.coder.com/touched=1 -o json | jq -er '.metadata.resourceVersion') ||
+  fail "cannot annotate Secret $AI_SECRET"
+rv_recorded() { ai_state "$AI" && jq -e --arg rv "$SECRET_RV" '.status.credential.secretResourceVersion == $rv' "$WORK/ai-$AI.state.json" >/dev/null; }
+wait_until "AI provider $AI to record Secret resourceVersion $SECRET_RV" rv_recorded
+ai_matches ai-key-2 "E2E $AI" || fail "Coder provider $AI_ID lost the second key: $(ai_coder_seen)"
+[[ $AI_KEY_ID == "$ROTATED_KEY_ID" ]] || fail "a metadata-only Secret change sent a new key ($ROTATED_KEY_ID -> $AI_KEY_ID)"
+k -n "$OP_NS" logs deploy/coder-k8s >"$WORK/operator-ai.txt" || fail "cannot read the operator log"
+LEAKS=$({ cat "$WORK/ai-key-1" && echo && cat "$WORK/ai-key-2"; } | grep -cFf - "$WORK/operator-ai.txt" || true)
+[[ $LEAKS == 0 ]] || fail "the operator log holds an AI provider key ($LEAKS lines)"
+phase ai-rotation
+
+step "CoderAIProvider refusals: an unlabeled Secret, the operator token, a foreign origin and a taken name write nothing to Coder (plan 8.2 P3)"
+T0=$SECONDS
+coder_api POST /api/v2/ai/providers "$(jq -nc --arg u "$AI_ORIGIN/v1" '{type: "openai-compat", name: "e2e-taken", base_url: $u, enabled: false}')" \
+  >/dev/null || fail "cannot create provider e2e-taken through the Coder API"
+new_key ai-key-3 || fail "cannot generate the third AI provider key"
+key_secret create e2e-ai-key-unlabeled ai-key-3 '{}' || fail "cannot create Secret e2e-ai-key-unlabeled"
+AI_BEFORE=$(ai_list) || fail "cannot list the Coder AI providers"
+ai_provider e2e-p3-unlabeled e2e-ai-key-unlabeled api-key
+ai_provider e2e-p3-refused "$SECRET" "$KEY"
+ai_provider e2e-p3-origin "$AI_SECRET" api-key http://other.invalid:8080/v1
+ai_provider e2e-taken "$AI_SECRET" api-key
+for c in e2e-p3-unlabeled:CredentialNotOptedIn e2e-p3-refused:CredentialRefused e2e-p3-origin:CredentialDestinationNotAllowed e2e-taken:NameConflict; do
+  wait_until "AI provider ${c%%:*} to stall with ${c#*:}" ai_is "${c%%:*}" False "${c#*:}"
+  jq -e '(.status.providerID // "") == ""' "$WORK/ai-${c%%:*}.state.json" >/dev/null || fail "refused AI provider ${c%%:*} has a providerID"
+done
+AI_AFTER=$(ai_list) || fail "cannot list the Coder AI providers after the refusals"
+[[ $AI_AFTER == "$AI_BEFORE" ]] || fail "a refused CoderAIProvider wrote to Coder: before=$AI_BEFORE after=$AI_AFTER"
+k -n "$NS" delete coderaiprovider e2e-p3-unlabeled e2e-p3-refused e2e-p3-origin e2e-taken --wait=false >/dev/null ||
+  fail "cannot delete the refused CoderAIProviders"
+for c in e2e-p3-unlabeled e2e-p3-refused e2e-p3-origin e2e-taken; do wait_until "CoderAIProvider $c to disappear" gone_obj coderaiprovider "$c"; done
+AI_AFTER=$(ai_list) || fail "cannot list the Coder AI providers after deleting the refused objects"
+[[ $AI_AFTER == "$AI_BEFORE" ]] || fail "deleting a refused CoderAIProvider wrote to Coder: before=$AI_BEFORE after=$AI_AFTER"
+phase ai-refusals
+
+step "CoderAIProvider kill switch: a disable in Coder stalls the object; a spec edit enables the provider again (plan 8.2 P4)"
+T0=$SECONDS
+coder_api PATCH "/api/v2/ai/providers/$AI_ID" '{"enabled":false}' >/dev/null || fail "cannot disable provider $AI in Coder"
+k -n "$NS" annotate coderaiprovider "$AI" e2e.coder.com/poke=1 >/dev/null || fail "cannot annotate CoderAIProvider $AI"
+wait_until "AI provider $AI to stall with DisabledExternally" ai_is "$AI" False DisabledExternally
+coder_api GET "/api/v2/ai/providers/$AI_ID" >"$WORK/ai-coder.json" || fail "cannot read provider $AI_ID"
+jq -e '.enabled == false' "$WORK/ai-coder.json" >/dev/null || fail "the controller undid the disable of provider $AI: $(ai_coder_seen)"
+k -n "$NS" patch coderaiprovider "$AI" --type=merge -p '{"spec":{"displayName":"E2E edited"}}' >/dev/null ||
+  fail "cannot edit spec.displayName of CoderAIProvider $AI"
+wait_until "AI provider $AI Ready after the spec edit" ai_is "$AI" True Applied
+ai_matches ai-key-2 "E2E edited" && [[ $AI_KEY_ID == "$ROTATED_KEY_ID" ]] ||
+  fail "Coder provider $AI_ID is not enabled with the edited spec and the second key: $(ai_coder_seen)"
+phase ai-kill-switch
+
+step "CoderAIProvider delete: deleting the object deletes the provider in Coder (plan 8.2 P6)"
+T0=$SECONDS
+k -n "$NS" delete coderaiprovider "$AI" --wait=false >/dev/null || fail "cannot delete CoderAIProvider $AI"
+wait_until "CoderAIProvider $AI to disappear" gone_obj coderaiprovider "$AI"
+if coder_api GET "/api/v2/ai/providers/$AI_ID" >/dev/null 2>"$WORK/ai-get.err"; then
+  fail "provider $AI ($AI_ID) still exists in Coder after its object was deleted"
+fi
+grep -q 'error: 404' "$WORK/ai-get.err" || fail "GET provider $AI_ID after the delete: $(head -c 300 "$WORK/ai-get.err")"
+phase ai-delete
+
 # Last: it scales Coder to zero and deletes namespace $NS. Later CI steps must not need either.
 step "namespace deletion releases a running test while Coder is unreachable (plan A1, A13.2)"
 tt_create e2e-ns-delete "$(param startup_delay 120)" || fail "cannot create template test e2e-ns-delete"
 tt_waiting() { tt_state e2e-ns-delete && [[ $TT_S == "Running WaitingForAgents "* ]]; }
 wait_until "template test e2e-ns-delete at Running/WaitingForAgents" tt_waiting
+ai_provider e2e-ns-keep "$AI_SECRET" api-key # plan 8.2 P7: a Ready provider goes with the namespace
+wait_until "AI provider e2e-ns-keep Ready" ai_is e2e-ns-keep True Applied
 # spec.replicas is the operator's desired state for deploy/coder: the operator keeps it at zero instead of undoing it.
 k -n "$NS" patch codercontrolplane coder --type=merge -p '{"spec":{"replicas":0}}' >/dev/null || fail "cannot scale Coder to zero"
 coder_down() { k -n "$NS" get deploy coder -o json | jq -e '.spec.replicas == 0 and (.status.replicas // 0) == 0' >/dev/null; }
@@ -574,10 +699,10 @@ tt_unavailable() { tt_state e2e-ns-delete && [[ $TT_S == "Running CoderUnavailab
 wait_until "template test e2e-ns-delete to report CoderUnavailable" tt_unavailable
 T0=$SECONDS
 k delete namespace "$NS" --wait=false >/dev/null || fail "cannot delete namespace $NS"
-gone_obj() { ! k -n "$NS" get "$1" "$2" -o name >/dev/null 2>"$WORK/obj.err" && grep -q NotFound "$WORK/obj.err"; }
 NS_SEEN=""
-ns_gone() { # the namespace disappears (#209), and with it the test and the control plane
+ns_gone() { # the namespace disappears (#209), and with it the test, the provider and the control plane
   tt_state e2e-ns-delete || true # logs the ControlPlaneGone release while the object still exists
+  ai_state e2e-ns-keep || true
   if k get namespace "$NS" -o json >"$WORK/ns.json" 2>"$WORK/ns.err"; then
     # Diagnostics from the first poll on, so a run shows NamespaceDeletionContentFailure (the aggregated
     # LIST errors while the control plane still exists): the phase and every True condition, on change.
@@ -588,10 +713,11 @@ ns_gone() { # the namespace disappears (#209), and with it the test and the cont
     NS_SEEN=$seen
     return 1
   fi
-  grep -q NotFound "$WORK/ns.err" && gone_obj codertemplatetest e2e-ns-delete && gone_obj codercontrolplane coder
+  grep -q NotFound "$WORK/ns.err" && gone_obj codertemplatetest e2e-ns-delete && gone_obj coderaiprovider e2e-ns-keep &&
+    gone_obj codercontrolplane coder
 }
-TIMEOUT=$NS_DELETE_TIMEOUT wait_until "test, control plane, and namespace $NS deleted (ControlPlaneGone release)" ns_gone
+TIMEOUT=$NS_DELETE_TIMEOUT wait_until "test, provider, control plane, and namespace $NS deleted (ControlPlaneGone release)" ns_gone
 NS_DELETE_SECONDS=$((SECONDS - T0))
-log "namespace $NS deleted in ${NS_DELETE_SECONDS}s, after its test and control plane"
+log "namespace $NS deleted in ${NS_DELETE_SECONDS}s, after its test, provider and control plane"
 CASES+=("case: $CURRENT = passed") && CURRENT="" && RESULT=PASS
 log "PASS: workspace lifecycle"

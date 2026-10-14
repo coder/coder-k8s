@@ -83,7 +83,7 @@ func (r *CoderTemplateTestReconciler) createWorkspace(
 		// marker only after a result without effect, so someone else holds
 		// the name. The controller never adopts that workspace.
 		return templateTestFailNotCreated("WorkspaceNameConflict", "Workspace %s already exists: %s", tt.Status.WorkspaceName, coderErrorSummary(err)), nil
-	case status >= 400 && status < 500:
+	case createRejected(status):
 		return templateTestFailNotCreated("CreateRejected", "Coder rejected the create request: %s", coderErrorSummary(err)), nil
 	default:
 		return templateTestWait("ConfirmingCreate", "The create result is uncertain (%s). The controller reads Coder instead of sending it again.", coderErrorSummary(err)), nil
@@ -94,6 +94,9 @@ func (r *CoderTemplateTestReconciler) createWorkspace(
 // rate limiter and authentication answer before the handler, Coder v2.37.2
 // answers 406 from inside a rolled-back transaction (coderd/workspaces.go,
 // createWorkspace), and a failed dial or TLS handshake never sent the request.
+// A bad TLS record header proves that only on the first record: crypto/tls
+// sets Conn only there. On a reused connection the same error type comes
+// with a nil Conn, after Coder may already have committed the request.
 func createHadNoEffect(err error) bool {
 	switch coderStatus(err) {
 	case http.StatusTooManyRequests, http.StatusUnauthorized, http.StatusNotAcceptable:
@@ -102,7 +105,21 @@ func createHadNoEffect(err error) bool {
 	var opErr *net.OpError
 	var certErr *tls.CertificateVerificationError
 	var headerErr tls.RecordHeaderError
-	return (errors.As(err, &opErr) && opErr.Op == "dial") || errors.As(err, &certErr) || errors.As(err, &headerErr)
+	return (errors.As(err, &opErr) && opErr.Op == "dial") || errors.As(err, &certErr) ||
+		(errors.As(err, &headerErr) && headerErr.Conn != nil)
+}
+
+// statusClientClosedRequest is nginx's status for a client that closed the
+// connection before the answer.
+const statusClientClosedRequest = 499
+
+// createRejected reports a 4xx answer that proves the create request failed.
+// Coder v2.37.3 never answers 408 or 499 on create (coderd/workspaces.go,
+// createWorkspace, and wsbuilder). A proxy can answer either after it
+// forwarded the request, so the workspace can exist and the result is
+// uncertain.
+func createRejected(status int) bool {
+	return status >= 400 && status < 500 && status != http.StatusRequestTimeout && status != statusClientClosedRequest
 }
 
 func templateTestFailNotCreated(reason, format string, args ...any) *templateTestStep {

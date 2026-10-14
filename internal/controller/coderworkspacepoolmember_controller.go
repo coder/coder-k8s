@@ -412,7 +412,7 @@ func (r *CoderWorkspacePoolMemberReconciler) createWorkspace(
 		// the name. The controller never adopts that workspace.
 		member.Status.CreateAttemptTime = nil
 		return coderFail("WorkspaceNameConflict", "Workspace %s already exists: %s", name, coderErrorSummary(err)), nil
-	case status >= 400 && status < 500:
+	case createRejected(status):
 		member.Status.CreateAttemptTime = nil
 		return coderFail("CreateRejected", "Coder rejected the create request: %s", coderErrorSummary(err)), nil
 	default:

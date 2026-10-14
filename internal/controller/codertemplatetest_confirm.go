@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"slices"
 	"time"
 
@@ -19,6 +20,25 @@ import (
 // after an uncertain create result. It is a guess, not a measurement: Coder
 // has no known upper bound for a create request.
 const templateTestSettleWindow = 15 * time.Minute
+
+// templateTestCreateAnswer finds the HTTP status of an uncertain create
+// answer at the start of a test's last message: the create step's own
+// message, or the note that keepCreateAnswer puts in front of each later
+// wait. The anchor matters: later in a message, Coder's own text can follow.
+var templateTestCreateAnswer = regexp.MustCompile(`^(?:The create result is uncertain \(Coder answered|The create request got HTTP) (\d{3})\b`)
+
+// keepCreateAnswer puts the HTTP status of an uncertain create answer, for
+// example a proxy's 408, in front of a wait while the controller confirms the
+// create. Each wait replaces the message, so without it the final
+// DeadlineExceeded message no longer says why the test waited. In front, the
+// note survives the cut to templateTestMaxMessageLength.
+func keepCreateAnswer(step *templateTestStep, lastMessage string) {
+	match := templateTestCreateAnswer.FindStringSubmatch(lastMessage)
+	if step == nil || step.failed || match == nil {
+		return
+	}
+	step.message = fmt.Sprintf("The create request got HTTP %s from Coder or a proxy. %s", match[1], step.message)
+}
 
 // confirmCreate reads Coder after an uncertain create result. It never sends
 // a request that changes anything.
