@@ -21,6 +21,9 @@ const (
 	// aiProviderBoundedDeleteTimeout bounds the one delete attempt while the
 	// control plane is being deleted (plan D12).
 	aiProviderBoundedDeleteTimeout = 10 * time.Second
+	// aiProviderCreateSettle is how long after a create request a 404 does
+	// not yet prove absence: the request can still be in flight in Coder.
+	aiProviderCreateSettle = 2 * time.Minute
 )
 
 // deleteStep handles an object that is being deleted. It deletes in Coder
@@ -87,6 +90,12 @@ func (r *CoderAIProviderReconciler) deleteInCoder(ctx context.Context, sdk *code
 			if step := requireSiteOwner(ctx, sdk); step != nil {
 				step.requeue = aiProviderDeletePoll
 				return step, nil
+			}
+			if wait := aiProviderCreateSettle - time.Since(provider.Status.CreateAttemptTime.Time); wait > 0 {
+				// A create sent moments ago can still commit after this read.
+				return aiProviderWait(wait, "ConfirmingCreate",
+					"Provider %s is not in Coder, but its create request was sent at %s and can still commit. The controller reads again before it releases the finalizer.",
+					provider.Name, provider.Status.CreateAttemptTime.UTC().Format(time.RFC3339)), nil
 			}
 			return nil, nil
 		case err != nil:

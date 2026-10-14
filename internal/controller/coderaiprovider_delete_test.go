@@ -146,7 +146,7 @@ func TestCoderAIProviderDeletePendingCreate(t *testing.T) {
 			}
 			provider.Finalizers = []string{coderv1alpha1.CoderAIProviderCleanupFinalizer}
 			require.NoError(t, k8sClient.Update(ctx, provider))
-			provider.Status.CreateAttemptTime = &metav1.Time{Time: time.Now()}
+			provider.Status.CreateAttemptTime = &metav1.Time{Time: time.Now().Add(-3 * time.Minute)}
 			require.NoError(t, k8sClient.Status().Update(ctx, provider))
 			got, _ := env.deleteAIProvider(ctx, t, provider)
 			require.Nil(t, got, "the finalizer went")
@@ -165,7 +165,7 @@ func TestCoderAIProviderDeletePendingCreateNeedsSiteOwner(t *testing.T) {
 	env, _, provider := newAIProviderCreateEnv(ctx, t)
 	provider.Finalizers = []string{coderv1alpha1.CoderAIProviderCleanupFinalizer}
 	require.NoError(t, k8sClient.Update(ctx, provider))
-	provider.Status.CreateAttemptTime = &metav1.Time{Time: time.Now()}
+	provider.Status.CreateAttemptTime = &metav1.Time{Time: time.Now().Add(-3 * time.Minute)}
 	require.NoError(t, k8sClient.Status().Update(ctx, provider))
 	env.fake.updateUser(env.fake.operatorID, func(u *codersdk.User) { u.Roles = []codersdk.SlimRole{} })
 	got, result := env.deleteAIProvider(ctx, t, provider)
@@ -174,6 +174,39 @@ func TestCoderAIProviderDeletePendingCreateNeedsSiteOwner(t *testing.T) {
 	require.Equal(t, 60*time.Second, result.RequeueAfter, "a delete waits with the delete poll")
 	require.Equal(t, []string{coderv1alpha1.CoderAIProviderCleanupFinalizer}, got.Finalizers)
 	require.Zero(t, env.fake.requestCount(routeDeleteAIProvider))
+}
+
+// A 404 right after a create request does not prove absence: the request
+// can still commit. The finalizer stays until the settle window ends, and a
+// create that commits in the meantime is deleted.
+func TestCoderAIProviderDeleteRecentCreate(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newAIProviderCreateEnv(ctx, t)
+	provider.Finalizers = []string{coderv1alpha1.CoderAIProviderCleanupFinalizer}
+	require.NoError(t, k8sClient.Update(ctx, provider))
+	provider.Status.CreateAttemptTime = &metav1.Time{Time: time.Now().Add(-30 * time.Second)}
+	require.NoError(t, k8sClient.Status().Update(ctx, provider))
+	got, result := env.deleteAIProvider(ctx, t, provider)
+	require.NotNil(t, got)
+	require.Contains(t, requireAIProviderStep(t, got, false, "ConfirmingCreate"), "can still commit")
+	require.Equal(t, []string{coderv1alpha1.CoderAIProviderCleanupFinalizer}, got.Finalizers)
+	require.Greater(t, result.RequeueAfter, time.Duration(0))
+	require.LessOrEqual(t, result.RequeueAfter, 90*time.Second)
+
+	// The create commits late. The next read after the window finds it.
+	_, err := env.fake.client(t, 2*time.Second).CreateAIProvider(ctx, codersdk.CreateAIProviderRequest{
+		Type: codersdk.AIProviderTypeOpenAI, Name: provider.Name, DisplayName: "coder-k8s:" + string(provider.UID),
+		BaseURL: provider.Spec.BaseURL, APIKeys: []string{testAIProviderKey},
+	})
+	require.NoError(t, err)
+	got.Status.CreateAttemptTime = &metav1.Time{Time: time.Now().Add(-3 * time.Minute)}
+	require.NoError(t, k8sClient.Status().Update(ctx, got))
+	got, _ = env.reconcileDeleting(ctx, t, got)
+	require.Nil(t, got, "the finalizer went")
+	require.Equal(t, 1, env.fake.requestCount(routeDeleteAIProvider))
+	_, found := env.fake.aiProvider(provider.Name)
+	require.False(t, found, "the late create was deleted")
 }
 
 // A name lookup that answers this object's provider without an ID is
@@ -200,7 +233,7 @@ func testAIProviderDeleteAnswerWithoutID(t *testing.T, deleting bool) {
 	require.NoError(t, err)
 	provider.Finalizers = []string{coderv1alpha1.CoderAIProviderCleanupFinalizer}
 	require.NoError(t, k8sClient.Update(ctx, provider))
-	provider.Status.CreateAttemptTime = &metav1.Time{Time: time.Now()}
+	provider.Status.CreateAttemptTime = &metav1.Time{Time: time.Now().Add(-3 * time.Minute)}
 	require.NoError(t, k8sClient.Status().Update(ctx, provider))
 	env.fake.failNext(routeAIProvider, fakeFault{Rewrite: func(answer any) any {
 		p := answer.(codersdk.AIProvider)
