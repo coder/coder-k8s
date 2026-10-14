@@ -43,6 +43,7 @@ const (
 	aiGatewayKeyAdopt      aiGatewayKeyAction = "Adopt"      // The Secret holds a newer key of this object (4.4).
 	aiGatewayKeyRecover    aiGatewayKeyAction = "Recover"    // A marker from an attempt that did not finish (4.3).
 	aiGatewayKeySweep      aiGatewayKeyAction = "Sweep"      // Delete one orphan (4.5).
+	aiGatewayKeyRetire     aiGatewayKeyAction = "Retire"     // Delete one retiring key after its grace period (4.6).
 	aiGatewayKeySettle     aiGatewayKeyAction = "Settle"     // An orphan waits for the settle window: no create (create gate).
 	aiGatewayKeyIssue      aiGatewayKeyAction = "Issue"      // Issue the first key (4.3).
 	aiGatewayKeyKillSwitch aiGatewayKeyAction = "KillSwitch" // Someone deleted the current key in Coder (4.7).
@@ -63,6 +64,8 @@ type aiGatewayKeyDecision struct {
 	// healthy reports that the Secret holds the current key and Coder lists
 	// it, so a sweep keeps Ready=True.
 	healthy bool
+	// retirement is the state of the retiring keys (plan 4.6).
+	retirement aiGatewayKeyRetirement
 }
 
 // settled reports that an orphan exists and its settle window has passed.
@@ -74,9 +77,11 @@ func (d aiGatewayKeyDecision) settled(now time.Time) bool {
 // the listed keys whose name is prefix and a serial, and holds is the key
 // that the Secret holds (uuid.Nil for none). The rows run in this order:
 // recovery, then the first issue behind the create gate, then the kill
-// switch, the steady state, and the drift re-issue. The sweep never comes
-// before the kill switch or a re-issue. A stall still sweeps (delete-only
-// mode, plan 4.8), and the observe step does that. K8 and K9 add rows.
+// switch, the drift re-issue behind the create gate, and the steady state
+// with its retire step and sweep. The sweep never comes before the kill
+// switch. Every create waits behind the create gate, so at most one visible
+// orphan exists at a time. A stall still retires keys and sweeps
+// (delete-only mode, plan 4.8), and the observe step does that.
 func nextAIGatewayKeyAction(
 	key *coderv1alpha1.CoderAIGatewayKey, prefix string, own []codersdk.AIGatewayKey, holds uuid.UUID, now time.Time,
 ) aiGatewayKeyDecision {
@@ -120,14 +125,20 @@ func nextAIGatewayKeyAction(
 		decision.action = aiGatewayKeyRearm
 	case !aiGatewayKeyListed(own, current.ID):
 		decision.action = aiGatewayKeyKillSwitch
-	case decision.healthy && decision.settled(now):
-		decision.action = aiGatewayKeySweep
-	case decision.healthy:
-		decision.action = aiGatewayKeyReady
-	case aiGatewayKeyDriftBlocked(key, now) != nil:
+	case !decision.healthy && aiGatewayKeyDriftBlocked(key, now) != nil:
 		decision.action = aiGatewayKeyConflict
-	default:
+	case !decision.healthy && decision.settled(now):
+		decision.action = aiGatewayKeySweep
+	case !decision.healthy && !decision.settleAt.IsZero():
+		decision.action = aiGatewayKeySettle
+	case !decision.healthy:
 		decision.action = aiGatewayKeyReissue
+	case decision.retirement.due != nil:
+		decision.action = aiGatewayKeyRetire
+	case decision.settled(now):
+		decision.action = aiGatewayKeySweep
+	default:
+		decision.action = aiGatewayKeyReady
 	}
 	return decision
 }
@@ -135,7 +146,8 @@ func nextAIGatewayKeyAction(
 // aiGatewayKeyOrphan returns a decision with the first listed key of this
 // object that is not current, not retiring and not held (the Secret holds
 // holds), its serial, and the time at which the sweep may delete it. The
-// decision has no key and a zero time when there is no orphan.
+// decision has no key and a zero time when there is no orphan. It also
+// holds the state of the retiring keys.
 func aiGatewayKeyOrphan(key *coderv1alpha1.CoderAIGatewayKey, prefix string, own []codersdk.AIGatewayKey, holds uuid.UUID, now time.Time) aiGatewayKeyDecision {
 	status := &key.Status
 	for _, k := range own {
@@ -154,9 +166,9 @@ func aiGatewayKeyOrphan(key *coderv1alpha1.CoderAIGatewayKey, prefix string, own
 		if status.LastCreateAttemptTime != nil {
 			start = status.LastCreateAttemptTime.Time
 		}
-		return aiGatewayKeyDecision{key: k, serial: serial, settleAt: start.Add(aiGatewayKeySettleWindow)}
+		return aiGatewayKeyDecision{key: k, serial: serial, settleAt: start.Add(aiGatewayKeySettleWindow), retirement: aiGatewayKeyRetireState(key, own, now)}
 	}
-	return aiGatewayKeyDecision{}
+	return aiGatewayKeyDecision{retirement: aiGatewayKeyRetireState(key, own, now)}
 }
 
 // aiGatewayKeyRearmed reports that the kill switch fired in an older
@@ -206,6 +218,12 @@ func aiGatewayKeyRetiring(status *coderv1alpha1.CoderAIGatewayKeyStatus, id uuid
 func adoptAIGatewayKey(key *coderv1alpha1.CoderAIGatewayKey, own []codersdk.AIGatewayKey, decision aiGatewayKeyDecision, now time.Time) *aiGatewayKeyStep {
 	if previous := key.Status.CurrentKey; previous != nil && aiGatewayKeyListed(own, previous.ID) {
 		retireAIGatewayKey(key, now)
+		// Status does not record whether the lost attempt was a drift
+		// re-issue, so the recovery counts it as one (fail closed): another
+		// loss of the Secret inside the grace period gives SecretConflict,
+		// not a second re-issue at once.
+		t := metav1.NewTime(now)
+		key.Status.LastDriftReissueTime = &t
 	}
 	if pending := key.Status.PendingKey; pending != nil && pending.Serial == decision.serial {
 		key.Status.PendingKey = nil
@@ -227,40 +245,57 @@ func retireAIGatewayKey(key *coderv1alpha1.CoderAIGatewayKey, now time.Time) {
 	})
 }
 
-// sweepOrphan deletes one orphan (plan 4.5) after the I1 live read: a key
-// that the Secret holds is never deleted. One DELETE per reconcile, then
-// requeue at once. A DELETE that Coder refuses with 403, or with 404 "Route
-// not found.", needs a person, so it stalls the object. Other failures retry
-// every 30 s with no deadline, as for a failed LIST.
+// sweepOrphan deletes one orphan (plan 4.5). One DELETE per reconcile,
+// then requeue at once.
 func (r *CoderAIGatewayKeyReconciler) sweepOrphan(
 	ctx context.Context, sdk *codersdk.Client, key *coderv1alpha1.CoderAIGatewayKey, decision aiGatewayKeyDecision,
 ) *aiGatewayKeyStep {
-	orphan := decision.key
-	step := func(s *aiGatewayKeyStep) *aiGatewayKeyStep {
-		// The Secret stays valid. A stall stays reported with it, because a
-		// person must act on the orphan.
-		if decision.healthy {
-			s.ready, s.inProgress = true, !s.stalled
-		}
-		return s
+	step := r.deleteOwnKey(ctx, sdk, key, decision.key, reasonDeletingOrphans, "orphan key")
+	if step == nil {
+		step = aiGatewayKeyWait(time.Second, reasonDeletingOrphans, "Deleted orphan key %s.", decision.key.Name)
 	}
-	held, err := r.liveSecretHolds(ctx, key, []codersdk.AIGatewayKey{orphan})
+	return aiGatewayKeyKeepReady(key, step, decision.healthy)
+}
+
+// deleteOwnKey deletes key k of this object after the I1 live read: a key
+// that the Secret holds is never deleted. It returns nil when Coder no
+// longer has k (204 or 404), and otherwise the step that reports why not. A
+// DELETE that Coder refuses with 403, or with 404 "Route not found.", needs
+// a person, so it stalls the object. Other failures retry every 30 s with no
+// deadline, as for a failed LIST. noun names k in messages.
+func (r *CoderAIGatewayKeyReconciler) deleteOwnKey(
+	ctx context.Context, sdk *codersdk.Client, key *coderv1alpha1.CoderAIGatewayKey, k codersdk.AIGatewayKey, reason, noun string,
+) *aiGatewayKeyStep {
+	held, err := r.liveSecretHolds(ctx, key, []codersdk.AIGatewayKey{k})
 	if err != nil {
-		return step(aiGatewayKeyWait(time.Second, reasonDeletingOrphans,
-			"The operator did not delete orphan %s: reading Secret %q failed (%s).", orphan.Name, key.Spec.SecretName, aiGatewayKeyAPIFailure(err)))
+		return aiGatewayKeyWait(time.Second, reason,
+			"The operator did not delete %s %s: reading Secret %q failed (%s).", noun, k.Name, key.Spec.SecretName, aiGatewayKeyAPIFailure(err))
 	}
-	if held == orphan.ID {
-		return step(aiGatewayKeyWait(time.Second, reasonDeletingOrphans,
-			"Secret %q now holds key %s, so the operator does not delete it.", key.Spec.SecretName, orphan.Name))
+	if held == k.ID {
+		return aiGatewayKeyWait(time.Second, reason, "Secret %q now holds key %s, so the operator does not delete it.", key.Spec.SecretName, k.Name)
 	}
-	if err := sdk.DeleteAIGatewayKey(ctx, orphan.ID); (err != nil && coderStatus(err) != http.StatusNotFound) || coderRouteMissing(err) {
-		failure := aiGatewayKeyCoderFailure("delete orphan key "+orphan.Name, err)
+	if err := sdk.DeleteAIGatewayKey(ctx, k.ID); (err != nil && coderStatus(err) != http.StatusNotFound) || coderRouteMissing(err) {
+		failure := aiGatewayKeyCoderFailure("delete "+noun+" "+k.Name, err)
 		if failure.stalled {
-			failure.message = fmt.Sprintf("The operator cannot delete orphan key %s. %s", orphan.Name, failure.message)
+			failure.message = fmt.Sprintf("The operator cannot delete %s %s. %s", noun, k.Name, failure.message)
 		}
-		return step(failure)
+		return failure
 	}
-	return step(aiGatewayKeyWait(time.Second, reasonDeletingOrphans, "Deleted orphan key %s.", orphan.Name))
+	return nil
+}
+
+// aiGatewayKeyKeepReady keeps Ready=True on a cleanup step while the Secret
+// holds the current key (healthy). A stall stays reported with it, because
+// a person must act, and its message says that the key still works.
+func aiGatewayKeyKeepReady(key *coderv1alpha1.CoderAIGatewayKey, step *aiGatewayKeyStep, healthy bool) *aiGatewayKeyStep {
+	if !healthy {
+		return step
+	}
+	step.ready, step.inProgress = true, !step.stalled
+	if step.stalled {
+		step.message = fmt.Sprintf("The key in Secret %q still works. %s", key.Spec.SecretName, step.message)
+	}
+	return step
 }
 
 // coderRouteMissing reports Coder's 404 for a route that it does not have
@@ -286,22 +321,28 @@ func (r *CoderAIGatewayKeyReconciler) liveSecretHolds(ctx context.Context, key *
 	return aiGatewayKeySecretHolds(secret, own), nil
 }
 
-// deleteOnly runs the sweep inside a stall (plan 4.8): the stall stays the
-// reported condition, so the sweep never hides it, and no create runs.
-// Callers pass only stalls.
+// deleteOnly runs the retire step or the sweep inside a stall (plan 4.8):
+// the stall stays the reported condition, so the cleanup never hides it, and
+// no create runs. Callers pass only stalls.
 func (r *CoderAIGatewayKeyReconciler) deleteOnly(
 	ctx context.Context, sdk *codersdk.Client, key *coderv1alpha1.CoderAIGatewayKey, decision aiGatewayKeyDecision, stall *aiGatewayKeyStep, now time.Time,
 ) *aiGatewayKeyStep {
-	if decision.settleAt.IsZero() {
-		return stall
-	}
-	if !decision.settled(now) {
-		stall.requeue = min(stall.requeue, max(decision.settleAt.Sub(now), time.Second))
-		return stall
-	}
 	decision.healthy = false
-	swept := r.sweepOrphan(ctx, sdk, key, decision)
-	stall.message += " " + swept.message
-	stall.requeue, stall.rateLimited = swept.requeue, swept.rateLimited
+	var cleanup *aiGatewayKeyStep
+	switch {
+	case decision.retirement.due != nil:
+		cleanup = r.retireKey(ctx, sdk, key, decision)
+	case decision.settled(now):
+		cleanup = r.sweepOrphan(ctx, sdk, key, decision)
+	default:
+		for _, at := range []time.Time{decision.settleAt, decision.retirement.next} {
+			if !at.IsZero() {
+				stall.requeue = min(stall.requeue, max(at.Sub(now), time.Second))
+			}
+		}
+		return stall
+	}
+	stall.message += " " + cleanup.message
+	stall.requeue, stall.rateLimited = cleanup.requeue, cleanup.rateLimited
 	return stall
 }
