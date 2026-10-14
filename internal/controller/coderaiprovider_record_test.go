@@ -56,7 +56,7 @@ func TestCoderAIProviderCleanupRecord(t *testing.T) {
 	delete(record, "createAttemptTime")
 	require.Equal(t, map[string]string{
 		"kind": "CoderAIProvider", "uid": string(got.UID), "namespace": env.namespace, "name": "openai",
-		"deploymentID": env.fake.deploymentID, "nonce": "coder-k8s:" + string(got.UID), "coderID": stored.id.String(),
+		"deploymentID": env.fake.deploymentID, "nonce": "coder-k8s:" + string(got.UID), "coderID": stored.id.String(), "type": "openai",
 	}, record, "the provider ID is recorded before the sync replaces the nonce")
 
 	got, _ = env.reconcile(ctx, t, got)
@@ -255,4 +255,28 @@ func TestCoderAIProviderSetupNeedsRecordDependencies(t *testing.T) {
 		require.NoError(t, err)
 		require.ErrorContains(t, r.SetupWithManager(mgr), "assertion failed: AI provider reconciler needs", name)
 	}
+}
+
+// #374 review round 3: when the control plane reaches another Coder
+// deployment while the object lives, the provider looks gone, but the
+// record still locates it in the old deployment. The controller keeps the
+// record and creates nothing in the new deployment.
+func TestCoderAIProviderDeploymentSwitchKeepsRecord(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newReadyAIProvider(ctx, t)
+	before := cleanupRecord(ctx, t, env.namespace, provider.UID)
+	env.fake.mu.Lock()
+	env.fake.deploymentID = uuid.NewString() // A new database behind the same control plane.
+	for id := range env.fake.aiProviders {
+		delete(env.fake.aiProviders, id)
+	}
+	env.fake.mu.Unlock()
+	provider.Spec.DisplayName = "OpenAI (edited)"
+	require.NoError(t, k8sClient.Update(ctx, provider))
+	got, _ := env.reconcile(ctx, t, provider)
+	got, _ = env.reconcile(ctx, t, got)
+	require.Contains(t, requireAIProviderStep(t, got, true, "CoderDeploymentChanged"), before["deploymentID"])
+	require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider), "no create in the new deployment")
+	require.Equal(t, before, cleanupRecord(ctx, t, env.namespace, provider.UID), "the record keeps the old locator")
 }

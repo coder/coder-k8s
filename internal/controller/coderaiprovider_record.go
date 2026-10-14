@@ -30,9 +30,17 @@ func (r *CoderAIProviderReconciler) writeAIProviderRecord(
 	if err != nil {
 		return aiProviderWait(aiProviderRetry, "CoderUnavailable", "read the Coder deployment ID for the cleanup record: %s", coderErrorSummary(err)), nil
 	}
+	if previous != nil && previous.DeploymentID != deploymentID {
+		// The control plane now reaches another Coder database. The record
+		// is the only locator of what this object made in the old one, so
+		// the controller neither overwrites it nor creates in the new one.
+		return aiProviderStalled(aiProviderResync, "CoderDeploymentChanged",
+			"Provider %s (ID %q) is in Coder deployment %s, but CoderControlPlane %s now reaches deployment %s. Delete the provider there, then delete ConfigMap %s/%s. Until then the controller creates nothing.",
+			provider.Name, previous.CoderID, previous.DeploymentID, provider.Spec.ControlPlaneRef.Name, deploymentID, r.OperatorNamespace, cleanupRecordObjectName(provider.UID)), nil
+	}
 	record := cleanupRecord{
 		Kind: cleanupRecordKindAIProvider, UID: provider.UID, Namespace: provider.Namespace, Name: provider.Name,
-		DeploymentID: deploymentID, Nonce: aiProviderNonce(provider), CoderID: provider.Status.ProviderID,
+		DeploymentID: deploymentID, Nonce: aiProviderNonce(provider), CoderID: provider.Status.ProviderID, Type: provider.Spec.Type,
 	}
 	if createAttempt != nil {
 		record.CreateAttemptTime = *createAttempt
