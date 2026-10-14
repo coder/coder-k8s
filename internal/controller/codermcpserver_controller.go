@@ -206,26 +206,32 @@ func (r *CoderMCPServerReconciler) check(
 		return mcpServerWait(mcpServerRetry, wait.reason, "%s", wait.message), nil
 	}
 	org, step, err := resolveMCPServerOrganization(ctx, sdk, server.Spec.Organization)
-	if step != nil || err != nil {
-		return step, err
+	if err != nil {
+		return nil, err
 	}
-	if pinned := server.Status.OrganizationID; pinned != "" && pinned != org.ID.String() {
-		return mcpServerStalled(mcpServerResync, "OrganizationChanged",
-			"Coder organization %s now has ID %s, not the pinned ID %s. Re-create this object to use the new organization.", server.Spec.Organization, org.ID, pinned), nil
+	pinned := server.Status.OrganizationID
+	if step == nil && pinned != "" && pinned != org.ID.String() {
+		step = mcpServerStalled(mcpServerResync, "OrganizationChanged",
+			"Coder organization %s now has ID %s, not the pinned ID %s. Re-create this object to use the new organization.", server.Spec.Organization, org.ID, pinned)
+	}
+	if step != nil {
+		// The config of a renamed, deleted or replaced organization stays in
+		// the pinned organization, and a withdrawn opt-in still disables it.
+		if pinnedID, parseErr := uuid.Parse(pinned); (step.reason == "OrganizationNotFound" || step.reason == "OrganizationChanged") && parseErr == nil && server.Status.ConfigID != "" {
+			if optInStep, err := r.optInGate(ctx, sdk, controlPlane, server, before, pinnedID); optInStep != nil || err != nil {
+				return optInStep, err
+			}
+		}
+		return step, nil
 	}
 	server.Status.OrganizationID = org.ID.String()
-	if step, err := mcpServerScopeGate(ctx, sdk, controlPlane, server.Spec, org.ID); step != nil || err != nil {
-		if step != nil && (step.reason == "MCPServersNotAllowed" || step.reason == "ForceOnNotAllowed") && server.Status.ConfigID != "" {
-			// Fail closed when the opt-in goes (#336). Any other step, such
-			// as a mismatched Coder answer, keeps the config as it is.
-			return r.disableMCPServerWithoutOptIn(ctx, sdk, server, org.ID, step)
-		}
+	if step, err := r.optInGate(ctx, sdk, controlPlane, server, before, org.ID); step != nil || err != nil {
 		return step, err
 	}
 	values, step, err := readMCPServerCredentials(ctx, r.Client, server)
 	if step != nil && step.stalled && server.Status.ConfigID != "" {
 		// Fail closed when consent goes (plan G8).
-		step, err = r.disableMCPServerWithoutConsent(ctx, sdk, server, org.ID, step)
+		step, err = r.disableMCPServerWithoutConsent(ctx, sdk, server, before, org.ID, step)
 	}
 	if step != nil || err != nil {
 		return step, err
@@ -261,6 +267,21 @@ func (r *CoderMCPServerReconciler) check(
 	}
 	step.message = credentialsecret.Redact(step.message, all...)
 	return step, nil
+}
+
+// optInGate applies the control plane's opt-in for the organization orgID.
+// When the opt-in is withdrawn for a config that this object created, it
+// disables the config (#336). Any other stall of the scope check, such as a
+// mismatched Coder answer, keeps the config as it is.
+func (r *CoderMCPServerReconciler) optInGate(
+	ctx context.Context, sdk *codersdk.Client, controlPlane *coderv1alpha1.CoderControlPlane,
+	server *coderv1alpha1.CoderMCPServer, before *coderv1alpha1.CoderMCPServerStatus, orgID uuid.UUID,
+) (*mcpServerStep, error) {
+	step, err := mcpServerScopeGate(ctx, sdk, controlPlane, server.Spec, orgID)
+	if step != nil && (step.reason == "MCPServersNotAllowed" || step.reason == "ForceOnNotAllowed") && server.Status.ConfigID != "" {
+		return r.disableMCPServerWithoutOptIn(ctx, sdk, server, before, orgID, step)
+	}
+	return step, err
 }
 
 // resolveMCPServerOrganization looks up a Coder organization by name. Coder

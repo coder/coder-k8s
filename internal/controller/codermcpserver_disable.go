@@ -32,7 +32,7 @@ import (
 // appliedGeneration, so a later sync reports DisabledExternally and only a
 // spec edit after the disable enables the config again.
 func (r *CoderMCPServerReconciler) disableMCPServerWithoutConsent(
-	ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, orgID uuid.UUID, failed *mcpServerStep,
+	ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, before *coderv1alpha1.CoderMCPServerStatus, orgID uuid.UUID, failed *mcpServerStep,
 ) (*mcpServerStep, error) {
 	id, err := uuid.Parse(server.Status.ConfigID)
 	if err != nil || id == uuid.Nil || failed == nil || !failed.stalled {
@@ -65,8 +65,8 @@ func (r *CoderMCPServerReconciler) disableMCPServerWithoutConsent(
 		return stalled("Coder sends each credential of MCP server config %s only to origins that its recorded Secret allows.", id), nil
 	}
 
-	if step := sendMCPServerDisable(ctx, sdk, server, orgID, id, unchecked); step != nil {
-		return step, nil
+	if step, err := r.sendMCPServerDisable(ctx, sdk, server, before, orgID, id, failed.reason, unchecked); step != nil || err != nil {
+		return step, err
 	}
 	// The reason stays the credential reason, so it does not flap between
 	// this reconcile and the next one, which finds the config disabled.
@@ -106,25 +106,40 @@ func readMCPServerToDisable(
 // sendMCPServerDisable sends the one PATCH of a fail-closed path. It holds
 // only enabled false: no credential and no destination field. It returns a
 // wait step when the PATCH failed or Coder answered for another or an
-// enabled config. On success it sets appliedGeneration: the disable counts
-// as an external disable of this generation, also of one that is not
-// applied yet, so the DisabledExternally kill switch holds until the next
-// spec edit.
-func sendMCPServerDisable(
-	ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, orgID, id uuid.UUID,
-	unchecked func(format string, args ...any) *mcpServerStep,
-) *mcpServerStep {
+// enabled config.
+//
+// The disable counts as an external disable of this generation, also of one
+// that is not applied yet, so the DisabledExternally kill switch holds until
+// the next spec edit. The controller writes appliedGeneration to status
+// before the PATCH: Coder can commit the PATCH while its answer or the next
+// status write is lost, and a pending generation must not enable the config
+// once consent or the opt-in comes back. A failed status write sends no
+// PATCH.
+func (r *CoderMCPServerReconciler) sendMCPServerDisable(
+	ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, before *coderv1alpha1.CoderMCPServerStatus,
+	orgID, id uuid.UUID, reason string, unchecked func(format string, args ...any) *mcpServerStep,
+) (*mcpServerStep, error) {
+	if before == nil {
+		return nil, fmt.Errorf("assertion failed: MCP server %s/%s needs the status before the reconcile to be disabled", server.Namespace, server.Name)
+	}
+	if server.Status.AppliedGeneration != server.Generation {
+		server.Status.AppliedGeneration = server.Generation
+		applyMCPServerStep(server, mcpServerWait(0, reason, "Disabling MCP server config %s in Coder.", id))
+		if err := r.writeStatus(ctx, server, before); err != nil {
+			return nil, err
+		}
+		*before = *server.Status.DeepCopy()
+	}
 	disabled := false
 	updated, err := sdk.UpdateMCPServerConfig(ctx, orgID, id, codersdk.UpdateMCPServerConfigRequest{Enabled: &disabled})
 	if err != nil {
-		return unchecked("the disable failed: %s", coderErrorSummary(err))
+		return unchecked("the disable failed: %s", coderErrorSummary(err)), nil
 	}
 	if updated.ID != id || updated.OrganizationID != orgID || updated.Slug != server.Spec.Slug || updated.Enabled {
 		return mcpServerWait(mcpServerRetry, "CoderAnswerMismatch",
-			"Coder answered the disable of MCP server config %s with another or an enabled config. The controller disables it again.", id)
+			"Coder answered the disable of MCP server config %s with another or an enabled config. The controller disables it again.", id), nil
 	}
-	server.Status.AppliedGeneration = server.Generation
-	return nil
+	return nil, nil
 }
 
 // disableMCPServerWithoutOptIn handles a config that this object created
@@ -136,7 +151,7 @@ func sendMCPServerDisable(
 // switch, as in disableMCPServerWithoutConsent: a restored opt-in needs a
 // spec edit to enable the config again.
 func (r *CoderMCPServerReconciler) disableMCPServerWithoutOptIn(
-	ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, orgID uuid.UUID, failed *mcpServerStep,
+	ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, before *coderv1alpha1.CoderMCPServerStatus, orgID uuid.UUID, failed *mcpServerStep,
 ) (*mcpServerStep, error) {
 	id, err := uuid.Parse(server.Status.ConfigID)
 	if err != nil || id == uuid.Nil || failed == nil || !failed.stalled {
@@ -151,8 +166,8 @@ func (r *CoderMCPServerReconciler) disableMCPServerWithoutOptIn(
 	if _, step := readMCPServerToDisable(ctx, sdk, server, orgID, id, stalled, unchecked); step != nil {
 		return step, nil
 	}
-	if step := sendMCPServerDisable(ctx, sdk, server, orgID, id, unchecked); step != nil {
-		return step, nil
+	if step, err := r.sendMCPServerDisable(ctx, sdk, server, before, orgID, id, failed.reason, unchecked); step != nil || err != nil {
+		return step, err
 	}
 	return stalled("The controller disabled MCP server config %s in Coder: the control plane no longer allows it. After the opt-in is back, a spec edit enables the config.", id), nil
 }

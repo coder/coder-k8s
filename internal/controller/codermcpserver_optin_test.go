@@ -2,18 +2,22 @@ package controller_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/controller"
 )
 
 // #336: when the control plane withdraws its opt-in, the controller disables
@@ -217,4 +221,111 @@ func TestCoderMCPServerScopeMismatchKeepsConfig(t *testing.T) {
 	requireMCPServerStep(t, got, true, "CoderAnswerMismatch")
 	require.Equal(t, mcp, env.mcpRequests())
 	require.True(t, env.stored(t, got).view.Enabled)
+}
+
+// A disable PATCH can commit while its answer is lost, and the opt-in can
+// come back before the next reconcile. The controller wrote
+// appliedGeneration before the PATCH, so the sync then finds
+// DisabledExternally and does not apply a pending generation. When that
+// status write fails, the controller sends no PATCH.
+func TestCoderMCPServerOptInDisableMarkerFirst(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		lostStatus bool // The status write before the PATCH fails.
+	}{{name: "answer lost, opt-in back"}, {name: "marker write fails", lostStatus: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			env := newMCPServerEnv(ctx, t, true)
+			env.keySecret(ctx, t, testMCPKey)
+			got, _ := env.applied(ctx, t, nil)
+			require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(got), got))
+			got.Spec.Description = "pending"
+			require.NoError(t, k8sClient.Update(ctx, got))
+			env.fake.failNext(routeUpdateMCPServer, fakeFault{Status: http.StatusBadGateway})
+			got, _ = env.reconcile(ctx, t, got)
+			requireMCPServerStep(t, got, false, "CoderUnavailable")
+			env.setOptIn(ctx, t, nil)
+
+			if tc.lostStatus {
+				base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+				require.NoError(t, err)
+				r := &controller.CoderMCPServerReconciler{Client: interceptor.NewClient(base, interceptor.Funcs{
+					SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {
+						return errors.New("lost status write")
+					},
+				}), Scheme: scheme}
+				mark := len(env.writeRoutes())
+				_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(got)})
+				require.ErrorContains(t, err, "lost status write")
+				require.Empty(t, env.writesSince(mark), "no PATCH without the marker")
+				require.True(t, env.stored(t, got).view.Enabled)
+				return
+			}
+
+			env.fake.failNext(routeUpdateMCPServer, fakeFault{Status: http.StatusBadGateway, AfterCommit: true})
+			got, _ = env.reconcile(ctx, t, got)
+			require.Contains(t, requireMCPServerStep(t, got, false, "MCPServersNotAllowed"), "the disable failed")
+			require.False(t, env.stored(t, got).view.Enabled, "the PATCH committed")
+			require.Equal(t, got.Generation, got.Status.AppliedGeneration, "written before the PATCH")
+
+			env.setOptIn(ctx, t, &coderv1alpha1.MCPServersSpec{Organizations: []string{"coder"}})
+			mark := len(env.writeRoutes())
+			got, _ = env.reconcile(ctx, t, got)
+			requireMCPServerStep(t, got, true, "DisabledExternally")
+			require.Empty(t, env.writesSince(mark))
+			require.Empty(t, env.stored(t, got).view.Description, "the pending generation is not applied")
+		})
+	}
+}
+
+// A renamed, deleted or replaced organization keeps the config in the
+// pinned organization. A withdrawn opt-in still disables it there, while a
+// name that is still listed changes nothing.
+func TestCoderMCPServerOptInUsesPinnedOrganization(t *testing.T) {
+	t.Parallel()
+	gone := fakeFault{Status: http.StatusNotFound, Message: coderResourceNotFound}
+	replaced := fakeFault{Rewrite: func(answer any) any {
+		org := answer.(codersdk.Organization)
+		org.ID = uuid.New()
+		return org
+	}}
+	for _, tc := range []struct {
+		name     string
+		fault    fakeFault
+		reason   string
+		withdraw bool
+	}{
+		{name: "not found, opt-in removed", fault: gone, reason: "OrganizationNotFound", withdraw: true},
+		{name: "replaced, opt-in removed", fault: replaced, reason: "OrganizationChanged", withdraw: true},
+		{name: "not found, still listed", fault: gone, reason: "OrganizationNotFound"},
+		{name: "replaced, still listed", fault: replaced, reason: "OrganizationChanged"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			env := newMCPServerEnv(ctx, t, true)
+			env.keySecret(ctx, t, testMCPKey)
+			got, _ := env.applied(ctx, t, nil)
+			if tc.withdraw {
+				env.setOptIn(ctx, t, nil)
+			}
+			env.fake.failNext(routeOrganization, tc.fault)
+			mark := len(env.writeRoutes())
+			got, _ = env.reconcile(ctx, t, got)
+			if !tc.withdraw {
+				message := requireMCPServerStep(t, got, tc.reason == "OrganizationChanged", tc.reason)
+				require.NotContains(t, message, "disabled")
+				require.Empty(t, env.writesSince(mark))
+				require.True(t, env.stored(t, got).view.Enabled)
+				return
+			}
+			require.Contains(t, requireMCPServerStep(t, got, true, "MCPServersNotAllowed"), "The controller disabled MCP server config")
+			writes := env.writesSince(mark)
+			require.Len(t, writes, 1)
+			require.JSONEq(t, `{"enabled":false}`, string(writes[0].body))
+			require.False(t, env.stored(t, got).view.Enabled)
+		})
+	}
 }
