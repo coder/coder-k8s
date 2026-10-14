@@ -109,7 +109,9 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 	for i := range all {
 		m := &all[i]
 		controller := metav1.GetControllerOf(m)
-		if controller != nil && controller.UID == pool.UID && m.Spec.ClaimRef == nil && m.DeletionTimestamp.IsZero() &&
+		// spec.poolName is immutable and decides the holder, so a member that
+		// names another pool is never bound here.
+		if controller != nil && controller.UID == pool.UID && m.Spec.PoolName == pool.Name && m.Spec.ClaimRef == nil && m.DeletionTimestamp.IsZero() &&
 			poolMemberReady(m) && !meta.IsStatusConditionTrue(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed) {
 			free = append(free, m)
 		}

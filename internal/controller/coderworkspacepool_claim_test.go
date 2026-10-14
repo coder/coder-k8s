@@ -102,7 +102,8 @@ func TestPoolBindsOldestClaimFirst(t *testing.T) {
 
 // TestPoolBindsCurrentBeforeOutdated: a claim takes a current member before
 // an outdated one, even an older one. A used member and a member whose
-// agent is not ready are never bound (plan 16, PR 9 advisor item (a)).
+// agent is not ready are never bound (plan 16, PR 9 advisor item (a)), nor
+// is a member whose spec.poolName names another pool.
 func TestPoolBindsCurrentBeforeOutdated(t *testing.T) {
 	t.Parallel()
 	e := newPoolMemberEnv(t)
@@ -120,6 +121,9 @@ func TestPoolBindsCurrentBeforeOutdated(t *testing.T) {
 	notReady := e.createMember(t, nil)
 	e.setMemberStatus(t, notReady, withWorkspace(memberPhase(coderv1alpha1.CoderWorkspacePoolMemberPhaseReady,
 		memberCondition(coderv1alpha1.CoderWorkspacePoolMemberConditionReady, metav1.ConditionFalse, "AgentNotReady"))))
+	// The pool controls this member, but it names another pool.
+	misnamed := e.createMember(t, func(m *coderv1alpha1.CoderWorkspacePoolMember) { m.Spec.PoolName = "other" })
+	e.setMemberStatus(t, misnamed, withWorkspace(e.readyAt(now.Add(-2*time.Hour))))
 	first := e.createClaim(t, "first")
 	time.Sleep(1100 * time.Millisecond)
 	second := e.createClaim(t, "second")
@@ -132,6 +136,7 @@ func TestPoolBindsCurrentBeforeOutdated(t *testing.T) {
 	requireClaim(t, e.claim(t, third), coderv1alpha1.CoderWorkspaceClaimPhasePending, "WaitingForReadyWorkspace", false)
 	require.Nil(t, e.reconcileMember(t, used, 0).Spec.ClaimRef)
 	require.Nil(t, e.reconcileMember(t, notReady, 0).Spec.ClaimRef)
+	require.Nil(t, e.reconcileMember(t, misnamed, 0).Spec.ClaimRef)
 }
 
 // bindHookClient runs hook once, right before the first member update.
