@@ -362,3 +362,38 @@ func TestCoderMCPServerSyncAuthRoundTripResends(t *testing.T) {
 	requireMCPServerApplied(t, got)
 	require.Equal(t, testMCPKey, env.stored(t, got).apiKeyValue)
 }
+
+// A credential PATCH can commit in Coder while its answer is lost. The
+// controller then does not know which value Coder holds, so the retry sends
+// the credential even when its value matches an earlier hash: here the
+// Secret goes from A to B, the PATCH with B commits without an answer, and
+// the Secret goes back to A.
+func TestCoderMCPServerSyncLostAnswerResends(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	secret := env.keySecret(ctx, t, testMCPKey)
+	got, _ := env.applied(ctx, t, nil)
+	setKey := func(value string) {
+		t.Helper()
+		require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(secret), secret))
+		secret.Data["token"] = []byte(value)
+		require.NoError(t, k8sClient.Update(ctx, secret))
+	}
+
+	rotated := testMCPKey + "-rotated"
+	setKey(rotated)
+	env.fake.failNext(routeUpdateMCPServer, fakeFault{Status: http.StatusBadGateway, AfterCommit: true})
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerStep(t, got, false, "CoderUnavailable")
+	require.Equal(t, rotated, env.stored(t, got).apiKeyValue, "the PATCH committed")
+
+	setKey(testMCPKey)
+	mark := len(env.writeRoutes())
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerApplied(t, got)
+	writes := env.writesSince(mark)
+	require.Len(t, writes, 1)
+	require.JSONEq(t, `{"api_key_value":"`+testMCPKey+`"}`, string(writes[0].body))
+	require.Equal(t, testMCPKey, env.stored(t, got).apiKeyValue)
+}

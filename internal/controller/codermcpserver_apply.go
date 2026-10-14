@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -93,6 +94,10 @@ func (r *CoderMCPServerReconciler) syncMCPServer(
 				return step, false, err
 			}
 		}
+		// Coder can commit the PATCH and the answer still get lost. Until a
+		// good answer, the controller does not know which value Coder holds,
+		// so a retry must send these credentials again.
+		r.forgetSentCredentials(server, sent)
 		updated, err := sdk.UpdateMCPServerConfig(ctx, orgID, id, req)
 		switch status := coderStatus(err); {
 		case status == http.StatusBadRequest:
@@ -318,6 +323,20 @@ func (r *CoderMCPServerReconciler) rememberSentCredentials(server *coderv1alpha1
 	}
 	for _, field := range sent {
 		sums[field] = sha256.Sum256([]byte(values[field].Reveal()))
+	}
+	r.sentCredentials.Store(server.UID, sums)
+}
+
+// forgetSentCredentials drops the hashes of fields before a write that sends
+// them.
+func (r *CoderMCPServerReconciler) forgetSentCredentials(server *coderv1alpha1.CoderMCPServer, fields []string) {
+	old, ok := r.sentCredentials.Load(server.UID)
+	if !ok || len(fields) == 0 {
+		return
+	}
+	sums := maps.Clone(old.(map[string][sha256.Size]byte))
+	for _, field := range fields {
+		delete(sums, field)
 	}
 	r.sentCredentials.Store(server.UID, sums)
 }
