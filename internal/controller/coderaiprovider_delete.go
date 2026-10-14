@@ -108,6 +108,23 @@ func (r *CoderAIProviderReconciler) deleteStep(ctx context.Context, provider *co
 		ctx, cancel = context.WithTimeout(ctx, aiProviderBoundedDeleteTimeout)
 		defer cancel()
 	}
+	// The record names the deployment that holds the provider. When the
+	// control plane now reaches another deployment, a delete there proves
+	// nothing, so the record stays for a sweep (#353 invariant 7).
+	if record, _, err := readCleanupRecord(ctx, r.APIReader, r.OperatorNamespace, provider.UID); err != nil && !errors.Is(err, errNotACleanupRecord) {
+		return false, nil, err
+	} else if record != nil && (provider.Status.ProviderID == "" || checkAIProviderID(provider) == nil) {
+		// A forged provider ID fails its assertion below, before any request.
+		id, err := coderDeploymentID(ctx, sdk)
+		switch {
+		case err != nil && deleting:
+			return r.releaseWithoutDelete(ctx, provider, "the deployment ID read while CoderControlPlane is being deleted failed: "+coderErrorSummary(err)), nil, nil
+		case err != nil:
+			return false, aiProviderWait(aiProviderDeletePoll, "CoderUnavailable", "read the Coder deployment ID: %s", coderErrorSummary(err)), nil
+		case id != record.DeploymentID:
+			return r.releaseWithoutDelete(ctx, provider, fmt.Sprintf("CoderControlPlane now reaches Coder deployment %s, but the provider is in deployment %s", id, record.DeploymentID)), nil, nil
+		}
+	}
 	step, err = r.deleteInCoder(ctx, sdk, provider)
 	if err == nil && step == nil {
 		// Coder confirmed that it holds no provider of this object. Only

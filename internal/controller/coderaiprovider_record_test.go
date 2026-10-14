@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -16,8 +17,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/controller"
 )
 
 // cleanupRecord returns the data of the cleanup record of uid in namespace,
@@ -223,4 +226,33 @@ func TestCoderAIProviderDeleteUsesRecordedID(t *testing.T) {
 	_, ok := env.fake.aiProvider("openai")
 	require.False(t, ok, "the recorded ID proves ownership")
 	require.Nil(t, cleanupRecord(ctx, t, env.namespace, provider.UID))
+}
+
+// #374 review round 2: when the control plane now reaches another Coder
+// deployment (a new database), a delete there proves nothing. The finalizer
+// goes without a delete, and the record stays for a sweep.
+func TestCoderAIProviderDeleteAfterDeploymentSwitch(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newReadyAIProvider(ctx, t)
+	env.fake.mu.Lock()
+	env.fake.deploymentID = uuid.NewString()
+	env.fake.mu.Unlock()
+	gone, _ := env.deleteAIProvider(ctx, t, provider)
+	require.Nil(t, gone)
+	require.Zero(t, env.fake.requestCount(routeDeleteAIProvider), "no delete in another deployment")
+	require.Equal(t, provider.Status.ProviderID, cleanupRecord(ctx, t, env.namespace, provider.UID)["coderID"], "the record stays")
+}
+
+// The reconciler refuses to start without its cleanup record dependencies.
+func TestCoderAIProviderSetupNeedsRecordDependencies(t *testing.T) {
+	t.Parallel()
+	for name, r := range map[string]*controller.CoderAIProviderReconciler{
+		"no operator namespace": {Client: k8sClient, Scheme: scheme, APIReader: k8sClient},
+		"no API reader":         {Client: k8sClient, Scheme: scheme, OperatorNamespace: "coder-system"},
+	} {
+		mgr, err := ctrl.NewManager(cfg, ctrl.Options{Scheme: scheme, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0"})
+		require.NoError(t, err)
+		require.ErrorContains(t, r.SetupWithManager(mgr), "assertion failed: AI provider reconciler needs", name)
+	}
 }

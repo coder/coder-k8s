@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 )
@@ -43,6 +44,26 @@ func (r *CoderAIProviderReconciler) writeAIProviderRecord(
 		record.CreateAttemptTime = previous.CreateAttemptTime
 	}
 	return nil, writeCleanupRecord(ctx, r.Client, r.OperatorNamespace, existing, record)
+}
+
+// backfillAIProviderRecord writes the missing record of a provider that
+// exists in Coder from before records existed. It runs before every other
+// check, so a stalled object (a bad base URL or key Secret) gets its record
+// too. It never stops the reconcile: a failure is logged and retried.
+func (r *CoderAIProviderReconciler) backfillAIProviderRecord(ctx context.Context, provider *coderv1alpha1.CoderAIProvider) {
+	if provider.Status.ProviderID == "" || checkAIProviderID(provider) != nil {
+		return // The create path writes the record. A forged ID fails later checks.
+	}
+	if record, _, err := readCleanupRecord(ctx, r.APIReader, r.OperatorNamespace, provider.UID); err == nil && record != nil && record.CoderID == provider.Status.ProviderID {
+		return
+	}
+	sdk, _, wait, err := controlPlaneCoderClient(ctx, r.Client, provider.Namespace, provider.Spec.ControlPlaneRef.Name)
+	if err != nil || wait != nil {
+		return // The control plane cannot be reached now. A later reconcile retries.
+	}
+	if step, err := r.ensureAIProviderRecord(ctx, sdk, provider); err != nil || step != nil {
+		log.FromContext(ctx).Info("Cannot write the cleanup record of a provider that exists in Coder", "error", err, "step", step)
+	}
 }
 
 // ensureAIProviderRecord makes sure that a provider which can exist in Coder
