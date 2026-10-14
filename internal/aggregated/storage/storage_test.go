@@ -3107,15 +3107,15 @@ func (s *mockCoderServerState) handleGetTemplate(w http.ResponseWriter, template
 type promoteFault struct {
 	apply         bool          // activate the requested version
 	activateAfter uuid.UUID     // then activate this version instead: a concurrent supersede or revert
-	delay         time.Duration // wait this long before answering
+	hang          chan struct{} // if set: close it when the PATCH arrives, and answer only after the client gave up
 	status        int           // answer with this status; 0 drops the connection without an answer
 	failReread    bool          // GET /api/v2/templates/{id} answers 500
 	rereadDelay   time.Duration // GET /api/v2/templates/{id} answers after this delay
 }
 
 // answerWithPromoteFault applies s.promoteFault. The caller holds s.mu and releases it when this
-// returns; the lock is dropped during the delay so the client's confirming re-read is not blocked.
-func (s *mockCoderServerState) answerWithPromoteFault(w http.ResponseWriter, templateID uuid.UUID, template codersdk.Template, versionID uuid.UUID) {
+// returns; the lock is dropped during a hang so the client's confirming re-read is not blocked.
+func (s *mockCoderServerState) answerWithPromoteFault(w http.ResponseWriter, r *http.Request, templateID uuid.UUID, template codersdk.Template, versionID uuid.UUID) {
 	fault := *s.promoteFault
 	if fault.apply {
 		template.ActiveVersionID = versionID
@@ -3127,9 +3127,23 @@ func (s *mockCoderServerState) answerWithPromoteFault(w http.ResponseWriter, tem
 	}
 	s.templatesByID[templateID] = template
 
+	hang := false
+	if fault.hang != nil {
+		select {
+		case <-fault.hang:
+			// A second PATCH answers at once; the test's one-PATCH check reports it.
+		default:
+			close(fault.hang)
+			hang = true
+		}
+	}
 	s.mu.Unlock()
 	defer s.mu.Lock()
-	time.Sleep(fault.delay)
+	if hang {
+		// The client gives up at its PATCH deadline and closes the connection, which ends r.Context().
+		<-r.Context().Done()
+		return
+	}
 	switch {
 	case fault.status == http.StatusOK:
 		writeJSON(w, http.StatusOK, map[string]string{"message": "template active version updated"})
@@ -3416,7 +3430,7 @@ func (s *mockCoderServerState) handleUpdateActiveTemplateVersion(w http.Response
 	}
 
 	if s.promoteFault != nil {
-		s.answerWithPromoteFault(w, templateID, template, request.ID)
+		s.answerWithPromoteFault(w, r, templateID, template, request.ID)
 		return
 	}
 	if !s.failActiveVersionPromotion {
