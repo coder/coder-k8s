@@ -111,7 +111,8 @@ func TestCoderMCPServerDisablesWithoutConsent(t *testing.T) {
 // which the recorded Secret still allows, so the config stays enabled. A
 // credential that Coder holds without a recorded Secret, or a recorded
 // Secret replaced by another one with the same name, has no proof of consent,
-// so the config is disabled.
+// so the config is disabled. So is a config whose auth type was switched to
+// user_oidc, which the controller cannot set back without the credential.
 func TestCoderMCPServerConsentCheckUsesCoderState(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -122,6 +123,10 @@ func TestCoderMCPServerConsentCheckUsesCoderState(t *testing.T) {
 		{name: "Coder keeps an allowed URL"},
 		{name: "Coder holds an unrecorded credential", disabled: true, prepare: func(ctx context.Context, t *testing.T, env mcpServerEnv, _ *corev1.Secret, id uuid.UUID) {
 			_, err := env.dashboard(t).UpdateMCPServerConfig(ctx, env.orgID, id, codersdk.UpdateMCPServerConfigRequest{CustomHeaders: &map[string]string{"X-Extra": "v"}})
+			require.NoError(t, err)
+		}},
+		{name: "Coder uses user_oidc", disabled: true, prepare: func(ctx context.Context, t *testing.T, env mcpServerEnv, _ *corev1.Secret, id uuid.UUID) {
+			_, err := env.dashboard(t).UpdateMCPServerConfig(ctx, env.orgID, id, codersdk.UpdateMCPServerConfigRequest{AuthType: ptrTo("user_oidc")})
 			require.NoError(t, err)
 		}},
 		{name: "Secret replaced", disabled: true, prepare: func(ctx context.Context, t *testing.T, env mcpServerEnv, secret *corev1.Secret, _ uuid.UUID) {

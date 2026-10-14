@@ -20,6 +20,9 @@ import (
 // the contract for those URLs, the controller disables the config in Coder
 // with one PATCH that holds no credential and no destination field.
 //
+// An observed auth type user_oidc is disabled too: the controller cannot set
+// it back without the credentials (plan 4.7 item 4).
+//
 // It fails closed on every stalled credential failure, as CoderAIProvider
 // does (#290): a deleted Secret, a removed opt-in label or origin, and also
 // a missing or malformed value. The Secret then no longer proves consent for
@@ -56,9 +59,14 @@ func (r *CoderMCPServerReconciler) disableMCPServerWithoutConsent(
 	if !found.Enabled {
 		return stalled("MCP server config %s is disabled in Coder.", id), nil
 	}
-	ok, err := r.mcpServerConsentHolds(ctx, server, found)
-	if err != nil {
-		return nil, err
+	// user_oidc sends each chat user's login token to url (plan F14). Without
+	// a readable credential the controller cannot set the auth type back, so
+	// it disables the config.
+	ok := false
+	if found.AuthType != "user_oidc" {
+		if ok, err = r.mcpServerConsentHolds(ctx, server, found); err != nil {
+			return nil, err
+		}
 	}
 	if ok {
 		return stalled("Coder sends each credential of MCP server config %s only to origins that its recorded Secret allows.", id), nil
