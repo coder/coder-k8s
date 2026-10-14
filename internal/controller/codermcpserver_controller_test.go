@@ -341,6 +341,19 @@ func TestCoderMCPServerControlPlaneAndOptIn(t *testing.T) {
 		}
 	}
 
+	// The gate compares resolved IDs, not names: a listed name that Coder
+	// resolves to the object's organization ID allows the object.
+	env.fake.addOrganization("alias")
+	env.setOptIn(ctx, t, &coderv1alpha1.MCPServersSpec{Organizations: []string{"alias"}})
+	env.fake.failNext(routeOrganization, fakeFault{Rewrite: func(answer any) any { return answer }}) // The object's own organization.
+	env.fake.failNext(routeOrganization, fakeFault{Rewrite: func(answer any) any {
+		org := answer.(codersdk.Organization)
+		org.ID = env.orgID
+		return org
+	}})
+	got, _ = env.reconcile(ctx, t, server)
+	requireMCPServerStep(t, got, false, "Applied")
+
 	// A failed lookup of a listed name is a wait, not a refusal.
 	env.setOptIn(ctx, t, &coderv1alpha1.MCPServersSpec{Organizations: []string{"other", "coder"}})
 	env.fake.failNext(routeOrganization, fakeFault{Rewrite: func(answer any) any { return answer }}) // The object's own organization.

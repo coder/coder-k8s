@@ -1,0 +1,46 @@
+# Manages one MCP server config in a Coder organization. See
+# docs/how-to/manage-mcp-servers.md.
+#
+# Prerequisites:
+# - CoderControlPlane codercontrolplane-sample with status.operatorAccessReady
+#   true and spec.mcpServers.organizations listing coder.
+# - Replace the placeholder key below. Never commit a real key.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: example-mcp-key
+  namespace: coder
+  labels:
+    coder.com/credential: "true"
+  annotations:
+    # The origin of spec.url. The operator sends the key to no other origin.
+    coder.com/credential-destinations: https://mcp.example.com
+type: Opaque
+stringData:
+  api-key: replace-with-the-mcp-server-key
+---
+apiVersion: coder.com/v1alpha1
+kind: CoderMCPServer
+metadata:
+  name: example
+  namespace: coder
+spec:
+  controlPlaneRef:
+    name: codercontrolplane-sample
+  # Immutable: Coder cannot move a config to another organization.
+  organization: coder
+  # Immutable: the model sees the tools as example__<tool>.
+  slug: example
+  displayName: Example
+  url: https://mcp.example.com/mcp
+  auth:
+    type: api_key
+    apiKey:
+      header: X-Api-Key
+      secretRef:
+        name: example-mcp-key
+        key: api-key
+  # Exactly these groups can read the server. Every sync removes other
+  # entries, also user grants added in the Coder dashboard.
+  access:
+    groups: [Everyone]

@@ -63,16 +63,17 @@ Then open `http://127.0.0.1:3000` in a browser.
 
 ## 5. Clean up (optional)
 
-Delete the `CoderAIProvider` and `CoderAIGatewayKey` objects first, if you created any, and then the control plane, while the operator still runs. The operator then deletes the providers and keys in Coder, cleans up, and removes its finalizers. A provider or key deleted after its control plane stays in Coder. A `CoderAIGatewayKey` can take up to 5 minutes after its last key create. After that, remove the bundle. The commands set `BASE` again, because you can be in a new shell.
+Delete the `CoderAIProvider`, `CoderAIGatewayKey` and `CoderMCPServer` objects first, if you created any, and then the control plane, while the operator still runs. The operator then deletes the providers, keys and MCP servers in Coder, cleans up, and removes its finalizers. A provider, key or MCP server deleted after its control plane stays in Coder. A `CoderAIGatewayKey` can take up to 5 minutes after its last key create. After that, remove the bundle. The commands set `BASE` again, because you can be in a new shell.
 
 !!! warning
-    Delete all other `CoderAIGatewayKey`, `CoderAIProvider`, `CoderControlPlane`, `CoderProvisioner`, and `CoderWorkspaceProxy` resources before you delete the bundle. Delete `CoderAIProvider` and `CoderAIGatewayKey` resources before their control plane. When you delete the bundle, you also delete the `coder.com` CRDs, and Kubernetes then removes all remaining resources of these kinds in the cluster. When you delete the `coder` namespace, you also delete all other objects in it, for example Secrets and PersistentVolumeClaims.
+    Delete all other `CoderAIGatewayKey`, `CoderAIProvider`, `CoderControlPlane`, `CoderMCPServer`, `CoderProvisioner`, and `CoderWorkspaceProxy` resources before you delete the bundle. Delete `CoderAIProvider`, `CoderAIGatewayKey` and `CoderMCPServer` resources before their control plane. When you delete the bundle, you also delete the `coder.com` CRDs, and Kubernetes then removes all remaining resources of these kinds in the cluster. When you delete the `coder` namespace, you also delete all other objects in it, for example Secrets and PersistentVolumeClaims.
 
 ```bash
 BASE="https://raw.githubusercontent.com/coder/coder-k8s/main"
 
 kubectl delete coderaiproviders --all -n coder --wait --timeout=120s
 kubectl delete coderaigatewaykeys --all -n coder --wait --timeout=420s
+kubectl delete codermcpservers --all -n coder --wait --timeout=120s
 kubectl delete -f "$BASE/config/samples/coder_v1alpha1_codercontrolplane.yaml" --ignore-not-found
 kubectl wait --for=delete codercontrolplane/codercontrolplane-sample -n coder --timeout=120s
 kubectl delete -f "$BASE/dist/install.yaml" --ignore-not-found
