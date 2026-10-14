@@ -2,12 +2,15 @@ package controller_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -185,19 +188,90 @@ func TestPoolFailureBackoffAndLimit(t *testing.T) {
 	require.True(t, meta.IsStatusConditionTrue(pool.Status.Conditions, coderv1alpha1.CoderWorkspacePoolConditionReady))
 }
 
-// TestPoolCountsDeletingFailedMemberOnce: a failed member whose finalizer
-// keeps it after the delete is counted once.
-func TestPoolCountsDeletingFailedMemberOnce(t *testing.T) {
+// deleteHookClient runs hook before each member delete and fails the pool
+// status writes after a member delete when failStatus is set.
+type deleteHookClient struct {
+	client.Client
+	hook       func(m *coderv1alpha1.CoderWorkspacePoolMember)
+	failStatus bool
+	deleted    *bool
+}
+
+func (c deleteHookClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	if m, ok := obj.(*coderv1alpha1.CoderWorkspacePoolMember); ok {
+		if c.hook != nil {
+			c.hook(m)
+		}
+		*c.deleted = true
+	}
+	return c.Client.Delete(ctx, obj, opts...)
+}
+
+func (c deleteHookClient) Status() client.SubResourceWriter {
+	return deleteHookStatusWriter{c.Client.Status(), c}
+}
+
+type deleteHookStatusWriter struct {
+	client.SubResourceWriter
+	c deleteHookClient
+}
+
+func (w deleteHookStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	if _, ok := obj.(*coderv1alpha1.CoderWorkspacePool); ok && w.c.failStatus && *w.c.deleted {
+		return apierrors.NewConflict(schema.GroupResource{Group: "coder.com", Resource: "coderworkspacepools"}, obj.GetName(), errors.New("stale object"))
+	}
+	return w.SubResourceWriter.Update(ctx, obj, opts...)
+}
+
+// TestPoolCountsFailedMemberOnce: the pool stores the count before it
+// deletes a failed member. A lost status write after the delete, or a crash
+// before it, neither loses nor repeats the count. The delete carries the
+// listed UID and resourceVersion, so a member that changed after the list
+// stays.
+func TestPoolCountsFailedMemberOnce(t *testing.T) {
 	t.Parallel()
 	e := newPoolMemberEnv(t)
-	key := e.createMember(t, func(m *coderv1alpha1.CoderWorkspacePoolMember) { m.Finalizers = []string{"test.coder.com/hold"} })
-	e.setMemberStatus(t, key, memberPhase(coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed))
-	t.Cleanup(func() {
-		m := e.reconcileMember(t, key, 0)
-		m.Finalizers = nil
-		_ = k8sClient.Update(e.ctx, m)
-	})
-	pool := e.reconcilePool(t, 2)
-	require.Equal(t, int32(1), pool.Status.ConsecutiveFailures, "a member that stays deleting is counted once")
-	require.False(t, e.reconcileMember(t, key, 0).DeletionTimestamp.IsZero())
+	key := types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}
+	failed := func(t *testing.T) types.NamespacedName {
+		t.Helper()
+		member := e.createMember(t, nil)
+		e.setMemberStatus(t, member, memberPhase(coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed))
+		return member
+	}
+	reconcileWith := func(t *testing.T, c deleteHookClient) error {
+		t.Helper()
+		c.Client, c.deleted = k8sClient, new(false)
+		r := &controller.CoderWorkspacePoolReconciler{Client: c, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+		_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+		return err
+	}
+
+	// observedGeneration is current, so no spec change resets the count.
+	pool := e.reconcilePool(t, 0)
+	pool.Status.ObservedGeneration = pool.Generation
+	require.NoError(t, k8sClient.Status().Update(e.ctx, pool))
+	// The status write after the delete is lost: the count stays stored.
+	member := failed(t)
+	require.True(t, apierrors.IsConflict(reconcileWith(t, deleteHookClient{failStatus: true})))
+	require.Nil(t, e.reconcileMember(t, member, 0))
+	require.Equal(t, int32(1), e.reconcilePool(t, 0).Status.ConsecutiveFailures)
+
+	// A crash after the count, before the delete: the next reconcile deletes
+	// the member and does not count it again.
+	member = failed(t)
+	pool = e.reconcilePool(t, 0)
+	pool.Status.ConsecutiveFailures, pool.Status.LastFailure = 2, &coderv1alpha1.CoderWorkspacePoolFailure{Member: member.Name, Reason: "BuildFailed", Time: &metav1.Time{Time: e.clock.Now()}}
+	require.NoError(t, k8sClient.Status().Update(e.ctx, pool))
+	require.Equal(t, int32(2), e.reconcilePool(t, 1).Status.ConsecutiveFailures)
+	require.Nil(t, e.reconcileMember(t, member, 0))
+
+	// The member changes between the list and the delete: it stays.
+	member = failed(t)
+	err := reconcileWith(t, deleteHookClient{hook: func(m *coderv1alpha1.CoderWorkspacePoolMember) {
+		fresh := e.reconcileMember(t, memberKey(*m), 0)
+		fresh.Annotations = map[string]string{"test.coder.com/touched": "true"}
+		require.NoError(t, k8sClient.Update(e.ctx, fresh))
+	}})
+	require.True(t, apierrors.IsConflict(err), "the resourceVersion precondition refuses the delete: %v", err)
+	require.NotNil(t, e.reconcileMember(t, member, 0))
 }
