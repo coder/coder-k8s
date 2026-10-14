@@ -53,9 +53,14 @@ const (
 // write the marker, create the key, check the answer, write the key into the
 // Secret, and record it in status. The key exists only in memory between the
 // create answer and the Secret write, so these steps run in one reconcile.
+// A replaced current key retires from the Secret write. drift reports a
+// re-issue because the Secret lost the current key (decision D7).
 func (r *CoderAIGatewayKeyReconciler) issueKey(
-	ctx context.Context, sdk *codersdk.Client, key *coderv1alpha1.CoderAIGatewayKey, before *coderv1alpha1.CoderAIGatewayKeyStatus, prefix string,
+	ctx context.Context, sdk *codersdk.Client, key *coderv1alpha1.CoderAIGatewayKey, before *coderv1alpha1.CoderAIGatewayKeyStatus, prefix string, drift bool,
 ) (*aiGatewayKeyStep, error) {
+	if key.Status.CurrentKey != nil && len(key.Status.RetiringKeys) >= aiGatewayKeyMaxRetiring {
+		return nil, fmt.Errorf("assertion failed: AI Gateway key %s/%s has no room to retire its current key", key.Namespace, key.Name)
+	}
 	if step := aiGatewayKeyIssueBlocked(key); step != nil {
 		return step, nil
 	}
@@ -111,7 +116,14 @@ func (r *CoderAIGatewayKeyReconciler) issueKey(
 	}
 
 	key.Status.PendingKey = nil
-	step = setAIGatewayKeyCurrent(key, serial, created.ID, name, r.Clock.Now(), true)
+	written := r.Clock.Now()
+	if key.Status.CurrentKey != nil {
+		retireAIGatewayKey(key, written)
+	}
+	if drift {
+		key.Status.LastDriftReissueTime = &metav1.Time{Time: written}
+	}
+	step = setAIGatewayKeyCurrent(key, serial, created.ID, name, written, true)
 	r.applyStep(key, step)
 	if err := r.writeStatus(attemptCtx, key, before); err != nil {
 		return nil, err

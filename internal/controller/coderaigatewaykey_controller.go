@@ -283,8 +283,14 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 		return aiGatewayKeyWait(max(decision.settleAt.Sub(now), time.Second), reasonDeletingOrphans,
 			"Key %s of this object is an orphan. The operator creates no key until it deletes the orphan at %s, when no write of the last create attempt can still land.",
 			decision.key.Name, decision.settleAt.UTC().Format(time.RFC3339)), nil
-	case aiGatewayKeyIssue:
-		return r.issueKey(ctx, sdk, key, before, prefix)
+	case aiGatewayKeyIssue, aiGatewayKeyReissue:
+		serial := key.Status.NextSerial
+		step, err := r.issueKey(ctx, sdk, key, before, prefix, decision.action == aiGatewayKeyReissue)
+		if err == nil && step.stalled && key.Status.NextSerial == serial {
+			// The issue step stopped before the create, so the stall sweeps.
+			step = r.deleteOnly(ctx, sdk, key, decision, step, now)
+		}
+		return step, err
 	case aiGatewayKeyKillSwitch:
 		return r.deleteOnly(ctx, sdk, key, decision, aiGatewayKeyStalled(reasonKeyDeletedExternal,
 			"Coder no longer lists the current key %s. Someone deleted it outside the operator, so the operator creates no new key until the spec changes.",
@@ -296,9 +302,8 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 		key.Status.CurrentKey, key.Status.NextRotationTime = nil, nil
 		return aiGatewayKeyWait(time.Second, reasonIssuingKey,
 			"The spec changed after the kill switch, so the operator issues a new key in place of deleted key %s.", deleted), nil
-	case aiGatewayKeyReissue:
-		// The drift re-issue arrives in K7b.
-		return aiGatewayKeyWait(aiGatewayKeyResync, reasonIssuingKey, "This controller version does not run step %q yet.", decision.action), nil
+	case aiGatewayKeyConflict:
+		return r.deleteOnly(ctx, sdk, key, decision, aiGatewayKeyDriftBlocked(key, now), now), nil
 	case aiGatewayKeyReady:
 		step := aiGatewayKeyReadyStep(key)
 		if !decision.settleAt.IsZero() {

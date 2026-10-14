@@ -80,6 +80,13 @@ func TestNextAIGatewayKeyAction(t *testing.T) {
 	stalledAt := func(reason string, generation int64) []metav1.Condition {
 		return []metav1.Condition{{Type: "Stalled", Status: metav1.ConditionTrue, Reason: reason, ObservedGeneration: generation}}
 	}
+	retiring := func(n int) []coderv1alpha1.CoderAIGatewayKeyRetiring {
+		var keys []coderv1alpha1.CoderAIGatewayKeyRetiring
+		for i := range n {
+			keys = append(keys, coderv1alpha1.CoderAIGatewayKeyRetiring{Serial: int64(10 + i), ID: uuid.NewString()})
+		}
+		return keys
+	}
 	for name, tc := range map[string]struct {
 		status     coderv1alpha1.CoderAIGatewayKeyStatus
 		generation int64
@@ -164,6 +171,23 @@ func TestNextAIGatewayKeyAction(t *testing.T) {
 		"orphan without a create time": {
 			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 3},
 			own:    own, want: aiGatewayKeySettle, key: current.ID, settleAt: &metav1.Time{Time: now.Add(aiGatewayKeySettleWindow)},
+		},
+		// D7: one drift re-issue per grace period, and room in retiringKeys.
+		"secret emptied inside the grace period": {
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus, LastDriftReissueTime: &metav1.Time{Time: now.Add(-59 * time.Minute)}},
+			own:    own[:1], want: aiGatewayKeyConflict,
+		},
+		"secret emptied after the grace period": {
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus, LastDriftReissueTime: &metav1.Time{Time: now.Add(-time.Hour)}},
+			own:    own[:1], want: aiGatewayKeyReissue,
+		},
+		"secret emptied, retiring keys full": {
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus, RetiringKeys: retiring(3)},
+			own:    own[:1], want: aiGatewayKeyConflict,
+		},
+		"secret emptied, room for one more": {
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus, RetiringKeys: retiring(2)},
+			own:    own[:1], want: aiGatewayKeyReissue,
 		},
 		"secret emptied":       {status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus}, own: own, holds: uuid.Nil, want: aiGatewayKeyReissue},
 		"secret holds another": {status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus}, own: own, holds: other.ID, want: aiGatewayKeyReissue},
