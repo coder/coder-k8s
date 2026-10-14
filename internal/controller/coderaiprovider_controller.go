@@ -177,7 +177,8 @@ func (r *CoderAIProviderReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 // check validates the base URL, reads the key through the credential Secret
 // contract, gets Coder access, and then creates or applies the provider. The
-// checks before Coder access send nothing to Coder.
+// checks before Coder access send nothing to Coder, except the disable of a
+// provider whose key Secret withdrew its consent (#267).
 func (r *CoderAIProviderReconciler) check(
 	ctx context.Context, provider *coderv1alpha1.CoderAIProvider, before *coderv1alpha1.CoderAIProviderStatus,
 ) (*aiProviderStep, error) {
@@ -190,6 +191,9 @@ func (r *CoderAIProviderReconciler) check(
 	}
 	key, err := credentialsecret.Read(ctx, r.Client, provider.Namespace, provider.Spec.APIKeySecretRef, baseURL)
 	if credErr := (*credentialsecret.Error)(nil); errors.As(err, &credErr) {
+		if provider.Status.ProviderID != "" && aiProviderConsentWithdrawn(credErr) {
+			return r.disableWithoutConsent(ctx, provider, credErr)
+		}
 		return aiProviderStalled(0, credErr.Reason, "%s", credErr.Message), nil
 	} else if err != nil {
 		return nil, err
