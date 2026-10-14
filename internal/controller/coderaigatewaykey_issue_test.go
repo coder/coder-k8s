@@ -257,6 +257,36 @@ func TestCoderAIGatewayKeyLateCreateAnswer(t *testing.T) {
 	requireOutputSecretEmpty(ctx, t, env.namespace)
 }
 
+// A marker write that takes 2 minutes uses up the time for Secret writes:
+// the write-age limit counts from the marker's timestamp, the same instant
+// that starts the settle window.
+func TestCoderAIGatewayKeySlowMarkerWrite(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+	writes := 0
+	base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+	env.client = interceptor.NewClient(base, interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if _, ok := obj.(*corev1.Secret); ok && !isDryRunUpdate(opts) {
+				writes++
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subResource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if key, ok := obj.(*coderv1alpha1.CoderAIGatewayKey); ok && key.Status.PendingKey != nil {
+				env.clock.Step(2 * time.Minute)
+			}
+			return c.SubResource(subResource).Update(ctx, obj, opts...)
+		},
+	})
+	got, _ := env.reconcile(ctx, t, env.createKey(ctx, t, "coder", testAIGatewaySecret))
+	require.Contains(t, requireAIGatewayKeyStep(t, got, false, "IssuingKey"), "took too long")
+	require.Zero(t, writes)
+	requireOutputSecretEmpty(ctx, t, env.namespace)
+}
+
 // Plan 4.3 step 6: a Secret write whose answer is lost is resolved by the
 // next live read, so the key is not written twice and the issue succeeds.
 func TestCoderAIGatewayKeyUncertainSecretWrite(t *testing.T) {

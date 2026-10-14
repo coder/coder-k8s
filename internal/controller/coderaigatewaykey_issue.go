@@ -26,10 +26,11 @@ const (
 	// aiGatewayKeyAttemptTimeout bounds the create, the answer check, the
 	// Secret writes and the status write of one attempt.
 	aiGatewayKeyAttemptTimeout = 90 * time.Second
-	// aiGatewayKeyMaxWriteAge is the latest time after the marker write at
-	// which a Secret write may start. With the API server's 60 s request
-	// timeout, every write of an attempt has landed or failed 3 minutes after
-	// the marker, inside the 5-minute settle window of the sweep.
+	// aiGatewayKeyMaxWriteAge is the latest time after the marker's
+	// timestamp (lastCreateAttemptTime) at which a Secret write may start.
+	// With the API server's default 60 s request timeout (an assumption the
+	// docs state, plan RK13), every write of an attempt has landed or failed
+	// 3 minutes after that timestamp, inside the 5-minute settle window.
 	aiGatewayKeyMaxWriteAge        = 2 * time.Minute
 	aiGatewayKeySecretWriteTimeout = 10 * time.Second
 	aiGatewayKeySecretWriteTries   = 3
@@ -67,7 +68,12 @@ func (r *CoderAIGatewayKeyReconciler) issueKey(
 	// the create (plan I3). A conflict stops here, before any request.
 	serial := key.Status.NextSerial
 	name := prefix + strconv.FormatInt(serial, 10)
-	now := metav1.NewTime(r.Clock.Now())
+	// One instant stamps the marker (lastCreateAttemptTime, which starts the
+	// settle window) and starts the write-age limit, so a slow marker write
+	// shortens the time left for Secret writes, never the window. In
+	// production the instant carries Go's monotonic reading.
+	attemptStart := r.Clock.Now()
+	now := metav1.NewTime(attemptStart)
 	key.Status.PendingKey = &coderv1alpha1.CoderAIGatewayKeyPending{Serial: serial, Name: name, CreateAttemptTime: now}
 	key.Status.NextSerial = serial + 1
 	key.Status.LastCreateAttemptTime = &now
@@ -76,7 +82,6 @@ func (r *CoderAIGatewayKeyReconciler) issueKey(
 		return nil, err
 	}
 	*before = *key.Status.DeepCopy()
-	markerWrittenAt := r.Clock.Now()
 
 	attemptCtx, cancel := context.WithTimeout(ctx, aiGatewayKeyAttemptTimeout)
 	defer cancel()
@@ -94,7 +99,7 @@ func (r *CoderAIGatewayKeyReconciler) issueKey(
 		return aiGatewayKeyStalled(reasonCoderAnswerMismatch,
 			"Coder answered the create of key %s with key ID %s, but %s. The operator creates no key until the spec changes.", name, created.ID, mismatch), nil
 	}
-	step, err = r.writeKeySecret(attemptCtx, key, labels, created, plaintext, markerWrittenAt)
+	step, err = r.writeKeySecret(attemptCtx, key, labels, created, plaintext, attemptStart)
 	if err != nil {
 		return nil, err // An assertion failed. The marker stays.
 	}
@@ -234,12 +239,12 @@ func aiGatewayKeyIssueFailed(key *coderv1alpha1.CoderAIGatewayKey, message strin
 // writeKeySecret writes the new key into the output Secret (plan 4.3 step 6):
 // up to 3 tries within 10 s, each after a fresh live read. A read that finds
 // the key already written resolves an uncertain earlier try. No try starts
-// later than aiGatewayKeyMaxWriteAge after the marker write. It returns a
+// later than aiGatewayKeyMaxWriteAge after the marker's timestamp. It returns a
 // step when the write failed, and an error only when an assertion failed.
 // Neither holds the API server's message.
 func (r *CoderAIGatewayKeyReconciler) writeKeySecret(
 	ctx context.Context, key *coderv1alpha1.CoderAIGatewayKey, labels map[string]string,
-	created codersdk.CreateAIGatewayKeyResponse, plaintext credentialsecret.Value, markerWrittenAt time.Time,
+	created codersdk.CreateAIGatewayKeyResponse, plaintext credentialsecret.Value, attemptStart time.Time,
 ) (*aiGatewayKeyStep, error) {
 	ctx, cancel := context.WithTimeout(ctx, aiGatewayKeySecretWriteTimeout)
 	defer cancel()
@@ -264,7 +269,7 @@ func (r *CoderAIGatewayKeyReconciler) writeKeySecret(
 		if try == aiGatewayKeySecretWriteTries {
 			return aiGatewayKeyWait(0, reasonIssuingKey, "Writing key %s into Secret %q failed %d times (last: %s).", created.Name, name, try, last), nil
 		}
-		if r.Clock.Since(markerWrittenAt) >= aiGatewayKeyMaxWriteAge {
+		if r.Clock.Since(attemptStart) >= aiGatewayKeyMaxWriteAge {
 			return aiGatewayKeyWait(0, reasonIssuingKey,
 				"The create of key %s took too long, so the operator did not write it into Secret %q.", created.Name, name), nil
 		}
