@@ -76,7 +76,10 @@ spec:
                     description: |-
                       Groups are Coder group names in the server's organization. Everyone is
                       the group of all organization members. An empty list leaves the server
-                      to organization admins. Coder reserves the names new and create.
+                      to organization admins. Coder reserves the names new and create. While a
+                      listed group does not exist, the controller removes the access of every
+                      group that this list does not name, adds none, disables the server if
+                      the spec disables it, and waits with GroupNotFound for the rest.
                     items:
                       maxLength: 255
                       minLength: 1

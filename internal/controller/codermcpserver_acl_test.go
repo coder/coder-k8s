@@ -115,8 +115,10 @@ func TestMCPServerACLNotOwned(t *testing.T) {
 	require.Equal(t, before, env.fake.totalRequests(), "no read and no write")
 }
 
-// A name that resolves to no group, or that Coder's search rejects, stops
-// the sync before the ACL read, so nothing is written.
+// A name that resolves to no group, or that Coder's search rejects, gives
+// GroupNotFound. The sync fails closed (#313): it still removes every entry
+// that access.groups does not name, here the default Everyone entry and the
+// user entry, and it adds nothing.
 func TestMCPServerACLGroupNotFound(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -152,7 +154,8 @@ func TestMCPServerACLGroupNotFound(t *testing.T) {
 			require.True(t, got.Stalled)
 			require.Equal(t, tc.requeue, got.Requeue)
 			require.Contains(t, got.Message, tc.message)
-			require.Equal(t, mcpACLCalls{available: tc.available}, calls, "no ACL read and no write")
+			require.Equal(t, mcpACLCalls{available: tc.available, get: 1, patch: 1}, calls, "one ACL read and one remove-only write")
+			env.requireACL(t)
 		})
 	}
 }
@@ -163,13 +166,13 @@ func TestMCPServerACLRejectsNamesOutsideThePattern(t *testing.T) {
 	t.Parallel()
 	env := newMCPACLEnv(t)
 	for _, name := range []string{"data science", "role:admin", "50%", "data_science", `data\`, `"data"`, "-data", "data-", strings.Repeat("a", 256), ""} {
-		before := env.fake.totalRequests()
+		before := env.calls().available
 		got, err := controller.SyncMCPServerACL(context.Background(), env.sdk, env.orgID, env.configID, &coderv1alpha1.CoderMCPServerAccess{Groups: []string{"data", name}})
 		require.NoError(t, err)
 		require.Equal(t, "GroupNotFound", got.Reason, name)
 		require.True(t, got.Stalled)
 		require.Zero(t, got.Requeue, "only a spec change helps")
-		require.Equal(t, 1, env.fake.totalRequests()-before, "only the search for data ran: %q", name)
+		require.Equal(t, 1, env.calls().available-before, "only the search for data ran: %q", name)
 	}
 	got, _ := env.sync(t, strings.Repeat("a", 255))
 	require.Equal(t, "GroupNotFound", got.Reason)
@@ -301,4 +304,32 @@ func TestMCPServerACLComparesSets(t *testing.T) {
 	require.Equal(t, 1, calls.patch)
 	bodies := env.fake.mcpRequestBodies(routeUpdateMCPServerACL)
 	require.NotContains(t, string(bodies[len(bodies)-1]), `""`, "the PATCH sets read and removes nothing")
+}
+
+// #313: while a listed group is missing, the sync keeps the entries of the
+// groups that access.groups names, by their names in Coder's ACL answer,
+// removes the others, and adds no group. Once the group exists, the next
+// sync adds it.
+func TestMCPServerACLMissingGroupNeverWidens(t *testing.T) {
+	t.Parallel()
+	env := newMCPACLEnv(t)
+	got, _ := env.sync(t, "Everyone", "data", "analytics")
+	require.Empty(t, got.Reason)
+	env.requireACL(t, env.orgID, env.data, env.analytic)
+
+	got, calls := env.sync(t, "data", "data-science", "missing")
+	require.Equal(t, "GroupNotFound", got.Reason)
+	require.Equal(t, mcpACLCalls{available: 3, get: 1, patch: 1}, calls)
+	env.requireACL(t, env.data)
+	patches := env.fake.mcpRequestBodies(routeUpdateMCPServerACL)
+	require.JSONEq(t, `{"group_roles":{"`+env.orgID.String()+`":"","`+env.analytic.String()+`":""}}`, string(patches[len(patches)-1]),
+		"only removes: data-science resolves, but nothing is added while missing is missing")
+
+	_, calls = env.sync(t, "data", "data-science", "missing")
+	require.Equal(t, mcpACLCalls{available: 3, get: 1}, calls, "nothing left to remove")
+
+	missing := env.fake.addGroup(env.orgID, "missing", "")
+	got, _ = env.sync(t, "data", "data-science", "missing")
+	require.Empty(t, got.Reason)
+	env.requireACL(t, env.data, env.science, missing)
 }

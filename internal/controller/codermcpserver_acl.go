@@ -32,6 +32,12 @@ var mcpServerGroupNamePattern = regexp.MustCompile(`^[a-zA-Z0-9]+(?:-[a-zA-Z0-9]
 // it reads the ACL, and sends one sparse PATCH only when the ACL differs. A
 // nil access means the controller does not own the ACL, so it sends nothing.
 // It returns nil when the ACL matches.
+//
+// When a name does not resolve (GroupNotFound), it fails closed (#313): it
+// still removes every entry whose group name access.groups does not list,
+// by the names in Coder's ACL answer, and every user entry. It adds nothing,
+// so access never widens while a group is missing, and it returns the
+// GroupNotFound step. The missing groups are added once they exist.
 func syncMCPServerACL(
 	ctx context.Context, sdk *codersdk.Client, orgID, configID uuid.UUID, access *coderv1alpha1.CoderMCPServerAccess,
 ) (*mcpServerStep, error) {
@@ -59,8 +65,14 @@ func syncMCPServerACLPass(
 		return nil, nil
 	}
 	want, step := resolveMCPServerGroups(ctx, sdk, orgID, configID, access.Groups)
-	if step != nil {
+	if step != nil && step.reason != "GroupNotFound" {
 		return step, nil
+	}
+	// A missing group: keep only the entries that access.groups names (#313).
+	byName := step != nil
+	listed := make(map[string]bool, len(access.Groups))
+	for _, name := range access.Groups {
+		listed[name] = true
 	}
 	acl, err := sdk.MCPServerConfigACL(ctx, orgID, configID)
 	if err != nil {
@@ -72,14 +84,21 @@ func syncMCPServerACLPass(
 			return mcpServerStalled(mcpServerResync, "CoderAnswerMismatch",
 				"assertion failed: Coder answered an ACL group %s of organization %s for MCP server config %s", g.ID, g.OrganizationID, configID), nil
 		}
-		if _, ok := want[g.ID]; !ok {
+		keep := false
+		if byName {
+			// Everyone has the organization ID (mcpServerEveryoneGroup).
+			keep = g.ID == orgID && listed[mcpServerEveryoneGroup] || g.ID != orgID && listed[g.Name]
+		} else {
+			_, keep = want[g.ID]
+		}
+		if !keep {
 			patch.GroupRoles[g.ID.String()] = codersdk.MCPServerConfigRoleDeleted
 		} else if g.Role != codersdk.MCPServerConfigRoleRead {
 			patch.GroupRoles[g.ID.String()] = codersdk.MCPServerConfigRoleRead
 		}
 		delete(want, g.ID)
 	}
-	if !removeOnly {
+	if !removeOnly && !byName {
 		for id := range want {
 			patch.GroupRoles[id.String()] = codersdk.MCPServerConfigRoleRead
 		}
@@ -92,7 +111,7 @@ func syncMCPServerACLPass(
 		patch.UserRoles[u.ID.String()] = codersdk.MCPServerConfigRoleDeleted
 	}
 	if len(patch.GroupRoles) == 0 && len(patch.UserRoles) == 0 {
-		return nil, nil
+		return step, nil
 	}
 	err = sdk.UpdateMCPServerConfigACL(ctx, orgID, configID, patch)
 	switch {
@@ -104,7 +123,7 @@ func syncMCPServerACLPass(
 		// A sparse PATCH sets absolute roles, so sending it again is safe.
 		return mcpServerWait(mcpServerRetry, "CoderUnavailable", "update the ACL of MCP server config %s: %s", configID, coderErrorSummary(err)), nil
 	}
-	return nil, nil
+	return step, nil
 }
 
 // resolveMCPServerGroups maps group names to IDs. Everyone needs no call.

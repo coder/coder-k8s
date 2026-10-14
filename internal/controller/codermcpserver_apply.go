@@ -96,6 +96,11 @@ func (r *CoderMCPServerReconciler) syncMCPServer(
 	if req != (codersdk.UpdateMCPServerConfigRequest{}) {
 		if kill == nil {
 			if step, err := narrowMCPServerACL(ctx, sdk, orgID, id, server.Spec.Access); step != nil || err != nil {
+				if step != nil && step.reason == "GroupNotFound" && req.Enabled != nil && !*req.Enabled {
+					// Fail closed (#313): a generation that disables the
+					// server disables it now, while a group is missing.
+					return r.disableForMissingGroup(ctx, sdk, server, orgID, id, step), false, nil
+				}
 				return step, false, err
 			}
 		}
@@ -134,6 +139,26 @@ func (r *CoderMCPServerReconciler) syncMCPServer(
 	server.Status.Credentials = mcpServerCredentialStatus(server.Spec.Auth, values)
 	server.Status.AppliedGeneration = server.Generation
 	return mcpServerReady(server), false, nil
+}
+
+// disableForMissingGroup sends a PATCH that holds only enabled false, for a
+// generation that disables the server while one of its access.groups does
+// not resolve (#313). The generation stays unapplied, so the rest of it
+// follows once the group exists. It returns the GroupNotFound step, or a
+// wait when the PATCH failed.
+func (r *CoderMCPServerReconciler) disableForMissingGroup(
+	ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, orgID, id uuid.UUID, missing *mcpServerStep,
+) *mcpServerStep {
+	disabled := false
+	updated, err := sdk.UpdateMCPServerConfig(ctx, orgID, id, codersdk.UpdateMCPServerConfigRequest{Enabled: &disabled})
+	if err != nil {
+		return mcpServerWait(mcpServerRetry, missing.reason, "MCP server config %s is still enabled: the disable failed: %s. %s", id, coderErrorSummary(err), missing.message)
+	}
+	if updated.ID != id || updated.OrganizationID != orgID || updated.Slug != server.Spec.Slug || updated.Enabled {
+		return mcpServerWait(mcpServerRetry, "CoderAnswerMismatch",
+			"Coder answered the disable of MCP server config %s with another or an enabled config. The controller disables it again.", id)
+	}
+	return missing
 }
 
 // mcpServerCredentialSet says which credential fields an auth type uses.
