@@ -2,7 +2,7 @@ package controller
 
 import (
 	"context"
-	"net/http"
+	"slices"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
@@ -58,10 +58,10 @@ func (r *CoderAIGatewayKeyReconciler) deleteStep(ctx context.Context, key *coder
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, aiGatewayKeyBoundedDeleteTimeout)
 		defer cancel()
-		if _, failure, err := r.deleteKeys(ctx, sdk, key); err != nil {
+		if _, left, failure, err := r.deleteKeys(ctx, sdk, key); err != nil {
 			return false, nil, err
 		} else if failure != nil {
-			return r.releaseWithoutDelete(ctx, key, "the one pass while CoderControlPlane is being deleted failed: "+failure.message), nil, nil
+			return r.releaseWithoutDelete(ctx, key, "the one pass while CoderControlPlane is being deleted failed: "+failure.message, left...), nil, nil
 		}
 		return true, nil, nil
 	}
@@ -81,7 +81,7 @@ func (r *CoderAIGatewayKeyReconciler) deleteStep(ctx context.Context, key *coder
 	// The pass repeats until a LIST shows no key of this object, so the
 	// release follows a LIST that proves it.
 	for range 2 {
-		deleted, failure, err := r.deleteKeys(ctx, sdk, key)
+		deleted, _, failure, err := r.deleteKeys(ctx, sdk, key)
 		if err != nil || failure != nil {
 			return false, failure, err
 		} else if deleted == 0 {
@@ -93,27 +93,32 @@ func (r *CoderAIGatewayKeyReconciler) deleteStep(ctx context.Context, key *coder
 }
 
 // deleteKeys lists the keys of this object, deletes each one, and returns
-// how many it deleted, or the failure that stopped it.
-func (r *CoderAIGatewayKeyReconciler) deleteKeys(ctx context.Context, sdk *codersdk.Client, key *coderv1alpha1.CoderAIGatewayKey) (int, *aiGatewayKeyStep, error) {
+// how many it deleted. On a failed DELETE it also returns the failure and
+// the IDs of the listed keys that it did not delete.
+func (r *CoderAIGatewayKeyReconciler) deleteKeys(ctx context.Context, sdk *codersdk.Client, key *coderv1alpha1.CoderAIGatewayKey) (int, []string, *aiGatewayKeyStep, error) {
 	prefix, err := aiGatewayKeyNamePrefix(key.UID)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	listed, err := sdk.ListAIGatewayKeys(ctx)
 	if err != nil {
-		return 0, aiGatewayKeyDeleteFailure("list AI Gateway keys", err), nil
+		return 0, nil, aiGatewayKeyDeleteFailure("list AI Gateway keys", err), nil
 	}
-	deleted := 0
-	for _, k := range ownAIGatewayKeys(prefix, listed) {
-		if serial, _ := aiGatewayKeySerial(prefix, k.Name); serial >= key.Status.NextSerial {
-			continue // No create of this object used this serial (plan I3).
+	own := slices.DeleteFunc(ownAIGatewayKeys(prefix, listed), func(k codersdk.AIGatewayKey) bool {
+		serial, _ := aiGatewayKeySerial(prefix, k.Name)
+		return serial >= key.Status.NextSerial // No create of this object used this serial (plan I3).
+	})
+	for i, k := range own {
+		// Only Coder's own 404 proves that the key is gone (as for providers, #325).
+		if err := sdk.DeleteAIGatewayKey(ctx, k.ID); err != nil && !isCoderResourceNotFound(err) {
+			var left []string
+			for _, rest := range own[i:] {
+				left = append(left, rest.ID.String())
+			}
+			return i, left, aiGatewayKeyDeleteFailure("delete key "+k.Name, err), nil
 		}
-		if err := sdk.DeleteAIGatewayKey(ctx, k.ID); (err != nil && coderStatus(err) != http.StatusNotFound) || coderRouteMissing(err) {
-			return deleted, aiGatewayKeyDeleteFailure("delete key "+k.Name, err), nil
-		}
-		deleted++
 	}
-	return deleted, nil, nil
+	return len(own), nil, nil, nil
 }
 
 // aiGatewayKeyDeleteFailure classifies a failed call of the deletion like a
@@ -131,8 +136,9 @@ func aiGatewayKeyDeleteFailure(action string, err error) *aiGatewayKeyStep {
 }
 
 // releaseWithoutDelete logs the key IDs that can stay in Coder, because
-// nothing can delete them any more, and returns true (ControlPlaneGone).
-func (r *CoderAIGatewayKeyReconciler) releaseWithoutDelete(ctx context.Context, key *coderv1alpha1.CoderAIGatewayKey, why string) bool {
+// nothing can delete them any more, and returns true (ControlPlaneGone). left
+// holds the IDs that a failed pass listed but did not delete.
+func (r *CoderAIGatewayKeyReconciler) releaseWithoutDelete(ctx context.Context, key *coderv1alpha1.CoderAIGatewayKey, why string, left ...string) bool {
 	var ids []string
 	if current := key.Status.CurrentKey; current != nil {
 		ids = append(ids, current.ID)
@@ -141,6 +147,6 @@ func (r *CoderAIGatewayKeyReconciler) releaseWithoutDelete(ctx context.Context, 
 		ids = append(ids, retiring.ID)
 	}
 	log.FromContext(ctx).Info("Releasing the finalizer without deleting the keys in Coder: the keys can stay in Coder",
-		"reason", "ControlPlaneGone", "why", why, "keyIDs", ids, "nextSerial", key.Status.NextSerial)
+		"reason", "ControlPlaneGone", "why", why, "keyIDs", ids, "listedKeyIDs", left, "nextSerial", key.Status.NextSerial)
 	return true
 }
