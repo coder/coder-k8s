@@ -44,7 +44,7 @@ type CoderWorkspacePoolMemberReconciler struct {
 	// cache right before the create request.
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
-	Clock  clock.PassiveClock
+	Clock     clock.PassiveClock
 
 	rateLimited coderBackoff // Keyed by types.NamespacedName.
 }
