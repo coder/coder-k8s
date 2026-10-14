@@ -139,9 +139,18 @@ The finalizer stays while Coder cannot confirm the deletion:
 
 When the control plane is gone, nothing can delete the keys. The finalizer goes at once. The operator logs `Releasing the finalizer without deleting the keys in Coder` with reason `ControlPlaneGone` and the key IDs: delete those keys with `coder ai-gateway keys delete`.
 
-While the control plane is being deleted, as in a namespace deletion, the operator runs one pass of at most 10 seconds without the settle window, then removes the finalizer whatever the answer. A namespace deletion therefore finishes. A key create that was still in flight at that moment can commit later, and its key stays in Coder. When the pass fails, the log lists the IDs that it did not delete.
+While the control plane is being deleted and its operator access still works, the operator runs one pass of at most 10 seconds without the settle window, then removes the finalizer whatever the answer. A key create that was still in flight at that moment can commit later, and its key stays in Coder. When the pass fails, the log lists the IDs that it did not delete.
 
-Delete `CoderAIGatewayKey` objects before their control plane.
+!!! warning "Delete the keys before the namespace"
+    When you delete the namespace, Kubernetes deletes the control plane and the `CoderAIGatewayKey` objects at the same time. The control plane is usually gone before the operator handles the objects, so the finalizers go without a delete, and the keys stay valid in Coder. The namespace deletion finishes, and the operator logs the key IDs with reason `ControlPlaneGone`.
+
+Delete the `CoderAIGatewayKey` objects first and wait until they are gone, then delete the control plane or the namespace:
+
+```bash
+kubectl -n coder delete coderaigatewaykeys --all --wait --timeout=420s
+```
+
+If the namespace is already gone, delete the logged keys with `coder ai-gateway keys delete`.
 
 ### Stuck finalizer
 
@@ -170,7 +179,7 @@ A deletion that keeps failing never ends by itself. Leave it in one of these way
 
 ## Known limits
 
-- **Leftover keys.** A key that commits more than 5 minutes after a lost create answer, or after the object is gone, stays in Coder. Find keys of deleted objects with `coder ai-gateway keys list`: their names start with `ck8s-` and a UID that no `CoderAIGatewayKey` has.
+- **Leftover keys.** A key that commits more than 5 minutes after a lost create answer, or after the object is gone, stays in Coder. So do the keys of objects that go together with their control plane, for example in a namespace deletion. Find keys of deleted objects with `coder ai-gateway keys list`: their names start with `ck8s-` and a UID that no `CoderAIGatewayKey` has.
 - **A short key list.** The operator reads all keys with one list call. When a list answer names the current key but leaves out a replaced key, the operator treats the replaced key as deleted. If the key appears again, the operator deletes it as an orphan, without the rest of its grace period. Coder lists all keys in one answer, so only a proxy between the operator and Coder that changes the answer can cause this.
 
 ## Grant access
