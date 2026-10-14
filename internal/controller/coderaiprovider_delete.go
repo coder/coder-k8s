@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -25,6 +26,32 @@ const (
 	// not yet prove absence: the request can still be in flight in Coder.
 	aiProviderCreateSettle = 2 * time.Minute
 )
+
+// coderNotFoundMessage is the fixed message of Coder's resource 404, which
+// the provider routes answer (coderd/httpapi/httpapi.go:149-155 and
+// coderd/ai_providers.go:636-638 in v2.37.3). A 404 without it, for example
+// an HTML page of a proxy or "Route not found." for a wrong base URL, does
+// not prove that Coder has no such provider (#323).
+const coderNotFoundMessage = "Resource not found or you do not have access to this resource"
+
+// isCoderResourceNotFound reports a 404 that Coder itself answered.
+func isCoderResourceNotFound(err error) bool {
+	var sdkErr *codersdk.Error
+	return isCoderNotFound(err) && errors.As(err, &sdkErr) && sdkErr.Message == coderNotFoundMessage
+}
+
+// checkAIProviderID fails unless status.providerID is a canonical UUID. The
+// controller puts it into /api/v2/ai/providers/{id}, which also accepts a
+// name, and the SDK resolves ".." segments, so any other value could send
+// the operator token to another Coder route (#323). Only the controller
+// writes it, so another value is impossible.
+func checkAIProviderID(provider *coderv1alpha1.CoderAIProvider) error {
+	id, err := uuid.Parse(provider.Status.ProviderID)
+	if err != nil || id == uuid.Nil || id.String() != provider.Status.ProviderID {
+		return fmt.Errorf("assertion failed: AI provider %s/%s has status.providerID %q, which is not a canonical UUID", provider.Namespace, provider.Name, provider.Status.ProviderID)
+	}
+	return nil
+}
 
 // deleteStep handles an object that is being deleted. It deletes in Coder
 // only a provider that this object proved it created (plan S7), and it
@@ -81,10 +108,14 @@ func (r *CoderAIProviderReconciler) deleteStep(ctx context.Context, provider *co
 // only the nonce and the type prove that the provider is this object's.
 func (r *CoderAIProviderReconciler) deleteInCoder(ctx context.Context, sdk *codersdk.Client, provider *coderv1alpha1.CoderAIProvider) (*aiProviderStep, error) {
 	id := provider.Status.ProviderID
-	if id == "" {
+	if id != "" {
+		if err := checkAIProviderID(provider); err != nil {
+			return nil, err
+		}
+	} else {
 		found, err := sdk.AIProvider(ctx, provider.Name)
 		switch {
-		case isCoderNotFound(err):
+		case isCoderResourceNotFound(err):
 			// A 404 proves absence only for a site owner. A role change in
 			// Coder has no watch, so the wait uses the delete poll.
 			if step := requireSiteOwner(ctx, sdk); step != nil {
@@ -115,7 +146,7 @@ func (r *CoderAIProviderReconciler) deleteInCoder(ctx context.Context, sdk *code
 		}
 		id = found.ID.String()
 	}
-	if err := sdk.DeleteAIProvider(ctx, id); err != nil && !isCoderNotFound(err) {
+	if err := sdk.DeleteAIProvider(ctx, id); err != nil && !isCoderResourceNotFound(err) {
 		return aiProviderWait(aiProviderDeletePoll, "CoderUnavailable", "delete provider %s (ID %s): %s", provider.Name, id, coderErrorSummary(err)), nil
 	}
 	return nil, nil
