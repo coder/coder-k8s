@@ -158,7 +158,8 @@ jobs:
         run: |
           # grep exits 1 when nothing matches. Any other status (for example a missing file) fails the step.
           status=0
-          grep -n -E '^[[:space:]]+kind: CoderAIProvider$|coderaiproviders\.coder\.com' \
+          # The third pattern matches the CRD path entry in config/default/kustomization.yaml.
+          grep -n -E '^[[:space:]]+kind: CoderAIProvider$|coderaiproviders\.coder\.com|coder\.com_coderaiproviders\.yaml' \
             dist/install.yaml config/default/kustomization.yaml config/crd/bases/*.yaml || status=$?
           if [[ "${status}" -eq 0 ]]; then
             echo "assertion failed: the CoderAIProvider CRD must not ship before its controller" >&2
@@ -173,7 +174,8 @@ jobs:
         run: |
           # grep exits 1 when nothing matches. Any other status (for example a missing file) fails the step.
           status=0
-          grep -n -E '^[[:space:]]+kind: CoderAIGatewayKey$|coderaigatewaykeys\.coder\.com' \
+          # The third pattern matches the CRD path entry in config/default/kustomization.yaml.
+          grep -n -E '^[[:space:]]+kind: CoderAIGatewayKey$|coderaigatewaykeys\.coder\.com|coder\.com_coderaigatewaykeys\.yaml' \
             dist/install.yaml config/default/kustomization.yaml config/crd/bases/*.yaml || status=$?
           if [[ "${status}" -eq 0 ]]; then
             echo "assertion failed: the CoderAIGatewayKey CRD must not ship before its controller" >&2
@@ -188,7 +190,8 @@ jobs:
         run: |
           # grep exits 1 when nothing matches. Any other status (for example a missing file) fails the step.
           status=0
-          grep -n -E '^[[:space:]]+kind: CoderMCPServer$|codermcpservers\.coder\.com' \
+          # The third pattern matches the CRD path entry in config/default/kustomization.yaml.
+          grep -n -E '^[[:space:]]+kind: CoderMCPServer$|codermcpservers\.coder\.com|coder\.com_codermcpservers\.yaml' \
             dist/install.yaml config/default/kustomization.yaml config/crd/bases/*.yaml || status=$?
           if [[ "${status}" -eq 0 ]]; then
             echo "assertion failed: the CoderMCPServer CRD must not ship before its controller" >&2
