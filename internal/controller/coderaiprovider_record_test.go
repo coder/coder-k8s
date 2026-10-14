@@ -279,4 +279,12 @@ func TestCoderAIProviderDeploymentSwitchKeepsRecord(t *testing.T) {
 	require.Contains(t, requireAIProviderStep(t, got, true, "CoderDeploymentChanged"), before["deploymentID"])
 	require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider), "no create in the new deployment")
 	require.Equal(t, before, cleanupRecord(ctx, t, env.namespace, provider.UID), "the record keeps the old locator")
+
+	// #374 review round 4: deleting the object in this state keeps the
+	// record too, so a sweep in the old deployment can still find it.
+	require.Empty(t, got.Status.ProviderID)
+	gone, _ := env.deleteAIProvider(ctx, t, got)
+	require.Nil(t, gone, "the finalizer goes without a delete")
+	require.Zero(t, env.fake.requestCount(routeDeleteAIProvider), "no delete in the new deployment")
+	require.Equal(t, before, cleanupRecord(ctx, t, env.namespace, provider.UID), "the record stays for a sweep")
 }

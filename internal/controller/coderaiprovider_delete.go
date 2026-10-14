@@ -59,9 +59,17 @@ func checkAIProviderID(provider *coderv1alpha1.CoderAIProvider) error {
 // the finalizer stays.
 func (r *CoderAIProviderReconciler) deleteStep(ctx context.Context, provider *coderv1alpha1.CoderAIProvider) (release bool, step *aiProviderStep, err error) {
 	if provider.Status.ProviderID == "" && provider.Status.CreateAttemptTime == nil {
-		// Nothing of this object can exist in Coder: earlier Coder answers
-		// cleared the create marker, so the record goes too.
-		return true, nil, deleteCleanupRecord(ctx, r.Client, r.APIReader, r.OperatorNamespace, provider.UID)
+		// Earlier Coder answers cleared the create marker. A record with a
+		// provider ID still locates a provider, for example in a deployment
+		// that the control plane no longer reaches (CoderDeploymentChanged),
+		// so only a record without one proves that nothing exists.
+		record, _, err := readCleanupRecord(ctx, r.APIReader, r.OperatorNamespace, provider.UID)
+		if err != nil && !errors.Is(err, errNotACleanupRecord) {
+			return false, nil, err
+		}
+		if record == nil || record.CoderID == "" {
+			return true, nil, deleteCleanupRecord(ctx, r.Client, r.APIReader, r.OperatorNamespace, provider.UID)
+		}
 	}
 	ref := types.NamespacedName{Namespace: provider.Namespace, Name: provider.Spec.ControlPlaneRef.Name}
 	controlPlane := &coderv1alpha1.CoderControlPlane{}
