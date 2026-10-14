@@ -28,6 +28,12 @@ const MaxRedirects = 10
 // still wraps it in a *url.Error that names the target.
 var ErrCrossOrigin = errors.New("refusing redirect to a different origin than the coder URL")
 
+// ErrCrossOriginRequest is the error that RoundTripper returns for a request to
+// a different origin. The request can be a redirect that a client without
+// RedirectPolicy follows, or a direct call, so the message does not say
+// "redirect". net/http wraps it in a *url.Error that names the target.
+var ErrCrossOriginRequest = errors.New("refusing request to a different origin than the coder URL")
+
 // RedirectPolicy returns a CheckRedirect function that follows a redirect only
 // when it stays on the origin of origin, and stops after MaxRedirects.
 func RedirectPolicy(origin *url.URL) func(*http.Request, []*http.Request) error {
@@ -100,7 +106,7 @@ func effectivePort(u *url.URL) string {
 
 // RoundTripper returns an http.RoundTripper that sends a request through base
 // only when the request URL is on the origin of origin. It returns
-// ErrCrossOrigin for every other request, so a redirect that a caller follows
+// ErrCrossOriginRequest for every other request, so a redirect that a caller follows
 // without RedirectPolicy still cannot send the token to another origin.
 func RoundTripper(origin *url.URL, base http.RoundTripper) http.RoundTripper {
 	if origin == nil {
@@ -127,7 +133,7 @@ func (t *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 		if req.Body != nil {
 			_ = req.Body.Close()
 		}
-		return nil, ErrCrossOrigin
+		return nil, ErrCrossOriginRequest
 	}
 	return t.base.RoundTrip(req)
 }

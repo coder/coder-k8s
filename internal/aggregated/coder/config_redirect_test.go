@@ -14,6 +14,8 @@ import (
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+
+	"github.com/coder/coder-k8s/internal/sameorigin"
 )
 
 // TestNewSDKClient_RefusesCrossOriginRedirect checks that the aggregated
@@ -107,7 +109,7 @@ func TestNewSDKClient_WebsocketRefusesCrossOriginRedirect(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, _, err = client.WorkspaceBuildLogsAfter(ctx, uuid.New(), 0)
-	require.ErrorContains(t, err, "refusing redirect to a different origin")
+	require.ErrorIs(t, err, sameorigin.ErrCrossOriginRequest)
 
 	mu.Lock()
 	defer mu.Unlock()
