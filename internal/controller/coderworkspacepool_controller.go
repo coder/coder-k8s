@@ -77,7 +77,7 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	before := pool.Status.DeepCopy()
-	resolved, maxWorkspaces, step, err := r.resolve(ctx, pool)
+	resolved, step, err := r.resolve(ctx, pool)
 	if step, err = memberWaitOnWrongAnswer(ctx, step, err); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -103,8 +103,15 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	counts := countPoolMembers(pool, members.Items)
 
 	var requeue time.Duration
-	if step == nil {
-		step, requeue, err = r.createMembers(ctx, pool, &counts, maxWorkspaces)
+	switch {
+	case step != nil:
+	case !poolResolvedEqual(before.Resolved, pool.Status.Resolved):
+		// Members check their inputs against the pool's status.resolved in
+		// the shared cache. So the pool creates members only after a read
+		// of its own object shows the new resolved inputs.
+		requeue = time.Second
+	default:
+		step, requeue, err = r.createMembers(ctx, pool, &counts)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -134,21 +141,31 @@ func (r *CoderWorkspacePoolReconciler) deleteFailedMember(
 	members []coderv1alpha1.CoderWorkspacePoolMember,
 ) error {
 	st := &pool.Status
+	// Order failures and successes by when they happened, not by when the
+	// pool saw them: a member that became ready after a failure ends the run.
 	var failed *coderv1alpha1.CoderWorkspacePoolMember
+	var latestReady time.Time
 	for i := range members {
 		m := &members[i]
-		if st.LastFailure != nil && st.LastFailure.Time != nil && m.Status.ReadyTime != nil && m.Status.ReadyTime.After(st.LastFailure.Time.Time) {
-			st.ConsecutiveFailures = 0
+		if owner := metav1.GetControllerOf(m); owner == nil || owner.UID != pool.UID || m.Spec.ClaimRef != nil {
+			continue // Only the pool's own unclaimed members count.
 		}
-		owner := metav1.GetControllerOf(m)
-		if owner == nil || owner.UID != pool.UID || m.Spec.ClaimRef != nil || !m.DeletionTimestamp.IsZero() ||
-			m.Status.Phase != coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed {
+		if m.Status.ReadyTime != nil && m.Status.ReadyTime.After(latestReady) {
+			latestReady = m.Status.ReadyTime.Time
+		}
+		if !m.DeletionTimestamp.IsZero() || m.Status.Phase != coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed {
 			continue
 		}
-		if failed == nil || m.CreationTimestamp.Before(&failed.CreationTimestamp) {
+		if failed == nil || poolMemberFailedAt(m).Before(poolMemberFailedAt(failed)) {
 			failed = m
 		}
 	}
+	resetAfterReady := func() {
+		if st.LastFailure != nil && st.LastFailure.Time != nil && latestReady.After(st.LastFailure.Time.Time) {
+			st.ConsecutiveFailures = 0
+		}
+	}
+	resetAfterReady()
 	if failed == nil {
 		return nil
 	}
@@ -158,8 +175,9 @@ func (r *CoderWorkspacePoolReconciler) deleteFailedMember(
 		st.ConsecutiveFailures++
 		st.LastFailure = &coderv1alpha1.CoderWorkspacePoolFailure{
 			Member: failed.Name, Reason: failed.Status.Reason, Message: truncateTemplateTestMessage(failed.Status.Message),
-			Time: &metav1.Time{Time: r.Clock.Now()},
+			Time: &metav1.Time{Time: poolMemberFailedAt(failed)},
 		}
+		resetAfterReady() // A success after this failure already ended its run.
 		if err := r.writePoolStatus(ctx, pool, before); err != nil {
 			return err
 		}
@@ -175,13 +193,22 @@ func (r *CoderWorkspacePoolReconciler) deleteFailedMember(
 	return nil
 }
 
+// poolMemberFailedAt is when a failed member failed: the last change of its
+// Ready condition, else its creation.
+func poolMemberFailedAt(m *coderv1alpha1.CoderWorkspacePoolMember) time.Time {
+	if c := meta.FindStatusCondition(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionReady); c != nil {
+		return c.LastTransitionTime.Time
+	}
+	return m.CreationTimestamp.Time
+}
+
 // createMembers creates current members while all caps hold (plan 6.3 step
 // 7): current unclaimed members fewer than spec.replicas, building members
 // fewer than spec.maxInFlight, the owner's live members on this control
 // plane fewer than maxWorkspaces, and the failure backoff passed. It returns
 // the wait that stops it, if any, and when to read again.
 func (r *CoderWorkspacePoolReconciler) createMembers(
-	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, counts *poolMemberCounts, maxWorkspaces int32,
+	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, counts *poolMemberCounts,
 ) (*coderStep, time.Duration, error) {
 	st, now := &pool.Status, r.Clock.Now()
 	need := *pool.Spec.Replicas - counts.current // Claims add their demand in PR 11.
@@ -199,8 +226,21 @@ func (r *CoderWorkspacePoolReconciler) createMembers(
 				st.LastFailure.Member, st.LastFailure.Reason, retryAt.UTC().Format(time.RFC3339)), retryAt.Sub(now), nil
 		}
 	}
-	// An uncached count of the owner's members on this control plane, so
-	// that two pools never pass the cap together on a stale cache.
+	// The cap and the count both come from uncached reads, so that neither
+	// a cap that an admin just lowered nor two pools on a stale cache pass it.
+	controlPlane := &coderv1alpha1.CoderControlPlane{}
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Spec.ControlPlaneRef.Name}, controlPlane); err != nil {
+		return nil, 0, fmt.Errorf("get CoderControlPlane %s/%s: %w", pool.Namespace, pool.Spec.ControlPlaneRef.Name, err)
+	}
+	owner := workspacePoolOwner(controlPlane, st.Resolved.OwnerID)
+	if owner == nil {
+		return coderWait("OwnerNotAllowed", "CoderControlPlane %s does not list Coder user %s in spec.workspacePools.owners.",
+			controlPlane.Name, st.Resolved.OwnerID), poolResolvePoll, nil
+	}
+	if owner.MaxWorkspaces == nil {
+		return nil, 0, fmt.Errorf("assertion failed: CoderControlPlane %s has no defaulted maxWorkspaces for Coder user %s", controlPlane.Name, st.Resolved.OwnerID)
+	}
+	maxWorkspaces := *owner.MaxWorkspaces
 	all := &coderv1alpha1.CoderWorkspacePoolMemberList{}
 	if err := r.APIReader.List(ctx, all, client.InNamespace(pool.Namespace)); err != nil {
 		return nil, 0, fmt.Errorf("list pool members in namespace %s: %w", pool.Namespace, err)
@@ -264,63 +304,49 @@ func (r *CoderWorkspacePoolReconciler) createMember(ctx context.Context, pool *c
 // that new members can pin the returned values.
 func (r *CoderWorkspacePoolReconciler) resolve(
 	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool,
-) (*coderv1alpha1.CoderWorkspacePoolResolved, int32, *coderStep, error) {
-	resolved, controlPlane, step, err := r.resolveInputs(ctx, pool)
-	if step != nil || err != nil {
-		return nil, 0, step, err
-	}
-	maxWorkspaces := workspacePoolOwner(controlPlane, pool.Spec.OwnerUserID).MaxWorkspaces // The consent check found the entry.
-	if maxWorkspaces == nil {
-		return nil, 0, nil, fmt.Errorf("assertion failed: CoderControlPlane %s has no defaulted maxWorkspaces for Coder user %s", controlPlane.Name, pool.Spec.OwnerUserID)
-	}
-	return resolved, *maxWorkspaces, nil, nil
-}
-
-func (r *CoderWorkspacePoolReconciler) resolveInputs(
-	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool,
-) (*coderv1alpha1.CoderWorkspacePoolResolved, *coderv1alpha1.CoderControlPlane, *coderStep, error) {
+) (*coderv1alpha1.CoderWorkspacePoolResolved, *coderStep, error) {
 	spec := pool.Spec
 	sdk, controlPlane, wait, err := controlPlaneCoderClient(ctx, r.Client, pool.Namespace, spec.ControlPlaneRef.Name)
 	if wait != nil || err != nil {
 		if wait != nil {
-			return nil, nil, coderWait(wait.reason, "%s", wait.message), nil
+			return nil, coderWait(wait.reason, "%s", wait.message), nil
 		}
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	ownerID, err := uuid.Parse(spec.OwnerUserID)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("assertion failed: spec.ownerUserID %q passed validation but is not a UUID: %w", spec.OwnerUserID, err)
+		return nil, nil, fmt.Errorf("assertion failed: spec.ownerUserID %q passed validation but is not a UUID: %w", spec.OwnerUserID, err)
 	}
 	if step := workspacePoolConsent(controlPlane, spec.OwnerUserID, spec.Template); step != nil {
-		return nil, nil, step, nil
+		return nil, step, nil
 	}
 	owner, step, err := checkCoderWorkspaceOwner(ctx, sdk, ownerID)
 	if step != nil || err != nil {
-		return nil, nil, step, err
+		return nil, step, err
 	}
 	template, step, err := resolveCoderTemplate(ctx, sdk, spec.Template, owner)
 	if step != nil || err != nil {
-		return nil, nil, step, err
+		return nil, step, err
 	}
 	version, step, err := readCoderTemplateVersion(ctx, sdk, spec.Template, template, spec.Version.ID, spec.Version.Name)
 	if step != nil || err != nil {
-		return nil, nil, step, err
+		return nil, step, err
 	}
 	if step := checkCoderTemplateVersionUsable(version); step != nil {
-		return nil, nil, step, nil
+		return nil, step, nil
 	}
 	var presetID string
 	if spec.PresetName != "" {
 		presets, err := sdk.TemplateVersionPresets(ctx, version.ID)
 		if err != nil {
-			return nil, nil, coderStepUnavailable("get presets", err), nil
+			return nil, coderStepUnavailable("get presets", err), nil
 		}
 		i := slices.IndexFunc(presets, func(p codersdk.Preset) bool { return p.Name == spec.PresetName })
 		if i < 0 {
-			return nil, nil, coderWait("PresetNotFound", "Version %s has no preset %q.", version.Name, spec.PresetName), nil
+			return nil, coderWait("PresetNotFound", "Version %s has no preset %q.", version.Name, spec.PresetName), nil
 		}
 		if presets[i].ID == uuid.Nil {
-			return nil, nil, nil, &coderAnswerError{msg: "assertion failed: Coder answered a preset without an ID"}
+			return nil, nil, &coderAnswerError{msg: "assertion failed: Coder answered a preset without an ID"}
 		}
 		presetID = presets[i].ID.String()
 	}
@@ -332,7 +358,7 @@ func (r *CoderWorkspacePoolReconciler) resolveInputs(
 		OrganizationID: template.OrganizationID.String(), TemplateID: template.ID.String(),
 		TemplateVersionID: version.ID.String(), TemplateVersionName: version.Name, PresetID: presetID,
 		OwnerID: ownerID.String(), ParametersHash: workspacePoolParametersHash(params),
-	}, controlPlane, nil, nil
+	}, nil, nil
 }
 
 // poolResolvedEqual compares two resolved inputs without their time.

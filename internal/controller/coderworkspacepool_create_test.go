@@ -127,6 +127,25 @@ func TestPoolCreationCaps(t *testing.T) {
 	require.Len(t, e.poolMembers(t, "builders"), 2)
 }
 
+// failedStatus fails a member now, as the member reconciler does: phase
+// Failed and a Ready condition that changed at the test clock's time.
+func (e *poolMemberEnv) failedStatus(reason string) func(*coderv1alpha1.CoderWorkspacePoolMemberStatus) {
+	return func(s *coderv1alpha1.CoderWorkspacePoolMemberStatus) {
+		s.Phase, s.Reason, s.Message = coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed, reason, "The start build failed."
+		meta.SetStatusCondition(&s.Conditions, metav1.Condition{
+			Type: coderv1alpha1.CoderWorkspacePoolMemberConditionReady, Status: metav1.ConditionFalse,
+			Reason: reason, Message: reason, LastTransitionTime: metav1.NewTime(e.clock.Now()),
+		})
+	}
+}
+
+func (e *poolMemberEnv) readyAt(at time.Time) func(*coderv1alpha1.CoderWorkspacePoolMemberStatus) {
+	return func(s *coderv1alpha1.CoderWorkspacePoolMemberStatus) {
+		readyStatus(s)
+		s.ReadyTime = &metav1.Time{Time: at}
+	}
+}
+
 // TestPoolFailureBackoffAndLimit: the pool counts each failed member once,
 // deletes it, backs off, and stops after 5 failures in a row until its spec
 // changes. A member that becomes ready resets the count.
@@ -137,10 +156,7 @@ func TestPoolFailureBackoffAndLimit(t *testing.T) {
 		t.Helper()
 		members := e.poolMembers(t, e.pool.Name)
 		require.Len(t, members, 1)
-		e.setMemberStatus(t, memberKey(members[0]), func(s *coderv1alpha1.CoderWorkspacePoolMemberStatus) {
-			memberPhase(coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed)(s)
-			s.Reason, s.Message = "BuildFailed", "The start build failed."
-		})
+		e.setMemberStatus(t, memberKey(members[0]), e.failedStatus("BuildFailed"))
 		return members[0].Name
 	}
 	e.reconcilePool(t, 1)
@@ -180,10 +196,7 @@ func TestPoolFailureBackoffAndLimit(t *testing.T) {
 	members := e.poolMembers(t, e.pool.Name)
 	require.Len(t, members, 1)
 	e.clock.SetTime(e.clock.Now().Add(time.Minute))
-	e.setMemberStatus(t, memberKey(members[0]), func(s *coderv1alpha1.CoderWorkspacePoolMemberStatus) {
-		readyStatus(s)
-		s.ReadyTime = &metav1.Time{Time: e.clock.Now()}
-	})
+	e.setMemberStatus(t, memberKey(members[0]), e.readyAt(e.clock.Now()))
 	pool = e.reconcilePool(t, 1)
 	require.Zero(t, pool.Status.ConsecutiveFailures)
 	requirePool(t, pool, "Ready", true, false)
@@ -276,4 +289,92 @@ func TestPoolCountsFailedMemberOnce(t *testing.T) {
 	}})
 	require.True(t, apierrors.IsConflict(err), "the resourceVersion precondition refuses the delete: %v", err)
 	require.NotNil(t, e.reconcileMember(t, member, 0))
+}
+
+// TestPoolFailureRunOrder: failures and successes count in the order they
+// happened, not in the order the pool saw them, and only members that the
+// pool controls take part.
+func TestPoolFailureRunOrder(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(0)) })
+	start := e.clock.Now()
+	// Two members failed, then a third became ready, all before one reconcile.
+	for _, at := range []time.Duration{0, time.Second} {
+		e.clock.SetTime(start.Add(at))
+		e.setMemberStatus(t, e.createMember(t, nil), e.failedStatus("BuildFailed"))
+	}
+	e.setMemberStatus(t, e.createMember(t, nil), e.readyAt(start.Add(2*time.Second)))
+	// A ready member that the pool does not control never resets the count.
+	foreign := e.createMember(t, func(m *coderv1alpha1.CoderWorkspacePoolMember) { m.OwnerReferences = nil })
+	e.setMemberStatus(t, foreign, e.readyAt(start.Add(time.Hour)))
+	e.clock.SetTime(start.Add(time.Minute))
+	pool := e.reconcilePool(t, 3)
+	require.Zero(t, pool.Status.ConsecutiveFailures, "the success after both failures ended their run")
+
+	// A failure after the success starts a new run, and the foreign member
+	// does not end it.
+	e.clock.SetTime(start.Add(2 * time.Minute))
+	e.setMemberStatus(t, e.createMember(t, nil), e.failedStatus("BuildFailed"))
+	pool = e.reconcilePool(t, 1)
+	require.Equal(t, int32(1), pool.Status.ConsecutiveFailures)
+	require.True(t, pool.Status.LastFailure.Time.Time.Equal(start.Add(2*time.Minute)), "the failure time is when the member failed")
+}
+
+// staleControlPlaneClient answers control plane reads from a cache that
+// still holds a higher maxWorkspaces.
+type staleControlPlaneClient struct {
+	client.Client
+	maxWorkspaces int32
+}
+
+func (c staleControlPlaneClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := c.Client.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	if cp, ok := obj.(*coderv1alpha1.CoderControlPlane); ok && cp.Spec.WorkspacePools != nil {
+		for i := range cp.Spec.WorkspacePools.Owners {
+			cp.Spec.WorkspacePools.Owners[i].MaxWorkspaces = new(c.maxWorkspaces)
+		}
+	}
+	return nil
+}
+
+// TestPoolOwnerCapUncached: the cap comes from an uncached read, so a cap
+// that an admin just lowered holds even while the cache has the old one.
+func TestPoolOwnerCapUncached(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(3)) })
+	cp := &coderv1alpha1.CoderControlPlane{}
+	require.NoError(t, k8sClient.Get(e.ctx, types.NamespacedName{Namespace: e.ns, Name: "coder"}, cp))
+	cp.Spec.WorkspacePools.Owners[0].MaxWorkspaces = new(int32(1))
+	require.NoError(t, k8sClient.Update(e.ctx, cp))
+	r := &controller.CoderWorkspacePoolReconciler{Client: staleControlPlaneClient{k8sClient, 10}, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	for range 2 {
+		_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}})
+		require.NoError(t, err)
+	}
+	require.Len(t, e.poolMembers(t, e.pool.Name), 1)
+	requirePool(t, e.reconcilePool(t, 0), "OwnerWorkspaceLimit", false, false)
+}
+
+// TestPoolPublishesResolvedBeforeCreating: members check their inputs
+// against the pool's status.resolved, so the pool stores new resolved
+// inputs before it creates any member that pins them.
+func TestPoolPublishesResolvedBeforeCreating(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.pool.Status = coderv1alpha1.CoderWorkspacePoolStatus{}
+	require.NoError(t, k8sClient.Status().Update(e.ctx, e.pool))
+	pool := e.reconcilePool(t, 1)
+	require.NotNil(t, pool.Status.Resolved)
+	require.Empty(t, e.poolMembers(t, e.pool.Name), "no member before status.resolved is stored")
+	require.Equal(t, time.Second, e.lastStep.RequeueAfter)
+	e.reconcilePool(t, 1)
+	members := e.poolMembers(t, e.pool.Name)
+	require.Len(t, members, 1)
+	// The member accepts its inputs: it passes the check and creates.
+	member := e.reconcileMember(t, memberKey(members[0]), 3)
+	require.Equal(t, coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, member.Status.Phase, member.Status.Message)
 }

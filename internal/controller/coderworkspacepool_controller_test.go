@@ -89,7 +89,7 @@ func TestPoolResolvesInputs(t *testing.T) {
 
 	pool := e.reconcilePool(t, 1)
 	requirePool(t, pool, "WaitingForMembers", false, false)
-	require.Equal(t, 15*time.Second, e.lastStep.RequeueAfter)
+	require.Equal(t, time.Second, e.lastStep.RequeueAfter, "new resolved inputs: read again before creating")
 	require.Equal(t, "coder.com/workspace-pool-uid="+string(pool.UID), pool.Status.Selector, "HPA refuses an empty selector")
 	resolved := pool.Status.Resolved
 	require.NotNil(t, resolved)
@@ -116,6 +116,7 @@ func TestPoolResolvesInputs(t *testing.T) {
 	require.Equal(t, "v2", pool.Status.Resolved.TemplateVersionName)
 	require.Empty(t, pool.Status.Resolved.PresetID)
 	require.True(t, pool.Status.Resolved.ResolvedTime.Time.Equal(e.clock.Now()))
+	e.reconcilePool(t, 1)
 	require.Equal(t, time.Minute, e.lastStep.RequeueAfter, "the pool reads the active version again every minute")
 }
 
