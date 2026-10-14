@@ -163,15 +163,16 @@ func (r *CoderMCPServerReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		if !controllerutil.ContainsFinalizer(server, coderv1alpha1.CoderMCPServerCleanupFinalizer) {
 			return ctrl.Result{}, nil
 		}
-		if server.Status.ConfigID == "" && server.Status.CreateAttemptTime == nil {
-			// Nothing of this object can exist in Coder.
+		release, step, err := r.deleteStep(ctx, server)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if release {
+			r.sentCredentials.Delete(server.UID)
 			return ctrl.Result{}, r.patchFinalizer(ctx, server, false)
 		}
-		// Keep the finalizer: this controller version cannot prove what Coder
-		// holds, so it neither deletes nor forgets the config.
-		applyMCPServerStep(server, mcpServerWait(0, "DeletePending",
-			"MCP server config %s can exist in Coder. This controller version keeps the finalizer and deletes nothing.", server.Spec.Slug))
-		return ctrl.Result{}, r.writeStatus(ctx, server, before)
+		applyMCPServerStep(server, step)
+		return ctrl.Result{RequeueAfter: step.requeue}, r.writeStatus(ctx, server, before)
 	}
 
 	if err := r.patchFinalizer(ctx, server, true); err != nil {
