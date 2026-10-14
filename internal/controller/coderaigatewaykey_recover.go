@@ -11,7 +11,6 @@ import (
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -160,14 +159,14 @@ func aiGatewayKeyOrphan(key *coderv1alpha1.CoderAIGatewayKey, prefix string, own
 	return aiGatewayKeyDecision{}
 }
 
-// aiGatewayKeyRearmed reports that the kill switch fired for an older
-// generation, so a spec change re-arms the issue step (decision D6). When
-// another step replaced the kill switch's condition, the switch fires again
-// for the current generation: it fails closed.
+// aiGatewayKeyRearmed reports that the kill switch fired in an older
+// generation, so a spec change re-arms the issue step (decision D6). Status
+// keeps that generation, so a transient failure between the spec change and
+// the re-arm does not lose it. A kill switch that never fired (generation 0)
+// fires first: a spec change before the switch fired re-arms nothing.
 func aiGatewayKeyRearmed(key *coderv1alpha1.CoderAIGatewayKey) bool {
-	stalled := meta.FindStatusCondition(key.Status.Conditions, coderv1alpha1.CoderAIGatewayKeyConditionStalled)
-	return stalled != nil && stalled.Status == metav1.ConditionTrue && stalled.Reason == reasonKeyDeletedExternal &&
-		stalled.ObservedGeneration < key.Generation
+	fired := key.Status.KillSwitchGeneration
+	return fired > 0 && fired < key.Generation
 }
 
 // aiGatewayKeyDriftBlocked returns the SecretConflict stall when the Secret

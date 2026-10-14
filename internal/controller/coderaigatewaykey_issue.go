@@ -141,6 +141,7 @@ func setAIGatewayKeyCurrent(key *coderv1alpha1.CoderAIGatewayKey, serial int64, 
 	now := metav1.NewTime(at)
 	key.Status.CurrentKey = &coderv1alpha1.CoderAIGatewayKeyCurrent{Serial: serial, ID: id.String(), Name: name, IssuedAt: now}
 	key.Status.ConsecutiveIssueFailures = 0
+	key.Status.KillSwitchGeneration = 0 // The kill switch was for the replaced key.
 	if applied {
 		key.Status.LastHandledTrigger = key.Spec.Rotation.Trigger
 		key.Status.AppliedGeneration = key.Generation

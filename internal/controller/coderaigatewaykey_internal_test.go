@@ -77,9 +77,6 @@ func TestNextAIGatewayKeyAction(t *testing.T) {
 	otherStatus := &coderv1alpha1.CoderAIGatewayKeyCurrent{Serial: 2, ID: other.ID.String(), Name: other.Name}
 	now := time.Unix(1700000000, 0)
 	recent, settled := &metav1.Time{Time: now.Add(-time.Minute)}, &metav1.Time{Time: now.Add(-aiGatewayKeySettleWindow)}
-	stalledAt := func(reason string, generation int64) []metav1.Condition {
-		return []metav1.Condition{{Type: "Stalled", Status: metav1.ConditionTrue, Reason: reason, ObservedGeneration: generation}}
-	}
 	retiring := func(n int) []coderv1alpha1.CoderAIGatewayKeyRetiring {
 		var keys []coderv1alpha1.CoderAIGatewayKeyRetiring
 		for i := range n {
@@ -144,17 +141,17 @@ func TestNextAIGatewayKeyAction(t *testing.T) {
 		"steady state":        {status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus}, own: own, holds: current.ID, want: aiGatewayKeyReady},
 		"current key deleted": {status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus}, own: own[1:], holds: uuid.Nil, want: aiGatewayKeyKillSwitch},
 		// D6: only a spec change after the kill switch fired re-arms it. A
-		// replaced condition fires it again (fail closed).
+		// spec change before it fired re-arms nothing.
 		"kill switch, same generation": {
-			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus, Conditions: stalledAt(reasonKeyDeletedExternal, 1)},
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus, KillSwitchGeneration: 1},
 			own:    own[1:], generation: 1, want: aiGatewayKeyKillSwitch,
 		},
 		"kill switch, spec changed": {
-			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus, Conditions: stalledAt(reasonKeyDeletedExternal, 1)},
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus, KillSwitchGeneration: 1},
 			own:    own[1:], generation: 2, want: aiGatewayKeyRearm,
 		},
-		"kill switch condition replaced": {
-			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus, Conditions: stalledAt("NotAllowed", 1)},
+		"kill switch not fired, spec changed": {
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus},
 			own:    own[1:], generation: 2, want: aiGatewayKeyKillSwitch,
 		},
 		// A settled orphan never comes before the kill switch or a re-issue.

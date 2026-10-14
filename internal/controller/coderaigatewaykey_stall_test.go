@@ -145,7 +145,7 @@ func TestCoderAIGatewayKeyStallsKeepSweeping(t *testing.T) {
 
 // Plan R11 and D6: a key deleted in Coder stalls the object, and the stall
 // creates nothing, also while an orphan's DELETE keeps failing. Only a spec
-// change re-arms it.
+// change re-arms it, also when a failed LIST comes between the two.
 func TestCoderAIGatewayKeyKillSwitch(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -158,10 +158,7 @@ func TestCoderAIGatewayKeyKillSwitch(t *testing.T) {
 	got, _ = env.reconcile(ctx, t, got)
 	message := requireAIGatewayKeyStep(t, got, true, "KeyDeletedExternally")
 	require.Contains(t, message, "cannot delete orphan key "+orphan.name)
-	// A failed LIST replaces the condition. The kill switch fires again.
-	env.fake.failNext(routeAIGatewayKeys, fakeFault{Status: http.StatusBadGateway})
-	got, _ = env.reconcile(ctx, t, got)
-	requireAIGatewayKeyStep(t, got, false, "CoderUnavailable")
+	require.Equal(t, got.Generation, got.Status.KillSwitchGeneration)
 	for range 2 {
 		env.clock.Step(time.Hour)
 		got, _ = env.reconcile(ctx, t, got)
@@ -172,13 +169,24 @@ func TestCoderAIGatewayKeyKillSwitch(t *testing.T) {
 
 	got.Spec.Rotation.Trigger = "re-arm"
 	require.NoError(t, k8sClient.Update(ctx, got))
+	env.fake.failNext(routeAIGatewayKeys, fakeFault{Status: http.StatusBadGateway})
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyStep(t, got, false, "CoderUnavailable")
 	got, _ = env.reconcile(ctx, t, got)
 	requireAIGatewayKeyStep(t, got, false, "IssuingKey")
 	require.Nil(t, got.Status.CurrentKey)
+	require.Zero(t, got.Status.KillSwitchGeneration)
 	got, _ = env.reconcile(ctx, t, got)
 	requireAIGatewayKeyReady(t, got)
 	require.Equal(t, aiGatewayKeyPrefix(got)+"2", got.Status.CurrentKey.Name)
 	require.Empty(t, got.Status.RetiringKeys, "Coder deleted the old key, so nothing retires")
+	require.Equal(t, creates+1, env.fake.requestCount(routeCreateAIGatewayKey))
+
+	// The re-armed key is deleted too, without a spec change: the kill
+	// switch fires again instead of re-arming at once.
+	require.NoError(t, env.fake.client(t, 5*time.Second).DeleteAIGatewayKey(ctx, uuid.MustParse(got.Status.CurrentKey.ID)))
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyStep(t, got, true, "KeyDeletedExternally")
 	require.Equal(t, creates+1, env.fake.requestCount(routeCreateAIGatewayKey))
 }
 

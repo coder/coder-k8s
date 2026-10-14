@@ -180,9 +180,10 @@ func TestCoderAIGatewayKeyImmutableFieldsAndStatus(t *testing.T) {
 		CurrentKey: &coderv1alpha1.CoderAIGatewayKeyCurrent{
 			Serial: 3, ID: "1b2c0c2e-3a4d-4c55-9d2f-3f1b1f0c9a11", Name: "ck8s-0123456789abcdef0123456789abcdef-3", IssuedAt: now,
 		},
-		RetiringKeys:       []coderv1alpha1.CoderAIGatewayKeyRetiring{retiring(0), retiring(1), retiring(2)},
-		LastHandledTrigger: "rotate-1",
-		NextRotationTime:   &now,
+		RetiringKeys:         []coderv1alpha1.CoderAIGatewayKeyRetiring{retiring(0), retiring(1), retiring(2)},
+		LastHandledTrigger:   "rotate-1",
+		NextRotationTime:     &now,
+		KillSwitchGeneration: 2,
 	}
 	require.NoError(t, k8sClient.Status().Update(ctx, obj))
 

@@ -252,6 +252,11 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 		stamp := metav1.NewTime(now)
 		key.Status.LastCreateAttemptTime = &stamp
 	}
+	if current := key.Status.CurrentKey; current != nil && aiGatewayKeyListed(own, current.ID) {
+		// Coder lists the current key, so no kill switch holds. A stale
+		// generation would re-arm a later kill switch at once.
+		key.Status.KillSwitchGeneration = 0
+	}
 	if stall != nil {
 		// The Secret is not this object's, but its live value still decides
 		// I1 for the sweep (plan 4.8 rule 2).
@@ -292,6 +297,9 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 		}
 		return step, err
 	case aiGatewayKeyKillSwitch:
+		if key.Status.KillSwitchGeneration == 0 {
+			key.Status.KillSwitchGeneration = key.Generation
+		}
 		return r.deleteOnly(ctx, sdk, key, decision, aiGatewayKeyStalled(reasonKeyDeletedExternal,
 			"Coder no longer lists the current key %s. Someone deleted it outside the operator, so the operator creates no new key until the spec changes.",
 			key.Status.CurrentKey.Name), now), nil
@@ -299,7 +307,7 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 		// Coder no longer lists the key, so there is nothing to retire. The
 		// next reconcile issues a key behind the create gate.
 		deleted := key.Status.CurrentKey.Name
-		key.Status.CurrentKey, key.Status.NextRotationTime = nil, nil
+		key.Status.CurrentKey, key.Status.NextRotationTime, key.Status.KillSwitchGeneration = nil, nil, 0
 		return aiGatewayKeyWait(time.Second, reasonIssuingKey,
 			"The spec changed after the kill switch, so the operator issues a new key in place of deleted key %s.", deleted), nil
 	case aiGatewayKeyConflict:
