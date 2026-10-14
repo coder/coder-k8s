@@ -129,7 +129,7 @@ func (e *poolMemberEnv) createMember(t *testing.T, edit func(*coderv1alpha1.Code
 func (e *poolMemberEnv) reconcileMember(t *testing.T, key types.NamespacedName, n int) *coderv1alpha1.CoderWorkspacePoolMember {
 	t.Helper()
 	for range n {
-		r := &controller.CoderWorkspacePoolMemberReconciler{Client: k8sClient, Scheme: scheme, Clock: e.clock}
+		r := &controller.CoderWorkspacePoolMemberReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
 		var err error
 		e.lastStep, err = r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
 		require.NoError(t, err)
@@ -284,7 +284,7 @@ func TestPoolMemberMarkerConflictSendsNoRequest(t *testing.T) {
 	key := e.createMember(t, nil)
 	e.reconcileMember(t, key, 1) // Finalizer.
 
-	r := &controller.CoderWorkspacePoolMemberReconciler{Client: markerConflictClient{k8sClient}, Scheme: scheme, Clock: e.clock}
+	r := &controller.CoderWorkspacePoolMemberReconciler{Client: markerConflictClient{k8sClient}, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
 	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
 	require.True(t, apierrors.IsConflict(err), "the marker write conflict ends the reconcile: %v", err)
 	require.Zero(t, e.fake.requestCount(routeCreateWorkspace), "no create request without a stored marker")

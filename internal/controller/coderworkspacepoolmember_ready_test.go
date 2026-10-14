@@ -55,7 +55,7 @@ func TestPoolMemberBecomesReady(t *testing.T) {
 	// The same wait, when the read ends at the deadline, fails the member.
 	other, _, _ := e.createdMember(t, nil)
 	otherDeadline := e.reconcileMember(t, other, 0).CreationTimestamp.Add(900 * time.Second)
-	late := &controller.CoderWorkspacePoolMemberReconciler{Client: k8sClient, Scheme: scheme, Clock: &lateClock{times: []time.Time{otherDeadline.Add(-time.Second), otherDeadline}}}
+	late := &controller.CoderWorkspacePoolMemberReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Clock: &lateClock{times: []time.Time{otherDeadline.Add(-time.Second), otherDeadline}}}
 	_, err := late.Reconcile(e.ctx, ctrl.Request{NamespacedName: other})
 	require.NoError(t, err)
 	requireMemberFailed(t, e.reconcileMember(t, other, 0), "DeadlineExceeded", "Last wait: WaitingForBuild", metav1.ConditionFalse)
@@ -66,7 +66,7 @@ func TestPoolMemberBecomesReady(t *testing.T) {
 	// The read that finds the workspace ready ends at the deadline: it stays ready.
 	member := e.reconcileMember(t, key, 0)
 	deadline := member.CreationTimestamp.Add(900 * time.Second)
-	r := &controller.CoderWorkspacePoolMemberReconciler{Client: k8sClient, Scheme: scheme, Clock: &lateClock{times: []time.Time{deadline.Add(-time.Second), deadline}}}
+	r := &controller.CoderWorkspacePoolMemberReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Clock: &lateClock{times: []time.Time{deadline.Add(-time.Second), deadline}}}
 	result, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
 	require.NoError(t, err)
 	require.Equal(t, time.Minute, result.RequeueAfter, "a ready member reads its workspace every minute")

@@ -39,15 +39,6 @@ type CoderWorkspacePoolReconciler struct {
 	Clock     clock.PassiveClock
 }
 
-const (
-	// poolFailureLimit failed members in a row stop the pool from creating.
-	poolFailureLimit = 5
-	// poolFailureBackoffBase and poolFailureBackoffCap bound the wait after
-	// a failed member: 30 s times 2 to the power of (failures - 1).
-	poolFailureBackoffBase = 30 * time.Second
-	poolFailureBackoffCap  = 10 * time.Minute
-)
-
 // poolMemberCounts sorts the members of one pool.
 type poolMemberCounts struct {
 	unclaimed, ready, current, readyCurrent, outdated, bound, used int32
@@ -82,16 +73,9 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	}
 	if step == nil && !poolResolvedEqual(pool.Status.Resolved, resolved) {
-		if pool.Status.Resolved != nil && pool.Status.Resolved.TemplateVersionID != resolved.TemplateVersionID {
-			pool.Status.ConsecutiveFailures = 0 // A new version lifts the failure limit.
-		}
 		resolved.ResolvedTime = &metav1.Time{Time: r.Clock.Now()}
 		pool.Status.Resolved = resolved
 	}
-	if pool.Generation != before.ObservedGeneration {
-		pool.Status.ConsecutiveFailures = 0 // A spec change lifts the failure limit.
-	}
-	// Taken before any status write of this reconcile.
 	resolvedChanged := !poolResolvedEqual(before.Resolved, pool.Status.Resolved)
 
 	// One uncached list of the namespace's members: the pool's own members
@@ -107,9 +91,6 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if m.Labels[coderv1alpha1.CoderWorkspacePoolSelectorLabel] == string(pool.UID) || (owner != nil && owner.UID == pool.UID) {
 			members = append(members, m)
 		}
-	}
-	if err := r.deleteFailedMember(ctx, pool, before, members); err != nil {
-		return ctrl.Result{}, err
 	}
 	counts := countPoolMembers(pool, members)
 
@@ -144,103 +125,19 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	return ctrl.Result{}, nil
 }
 
-// deleteFailedMember counts the oldest failed unclaimed member of the pool
-// once, stores the count, and then deletes the member (plan 6.3 step 6).
-// A member that becomes ready after the last failure resets the count.
-func (r *CoderWorkspacePoolReconciler) deleteFailedMember(
-	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, before *coderv1alpha1.CoderWorkspacePoolStatus,
-	members []coderv1alpha1.CoderWorkspacePoolMember,
-) error {
-	st := &pool.Status
-	// Order failures and successes by when they happened, not by when the
-	// pool saw them: a member that became ready after a failure ends the run.
-	var failed *coderv1alpha1.CoderWorkspacePoolMember
-	var latestReady time.Time
-	for i := range members {
-		m := &members[i]
-		if owner := metav1.GetControllerOf(m); owner == nil || owner.UID != pool.UID || m.Spec.ClaimRef != nil {
-			continue // Only the pool's own unclaimed members count.
-		}
-		if m.Status.ReadyTime != nil && m.Status.ReadyTime.After(latestReady) {
-			latestReady = m.Status.ReadyTime.Time
-		}
-		if !m.DeletionTimestamp.IsZero() || m.Status.Phase != coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed {
-			continue
-		}
-		if failed == nil || poolMemberFailedAt(m).Before(poolMemberFailedAt(failed)) {
-			failed = m
-		}
-	}
-	resetAfterReady := func() {
-		if st.LastFailure != nil && st.LastFailure.Time != nil && latestReady.After(st.LastFailure.Time.Time) {
-			st.ConsecutiveFailures = 0
-		}
-	}
-	resetAfterReady()
-	if failed == nil {
-		return nil
-	}
-	// A failure of a member with old inputs belongs to a run that a new
-	// version or a spec change already ended: delete it without counting.
-	current := poolMemberInputMismatch(failed, pool) == ""
-	if current && (st.LastFailure == nil || st.LastFailure.Member != failed.Name) {
-		// Store the count before the delete, so a failed delete or a crash
-		// never counts the member twice.
-		st.ConsecutiveFailures++
-		st.LastFailure = &coderv1alpha1.CoderWorkspacePoolFailure{
-			Member: failed.Name, Reason: failed.Status.Reason, Message: truncateTemplateTestMessage(failed.Status.Message),
-			Time: &metav1.Time{Time: poolMemberFailedAt(failed)},
-		}
-		resetAfterReady() // A success after this failure already ended its run.
-		if err := r.writePoolStatus(ctx, pool, before); err != nil {
-			return err
-		}
-		*before = *pool.Status.DeepCopy()
-	}
-	// The preconditions keep the pool from deleting a member that changed
-	// after the list.
-	uid, version := failed.UID, failed.ResourceVersion
-	if err := r.Delete(ctx, failed, client.Preconditions{UID: &uid, ResourceVersion: &version}); client.IgnoreNotFound(err) != nil {
-		return fmt.Errorf("delete failed pool member %s/%s: %w", failed.Namespace, failed.Name, err)
-	}
-	failed.DeletionTimestamp = &metav1.Time{Time: r.Clock.Now()} // The counts skip it.
-	return nil
-}
-
-// poolMemberFailedAt is when a failed member failed. The member sets its
-// WorkspaceDeleted condition first when it fails, so its transition time is
-// the failure time. Ready is already False while a member builds, so its
-// time is the start of the build. Without the condition: the creation.
-func poolMemberFailedAt(m *coderv1alpha1.CoderWorkspacePoolMember) time.Time {
-	if c := meta.FindStatusCondition(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionWorkspaceDeleted); c != nil {
-		return c.LastTransitionTime.Time
-	}
-	return m.CreationTimestamp.Time
-}
-
 // createMembers creates current members while all caps hold (plan 6.3 step
 // 7): current unclaimed members fewer than spec.replicas, building members
 // fewer than spec.maxInFlight, the owner's live members on this control
-// plane fewer than maxWorkspaces, and the failure backoff passed. It returns
-// the wait that stops it, if any, and when to read again.
+// plane fewer than maxWorkspaces. It returns the wait that stops it, if any,
+// and when to read again. Failed members never count, so the pool replaces
+// them; the owner cap bounds the members that a failing template leaves.
 func (r *CoderWorkspacePoolReconciler) createMembers(
 	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, all []coderv1alpha1.CoderWorkspacePoolMember, counts *poolMemberCounts,
 ) (*coderStep, time.Duration, error) {
-	st, now := &pool.Status, r.Clock.Now()
+	st := &pool.Status
 	need := *pool.Spec.Replicas - counts.current // Claims add their demand in PR 11.
 	if need <= 0 {
 		return nil, 0, nil
-	}
-	if st.ConsecutiveFailures >= poolFailureLimit {
-		return coderFail("MemberFailureLimit", "%d members failed in a row. Change the pool or wait for a new version.",
-			st.ConsecutiveFailures), 0, nil
-	}
-	if st.ConsecutiveFailures > 0 && st.LastFailure != nil && st.LastFailure.Time != nil {
-		backoff := poolFailureBackoffBase << (st.ConsecutiveFailures - 1)
-		if retryAt := st.LastFailure.Time.Add(min(backoff, poolFailureBackoffCap)); now.Before(retryAt) {
-			return coderWait("FailureBackoff", "Member %s failed with %s. The pool creates the next member at %s.",
-				st.LastFailure.Member, st.LastFailure.Reason, retryAt.UTC().Format(time.RFC3339)), retryAt.Sub(now), nil
-		}
 	}
 	// The cap and the count both come from uncached reads, so that neither
 	// a cap that an admin just lowered nor two pools on a stale cache pass it.

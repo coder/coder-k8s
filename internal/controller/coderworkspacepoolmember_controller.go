@@ -40,7 +40,10 @@ const (
 // rules, and cleanup follow before activation.
 type CoderWorkspacePoolMemberReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	// APIReader reads the pool and the control plane's consent without the
+	// cache right before the create request.
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
 	Clock  clock.PassiveClock
 
 	rateLimited coderBackoff // Keyed by types.NamespacedName.
@@ -48,8 +51,8 @@ type CoderWorkspacePoolMemberReconciler struct {
 
 // Reconcile runs the first step of the member that applies, then returns.
 func (r *CoderWorkspacePoolMemberReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	if r.Client == nil || r.Scheme == nil || r.Clock == nil {
-		return ctrl.Result{}, errors.New("assertion failed: pool member reconciler needs a client, a scheme, and a clock")
+	if r.Client == nil || r.APIReader == nil || r.Scheme == nil || r.Clock == nil {
+		return ctrl.Result{}, errors.New("assertion failed: pool member reconciler needs a client, an API reader, a scheme, and a clock")
 	}
 	// Only a wait after HTTP 429 keeps the backoff count.
 	keepBackoff := false
@@ -180,8 +183,10 @@ func (r *CoderWorkspacePoolMemberReconciler) checkCreate(
 	if owner == nil || owner.APIVersion != coderv1alpha1.GroupVersion.String() || owner.Kind != "CoderWorkspacePool" || owner.Name != spec.PoolName {
 		return nil, coderFail("NotOwned", "CoderWorkspacePool %s does not control this member, so it creates no workspace.", spec.PoolName), nil
 	}
+	// Uncached: the pool's status.resolved and the consent below decide a
+	// create that hands the owner's token to a template.
 	pool := &coderv1alpha1.CoderWorkspacePool{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: member.Namespace, Name: spec.PoolName}, pool); apierrors.IsNotFound(err) {
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: member.Namespace, Name: spec.PoolName}, pool); apierrors.IsNotFound(err) {
 		return nil, coderWait("PoolNotFound", "CoderWorkspacePool %s does not exist.", spec.PoolName), nil
 	} else if err != nil {
 		return nil, nil, fmt.Errorf("get coderworkspacepool %s/%s: %w", member.Namespace, spec.PoolName, err)
@@ -203,7 +208,11 @@ func (r *CoderWorkspacePoolMemberReconciler) checkCreate(
 		}
 		return nil, nil, err
 	}
-	if step := workspacePoolConsent(controlPlane, spec.OwnerID, pool.Spec.Template); step != nil {
+	fresh := &coderv1alpha1.CoderControlPlane{}
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: member.Namespace, Name: controlPlane.Name}, fresh); err != nil {
+		return nil, nil, fmt.Errorf("get CoderControlPlane %s/%s: %w", member.Namespace, controlPlane.Name, err)
+	}
+	if step := workspacePoolConsent(fresh, spec.OwnerID, pool.Spec.Template); step != nil {
 		return nil, step, nil
 	}
 	ownerUser, step, err := checkCoderWorkspaceOwner(ctx, sdk, uuid.MustParse(spec.OwnerID))
