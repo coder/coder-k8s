@@ -257,7 +257,8 @@ func (r *CoderWorkspacePoolReconciler) deleteFailedMembers(
 // unclaimed members that someone used (plan 6.3 step 4, decision D6). A
 // used member then never counts as unclaimed again, and neither the pool
 // nor its deletion deletes it. It keeps the pool label for
-// status.usedReplicas. The update carries the listed resourceVersion, and
+// status.usedReplicas, set again if it drifted. The update carries the
+// listed resourceVersion, and
 // the listed members stay as they were, so the later steps decide on the
 // list.
 func (r *CoderWorkspacePoolReconciler) releaseUsedMembers(
@@ -272,6 +273,11 @@ func (r *CoderWorkspacePoolReconciler) releaseUsedMembers(
 		}
 		released := m.DeepCopy()
 		released.OwnerReferences = slices.DeleteFunc(released.OwnerReferences, func(o metav1.OwnerReference) bool { return o.UID == pool.UID })
+		// The label is the only link left, so repair a drifted one.
+		if released.Labels == nil {
+			released.Labels = map[string]string{}
+		}
+		released.Labels[coderv1alpha1.CoderWorkspacePoolSelectorLabel] = string(pool.UID)
 		if err := r.Update(ctx, released); err != nil {
 			return fmt.Errorf("release used pool member %s/%s: %w", m.Namespace, m.Name, err)
 		}

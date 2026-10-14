@@ -114,7 +114,9 @@ func TestPoolReleasesUsedMember(t *testing.T) {
 	t.Parallel()
 	e := newPoolMemberEnv(t)
 	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(2)) })
-	used := e.createMember(t, nil)
+	// The label drifted: the release sets it again, because it is the only
+	// link to the pool after the release.
+	used := e.createMember(t, func(m *coderv1alpha1.CoderWorkspacePoolMember) { m.Labels = nil })
 	e.setMemberStatus(t, used, withWorkspace(usedStatus))
 	ready := e.createMember(t, nil)
 	e.setMemberStatus(t, ready, withWorkspace(readyStatus))
@@ -128,6 +130,7 @@ func TestPoolReleasesUsedMember(t *testing.T) {
 	require.Equal(t, string(pool.UID), released.Labels[coderv1alpha1.CoderWorkspacePoolSelectorLabel])
 	require.Equal(t, int32(1), pool.Status.UsedReplicas)
 	require.Zero(t, pool.Status.Replicas)
+	require.Equal(t, int32(1), e.reconcilePool(t, 1).Status.UsedReplicas, "found again through the repaired label")
 
 	// The member reconciler marks the member used between the list and the
 	// delete: the resourceVersion precondition refuses the delete.
