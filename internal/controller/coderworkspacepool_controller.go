@@ -146,7 +146,8 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return ctrl.Result{}, err
 		}
 	}
-	if err := r.deleteUnclaimedMembers(ctx, pool, members, step); err != nil {
+	// The namespace list, where trimToOwnerCap marked its deletes.
+	if err := r.deleteUnclaimedMembers(ctx, pool, all.Items, step); err != nil {
 		return ctrl.Result{}, err
 	}
 	r.applyPoolStatus(pool, counts, step)

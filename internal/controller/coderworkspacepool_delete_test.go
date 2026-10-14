@@ -32,12 +32,6 @@ var usedStatus = memberPhase(coderv1alpha1.CoderWorkspacePoolMemberPhaseReady,
 	memberCondition(coderv1alpha1.CoderWorkspacePoolMemberConditionReady, metav1.ConditionTrue, "WorkspaceReady"),
 	memberCondition(coderv1alpha1.CoderWorkspacePoolMemberConditionUsed, metav1.ConditionTrue, "Used"))
 
-// gone reports whether the member no longer exists.
-func (e *poolMemberEnv) gone(t *testing.T, key types.NamespacedName) bool {
-	t.Helper()
-	return e.reconcileMember(t, key, 0) == nil
-}
-
 // TestPoolDeleteOrder: on a scale-down the pool deletes current members
 // without a create request first, then members that are not ready (newest
 // first), then ready members (oldest first).
@@ -46,6 +40,7 @@ func TestPoolDeleteOrder(t *testing.T) {
 	e := newPoolMemberEnv(t)
 	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(5)) })
 	now := e.clock.Now()
+	pending := e.createMember(t, nil) // The oldest, but it goes first.
 	readyNew := e.createMember(t, nil)
 	e.setMemberStatus(t, readyNew, withWorkspace(e.readyAt(now.Add(-time.Minute))))
 	readyOld := e.createMember(t, nil)
@@ -55,7 +50,6 @@ func TestPoolDeleteOrder(t *testing.T) {
 	time.Sleep(1100 * time.Millisecond) // creationTimestamp has second precision.
 	buildingNew := e.createMember(t, nil)
 	e.setMemberStatus(t, buildingNew, withWorkspace(nil))
-	pending := e.createMember(t, nil)
 	e.reconcilePool(t, 1)
 	require.Len(t, e.poolMembers(t, e.pool.Name), 5)
 
@@ -189,4 +183,31 @@ func TestPoolConsentLossDeletesUnclaimed(t *testing.T) {
 			require.False(t, meta.IsStatusConditionTrue(pool.Status.Conditions, coderv1alpha1.CoderWorkspacePoolConditionReady))
 		})
 	}
+}
+
+// TestPoolScaleDownAndLoweredCap: replicas and maxWorkspaces go down
+// together while members wait with finalizers. The pool deletes each member
+// once: the scale-down skips the members that the cap already deleted.
+func TestPoolScaleDownAndLoweredCap(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) {
+		s.Replicas, s.MaxInFlight = new(int32(3)), new(int32(3))
+	})
+	e.reconcilePool(t, 2)
+	members := e.poolMembers(t, e.pool.Name)
+	require.Len(t, members, 3)
+	for _, m := range members {
+		e.reconcileMember(t, memberKey(m), 1) // The finalizer only.
+	}
+	e.setOwnerCap(t, 2)
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(1)) })
+	e.reconcilePool(t, 1) // Fails on a 409 if one member is deleted twice.
+	deleting := 0
+	for _, m := range e.poolMembers(t, e.pool.Name) {
+		if !m.DeletionTimestamp.IsZero() {
+			deleting++
+		}
+	}
+	require.Equal(t, 2, deleting, "the cap deletes one, the scale-down one more")
 }
