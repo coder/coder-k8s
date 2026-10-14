@@ -1,8 +1,10 @@
 package sameorigin_test
 
 import (
+	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -59,4 +61,77 @@ func TestRedirectPolicyStopsAfterMaxRedirects(t *testing.T) {
 	via := make([]*http.Request, sameorigin.MaxRedirects)
 	err = sameorigin.RedirectPolicy(origin)(&http.Request{URL: origin}, via)
 	require.ErrorContains(t, err, "stopped after 10 redirects")
+}
+
+// recordingTransport records the requests that reach it and the calls to
+// CloseIdleConnections.
+type recordingTransport struct {
+	requests  []*http.Request
+	idleClose int
+}
+
+func (r *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.requests = append(r.requests, req)
+	return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+}
+
+func (r *recordingTransport) CloseIdleConnections() { r.idleClose++ }
+
+// closeRecorder is a request body that records whether it was closed.
+type closeRecorder struct {
+	io.Reader
+	closed bool
+}
+
+func (c *closeRecorder) Close() error {
+	c.closed = true
+	return nil
+}
+
+func TestRoundTripper(t *testing.T) {
+	t.Parallel()
+
+	origin, err := url.Parse("https://coder.example.com")
+	require.NoError(t, err)
+
+	t.Run("refuses another origin without calling base and closes the body", func(t *testing.T) {
+		t.Parallel()
+
+		base := &recordingTransport{}
+		body := &closeRecorder{Reader: strings.NewReader("payload")}
+		req, err := http.NewRequest(http.MethodPost, "https://attacker.example.com/api/v2/x", body)
+		require.NoError(t, err)
+
+		res, err := sameorigin.RoundTripper(origin, base).RoundTrip(req)
+		if res != nil {
+			_ = res.Body.Close()
+		}
+		require.ErrorIs(t, err, sameorigin.ErrCrossOriginRequest)
+		require.NotContains(t, err.Error(), "redirect")
+		require.Nil(t, res)
+		require.Empty(t, base.requests, "the base transport must receive no request")
+		require.True(t, body.closed, "a refused request must close its body")
+	})
+
+	t.Run("passes the same origin through to base", func(t *testing.T) {
+		t.Parallel()
+
+		base := &recordingTransport{}
+		req, err := http.NewRequest(http.MethodGet, "https://coder.example.com:443/api/v2/x", nil)
+		require.NoError(t, err)
+
+		res, err := sameorigin.RoundTripper(origin, base).RoundTrip(req)
+		require.NoError(t, err)
+		defer func() { _ = res.Body.Close() }()
+		require.Equal(t, http.StatusOK, res.StatusCode)
+		require.Equal(t, []*http.Request{req}, base.requests)
+	})
+
+	t.Run("forwards CloseIdleConnections", func(t *testing.T) {
+		t.Parallel()
+
+		base := &recordingTransport{}
+		(&http.Client{Transport: sameorigin.RoundTripper(origin, base)}).CloseIdleConnections()
+		require.Equal(t, 1, base.idleClose)
+	})
 }
