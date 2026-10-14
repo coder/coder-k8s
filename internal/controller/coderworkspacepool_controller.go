@@ -89,9 +89,12 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		pool.Status.Resolved = resolved
 	}
 	resolvedChanged := !poolResolvedEqual(before.Resolved, pool.Status.Resolved)
-	if pool.Generation != before.ObservedGeneration ||
-		(before.Resolved != nil && pool.Status.Resolved != nil && before.Resolved.TemplateVersionID != pool.Status.Resolved.TemplateVersionID) {
-		// A spec change or a new version starts a new run of failures.
+	if resolvedChanged && before.Resolved != nil {
+		// Only an input that can fix a failure starts a new run of failures:
+		// the template, the version, the preset, the parameters, the owner,
+		// or readyTimeoutSeconds. A rescale, for example by an HPA through
+		// /scale, keeps the run, so a pool that keeps rescaling still stops
+		// at the failure limit.
 		pool.Status.FailureRunStart = &metav1.Time{Time: r.Clock.Now()}
 	}
 
@@ -123,6 +126,9 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		// its own object shows the new resolved inputs stored.
 		requeue = time.Second
 	default:
+		if err := r.trimToOwnerCap(ctx, pool, all.Items); err != nil {
+			return ctrl.Result{}, err
+		}
 		step, requeue, err = r.createMembers(ctx, pool, all.Items, &counts)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -147,8 +153,8 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 // deleteFailedMembers records the failures of the pool's failed unclaimed
 // members in the current run, stores them, and then deletes all those
-// members (plan 6.3 step 6). The run starts at the latest spec or version
-// change or member ready time. A failure counts once, and only when it
+// members (plan 6.3 step 6). The run starts at the latest change of
+// status.resolved or member ready time. A failure counts once, and only when it
 // happened after the run start; a failure in the same second as the start
 // does not count. A failed member with old inputs never counts.
 func (r *CoderWorkspacePoolReconciler) deleteFailedMembers(
@@ -248,7 +254,7 @@ func (r *CoderWorkspacePoolReconciler) createMembers(
 		return nil, 0, nil
 	}
 	if n := len(st.RunFailures); n >= poolFailureLimit {
-		return coderFail("MemberFailureLimit", "%d members failed in a row. Change the pool or wait for a new version.", n), 0, nil
+		return coderFail("MemberFailureLimit", "%d members failed in a row. Change the template, version, preset, parameters, or readyTimeoutSeconds, or wait for a new version.", n), 0, nil
 	} else if n > 0 {
 		last := st.RunFailures[n-1]
 		if retryAt := last.Time.Add(min(poolFailureBackoffBase<<(n-1), poolFailureBackoffCap)); now.Before(retryAt) {
@@ -275,16 +281,7 @@ func (r *CoderWorkspacePoolReconciler) createMembers(
 		return nil, 0, fmt.Errorf("assertion failed: CoderControlPlane %s has no defaulted maxWorkspaces for Coder user %s", controlPlane.Name, st.Resolved.OwnerID)
 	}
 	maxWorkspaces := *owner.MaxWorkspaces
-	ownerID := uuid.MustParse(st.Resolved.OwnerID) // resolve parsed it.
-	var live int32
-	for i := range all {
-		m := &all[i]
-		id, err := uuid.Parse(m.Spec.OwnerID)
-		if err == nil && id == ownerID && m.Spec.ControlPlaneRef.Name == pool.Spec.ControlPlaneRef.Name &&
-			!meta.IsStatusConditionTrue(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionWorkspaceDeleted) {
-			live++
-		}
-	}
+	live := poolOwnerLiveMembers(all, st.Resolved.OwnerID, pool.Spec.ControlPlaneRef.Name, nil)
 	n := min(need, *pool.Spec.MaxInFlight-counts.building, maxWorkspaces-live)
 	for range n {
 		if err := r.createMember(ctx, pool); err != nil {
@@ -299,6 +296,67 @@ func (r *CoderWorkspacePoolReconciler) createMembers(
 			st.Resolved.OwnerID, live+max(n, 0), maxWorkspaces, pool.Spec.ControlPlaneRef.Name), poolResolvePoll, nil
 	}
 	return nil, 0, nil
+}
+
+// poolOwnerLiveMembers counts the members of one owner on one control plane
+// whose workspace is not deleted, and that match, if match is set.
+func poolOwnerLiveMembers(
+	all []coderv1alpha1.CoderWorkspacePoolMember, ownerID, controlPlane string, match func(*coderv1alpha1.CoderWorkspacePoolMember) bool,
+) int32 {
+	want := uuid.MustParse(ownerID) // Callers pass a checked owner ID.
+	var live int32
+	for i := range all {
+		m := &all[i]
+		id, err := uuid.Parse(m.Spec.OwnerID)
+		if err == nil && id == want && m.Spec.ControlPlaneRef.Name == controlPlane && (match == nil || match(m)) &&
+			!meta.IsStatusConditionTrue(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionWorkspaceDeleted) {
+			live++
+		}
+	}
+	return live
+}
+
+// trimToOwnerCap deletes the pool's members that sent no create request yet,
+// newest first, while the owner has more live members than maxWorkspaces
+// allows, because an admin lowered it (Codex 4271920249). Such a member only
+// waits at its own cap check until its deadline fails it. The preconditions
+// keep a member that wrote its create marker after the list.
+func (r *CoderWorkspacePoolReconciler) trimToOwnerCap(
+	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, all []coderv1alpha1.CoderWorkspacePoolMember,
+) error {
+	controlPlane := &coderv1alpha1.CoderControlPlane{}
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Spec.ControlPlaneRef.Name}, controlPlane); err != nil {
+		return fmt.Errorf("get CoderControlPlane %s/%s: %w", pool.Namespace, pool.Spec.ControlPlaneRef.Name, err)
+	}
+	owner := workspacePoolOwner(controlPlane, pool.Status.Resolved.OwnerID)
+	if !controlPlane.DeletionTimestamp.IsZero() || owner == nil || owner.MaxWorkspaces == nil {
+		return nil // createMembers reports these.
+	}
+	excess := poolOwnerLiveMembers(all, pool.Status.Resolved.OwnerID, pool.Spec.ControlPlaneRef.Name, nil) - *owner.MaxWorkspaces
+	if excess <= 0 {
+		return nil
+	}
+	var pending []*coderv1alpha1.CoderWorkspacePoolMember
+	for i := range all {
+		m := &all[i]
+		controller := metav1.GetControllerOf(m)
+		if controller != nil && controller.UID == pool.UID && m.Spec.ClaimRef == nil && m.DeletionTimestamp.IsZero() &&
+			m.Status.Phase != coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed && !poolMemberMayHaveWorkspace(m) {
+			pending = append(pending, m)
+		}
+	}
+	slices.SortStableFunc(pending, func(a, b *coderv1alpha1.CoderWorkspacePoolMember) int {
+		return b.CreationTimestamp.Compare(a.CreationTimestamp.Time)
+	})
+	pending = pending[:min(int(excess), len(pending))]
+	var errs []error
+	for _, m := range pending {
+		uid, version := m.UID, m.ResourceVersion
+		if err := r.Delete(ctx, m, client.Preconditions{UID: &uid, ResourceVersion: &version}); client.IgnoreNotFound(err) != nil {
+			errs = append(errs, fmt.Errorf("delete pool member %s/%s above the owner cap: %w", m.Namespace, m.Name, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // createMember creates one member that pins the pool's resolved inputs.
@@ -317,7 +375,7 @@ func (r *CoderWorkspacePoolReconciler) createMember(ctx context.Context, pool *c
 			ControlPlaneRef: pool.Spec.ControlPlaneRef, PoolName: pool.Name,
 			OwnerID: resolved.OwnerID, OrganizationID: resolved.OrganizationID, TemplateID: resolved.TemplateID,
 			TemplateVersionID: resolved.TemplateVersionID, PresetID: resolved.PresetID,
-			Parameters: params, ParametersHash: resolved.ParametersHash, ReadyTimeoutSeconds: *pool.Spec.ReadyTimeoutSeconds,
+			Parameters: params, ParametersHash: resolved.ParametersHash, ReadyTimeoutSeconds: resolved.ReadyTimeoutSeconds,
 		},
 	}
 	if err := controllerutil.SetControllerReference(pool, member, r.Scheme); err != nil {
@@ -387,7 +445,7 @@ func (r *CoderWorkspacePoolReconciler) resolve(
 	return &coderv1alpha1.CoderWorkspacePoolResolved{
 		OrganizationID: template.OrganizationID.String(), TemplateID: template.ID.String(),
 		TemplateVersionID: version.ID.String(), TemplateVersionName: version.Name, PresetID: presetID,
-		OwnerID: ownerID.String(), ParametersHash: workspacePoolParametersHash(params),
+		OwnerID: ownerID.String(), ParametersHash: workspacePoolParametersHash(params), ReadyTimeoutSeconds: *spec.ReadyTimeoutSeconds,
 	}, nil, nil
 }
 

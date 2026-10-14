@@ -307,15 +307,16 @@ spec:
               consecutiveFailures:
                 description: |-
                   ConsecutiveFailures is the number of member failures in a row: the
-                  length of RunFailures. A ready member, a spec change, and a new
-                  version reset it.
+                  length of RunFailures. A ready member and a change of status.resolved
+                  (template, version, preset, parameters, owner, or readyTimeoutSeconds)
+                  reset it. A change of replicas or maxInFlight does not.
                 format: int32
                 type: integer
               failureRunStart:
                 description: |-
                   FailureRunStart is the start of the current run of failures: the
-                  latest of the last spec or version change and the newest ready time
-                  of a member. Failures at or before it do not count.
+                  latest of the last change of status.resolved and the newest ready
+                  time of a member. Failures at or before it do not count.
                 format: date-time
                 type: string
               lastFailure:
@@ -386,6 +387,12 @@ spec:
                   presetID:
                     description: PresetID is the UUID of the preset named by spec.presetName.
                     type: string
+                  readyTimeoutSeconds:
+                    description: |-
+                      ReadyTimeoutSeconds is spec.readyTimeoutSeconds. A change of any of
+                      these values starts a new run of failures, because it can fix one.
+                    format: int32
+                    type: integer
                   resolvedTime:
                     description: ResolvedTime is when the controller last changed
                       these values.

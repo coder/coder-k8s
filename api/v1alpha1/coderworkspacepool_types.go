@@ -232,6 +232,10 @@ type CoderWorkspacePoolResolved struct {
 	// current members from outdated ones without storing values twice.
 	// +optional
 	ParametersHash string `json:"parametersHash,omitempty"`
+	// ReadyTimeoutSeconds is spec.readyTimeoutSeconds. A change of any of
+	// these values starts a new run of failures, because it can fix one.
+	// +optional
+	ReadyTimeoutSeconds int32 `json:"readyTimeoutSeconds,omitempty"`
 	// ResolvedTime is when the controller last changed these values.
 	// +optional
 	ResolvedTime *metav1.Time `json:"resolvedTime,omitempty"`
@@ -293,16 +297,17 @@ type CoderWorkspacePoolStatus struct {
 	// +optional
 	Resolved *CoderWorkspacePoolResolved `json:"resolved,omitempty"`
 	// ConsecutiveFailures is the number of member failures in a row: the
-	// length of RunFailures. A ready member, a spec change, and a new
-	// version reset it.
+	// length of RunFailures. A ready member and a change of status.resolved
+	// (template, version, preset, parameters, owner, or readyTimeoutSeconds)
+	// reset it. A change of replicas or maxInFlight does not.
 	// +optional
 	ConsecutiveFailures int32 `json:"consecutiveFailures,omitempty"`
 	// LastFailure is the newest member failure.
 	// +optional
 	LastFailure *CoderWorkspacePoolFailure `json:"lastFailure,omitempty"`
 	// FailureRunStart is the start of the current run of failures: the
-	// latest of the last spec or version change and the newest ready time
-	// of a member. Failures at or before it do not count.
+	// latest of the last change of status.resolved and the newest ready
+	// time of a member. Failures at or before it do not count.
 	// +optional
 	FailureRunStart *metav1.Time `json:"failureRunStart,omitempty"`
 	// RunFailures are the member failures of the current run, oldest first,

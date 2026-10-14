@@ -220,6 +220,9 @@ func (r *CoderWorkspacePoolMemberReconciler) checkCreate(
 	if step := workspacePoolConsent(fresh, spec.OwnerID, pool.Spec.Template); step != nil {
 		return nil, step, nil
 	}
+	if step, err := r.checkOwnerCap(ctx, member, fresh); step != nil || err != nil {
+		return nil, step, err
+	}
 	ownerUser, step, err := checkCoderWorkspaceOwner(ctx, sdk, uuid.MustParse(spec.OwnerID))
 	if step != nil || err != nil {
 		return nil, step, err
@@ -273,6 +276,31 @@ func (r *CoderWorkspacePoolMemberReconciler) checkCreate(
 		return nil, coderStepUnavailable("get workspace by name", err), nil
 	}
 	return sdk, nil, nil
+}
+
+// checkOwnerCap counts, without the cache, the owner's other members on the
+// control plane that may have a workspace. At maxWorkspaces the member
+// waits, so a member that the pool created under a higher cap creates
+// nothing above a cap that an admin lowered since (Codex 4271920249).
+func (r *CoderWorkspacePoolMemberReconciler) checkOwnerCap(
+	ctx context.Context, member *coderv1alpha1.CoderWorkspacePoolMember, controlPlane *coderv1alpha1.CoderControlPlane,
+) (*coderStep, error) {
+	owner := workspacePoolOwner(controlPlane, member.Spec.OwnerID)
+	if owner == nil || owner.MaxWorkspaces == nil {
+		return nil, fmt.Errorf("assertion failed: CoderControlPlane %s has no defaulted maxWorkspaces for Coder user %s after the consent check", controlPlane.Name, member.Spec.OwnerID)
+	}
+	all := &coderv1alpha1.CoderWorkspacePoolMemberList{}
+	if err := r.APIReader.List(ctx, all, client.InNamespace(member.Namespace)); err != nil {
+		return nil, fmt.Errorf("list pool members in namespace %s: %w", member.Namespace, err)
+	}
+	created := poolOwnerLiveMembers(all.Items, member.Spec.OwnerID, controlPlane.Name, func(m *coderv1alpha1.CoderWorkspacePoolMember) bool {
+		return m.UID != member.UID && poolMemberMayHaveWorkspace(m)
+	})
+	if created >= *owner.MaxWorkspaces {
+		return coderWait("OwnerWorkspaceLimit", "Coder user %s has %d of at most %d workspaces on CoderControlPlane %s.",
+			member.Spec.OwnerID, created, *owner.MaxWorkspaces, controlPlane.Name), nil
+	}
+	return nil, nil
 }
 
 // poolMemberInputMismatch names the first pinned input that differs from the

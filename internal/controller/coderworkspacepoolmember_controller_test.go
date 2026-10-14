@@ -75,7 +75,7 @@ func (e *poolMemberEnv) resolve(t *testing.T, edit func(*coderv1alpha1.CoderWork
 	require.NoError(t, k8sClient.Get(e.ctx, types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}, e.pool))
 	e.pool.Status.Resolved = &coderv1alpha1.CoderWorkspacePoolResolved{
 		OrganizationID: e.orgID.String(), TemplateID: e.tplID.String(), TemplateVersionID: e.v1.String(), TemplateVersionName: "v1",
-		OwnerID: e.tester.String(), ParametersHash: parametersHash(),
+		OwnerID: e.tester.String(), ParametersHash: parametersHash(), ReadyTimeoutSeconds: *e.pool.Spec.ReadyTimeoutSeconds,
 	}
 	if edit != nil {
 		edit(e.pool.Status.Resolved)
