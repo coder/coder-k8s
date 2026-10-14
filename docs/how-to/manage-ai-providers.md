@@ -131,6 +131,8 @@ Delete `CoderAIProvider` objects before their namespace: a namespace deletion re
 
 Before the operator creates a provider in Coder, it writes a cleanup record: a ConfigMap named `ck8s-cleanup-<object UID>` with the label `coder.com/cleanup-record=CoderAIProvider` in the operator's namespace (`coder-system`). If it cannot write the record, it does not create the provider. The record holds no key: it holds the object's namespace, name and UID, Coder's deployment ID from `/api/v2/buildinfo`, the provider's display-name nonce, and the provider ID once the operator knows it. The deployment ID lives in the Coder database, so it names the database that holds the provider.
 
+When the control plane later reaches another Coder deployment (for example after its database Secret changed), the record still locates the provider in the old one. The operator then stalls the object with `CoderDeploymentChanged`, keeps the record and creates nothing in the new deployment. Delete the provider in the old deployment, then delete the ConfigMap.
+
 The operator removes the record when Coder confirms that the provider is deleted. When the finalizer goes without a delete, for example in a namespace deletion, the record stays. Find these records with `kubectl -n coder-system get configmaps -l coder.com/cleanup-record`. The operator gets write access to ConfigMaps only in that namespace (the Role `manager-role` and the RoleBinding `coder-k8s-cleanup-records`). Do not give other users write access to ConfigMaps there: a record names a Coder provider ID that a cleanup deletes. If you install the operator in another namespace, change the namespace of both.
 
 ### Stuck finalizer
