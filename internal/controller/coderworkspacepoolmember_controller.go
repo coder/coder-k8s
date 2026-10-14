@@ -67,6 +67,12 @@ func (r *CoderWorkspacePoolMemberReconciler) Reconcile(ctx context.Context, req 
 		return ctrl.Result{}, err
 	}
 	if !member.DeletionTimestamp.IsZero() {
+		if !controllerutil.ContainsFinalizer(member, coderv1alpha1.CoderWorkspacePoolMemberCleanupFinalizer) {
+			// Removing the finalizer is the way to release a member: the
+			// controller then never touches its workspace, even while another
+			// finalizer keeps the object.
+			return ctrl.Result{}, nil
+		}
 		return r.cleanup(ctx, member)
 	}
 	switch member.Status.Phase {

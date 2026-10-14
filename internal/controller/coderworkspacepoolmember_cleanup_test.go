@@ -85,6 +85,23 @@ func TestPoolMemberCleanupGuardsDelete(t *testing.T) {
 		require.Equal(t, reads, e.fake.totalRequests(), "%s: no Coder call after OwnershipUnknown", tc.name)
 		require.Equal(t, writes, e.coderWrites(), "%s: no Coder write", tc.name)
 	}
+
+	// A person releases a member by removing its finalizer. While another
+	// finalizer keeps the object, the controller still never touches the
+	// workspace.
+	key, _ := e.readyMember(t)
+	member := e.reconcileMember(t, key, 0)
+	member.Finalizers = append(member.Finalizers, "test.coder.com/hold")
+	require.NoError(t, k8sClient.Update(e.ctx, member))
+	e.deleteMember(t, key)
+	member = e.reconcileMember(t, key, 0)
+	member.Finalizers = []string{"test.coder.com/hold"}
+	require.NoError(t, k8sClient.Update(e.ctx, member))
+	requests := e.fake.totalRequests()
+	member = e.reconcileMember(t, key, 2)
+	require.Equal(t, requests, e.fake.totalRequests(), "no Coder call after the finalizer is gone")
+	member.Finalizers = nil
+	require.NoError(t, k8sClient.Update(e.ctx, member))
 }
 
 // TestPoolMemberCleanupLastUseCheck is mutation check 11: before the first
