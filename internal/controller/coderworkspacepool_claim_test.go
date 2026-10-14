@@ -109,7 +109,9 @@ func TestPoolBindsCurrentBeforeOutdated(t *testing.T) {
 	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(4)) })
 	v0 := e.fake.addVersion(e.tplID, "v0", codersdk.ProvisionerJobSucceeded).String()
 	now := e.clock.Now()
-	outdated := e.createMember(t, func(m *coderv1alpha1.CoderWorkspacePoolMember) { m.Spec.TemplateVersionID = v0 })
+	// The outdated member's label drifted: the pool finds it as its
+	// controller, and the bind sets the label again.
+	outdated := e.createMember(t, func(m *coderv1alpha1.CoderWorkspacePoolMember) { m.Spec.TemplateVersionID, m.Labels = v0, nil })
 	e.setMemberStatus(t, outdated, withWorkspace(e.readyAt(now.Add(-time.Hour))))
 	current := e.createMember(t, nil)
 	e.setMemberStatus(t, current, withWorkspace(e.readyAt(now)))
@@ -258,6 +260,7 @@ func TestPoolFinishesClaimAfterCrash(t *testing.T) {
 	requireClaim(t, claim, coderv1alpha1.CoderWorkspaceClaimPhaseBound, "WorkspaceReady", true)
 	require.Equal(t, held.Name, claim.Status.MemberName)
 	require.Equal(t, "kwp-held", claim.Status.WorkspaceName)
+	require.Equal(t, "tester", claim.Status.OwnerName)
 	require.Nil(t, e.reconcileMember(t, spare, 0).Spec.ClaimRef, "no second member for the claim")
 }
 
@@ -283,4 +286,55 @@ func TestPoolClaimDeleteDeletesWorkspace(t *testing.T) {
 	requireMember(t, m, coderv1alpha1.CoderWorkspacePoolMemberPhaseDeleting, "Deleting", "started a delete build")
 	e.fake.setBuildJob(uuid.MustParse(m.Status.DeleteBuildID), codersdk.ProvisionerJobSucceeded)
 	require.Nil(t, e.reconcileMember(t, member, 1), "the workspace is deleted, then the finalizer goes")
+}
+
+// staleClaims answers claim lists with the claims as the cache first saw
+// them: without status.
+type staleClaims struct{ client.Client }
+
+func (c staleClaims) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if err := c.Client.List(ctx, list, opts...); err != nil {
+		return err
+	}
+	if claims, ok := list.(*coderv1alpha1.CoderWorkspaceClaimList); ok {
+		for i := range claims.Items {
+			claims.Items[i].Status = coderv1alpha1.CoderWorkspaceClaimStatus{}
+		}
+	}
+	return nil
+}
+
+// TestPoolNeverRebindsClaim: a claim that a member held once never binds
+// again, also when its member is gone and the cache still shows the claim
+// without status: the pool reads the claim again without the cache right
+// before a bind. The claim becomes Lost with MemberDeleted. A member of
+// another pool that names the claim never counts as its holder.
+func TestPoolNeverRebindsClaim(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(2)) })
+	first := e.createMember(t, nil)
+	e.setMemberStatus(t, first, readyWithWorkspace("kwp-first"))
+	claimKey := e.createClaim(t, "build-1")
+	claim := e.claim(t, claimKey)
+	// A member of another pool with a claimRef to this claim.
+	e.createMember(t, func(m *coderv1alpha1.CoderWorkspacePoolMember) {
+		m.Spec.PoolName, m.OwnerReferences, m.Labels = "other", nil, nil
+		m.Spec.ClaimRef = &coderv1alpha1.CoderWorkspaceClaimReference{Name: claim.Name, UID: string(claim.UID)}
+	})
+	e.reconcilePool(t, 1)
+	e.requireBound(t, first, claimKey)
+	require.Equal(t, first.Name, e.claim(t, claimKey).Status.MemberName)
+
+	require.NoError(t, k8sClient.Delete(e.ctx, e.reconcileMember(t, first, 0)))
+	spare := e.createMember(t, nil)
+	e.setMemberStatus(t, spare, readyWithWorkspace("kwp-spare"))
+	stale := &controller.CoderWorkspacePoolReconciler{Client: staleClaims{k8sClient}, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	_, err := stale.Reconcile(e.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}})
+	require.NoError(t, err)
+	require.Nil(t, e.reconcileMember(t, spare, 0).Spec.ClaimRef, "no second member for the claim")
+	claim = e.claim(t, claimKey)
+	require.Equal(t, coderv1alpha1.CoderWorkspaceClaimPhaseLost, claim.Status.Phase)
+	require.Equal(t, "MemberDeleted", claim.Status.Reason)
+	require.True(t, meta.IsStatusConditionTrue(claim.Status.Conditions, coderv1alpha1.CoderWorkspaceClaimConditionStalled))
 }

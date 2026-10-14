@@ -146,7 +146,7 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if err := r.trimToOwnerCap(ctx, pool, maxWorkspaces, all.Items); err != nil {
 			return ctrl.Result{}, err
 		}
-		if err := r.bindClaims(ctx, pool, claims, all.Items, &counts); err != nil {
+		if err := r.bindClaims(ctx, pool, claims, all.Items, &counts, ownerName); err != nil {
 			return ctrl.Result{}, err
 		}
 		step, requeue, err = r.createMembers(ctx, pool, maxWorkspaces, all.Items, &counts)
