@@ -207,37 +207,62 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 	if wait != nil {
 		return aiGatewayKeyWait(aiGatewayKeyRetry, wait.reason, "%s", wait.message), nil
 	}
+	// A stall found before the LIST sends nothing to Coder while no key of
+	// this object can exist (nextSerial == 0, plan 4.8 rule 4). Otherwise it
+	// runs in delete-only mode.
+	var stall *aiGatewayKeyStep
 	secret, err := getOwnedSecret(ctx, r.APIReader, key, aiGatewayKeyKind, key.Spec.SecretName)
 	if credErr := (*credentialsecret.Error)(nil); errors.As(err, &credErr) {
-		return aiGatewayKeyStalled(credErr.Reason, "%s", credErr.Message), nil
+		stall = aiGatewayKeyStalled(credErr.Reason, "%s", credErr.Message)
 	} else if err != nil {
 		return nil, err
 	}
-	err = reservedSecretName(ctx, r.APIReader, key, key.Spec.SecretName, secret != nil)
-	if credErr := (*credentialsecret.Error)(nil); errors.As(err, &credErr) {
-		return aiGatewayKeyStalled(credErr.Reason, "%s", credErr.Message), nil
-	} else if err != nil {
-		return nil, err
+	if stall == nil {
+		err = reservedSecretName(ctx, r.APIReader, key, key.Spec.SecretName, secret != nil)
+		if credErr := (*credentialsecret.Error)(nil); errors.As(err, &credErr) {
+			stall = aiGatewayKeyStalled(credErr.Reason, "%s", credErr.Message)
+		} else if err != nil {
+			return nil, err
+		}
 	}
-	// With nextSerial > 0 the stalls above and this one continue in
-	// delete-only mode (plan 4.8, K7). This version never creates a key, so
-	// it stops here.
-	if controlPlane.Spec.AIGateway == nil || !controlPlane.Spec.AIGateway.AllowKeys {
-		return aiGatewayKeyStalled("NotAllowed",
-			"CoderControlPlane %s does not allow AI Gateway keys. Its admin can set spec.aiGateway.allowKeys to true.", controlPlane.Name), nil
+	if stall == nil && (controlPlane.Spec.AIGateway == nil || !controlPlane.Spec.AIGateway.AllowKeys) {
+		stall = aiGatewayKeyStalled("NotAllowed",
+			"CoderControlPlane %s does not allow AI Gateway keys. Its admin can set spec.aiGateway.allowKeys to true.", controlPlane.Name)
+	}
+	if stall != nil && key.Status.NextSerial == 0 {
+		return stall, nil
 	}
 	prefix, err := aiGatewayKeyNamePrefix(key.UID)
 	if err != nil {
 		return nil, err
 	}
 	listed, err := sdk.ListAIGatewayKeys(ctx)
-	if err != nil {
-		return aiGatewayKeyListFailure(err), nil
+	if err != nil && stall != nil {
+		return stall, nil // The stall says more than a failed LIST. The sweep runs at the next resync.
+	} else if err != nil {
+		return aiGatewayKeyCoderFailure("list AI Gateway keys", err), nil
 	}
 	own := ownAIGatewayKeys(prefix, listed)
 
 	now := r.Clock.Now()
-	decision := nextAIGatewayKeyAction(&key.Status, prefix, own, aiGatewayKeySecretHolds(secret, own), now)
+	if key.Status.LastCreateAttemptTime == nil && key.Status.NextSerial > 0 {
+		// Only a status edit loses the time of the last create. The settle
+		// window counts from now (fail closed), and status keeps that time,
+		// so the window ends.
+		stamp := metav1.NewTime(now)
+		key.Status.LastCreateAttemptTime = &stamp
+	}
+	if stall != nil {
+		// The Secret is not this object's, but its live value still decides
+		// I1 for the sweep (plan 4.8 rule 2).
+		holds, err := r.liveSecretHolds(ctx, key, own)
+		if err != nil {
+			return nil, err
+		}
+		return r.deleteOnly(ctx, sdk, key, aiGatewayKeyOrphan(key, prefix, own, holds, now), stall, now), nil
+	}
+
+	decision := nextAIGatewayKeyAction(key, prefix, own, aiGatewayKeySecretHolds(secret, own), now)
 	switch decision.action {
 	case aiGatewayKeyAdopt:
 		return adoptAIGatewayKey(key, own, decision, now), nil
@@ -247,12 +272,13 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 		return aiGatewayKeyIssueFailed(key, fmt.Sprintf(
 			"The create of key %s did not finish: the operator restarted, or a status write was lost. A committed key is an orphan.", pending.Name)), nil
 	case aiGatewayKeySweep:
+		if stall := aiGatewayKeyIssueBlocked(key); stall != nil && key.Status.CurrentKey == nil {
+			return r.deleteOnly(ctx, sdk, key, decision, stall, now), nil
+		}
 		return r.sweepOrphan(ctx, sdk, key, decision), nil
 	case aiGatewayKeySettle:
-		if step := aiGatewayKeyIssueBlocked(key); step != nil {
-			// The stall stays, and the sweep still runs after the window.
-			step.requeue = max(decision.settleAt.Sub(now), time.Second)
-			return step, nil
+		if stall := aiGatewayKeyIssueBlocked(key); stall != nil {
+			return r.deleteOnly(ctx, sdk, key, decision, stall, now), nil
 		}
 		return aiGatewayKeyWait(max(decision.settleAt.Sub(now), time.Second), reasonDeletingOrphans,
 			"Key %s of this object is an orphan. The operator creates no key until it deletes the orphan at %s, when no write of the last create attempt can still land.",
@@ -260,8 +286,19 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 	case aiGatewayKeyIssue:
 		return r.issueKey(ctx, sdk, key, before, prefix)
 	case aiGatewayKeyKillSwitch:
-		return aiGatewayKeyStalled(reasonKeyDeletedExternal,
-			"Coder no longer lists the current key %s. Someone deleted it outside the operator, so the operator creates no new key.", key.Status.CurrentKey.Name), nil
+		return r.deleteOnly(ctx, sdk, key, decision, aiGatewayKeyStalled(reasonKeyDeletedExternal,
+			"Coder no longer lists the current key %s. Someone deleted it outside the operator, so the operator creates no new key until the spec changes.",
+			key.Status.CurrentKey.Name), now), nil
+	case aiGatewayKeyRearm:
+		// Coder no longer lists the key, so there is nothing to retire. The
+		// next reconcile issues a key behind the create gate.
+		deleted := key.Status.CurrentKey.Name
+		key.Status.CurrentKey, key.Status.NextRotationTime = nil, nil
+		return aiGatewayKeyWait(time.Second, reasonIssuingKey,
+			"The spec changed after the kill switch, so the operator issues a new key in place of deleted key %s.", deleted), nil
+	case aiGatewayKeyReissue:
+		// The drift re-issue arrives in K7b.
+		return aiGatewayKeyWait(aiGatewayKeyResync, reasonIssuingKey, "This controller version does not run step %q yet.", decision.action), nil
 	case aiGatewayKeyReady:
 		step := aiGatewayKeyReadyStep(key)
 		if !decision.settleAt.IsZero() {
@@ -269,10 +306,8 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 			step.requeue = min(step.requeue, max(decision.settleAt.Sub(now), time.Second))
 		}
 		return step, nil
-	default:
-		// A drift re-issue arrives in K7.
-		return aiGatewayKeyWait(aiGatewayKeyResync, reasonIssuingKey, "This controller version does not run step %q yet.", decision.action), nil
 	}
+	return nil, fmt.Errorf("assertion failed: unknown AI Gateway key action %q", decision.action)
 }
 
 // prepareSecret runs the first two parts of the issue step (plan 4.3): the
@@ -328,9 +363,9 @@ func aiGatewayKeyWriteFailure(name string, err error) (*aiGatewayKeyStep, error)
 	return nil, fmt.Errorf("write output Secret %q: the API server answered %s (HTTP %d)", name, reason, code)
 }
 
-// aiGatewayKeyListFailure classifies a failed LIST (plan 4.2 step 4). The
-// message holds the status and Coder's short message only.
-func aiGatewayKeyListFailure(err error) *aiGatewayKeyStep {
+// aiGatewayKeyCoderFailure classifies a failed LIST (plan 4.2 step 4) or
+// sweep DELETE. The message holds the status and Coder's short message only.
+func aiGatewayKeyCoderFailure(action string, err error) *aiGatewayKeyStep {
 	var sdkErr *codersdk.Error
 	if errors.As(err, &sdkErr) {
 		switch status := sdkErr.StatusCode(); {
@@ -343,7 +378,7 @@ func aiGatewayKeyListFailure(err error) *aiGatewayKeyStep {
 			return aiGatewayKeyStalled("NotSupported", "%s This Coder deployment has no AI Gateway key API.", coderErrorSummary(err))
 		}
 	}
-	unavailable := coderStepUnavailable("list AI Gateway keys", err)
+	unavailable := coderStepUnavailable(action, err)
 	step := aiGatewayKeyWait(aiGatewayKeyRetry, unavailable.reason, "%s", unavailable.message)
 	step.rateLimited = unavailable.rateLimited
 	return step

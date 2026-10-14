@@ -40,7 +40,7 @@ func checkOwnedSecret(secret *corev1.Secret, owner client.Object, kind string) *
 	switch {
 	case !isControlledBy(secret, owner, kind):
 		return &credentialsecret.Error{Reason: reasonSecretNotOwned, Message: fmt.Sprintf(
-			"Secret %q exists and this %s does not own it. The operator does not read or change it.", secret.Name, kind)}
+			"Secret %q exists and this %s does not own it. The operator does not change it.", secret.Name, kind)}
 	case secret.Type != "" && secret.Type != corev1.SecretTypeOpaque:
 		return &credentialsecret.Error{Reason: reasonSecretNotOwned, Message: fmt.Sprintf(
 			"Secret %q has type %q, not Opaque. The operator does not change it.", secret.Name, secret.Type)}
