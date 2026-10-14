@@ -309,8 +309,12 @@ func TestPoolFailureRunOrder(t *testing.T) {
 	foreign := e.createMember(t, func(m *coderv1alpha1.CoderWorkspacePoolMember) { m.OwnerReferences = nil })
 	e.setMemberStatus(t, foreign, e.readyAt(start.Add(time.Hour)))
 	e.clock.SetTime(start.Add(time.Minute))
-	pool := e.reconcilePool(t, 3)
-	require.Zero(t, pool.Status.ConsecutiveFailures, "the success after both failures ended their run")
+	var pool *coderv1alpha1.CoderWorkspacePool
+	for range 3 { // Each reconcile counts one failure.
+		pool = e.reconcilePool(t, 1)
+		require.Zero(t, pool.Status.ConsecutiveFailures, "the success after both failures ended their run")
+	}
+	require.Len(t, e.poolMembers(t, e.pool.Name), 2, "both failed members are deleted: the ready and the foreign member remain")
 
 	// A failure after the success starts a new run, and the foreign member
 	// does not end it.
