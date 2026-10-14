@@ -6,6 +6,7 @@ resources:
   - ../crd/bases/coder.com_coderaigatewaykeys.yaml
   - ../crd/bases/coder.com_coderaiproviders.yaml
   - ../crd/bases/coder.com_codercontrolplanes.yaml
+  - ../crd/bases/coder.com_codermcpservers.yaml
   - ../crd/bases/coder.com_coderprovisioners.yaml
   - ../crd/bases/coder.com_codertemplatetests.yaml
   - ../crd/bases/coder.com_coderworkspaceproxies.yaml

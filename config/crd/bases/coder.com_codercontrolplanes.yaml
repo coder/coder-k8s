@@ -1400,8 +1400,7 @@ spec:
                 description: |-
                   MCPServers configures CoderMCPServer objects that use this control
                   plane. Removing it disables in Coder each server config that a
-                  CoderMCPServer created through this control plane. It has no effect
-                  yet: the CoderMCPServer controller is not shipped.
+                  CoderMCPServer created through this control plane.
                 properties:
                   allowForceOn:
                     description: |-
@@ -1410,9 +1409,6 @@ spec:
                       without that user's choice. When false (the default), such objects
                       create and change nothing, and a server config that one of them
                       created is disabled in Coder, as for a removed organization.
-
-                      This field has no effect yet: the CoderMCPServer controller is not
-                      shipped.
                     type: boolean
                   organizations:
                     description: |-
@@ -1427,9 +1423,6 @@ spec:
                       enabled: false, and then changes nothing else. After the organization
                       is listed again, a spec edit enables the server. Deleting a
                       CoderMCPServer still deletes the config it created.
-
-                      This field has no effect yet: the CoderMCPServer controller is not
-                      shipped.
                     items:
                       maxLength: 32
                       minLength: 1

@@ -2062,8 +2062,7 @@ spec:
                 description: |-
                   MCPServers configures CoderMCPServer objects that use this control
                   plane. Removing it disables in Coder each server config that a
-                  CoderMCPServer created through this control plane. It has no effect
-                  yet: the CoderMCPServer controller is not shipped.
+                  CoderMCPServer created through this control plane.
                 properties:
                   allowForceOn:
                     description: |-
@@ -2072,9 +2071,6 @@ spec:
                       without that user's choice. When false (the default), such objects
                       create and change nothing, and a server config that one of them
                       created is disabled in Coder, as for a removed organization.
-
-                      This field has no effect yet: the CoderMCPServer controller is not
-                      shipped.
                     type: boolean
                   organizations:
                     description: |-
@@ -2089,9 +2085,6 @@ spec:
                       enabled: false, and then changes nothing else. After the organization
                       is listed again, a spec edit enables the server. Deleting a
                       CoderMCPServer still deletes the config it created.
-
-                      This field has no effect yet: the CoderMCPServer controller is not
-                      shipped.
                     items:
                       maxLength: 32
                       minLength: 1
@@ -5202,6 +5195,563 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.0
+  name: codermcpservers.coder.com
+spec:
+  group: coder.com
+  names:
+    kind: CoderMCPServer
+    listKind: CoderMCPServerList
+    plural: codermcpservers
+    singular: codermcpserver
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.organization
+      name: Organization
+      type: string
+    - jsonPath: .spec.slug
+      name: Slug
+      type: string
+    - jsonPath: .spec.auth.type
+      name: Auth
+      type: string
+    - jsonPath: .spec.enabled
+      name: Enabled
+      type: boolean
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: CoderMCPServer manages one MCP server config in a Coder organization.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              CoderMCPServerSpec defines one MCP server config in a Coder organization.
+              Coder trims every text field with strings.TrimSpace, so the patterns reject
+              leading and trailing Unicode white space. The class [\s\v\x{85}\p{Z}] is
+              exactly the set of runes that unicode.IsSpace reports.
+            properties:
+              access:
+                description: |-
+                  Access, when set, makes the controller own the server's access list in
+                  Coder: exactly the listed groups can read the server. Every sync
+                  therefore also removes each user entry, for example a user that an admin
+                  added in the Coder dashboard. Coder does not show the entry of a deleted
+                  group, so the sync cannot remove it, but it grants nothing.
+                  When omitted, the controller leaves the access list alone, and Coder's
+                  default lets every organization member read the server.
+                properties:
+                  groups:
+                    description: |-
+                      Groups are Coder group names in the server's organization. Everyone is
+                      the group of all organization members. An empty list leaves the server
+                      to organization admins. Coder reserves the names new and create. While a
+                      listed group does not exist, the controller removes the access of every
+                      group that this list does not name, adds none, disables the server if
+                      the spec disables it, and waits with GroupNotFound for the rest.
+                    items:
+                      maxLength: 255
+                      minLength: 1
+                      pattern: ^[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*$
+                      type: string
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-type: set
+                    x-kubernetes-validations:
+                    - message: access.groups must not hold new or create
+                      rule: self.all(g, g != 'new' && g != 'create')
+                type: object
+              allowInPlanMode:
+                description: AllowInPlanMode offers the server in plan-mode chats.
+                type: boolean
+              auth:
+                description: Auth is how Coder authenticates to the server.
+                properties:
+                  apiKey:
+                    description: APIKey sends one Secret value in one header.
+                    properties:
+                      header:
+                        description: Header is the HTTP header name.
+                        maxLength: 128
+                        minLength: 1
+                        pattern: ^[!#$%&'*+.^_\x60|~0-9A-Za-z-]+$
+                        type: string
+                        x-kubernetes-validations:
+                        - message: header is reserved for the HTTP transport, MCP,
+                            or Coder
+                          rule: '!(self.lowerAscii() in [''host'', ''content-length'',
+                            ''content-type'', ''content-encoding'', ''transfer-encoding'',
+                            ''connection'', ''keep-alive'', ''upgrade'', ''te'', ''trailer'',
+                            ''accept'', ''accept-encoding'', ''proxy-authorization'',
+                            ''proxy-connection'', ''mcp-session-id'', ''mcp-protocol-version'',
+                            ''last-event-id'']) && !self.lowerAscii().startsWith(''x-coder-'')'
+                      secretRef:
+                        description: |-
+                          SecretRef references the key in a Secret in the same namespace that
+                          holds the header value. The Secret must opt in to the credential Secret
+                          contract and list the origin of spec.url.
+                        properties:
+                          key:
+                            description: Key is the key inside the Secret data map.
+                            type: string
+                          name:
+                            description: Name is the Kubernetes Secret name.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                        x-kubernetes-validations:
+                        - message: secretRef.name must not be empty
+                          rule: size(self.name) > 0
+                        - message: secretRef.key must not be empty
+                          rule: has(self.key) && size(self.key) > 0
+                    required:
+                    - header
+                    - secretRef
+                    type: object
+                  customHeaders:
+                    description: CustomHeaders sends each Secret value in its own
+                      header.
+                    items:
+                      description: CoderMCPServerHeader is one header whose value
+                        comes from a Secret.
+                      properties:
+                        name:
+                          description: Name is the HTTP header name.
+                          maxLength: 128
+                          minLength: 1
+                          pattern: ^[!#$%&'*+.^_\x60|~0-9A-Za-z-]+$
+                          type: string
+                          x-kubernetes-validations:
+                          - message: header is reserved for the HTTP transport, MCP,
+                              or Coder
+                            rule: '!(self.lowerAscii() in [''host'', ''content-length'',
+                              ''content-type'', ''content-encoding'', ''transfer-encoding'',
+                              ''connection'', ''keep-alive'', ''upgrade'', ''te'',
+                              ''trailer'', ''accept'', ''accept-encoding'', ''proxy-authorization'',
+                              ''proxy-connection'', ''mcp-session-id'', ''mcp-protocol-version'',
+                              ''last-event-id'']) && !self.lowerAscii().startsWith(''x-coder-'')'
+                        secretRef:
+                          description: |-
+                            SecretRef references the key in a Secret in the same namespace that
+                            holds the header value. The Secret must opt in to the credential Secret
+                            contract and list the origin of spec.url.
+                          properties:
+                            key:
+                              description: Key is the key inside the Secret data map.
+                              type: string
+                            name:
+                              description: Name is the Kubernetes Secret name.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                          x-kubernetes-validations:
+                          - message: secretRef.name must not be empty
+                            rule: size(self.name) > 0
+                          - message: secretRef.key must not be empty
+                            rule: has(self.key) && size(self.key) > 0
+                      required:
+                      - name
+                      - secretRef
+                      type: object
+                    maxItems: 16
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                    x-kubernetes-validations:
+                    - message: auth.customHeaders names must be unique, ignoring case
+                      rule: self.all(a, self.filter(b, b.name.lowerAscii() == a.name.lowerAscii()).size()
+                        == 1)
+                  oauth2:
+                    description: |-
+                      OAuth2 lets each user connect with an OAuth2 client that the admin
+                      registered at the authorization server.
+                    properties:
+                      authURL:
+                        description: AuthURL is the authorization endpoint that users'
+                          browsers open.
+                        maxLength: 2048
+                        minLength: 1
+                        pattern: ^[^\s\v\x{85}\p{Z}]+$
+                        type: string
+                        x-kubernetes-validations:
+                        - message: authURL must be a valid URL with a host
+                          rule: isURL(self) && url(self).getHostname() != ''
+                        - message: authURL must be an http:// or https:// URL with
+                            a host and no user info
+                          rule: self.matches('^https?://[^/?#@\\s]+([/?#].*)?$')
+                      clientID:
+                        description: ClientID is the OAuth2 client ID.
+                        maxLength: 256
+                        minLength: 1
+                        pattern: ^[^\s\v\x{85}\p{Z}]+$
+                        type: string
+                      clientSecretRef:
+                        description: |-
+                          ClientSecretRef references the key in a Secret in the same namespace
+                          that holds the client secret. The Secret must opt in to the credential
+                          Secret contract and list the origins of spec.url, authURL, tokenURL and
+                          revocationURL.
+                        properties:
+                          key:
+                            description: Key is the key inside the Secret data map.
+                            type: string
+                          name:
+                            description: Name is the Kubernetes Secret name.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                        x-kubernetes-validations:
+                        - message: clientSecretRef.name must not be empty
+                          rule: size(self.name) > 0
+                        - message: clientSecretRef.key must not be empty
+                          rule: has(self.key) && size(self.key) > 0
+                      revocationURL:
+                        description: |-
+                          RevocationURL is the https:// token revocation endpoint. Coder sends the
+                          client secret there when a user disconnects.
+                        maxLength: 2048
+                        pattern: ^[^\s\v\x{85}\p{Z}]+$
+                        type: string
+                        x-kubernetes-validations:
+                        - message: revocationURL must be a valid URL with a host
+                          rule: isURL(self) && url(self).getHostname() != ''
+                        - message: revocationURL must be an https:// URL with a host
+                            and no user info
+                          rule: self.matches('^https://[^/?#@\\s]+([/?#].*)?$')
+                      scopes:
+                        description: Scopes are the OAuth2 scopes that Coder requests.
+                        items:
+                          maxLength: 256
+                          minLength: 1
+                          pattern: ^[!#-\[\]-~]+$
+                          type: string
+                        maxItems: 32
+                        type: array
+                        x-kubernetes-list-type: set
+                      tokenURL:
+                        description: TokenURL is the token endpoint that Coder sends
+                          the client secret to.
+                        maxLength: 2048
+                        minLength: 1
+                        pattern: ^[^\s\v\x{85}\p{Z}]+$
+                        type: string
+                        x-kubernetes-validations:
+                        - message: tokenURL must be a valid URL with a host
+                          rule: isURL(self) && url(self).getHostname() != ''
+                        - message: tokenURL must be an http:// or https:// URL with
+                            a host and no user info
+                          rule: self.matches('^https?://[^/?#@\\s]+([/?#].*)?$')
+                    required:
+                    - authURL
+                    - clientID
+                    - clientSecretRef
+                    - tokenURL
+                    type: object
+                  type:
+                    description: |-
+                      Type is the auth type. Coder's user_oidc type is not supported, because
+                      it sends each user's login token to the server URL.
+                    enum:
+                    - none
+                    - api_key
+                    - custom_headers
+                    - oauth2
+                    type: string
+                required:
+                - type
+                type: object
+                x-kubernetes-validations:
+                - message: auth.apiKey must be set exactly when auth.type is api_key
+                  rule: (self.type == 'api_key') == has(self.apiKey)
+                - message: auth.customHeaders must be set exactly when auth.type is
+                    custom_headers
+                  rule: (self.type == 'custom_headers') == has(self.customHeaders)
+                - message: auth.oauth2 must be set exactly when auth.type is oauth2
+                  rule: (self.type == 'oauth2') == has(self.oauth2)
+              availability:
+                default: default_off
+                description: |-
+                  Availability decides how chats offer the server. force_on adds it to
+                  every new chat of a user who can read it. Coder's web UI preselects
+                  default_on servers. The Coder server treats default_on and default_off
+                  alike.
+                enum:
+                - force_on
+                - default_on
+                - default_off
+                type: string
+              controlPlaneRef:
+                description: |-
+                  ControlPlaneRef names the CoderControlPlane in the same namespace. The
+                  controller calls Coder with that control plane's operator token.
+                properties:
+                  name:
+                    description: Name is the CoderControlPlane name.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                required:
+                - name
+                type: object
+                x-kubernetes-validations:
+                - message: controlPlaneRef is immutable
+                  rule: self == oldSelf
+              description:
+                description: Description is a short summary of what the server provides.
+                maxLength: 512
+                pattern: ^[^\s\v\x{85}\p{Z}]([\s\S]*[^\s\v\x{85}\p{Z}])?$
+                type: string
+              displayName:
+                description: DisplayName is the name that Coder shows to users in
+                  chat.
+                maxLength: 128
+                minLength: 1
+                pattern: ^[^\s\v\x{85}\p{Z}]([\s\S]*[^\s\v\x{85}\p{Z}])?$
+                type: string
+              enabled:
+                default: true
+                description: |-
+                  Enabled turns the server on or off in Coder. Chats never connect to a
+                  disabled server. When omitted, the default is true.
+                type: boolean
+              forwardCoderHeaders:
+                description: |-
+                  ForwardCoderHeaders sends the chat owner, chat and workspace IDs to the
+                  server as X-Coder-* headers. Coder sends no token in them.
+                type: boolean
+              iconURL:
+                description: IconURL is the icon URL, path or emoji that Coder shows.
+                maxLength: 2048
+                pattern: ^[^\s\v\x{85}\p{Z}]+$
+                type: string
+              modelIntent:
+                description: ModelIntent asks the model to state its intent with each
+                  tool call.
+                type: boolean
+              organization:
+                description: |-
+                  Organization is the name of the Coder organization that holds the
+                  config. Coder cannot move a config to another organization. Coder
+                  reserves the names new and create.
+                maxLength: 32
+                minLength: 1
+                pattern: ^[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*$
+                type: string
+                x-kubernetes-validations:
+                - message: organization must not be new or create
+                  rule: self != 'new' && self != 'create'
+                - message: organization is immutable
+                  rule: self == oldSelf
+              slug:
+                description: |-
+                  Slug is the Coder slug of the config, unique in its organization. The
+                  model sees the server's tools as `<slug>__<tool>`.
+                maxLength: 32
+                minLength: 1
+                pattern: ^[a-z0-9]+(-[a-z0-9]+)*$
+                type: string
+                x-kubernetes-validations:
+                - message: slug is immutable
+                  rule: self == oldSelf
+              transport:
+                default: streamable_http
+                description: Transport is the MCP transport that Coder uses.
+                enum:
+                - streamable_http
+                - sse
+                type: string
+              url:
+                description: |-
+                  URL is the http:// or https:// MCP endpoint that Coder connects to. It
+                  must not hold user info. Every Secret in auth must list its origin as an
+                  allowed destination.
+                maxLength: 2048
+                minLength: 1
+                pattern: ^[^\s\v\x{85}\p{Z}]+$
+                type: string
+                x-kubernetes-validations:
+                - message: url must be a valid URL with a host
+                  rule: isURL(self) && url(self).getHostname() != ''
+                - message: url must be an http:// or https:// URL with a host and
+                    no user info
+                  rule: self.matches('^https?://[^/?#@\\s]+([/?#].*)?$')
+            required:
+            - auth
+            - controlPlaneRef
+            - displayName
+            - organization
+            - slug
+            - url
+            type: object
+          status:
+            description: CoderMCPServerStatus defines the observed state of a CoderMCPServer.
+            properties:
+              appliedGeneration:
+                description: |-
+                  AppliedGeneration is the last generation whose spec Coder fully holds,
+                  or that a kill switch holds: when the controller disables the config
+                  because a credential Secret or the control plane withdrew consent, it
+                  sets this field before it sends the disable, so only a later spec edit
+                  enables the config again. Ready tells whether Coder holds the spec.
+                format: int64
+                type: integer
+              conditions:
+                description: Conditions are Ready, Reconciling, and Stalled.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              configID:
+                description: ConfigID is the Coder MCP server config ID.
+                type: string
+              createAttemptTime:
+                description: |-
+                  CreateAttemptTime is set before every create request. While it is set
+                  and ConfigID is empty, a create request can be in flight or already
+                  committed in Coder.
+                format: date-time
+                type: string
+              credentials:
+                description: Credentials record the Secret values last sent to Coder.
+                items:
+                  description: |-
+                    CoderMCPServerCredentialStatus records which Secret value was last sent to
+                    Coder for one credential field. It holds no secret data and nothing derived
+                    from it.
+                  properties:
+                    field:
+                      description: |-
+                        Field names the credential: apiKey, oauth2ClientSecret, or
+                        `header:<name>`.
+                      maxLength: 160
+                      minLength: 1
+                      type: string
+                    secretKey:
+                      description: SecretKey is the key in the Secret that was read.
+                      type: string
+                    secretName:
+                      description: SecretName is the Secret name that was read.
+                      type: string
+                    secretResourceVersion:
+                      description: SecretResourceVersion is the resourceVersion of
+                        the Secret that was read.
+                      type: string
+                    secretUID:
+                      description: SecretUID is the UID of the Secret that was read.
+                      type: string
+                  required:
+                  - field
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - field
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the generation the controller last
+                  processed.
+                format: int64
+                type: integer
+              organizationID:
+                description: |-
+                  OrganizationID is the Coder organization ID that spec.organization
+                  resolved to first.
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
   name: coderprovisioners.coder.com
 spec:
   group: coder.com
@@ -6496,6 +7046,7 @@ rules:
   resources:
   - coderaigatewaykeys
   - coderaiproviders
+  - codermcpservers
   verbs:
   - get
   - list
@@ -6507,6 +7058,7 @@ rules:
   - coderaigatewaykeys/finalizers
   - coderaiproviders/finalizers
   - codercontrolplanes/finalizers
+  - codermcpservers/finalizers
   - coderprovisioners/finalizers
   - codertemplatetests/finalizers
   - coderworkspaceproxies/finalizers
@@ -6517,6 +7069,7 @@ rules:
   resources:
   - coderaigatewaykeys/status
   - coderaiproviders/status
+  - codermcpservers/status
   verbs:
   - get
   - update
@@ -6545,12 +7098,6 @@ rules:
   - get
   - patch
   - update
-- apiGroups:
-  - coder.com
-  resources:
-  - codermcpservers
-  verbs:
-  - list
 - apiGroups:
   - coder.com
   resources:

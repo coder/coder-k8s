@@ -87,6 +87,9 @@ jobs:
               - 'internal/controller/codertemplatetest*'
               - 'internal/controller/coderaiprovider*'
               - 'internal/controller/coderaigatewaykey*'
+              - 'internal/controller/codermcpserver*'
+              # The credential Secret contract that CoderAIProvider and CoderMCPServer read through.
+              - 'internal/credentialsecret/**'
               - 'internal/controller/owned_secret.go'
               - 'internal/controller/reserved_secret_names.go'
               - 'internal/controller/credential_checks.go'
@@ -169,22 +172,6 @@ jobs:
           if [[ -n "${UNTRACKED_GENERATED}" ]]; then
             echo "assertion failed: generated installer artifacts must be tracked" >&2
             printf '%s\n' "${UNTRACKED_GENERATED}" >&2
-            exit 1
-          fi
-
-      - name: Verify the dormant CoderMCPServer CRD is not installed
-        # Remove this step when the CoderMCPServer controller ships (#155).
-        run: |
-          # grep exits 1 when nothing matches. Any other status (for example a missing file) fails the step.
-          status=0
-          # The third pattern matches the CRD path entry in config/default/kustomization.yaml.
-          grep -n -E '^[[:space:]]+kind: CoderMCPServer$|codermcpservers\.coder\.com|coder\.com_codermcpservers\.yaml' \
-            dist/install.yaml config/default/kustomization.yaml config/crd/bases/*.yaml || status=$?
-          if [[ "${status}" -eq 0 ]]; then
-            echo "assertion failed: the CoderMCPServer CRD must not ship before its controller" >&2
-            exit 1
-          elif [[ "${status}" -ne 1 ]]; then
-            echo "assertion failed: the CoderMCPServer CRD guard could not read the install manifests (grep exit ${status})" >&2
             exit 1
           fi
 
