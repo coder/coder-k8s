@@ -305,6 +305,7 @@ func (c staleDeletingControlPlaneClient) Get(ctx context.Context, key client.Obj
 func TestPoolNoCreateWhileControlPlaneDeletes(t *testing.T) {
 	t.Parallel()
 	e := newPoolMemberEnv(t)
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(2)) }) // The pool wants one more.
 	member := e.createMember(t, nil)
 	cp := &coderv1alpha1.CoderControlPlane{}
 	cpKey := types.NamespacedName{Namespace: e.ns, Name: "coder"}
