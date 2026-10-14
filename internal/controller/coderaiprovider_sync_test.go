@@ -383,6 +383,29 @@ func TestCoderAIProviderSyncAnswers(t *testing.T) {
 			requireAIProviderReady(t, got)
 		})
 	}
+	// Coder never answers 408 or 499. A proxy can, after it forwarded the
+	// PATCH, so the controller reads the provider again instead of stalling.
+	for _, status := range []int{http.StatusRequestTimeout, 499} {
+		t.Run(fmt.Sprintf("%d after commit is retried", status), func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			env, _, provider := newAIProviderCreateEnv(ctx, t)
+			env.fake.failNext(routeUpdateAIProvider, fakeFault{Status: status, AfterCommit: true})
+			got, result := env.reconcile(ctx, t, provider)
+			require.Contains(t, requireAIProviderStep(t, got, false, "CoderUnavailable"), fmt.Sprintf("Coder answered %d", status))
+			require.Equal(t, 30*time.Second, result.RequeueAfter)
+			got, _ = env.reconcile(ctx, t, got)
+			requireAIProviderReady(t, got)
+		})
+	}
+	t.Run("400 is rejected", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		env, _, provider := newAIProviderCreateEnv(ctx, t)
+		env.fake.failNext(routeUpdateAIProvider, fakeFault{Status: http.StatusBadRequest})
+		got, _ := env.reconcile(ctx, t, provider)
+		requireAIProviderStep(t, got, true, "CoderRejected")
+	})
 	t.Run("answer without the requested values", func(t *testing.T) {
 		t.Parallel()
 		ctx := context.Background()
