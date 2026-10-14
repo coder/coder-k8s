@@ -153,7 +153,7 @@ func TestPoolFailureBackoffAndLimit(t *testing.T) {
 		require.Empty(t, e.poolMembers(t, e.pool.Name), "the failed member is deleted")
 		if n == 5 {
 			requirePool(t, pool, "MemberFailureLimit", false, true)
-			require.Zero(t, e.lastStep.RequeueAfter)
+			require.Equal(t, time.Minute, e.lastStep.RequeueAfter, "a stalled pool still reads Coder for a new version")
 			break
 		}
 		backoff := 30 * time.Second << (n - 1)
