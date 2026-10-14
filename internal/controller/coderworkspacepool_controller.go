@@ -210,9 +210,7 @@ func (r *CoderWorkspacePoolReconciler) deleteFailedMembers(
 		uid, version := m.UID, m.ResourceVersion
 		if err := r.Delete(ctx, m, client.Preconditions{UID: &uid, ResourceVersion: &version}); client.IgnoreNotFound(err) != nil {
 			errs = append(errs, fmt.Errorf("delete failed pool member %s/%s: %w", m.Namespace, m.Name, err))
-			continue
 		}
-		m.DeletionTimestamp = &metav1.Time{Time: r.Clock.Now()} // The counts skip it.
 	}
 	return errors.Join(errs...)
 }

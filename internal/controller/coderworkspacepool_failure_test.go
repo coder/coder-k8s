@@ -169,6 +169,20 @@ func TestPoolFailureRunResets(t *testing.T) {
 	e.setMemberStatus(t, outdated, e.failedStatus("BuildFailed"))
 	require.Zero(t, e.reconcilePool(t, 1).Status.ConsecutiveFailures)
 	require.Nil(t, e.reconcileMember(t, outdated, 0), "deleted without counting")
+
+	// A new version ends the run too. Two failures run first, so that the
+	// limit and the backoff stay out of the way.
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) {
+		s.Version = coderv1alpha1.CoderWorkspacePoolVersion{Active: new(true)}
+	})
+	e.tick()
+	e.reconcilePool(t, 1) // The spec change starts a new run.
+	e.tick()
+	e.setMemberStatus(t, e.createMember(t, nil), e.failedStatus("BuildFailed"))
+	require.Equal(t, int32(1), e.reconcilePool(t, 1).Status.ConsecutiveFailures)
+	e.tick()
+	e.fake.promoteVersion(e.fake.addVersion(e.tplID, "v2", codersdk.ProvisionerJobSucceeded))
+	require.Zero(t, e.reconcilePool(t, 1).Status.ConsecutiveFailures, "the new version started a new run")
 }
 
 // deleteHookClient runs hook before each member delete and fails the pool
