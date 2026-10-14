@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -112,6 +113,9 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 			members = append(members, m)
 		}
 	}
+	if err := r.releaseUsedMembers(ctx, pool, members); err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.deleteFailedMembers(ctx, pool, before, members, step == nil); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -141,6 +145,9 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+	if err := r.deleteUnclaimedMembers(ctx, pool, members, step); err != nil {
+		return ctrl.Result{}, err
 	}
 	r.applyPoolStatus(pool, counts, step)
 	if err := r.writePoolStatus(ctx, pool, before); err != nil {
@@ -243,6 +250,118 @@ func (r *CoderWorkspacePoolReconciler) deleteFailedMembers(
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// releaseUsedMembers removes the pool's controller reference from its
+// unclaimed members that someone used (plan 6.3 step 4, decision D6). A
+// used member then never counts as unclaimed again, and neither the pool
+// nor its deletion deletes it. It keeps the pool label for
+// status.usedReplicas. The update carries the listed resourceVersion, and
+// the listed members stay as they were, so the later steps decide on the
+// list.
+func (r *CoderWorkspacePoolReconciler) releaseUsedMembers(
+	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, members []coderv1alpha1.CoderWorkspacePoolMember,
+) error {
+	for i := range members {
+		m := &members[i]
+		controller := metav1.GetControllerOf(m)
+		if controller == nil || controller.UID != pool.UID || m.Spec.ClaimRef != nil || !m.DeletionTimestamp.IsZero() ||
+			!meta.IsStatusConditionTrue(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed) {
+			continue
+		}
+		released := m.DeepCopy()
+		released.OwnerReferences = slices.DeleteFunc(released.OwnerReferences, func(o metav1.OwnerReference) bool { return o.UID == pool.UID })
+		if err := r.Update(ctx, released); err != nil {
+			return fmt.Errorf("release used pool member %s/%s: %w", m.Namespace, m.Name, err)
+		}
+	}
+	return nil
+}
+
+// poolConsentLostReasons are the waits after which no unclaimed member may
+// keep its workspace: each one holds the owner's token from its start build.
+var poolConsentLostReasons = []string{"OwnerNotAllowed", "TemplateNotAllowed", "OwnerNotEligible"}
+
+// deleteUnclaimedMembers deletes the pool's unclaimed members that it no
+// longer wants (plan 6.3 steps 8 and 9). The deletes carry the listed UID and
+// resourceVersion, so a member that its reconciler marked used after the
+// list answers 409 and stays. Bound, used, failed, and deleting members never
+// go here. After a consent removal or an owner refusal, all other unclaimed
+// members go. Otherwise, new before old: outdated members that are not ready
+// go at once, and outdated ready members go oldest first, down to what the
+// current ready members do not cover yet. Current members above
+// spec.replicas go in this order: those without a create request, those not
+// ready (newest first), then ready ones (oldest first).
+func (r *CoderWorkspacePoolReconciler) deleteUnclaimedMembers(
+	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, members []coderv1alpha1.CoderWorkspacePoolMember, step *coderStep,
+) error {
+	want := *pool.Spec.Replicas // Claims add their demand in PR 11.
+	var current, outdatedReady, doomed []*coderv1alpha1.CoderWorkspacePoolMember
+	var readyCurrent int32
+	for i := range members {
+		m := &members[i]
+		controller := metav1.GetControllerOf(m)
+		if controller == nil || controller.UID != pool.UID || m.Spec.ClaimRef != nil || !m.DeletionTimestamp.IsZero() ||
+			m.Status.Phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed ||
+			meta.IsStatusConditionTrue(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed) {
+			continue
+		}
+		switch ready := poolMemberReady(m); {
+		case step != nil && slices.Contains(poolConsentLostReasons, step.reason):
+			doomed = append(doomed, m)
+		case poolMemberInputMismatch(m, pool) == "":
+			current = append(current, m)
+			if ready {
+				readyCurrent++
+			}
+		case ready:
+			outdatedReady = append(outdatedReady, m)
+		default:
+			doomed = append(doomed, m)
+		}
+	}
+	readyAt := func(m *coderv1alpha1.CoderWorkspacePoolMember) time.Time {
+		return cmp.Or(m.Status.ReadyTime, &m.CreationTimestamp).Time
+	}
+	// Newest ready first: the members to keep come first.
+	slices.SortStableFunc(outdatedReady, func(a, b *coderv1alpha1.CoderWorkspacePoolMember) int { return readyAt(b).Compare(readyAt(a)) })
+	doomed = append(doomed, outdatedReady[min(int(max(want-readyCurrent, 0)), len(outdatedReady)):]...)
+	if extra := len(current) - int(want); extra > 0 {
+		rank := func(m *coderv1alpha1.CoderWorkspacePoolMember) int {
+			switch {
+			case !poolMemberMayHaveWorkspace(m):
+				return 0
+			case !poolMemberReady(m):
+				return 1
+			}
+			return 2
+		}
+		slices.SortStableFunc(current, func(a, b *coderv1alpha1.CoderWorkspacePoolMember) int {
+			if c := cmp.Compare(rank(a), rank(b)); c != 0 {
+				return c
+			}
+			if rank(a) == 2 {
+				return readyAt(a).Compare(readyAt(b)) // Ready: oldest first.
+			}
+			return b.CreationTimestamp.Compare(a.CreationTimestamp.Time) // Newest first.
+		})
+		doomed = append(doomed, current[:extra]...)
+	}
+	var errs []error
+	for _, m := range doomed {
+		uid, version := m.UID, m.ResourceVersion
+		if err := r.Delete(ctx, m, client.Preconditions{UID: &uid, ResourceVersion: &version}); client.IgnoreNotFound(err) != nil {
+			errs = append(errs, fmt.Errorf("delete unclaimed pool member %s/%s: %w", m.Namespace, m.Name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// poolMemberReady reports a member that is ready to claim: phase Ready and
+// its Ready condition True.
+func poolMemberReady(m *coderv1alpha1.CoderWorkspacePoolMember) bool {
+	return m.Status.Phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseReady &&
+		meta.IsStatusConditionTrue(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionReady)
 }
 
 // poolMemberFailedAt is when a failed member failed. The member sets its
@@ -516,8 +635,7 @@ func countPoolMembers(pool *coderv1alpha1.CoderWorkspacePool, members []coderv1a
 		if m.Status.Phase != coderv1alpha1.CoderWorkspacePoolMemberPhaseReady {
 			c.building++
 		}
-		ready := m.Status.Phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseReady &&
-			meta.IsStatusConditionTrue(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionReady)
+		ready := poolMemberReady(m)
 		current := poolMemberInputMismatch(m, pool) == ""
 		switch {
 		case current && ready:
