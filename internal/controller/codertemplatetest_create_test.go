@@ -118,6 +118,42 @@ func TestTemplateTestCreateResults(t *testing.T) {
 	}
 }
 
+// Two create answers without effect in a row must both clear the stored
+// marker. Before #318 the second round compared the cleared status with the
+// snapshot taken before the marker write, found no change, skipped the write,
+// and left the stored marker behind: the test then confirmed forever and
+// never sent the create again.
+func TestTemplateTestCreateNoEffectTwiceInARow(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	for _, tc := range []struct {
+		name   string
+		fault  fakeFault
+		reason string
+	}{
+		{name: "429", fault: fakeFault{Status: 429}, reason: "CreateRetrying"},
+		{name: "401", fault: fakeFault{Status: 401}, reason: "CreateRetrying"},
+		{name: "406", fault: fakeFault{Status: 406}, reason: "TemplateVersionImporting"},
+	} {
+		t.Run(tc.name, func(t *testing.T) { // Not parallel: the cases share e.
+			creates := e.fake.requestCount(routeCreateWorkspace)
+			key := e.createTest(t, "default.docker", coderv1alpha1.CoderTemplateTestVersion{Name: "v1"})
+			e.reconcile(t, key, 2) // Finalizer and initialization.
+			for round := 1; round <= 2; round++ {
+				e.fake.failNext(routeCreateWorkspace, tc.fault)
+				tt := e.reconcile(t, key, 1) // Lookups and create.
+				require.Equal(t, creates+round, e.fake.requestCount(routeCreateWorkspace), "%s round %d", tc.name, round)
+				// The stored object, not the in-memory one, must hold no marker.
+				require.Nil(t, tt.Status.CreateAttemptTime, "%s round %d: a result without effect clears the stored marker", tc.name, round)
+				require.Equal(t, coderv1alpha1.CoderTemplateTestPhasePending, tt.Status.Phase, "%s round %d", tc.name, round)
+				require.Equal(t, tc.reason, tt.Status.Reason, "%s round %d", tc.name, round)
+			}
+			requireTemplateTestRunning(t, e.settle(t, key), "WaitingForBuild", "")
+			require.Equal(t, creates+3, e.fake.requestCount(routeCreateWorkspace), "%s: the create is sent again after both answers", tc.name)
+		})
+	}
+}
+
 // markerConflictClient fails every status write that sets the create marker
 // of a test or a pool member, like a write from a stale object after a leader
 // handover.

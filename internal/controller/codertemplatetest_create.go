@@ -28,6 +28,9 @@ func (r *CoderTemplateTestReconciler) createWorkspace(
 	if err := r.writeStatus(ctx, tt, before); err != nil {
 		return nil, err
 	}
+	// The stored status now holds the marker. Compare the final write with
+	// it, so a result without effect still clears the marker.
+	*before = *tt.Status.DeepCopy()
 	// The marker write can take a while. No request was sent yet, so a
 	// test past its deadline clears the marker and fails without a workspace.
 	if !r.Clock.Now().Before(deadline) {
