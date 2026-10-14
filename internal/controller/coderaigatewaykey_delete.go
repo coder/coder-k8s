@@ -117,11 +117,12 @@ func (r *CoderAIGatewayKeyReconciler) deleteKeys(ctx context.Context, sdk *coder
 }
 
 // aiGatewayKeyDeleteFailure classifies a failed call of the deletion like a
-// failed LIST, with the deletion cadence: 60 s while Coder does not answer,
-// 10 minutes while it refuses.
+// failed LIST, with the deletion cadence: 60 s while Coder does not answer
+// (a 429 too, instead of the shorter shared backoff), 10 minutes while it
+// refuses.
 func aiGatewayKeyDeleteFailure(action string, err error) *aiGatewayKeyStep {
 	step := aiGatewayKeyCoderFailure(action, err)
-	step.requeue = aiGatewayKeyDeleteRetry
+	step.requeue, step.rateLimited = aiGatewayKeyDeleteRetry, false
 	if step.stalled {
 		step.requeue = aiGatewayKeyDeleteRefusedRetry
 		step.message = "The object is being deleted, but the operator cannot delete its keys in Coder. " + step.message

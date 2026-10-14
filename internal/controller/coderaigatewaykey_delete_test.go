@@ -66,8 +66,8 @@ func TestCoderAIGatewayKeyDeleteDeletesEveryKey(t *testing.T) {
 	require.Equal(t, 2, env.fake.requestCount(routeAIGatewayKeys)-2, "one LIST to delete, one to prove none remain")
 }
 
-// Plan 3.5: while Coder does not answer, the finalizer stays and the
-// deletion retries every 60 s. While Coder refuses (403 or no key API), it
+// Plan 3.5: while Coder does not answer (also with 429), the finalizer stays
+// and the deletion retries every 60 s. While Coder refuses (403 or no key API), it
 // retries every 10 minutes. Both end in a release once Coder answers.
 func TestCoderAIGatewayKeyDeleteRetries(t *testing.T) {
 	t.Parallel()
@@ -81,6 +81,11 @@ func TestCoderAIGatewayKeyDeleteRetries(t *testing.T) {
 	}{
 		"unavailable": {
 			fail:   func(f *fakeCoder) { f.failNext(routeAIGatewayKeys, fakeFault{Status: http.StatusBadGateway}) },
+			heal:   func(*fakeCoder) {},
+			reason: "CoderUnavailable", requeue: time.Minute,
+		},
+		"rate limited": {
+			fail:   func(f *fakeCoder) { f.failNext(routeDeleteAIGatewayKey, fakeFault{Status: http.StatusTooManyRequests}) },
 			heal:   func(*fakeCoder) {},
 			reason: "CoderUnavailable", requeue: time.Minute,
 		},
