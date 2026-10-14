@@ -58,7 +58,7 @@ func applyMCPServer(
 		// so the GET of the next reconcile decides whether the config is gone.
 		return mcpServerWait(mcpServerRetry, "CoderUnavailable", "update MCP server config %s: %s", id, coderErrorSummary(err)), nil
 	}
-	if field := mcpServerUpdateMismatch(id, req, updated); field != "" {
+	if field := mcpServerUpdateMismatch(id, current.AuthType, req, updated); field != "" {
 		return mcpServerStalled(mcpServerResync, "CoderAnswerMismatch", "assertion failed: Coder answered the update of MCP server config %s with another %s", id, field), nil
 	}
 	if step, err := syncMCPServerACL(ctx, sdk, orgID, id, server.Spec.Access); step != nil || err != nil {
@@ -71,8 +71,10 @@ func applyMCPServer(
 
 // mcpServerUpdateMismatch returns the first field of the update answer that
 // differs from the request, or "". Coder returns every field the request
-// sets, except the credential values, for which it returns a has_* flag.
-func mcpServerUpdateMismatch(id uuid.UUID, req codersdk.UpdateMCPServerConfigRequest, got codersdk.MCPServerConfig) string {
+// sets, except the credential values, for which it returns a has_* flag. A
+// changed auth type makes Coder clear the credentials of the other types
+// (plan F9), so their flags must then be false.
+func mcpServerUpdateMismatch(id uuid.UUID, oldAuthType string, req codersdk.UpdateMCPServerConfigRequest, got codersdk.MCPServerConfig) string {
 	if got.ID != id {
 		return "ID"
 	}
@@ -122,6 +124,16 @@ func mcpServerUpdateMismatch(id uuid.UUID, req codersdk.UpdateMCPServerConfigReq
 		return "has_custom_headers"
 	case req.OAuth2ClientSecret != nil && !got.HasOAuth2Secret:
 		return "has_oauth2_secret"
+	}
+	if req.AuthType != nil && *req.AuthType != oldAuthType {
+		switch {
+		case req.APIKeyValue == nil && got.HasAPIKey:
+			return "has_api_key"
+		case req.CustomHeaders == nil && got.HasCustomHeaders:
+			return "has_custom_headers"
+		case req.OAuth2ClientSecret == nil && got.HasOAuth2Secret:
+			return "has_oauth2_secret"
+		}
 	}
 	return ""
 }

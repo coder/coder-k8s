@@ -312,3 +312,71 @@ func TestCoderMCPServerApplyLostStatusWrite(t *testing.T) {
 	require.Equal(t, 1, env.posts())
 	require.Equal(t, 2, env.fake.requestCount(routeUpdateMCPServer))
 }
+
+// A Secret change moves its change token but not the generation. The next
+// reconcile sends the new value in one PATCH and records the new token, and
+// the one after sends nothing.
+func TestCoderMCPServerApplySecretRotation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	secret := env.keySecret(ctx, t, testMCPKey)
+	got, _ := env.reconcile(ctx, t, env.create(ctx, t, nil))
+	requireMCPServerApplied(t, got)
+
+	rotated := testMCPKey + "-rotated"
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(secret), secret))
+	secret.Data["token"] = []byte(rotated)
+	require.NoError(t, k8sClient.Update(ctx, secret))
+	before := env.fake.requestCount(routeUpdateMCPServer)
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerApplied(t, got)
+	require.Equal(t, 1, env.fake.requestCount(routeUpdateMCPServer)-before)
+	require.Equal(t, rotated, env.requireCreated(t, got).apiKeyValue)
+	require.Equal(t, secret.ResourceVersion, got.Status.Credentials[0].SecretResourceVersion)
+
+	before = env.mcpRequests()
+	again, _ := env.reconcile(ctx, t, got)
+	require.Equal(t, before, env.mcpRequests(), "a recorded token sends nothing")
+	require.Equal(t, got.ResourceVersion, again.ResourceVersion)
+}
+
+// A spec change of the auth type relies on Coder clearing the old type's
+// credential. An answer that still holds it is not accepted.
+func TestCoderMCPServerApplyAuthTypeChange(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		fault *fakeFault
+	}{
+		{name: "old key cleared"},
+		{name: "old key kept", fault: ptrTo(rewriteUpdate(func(c *codersdk.MCPServerConfig) { c.HasAPIKey = true }))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			env := newMCPServerEnv(ctx, t, true)
+			env.keySecret(ctx, t, testMCPKey)
+			got, _ := env.reconcile(ctx, t, env.create(ctx, t, nil))
+			requireMCPServerApplied(t, got)
+
+			require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(got), got))
+			got.Spec.Auth = coderv1alpha1.CoderMCPServerAuth{Type: "none"}
+			require.NoError(t, k8sClient.Update(ctx, got))
+			if tc.fault != nil {
+				env.fake.failNext(routeUpdateMCPServer, *tc.fault)
+			}
+			got, _ = env.reconcile(ctx, t, got)
+			stored := env.requireCreated(t, got)
+			require.Equal(t, "none", stored.view.AuthType)
+			if tc.fault == nil {
+				requireMCPServerApplied(t, got)
+				require.Empty(t, stored.apiKeyValue, "Coder cleared the key")
+				require.Empty(t, got.Status.Credentials)
+				return
+			}
+			require.Contains(t, requireMCPServerStep(t, got, true, "CoderAnswerMismatch"), "has_api_key")
+			require.NotEqual(t, got.Generation, got.Status.AppliedGeneration)
+		})
+	}
+}

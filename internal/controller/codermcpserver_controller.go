@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -231,7 +232,9 @@ func (r *CoderMCPServerReconciler) check(
 	}
 	switch {
 	case step != nil:
-	case server.Status.AppliedGeneration == server.Generation:
+	case server.Status.AppliedGeneration == server.Generation &&
+		slices.Equal(server.Status.Credentials, mcpServerCredentialStatus(server.Spec.Auth, values)):
+		// A Secret change moves its change token without a new generation.
 		step = mcpServerReady(server)
 	default:
 		if step, err = applyMCPServer(ctx, sdk, server, org.ID, values); err != nil {
