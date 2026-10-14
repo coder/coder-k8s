@@ -36,9 +36,6 @@ type AIGatewaySpec struct {
 	// controller creates no key. Setting it back to false stops new keys and
 	// rotations. The current key of each CoderAIGatewayKey stays until that
 	// object is deleted.
-	//
-	// This field has no effect yet: the CoderAIGatewayKey controller is not
-	// shipped.
 	// +optional
 	AllowKeys bool `json:"allowKeys,omitempty"`
 }

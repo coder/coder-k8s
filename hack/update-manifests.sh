@@ -31,7 +31,7 @@ list_manifests() {
 # CRDs of kinds whose controller is not registered yet. They go to config/crd/dormant/, which no kustomization,
 # example, doc or script applies, so the kind is never served without its controller.
 # Move a file back by deleting its entry when the controller ships.
-DORMANT_CRDS=(coder.com_coderaigatewaykeys.yaml coder.com_codermcpservers.yaml coder.com_coderworkspacepools.yaml coder.com_coderworkspacepoolmembers.yaml coder.com_coderworkspaceclaims.yaml)
+DORMANT_CRDS=(coder.com_codermcpservers.yaml coder.com_coderworkspacepools.yaml coder.com_coderworkspacepoolmembers.yaml coder.com_coderworkspaceclaims.yaml)
 
 # RBAC manifests that only the aggregated API server needs; the controller-only install bundle leaves them out.
 BUNDLE_EXCLUDED_RBAC=(apiservice-cabundle-role.yaml auth-delegator-binding.yaml authentication-reader-binding.yaml)

@@ -41,7 +41,7 @@
 | `affinity` | [Affinity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#affinity-v1-core) | Affinity configures pod affinity/anti-affinity rules. |
 | `topologySpreadConstraints` | [TopologySpreadConstraint](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#topologyspreadconstraint-v1-core) array | TopologySpreadConstraints control pod topology spread. |
 | `mcpServers` | [MCPServersSpec](#mcpserversspec) | MCPServers configures CoderMCPServer objects that use this control plane. It has no effect yet: the CoderMCPServer controller is not shipped. |
-| `aiGateway` | [AIGatewaySpec](#aigatewayspec) | AIGateway configures CoderAIGatewayKey objects that use this control plane. It has no effect yet: the CoderAIGatewayKey controller is not shipped. |
+| `aiGateway` | [AIGatewaySpec](#aigatewayspec) | AIGateway configures CoderAIGatewayKey objects that use this control plane. |
 | `workspacePools` | [WorkspacePoolsSpec](#workspacepoolsspec) | WorkspacePools configures CoderWorkspacePool objects that use this control plane. It has no effect yet: the CoderWorkspacePool controller is not shipped. |
 | `templateTests` | [TemplateTestsSpec](#templatetestsspec) | TemplateTests configures CoderTemplateTest runs against this control plane. |
 
@@ -71,7 +71,7 @@ CoderControlPlane (CoderControlPlane.spec.aiGateway).
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `allowKeys` | boolean | AllowKeys lets CoderAIGatewayKey objects in this namespace create and rotate Coder AI Gateway keys with this control plane's operator token. A gateway key lets its holder load the API key of every enabled AI provider, so this delegates that power to everyone who can create CoderAIGatewayKey objects here. When false (the default), the controller creates no key. Setting it back to false stops new keys and rotations. The current key of each CoderAIGatewayKey stays until that object is deleted. This field has no effect yet: the CoderAIGatewayKey controller is not shipped. |
+| `allowKeys` | boolean | AllowKeys lets CoderAIGatewayKey objects in this namespace create and rotate Coder AI Gateway keys with this control plane's operator token. A gateway key lets its holder load the API key of every enabled AI provider, so this delegates that power to everyone who can create CoderAIGatewayKey objects here. When false (the default), the controller creates no key. Setting it back to false stops new keys and rotations. The current key of each CoderAIGatewayKey stays until that object is deleted. |
 
 ### CertSecretSelector
 
