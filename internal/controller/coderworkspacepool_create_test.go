@@ -253,3 +253,33 @@ func TestPoolMemberRechecksConsentUncached(t *testing.T) {
 	require.Equal(t, "TemplateNotAllowed", member.Status.Reason, member.Status.Message)
 	require.Zero(t, e.fake.requestCount(routeCreateWorkspace))
 }
+
+// stalePoolClient answers pool reads from a cache that has not seen the
+// pool's resolved inputs yet.
+type stalePoolClient struct{ client.Client }
+
+func (c stalePoolClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := c.Client.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	if pool, ok := obj.(*coderv1alpha1.CoderWorkspacePool); ok {
+		pool.Status.Resolved = nil
+	}
+	return nil
+}
+
+// TestPoolMemberReadsPoolUncached: the member compares its inputs with the
+// pool read without the cache, so a cache that lags behind the pool's
+// status never fails a valid member.
+func TestPoolMemberReadsPoolUncached(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	key := e.createMember(t, nil)
+	r := &controller.CoderWorkspacePoolMemberReconciler{Client: stalePoolClient{k8sClient}, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	for range 3 {
+		_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+		require.NoError(t, err)
+	}
+	member := e.reconcileMember(t, key, 0)
+	require.Equal(t, coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, member.Status.Phase, member.Status.Message)
+}
