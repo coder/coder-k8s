@@ -8,6 +8,277 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.0
+  name: coderaiproviders.coder.com
+spec:
+  group: coder.com
+  names:
+    kind: CoderAIProvider
+    listKind: CoderAIProviderList
+    plural: coderaiproviders
+    singular: coderaiprovider
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.type
+      name: Type
+      type: string
+    - jsonPath: .spec.enabled
+      name: Enabled
+      type: boolean
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          CoderAIProvider manages one AI provider in Coder. The object name is the
+          Coder provider name. It cannot be a UUID, because Coder looks up a
+          UUID-shaped name as a provider ID.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: CoderAIProviderSpec defines one AI provider in Coder.
+            properties:
+              apiKeySecretRef:
+                description: |-
+                  APIKeySecretRef references the key in a Secret in the same namespace
+                  that holds the provider API key. The Secret must opt in to the
+                  credential Secret contract.
+                properties:
+                  key:
+                    description: Key is the key inside the Secret data map.
+                    type: string
+                  name:
+                    description: Name is the Kubernetes Secret name.
+                    type: string
+                required:
+                - name
+                type: object
+                x-kubernetes-validations:
+                - message: apiKeySecretRef.name must not be empty
+                  rule: size(self.name) > 0
+                - message: apiKeySecretRef.key must not be empty
+                  rule: has(self.key) && size(self.key) > 0
+              baseURL:
+                description: |-
+                  BaseURL is the http:// or https:// URL that Coder sends model requests
+                  to. It must not hold user info. The Secret in apiKeySecretRef must list
+                  its origin as an allowed destination.
+                maxLength: 2048
+                minLength: 1
+                type: string
+                x-kubernetes-validations:
+                - message: baseURL must be a valid URL with a host
+                  rule: isURL(self) && url(self).getHostname() != ''
+                - message: baseURL must be an http:// or https:// URL with a host
+                    and no user info
+                  rule: self.matches('^https?://[^/?#@\\s]+([/?#].*)?$')
+              controlPlaneRef:
+                description: |-
+                  ControlPlaneRef names the CoderControlPlane in the same namespace. The
+                  controller calls Coder with that control plane's operator token.
+                properties:
+                  name:
+                    description: Name is the CoderControlPlane name.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                required:
+                - name
+                type: object
+                x-kubernetes-validations:
+                - message: controlPlaneRef is immutable
+                  rule: self == oldSelf
+              displayName:
+                description: |-
+                  DisplayName is the name that Coder shows. When empty, Coder shows the
+                  provider name.
+                maxLength: 128
+                type: string
+              enabled:
+                default: true
+                description: |-
+                  Enabled turns the provider on or off in Coder. When omitted, the
+                  default is true.
+                type: boolean
+              icon:
+                description: Icon is the icon URL or path that Coder shows.
+                maxLength: 2048
+                type: string
+              type:
+                description: Type is the Coder provider type. Coder cannot change
+                  it after create.
+                enum:
+                - openai
+                - anthropic
+                - azure
+                - google
+                - openai-compat
+                - openrouter
+                - vercel
+                type: string
+                x-kubernetes-validations:
+                - message: type is immutable
+                  rule: self == oldSelf
+            required:
+            - apiKeySecretRef
+            - baseURL
+            - controlPlaneRef
+            - type
+            type: object
+          status:
+            description: CoderAIProviderStatus defines the observed state of a CoderAIProvider.
+            properties:
+              appliedGeneration:
+                description: AppliedGeneration is the last generation whose spec Coder
+                  fully holds.
+                format: int64
+                type: integer
+              conditions:
+                description: Conditions are Ready, Reconciling, and Stalled.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              createAttemptTime:
+                description: |-
+                  CreateAttemptTime is set before every provider create request. While it
+                  is set and ProviderID is empty, a create request can be in flight or
+                  already committed in Coder.
+                format: date-time
+                type: string
+              credential:
+                description: Credential records the Secret value last sent to Coder.
+                properties:
+                  keyID:
+                    description: KeyID is the ID that Coder gave the key. It is not
+                      the key.
+                    type: string
+                  resendAttemptTime:
+                    description: |-
+                      ResendAttemptTime is set before every key resend. While it is set, a
+                      resend can be in flight or already committed in Coder.
+                    format: date-time
+                    type: string
+                  secretKey:
+                    description: SecretKey is the key in the Secret that was read.
+                    type: string
+                  secretName:
+                    description: SecretName is the Secret name that was read.
+                    type: string
+                  secretResourceVersion:
+                    description: SecretResourceVersion is the resourceVersion of the
+                      Secret that was read.
+                    type: string
+                  secretUID:
+                    description: SecretUID is the UID of the Secret that was read.
+                    type: string
+                type: object
+              observedGeneration:
+                description: ObservedGeneration is the generation the controller last
+                  processed.
+                format: int64
+                type: integer
+              providerID:
+                description: ProviderID is the Coder provider ID.
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: 'metadata.name is the Coder provider name: at most 63 lowercase
+            letters, digits, and single hyphens between them'
+          rule: size(self.metadata.name) <= 63 && self.metadata.name.matches('^[a-z0-9]+(-[a-z0-9]+)*$')
+        - message: 'metadata.name must not be a UUID: Coder reads a UUID-shaped provider
+            name as a provider ID'
+          rule: '!self.metadata.name.matches(''^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'')
+            && !self.metadata.name.matches(''^[0-9a-f]{32}$'')'
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
   name: codercontrolplanes.coder.com
 spec:
   group: coder.com
@@ -5836,10 +6107,35 @@ rules:
   - coder.com
   resources:
   - coderaigatewaykeys
-  - coderaiproviders
   - codermcpservers
   verbs:
   - list
+- apiGroups:
+  - coder.com
+  resources:
+  - coderaiproviders
+  verbs:
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - coder.com
+  resources:
+  - coderaiproviders/finalizers
+  - codercontrolplanes/finalizers
+  - coderprovisioners/finalizers
+  - codertemplatetests/finalizers
+  - coderworkspaceproxies/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - coder.com
+  resources:
+  - coderaiproviders/status
+  verbs:
+  - get
+  - update
 - apiGroups:
   - coder.com
   resources:
@@ -5854,15 +6150,6 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - coder.com
-  resources:
-  - codercontrolplanes/finalizers
-  - coderprovisioners/finalizers
-  - codertemplatetests/finalizers
-  - coderworkspaceproxies/finalizers
-  verbs:
-  - update
 - apiGroups:
   - coder.com
   resources:

@@ -39,8 +39,12 @@ const (
 	aiProviderRetry = 30 * time.Second
 )
 
-// CoderAIProviderReconciler reconciles CoderAIProvider objects (#154). It is
-// not registered yet. It checks the spec, the credential Secret and the
+// +kubebuilder:rbac:groups=coder.com,resources=coderaiproviders,verbs=get;list;watch;patch
+// +kubebuilder:rbac:groups=coder.com,resources=coderaiproviders/status,verbs=get;update
+// +kubebuilder:rbac:groups=coder.com,resources=coderaiproviders/finalizers,verbs=update
+
+// CoderAIProviderReconciler reconciles CoderAIProvider objects (#154). It
+// checks the spec, the credential Secret and the
 // control plane, creates the Coder provider when the name is free, and sets
 // the spec values on the provider that it created. It never changes a
 // provider that it did not create.
@@ -70,9 +74,8 @@ func aiProviderStalled(requeue time.Duration, reason, format string, args ...any
 	return &aiProviderStep{stalled: true, reason: reason, message: fmt.Sprintf(format, args...), requeue: requeue}
 }
 
-// SetupWithManager wires the reconciler into controller-runtime. Nothing
-// calls it until activation. A change of the referenced control plane or of
-// the key Secret requeues the provider.
+// SetupWithManager wires the reconciler into controller-runtime. A change of
+// the referenced control plane or of the key Secret requeues the provider.
 func (r *CoderAIProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if mgr == nil || r.Client == nil || r.Scheme == nil {
 		return fmt.Errorf("assertion failed: AI provider reconciler needs a manager, a client, and a scheme")
