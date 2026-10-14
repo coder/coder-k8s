@@ -56,6 +56,9 @@ type CoderAIProviderReconciler struct {
 	// OperatorNamespace holds the cleanup records (#353): the operator's own
 	// namespace, which only the operator can write ConfigMaps in.
 	OperatorNamespace string
+	// APIReader reads the cleanup records live: a record written moments ago
+	// can be missing from the cache.
+	APIReader client.Reader
 
 	sentKeys sync.Map // types.UID -> SHA-256 of the key that Coder holds. Memory only.
 }
@@ -144,8 +147,8 @@ func (r *CoderAIProviderReconciler) providersWith(ctx context.Context, namespace
 
 // Reconcile runs the checks in order and reports the first one that fails.
 func (r *CoderAIProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	if r.Client == nil || r.Scheme == nil || r.OperatorNamespace == "" {
-		return ctrl.Result{}, fmt.Errorf("assertion failed: AI provider reconciler needs a client, a scheme and the operator namespace")
+	if r.Client == nil || r.Scheme == nil || r.OperatorNamespace == "" || r.APIReader == nil {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: AI provider reconciler needs a client, a scheme, the operator namespace and an API reader")
 	}
 	provider := &coderv1alpha1.CoderAIProvider{}
 	if err := r.Get(ctx, req.NamespacedName, provider); err != nil {

@@ -39,7 +39,7 @@ func newAIProviderCreateEnv(ctx context.Context, t *testing.T) (aiProviderEnv, *
 // restart gives env a new reconciler, as a controller restart does. The
 // reconciler keeps no state between calls, so every step resumes from status.
 func (env *aiProviderEnv) restart() {
-	env.r = &controller.CoderAIProviderReconciler{Client: k8sClient, Scheme: scheme, OperatorNamespace: env.namespace}
+	env.r = &controller.CoderAIProviderReconciler{Client: k8sClient, Scheme: scheme, OperatorNamespace: env.namespace, APIReader: k8sClient}
 }
 
 func TestCoderAIProviderCreate(t *testing.T) {

@@ -21,7 +21,7 @@ const cleanupRecordKindAIProvider = "CoderAIProvider"
 func (r *CoderAIProviderReconciler) writeAIProviderRecord(
 	ctx context.Context, sdk *codersdk.Client, provider *coderv1alpha1.CoderAIProvider, createAttempt *time.Time,
 ) (*aiProviderStep, error) {
-	previous, existing, err := readCleanupRecord(ctx, r.Client, r.OperatorNamespace, provider.UID)
+	previous, existing, err := readCleanupRecord(ctx, r.APIReader, r.OperatorNamespace, provider.UID)
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +60,7 @@ func (r *CoderAIProviderReconciler) ensureAIProviderRecord(
 			return nil, err
 		}
 	}
-	record, _, err := readCleanupRecord(ctx, r.Client, r.OperatorNamespace, provider.UID)
+	record, _, err := readCleanupRecord(ctx, r.APIReader, r.OperatorNamespace, provider.UID)
 	if err != nil {
 		return nil, err
 	}

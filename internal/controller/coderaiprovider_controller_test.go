@@ -42,7 +42,7 @@ type aiProviderEnv struct {
 func newAIProviderEnv(ctx context.Context, t *testing.T, withControlPlane bool) aiProviderEnv {
 	t.Helper()
 	env := aiProviderEnv{namespace: createTestNamespace(ctx, t, "aip"), fake: newFakeCoder(t)}
-	env.r = &controller.CoderAIProviderReconciler{Client: k8sClient, Scheme: scheme, OperatorNamespace: env.namespace}
+	env.r = &controller.CoderAIProviderReconciler{Client: k8sClient, Scheme: scheme, OperatorNamespace: env.namespace, APIReader: k8sClient}
 	if withControlPlane {
 		createTestControlPlane(ctx, t, env.namespace, "coder", env.fake.server.URL)
 	}
@@ -384,7 +384,7 @@ func TestCoderAIProviderWatches(t *testing.T) {
 		Controller: config.Controller{SkipNameValidation: ptrTo(true)},
 	})
 	require.NoError(t, err)
-	require.NoError(t, (&controller.CoderAIProviderReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), OperatorNamespace: env.namespace}).SetupWithManager(mgr))
+	require.NoError(t, (&controller.CoderAIProviderReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), OperatorNamespace: env.namespace, APIReader: mgr.GetAPIReader()}).SetupWithManager(mgr))
 	mgrCtx, cancel := context.WithCancel(ctx)
 	mgrDone := make(chan error, 1)
 	go func() { mgrDone <- mgr.Start(mgrCtx) }()

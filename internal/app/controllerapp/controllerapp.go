@@ -131,6 +131,7 @@ func SetupControllers(mgr manager.Manager) error {
 		Scheme: managerScheme,
 		// The operator's own namespace holds the cleanup records (#353).
 		OperatorNamespace: detectLeaderElectionNamespace(),
+		APIReader:         mgr.GetAPIReader(),
 	}
 	if err := aiProviderReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create AI provider controller: %w", err)

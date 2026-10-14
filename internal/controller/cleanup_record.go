@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // Cleanup records (#353 part 2, option B′). Before the operator creates
@@ -60,6 +61,10 @@ type cleanupRecord struct {
 
 func cleanupRecordObjectName(uid types.UID) string { return cleanupRecordPrefix + string(uid) }
 
+// errNotACleanupRecord marks a ConfigMap of a record's name that is not a
+// valid record of that object. The operator never writes over it or deletes it.
+var errNotACleanupRecord = errors.New("not a cleanup record of this object")
+
 // coderDeploymentID reads Coder's deployment ID. Only a canonical UUID is
 // accepted: the ID decides which resources a sweep may delete.
 func coderDeploymentID(ctx context.Context, sdk *codersdk.Client) (string, error) {
@@ -91,7 +96,7 @@ func readCleanupRecord(ctx context.Context, reader client.Reader, namespace stri
 		return nil, nil, err
 	}
 	if record.UID != uid {
-		return nil, nil, fmt.Errorf("ConfigMap %s/%s is not the cleanup record of object %s", namespace, configMap.Name, uid)
+		return nil, nil, fmt.Errorf("ConfigMap %s/%s is not the cleanup record of object %s: %w", namespace, configMap.Name, uid, errNotACleanupRecord)
 	}
 	return record, configMap, nil
 }
@@ -105,12 +110,12 @@ func parseCleanupRecord(configMap *corev1.ConfigMap) (*cleanupRecord, error) {
 	}
 	if configMap.Labels[cleanupRecordLabel] == "" || configMap.Labels[cleanupRecordLabel] != record.Kind || record.UID == "" ||
 		configMap.Name != cleanupRecordObjectName(record.UID) || record.DeploymentID == "" {
-		return nil, fmt.Errorf("ConfigMap %s/%s is not a valid cleanup record", configMap.Namespace, configMap.Name)
+		return nil, fmt.Errorf("ConfigMap %s/%s is not a valid cleanup record: %w", configMap.Namespace, configMap.Name, errNotACleanupRecord)
 	}
 	if t := d[cleanupRecordCreateSentAt]; t != "" {
 		parsed, err := time.Parse(time.RFC3339, t)
 		if err != nil {
-			return nil, fmt.Errorf("cleanup record %s/%s has an invalid %s: %w", configMap.Namespace, configMap.Name, cleanupRecordCreateSentAt, err)
+			return nil, fmt.Errorf("cleanup record %s/%s has an invalid %s (%w): %w", configMap.Namespace, configMap.Name, cleanupRecordCreateSentAt, err, errNotACleanupRecord)
 		}
 		record.CreateAttemptTime = parsed
 	}
@@ -152,13 +157,18 @@ func writeCleanupRecord(ctx context.Context, c client.Client, namespace string, 
 }
 
 // deleteCleanupRecord removes the record of uid. Call it only after Coder
-// confirmed that it holds no resource of the object.
-func deleteCleanupRecord(ctx context.Context, c client.Client, namespace string, uid types.UID) error {
-	if namespace == "" || uid == "" {
-		return errors.New("assertion failed: a cleanup record needs the operator namespace and an object UID")
+// confirmed that it holds no resource of the object. It reads the record
+// through reader (live) and deletes only that ConfigMap (UID precondition).
+// A ConfigMap of that name that is not a record of uid stays.
+func deleteCleanupRecord(ctx context.Context, c client.Client, reader client.Reader, namespace string, uid types.UID) error {
+	record, configMap, err := readCleanupRecord(ctx, reader, namespace, uid)
+	if errors.Is(err, errNotACleanupRecord) {
+		log.FromContext(ctx).Error(err, "Leaving a ConfigMap that is not the cleanup record of this object")
+		return nil
+	} else if err != nil || record == nil {
+		return err
 	}
-	configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: cleanupRecordObjectName(uid)}}
-	if err := c.Delete(ctx, configMap); err != nil && !apierrors.IsNotFound(err) {
+	if err := c.Delete(ctx, configMap, client.Preconditions{UID: &configMap.UID}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete cleanup record %s/%s: %w", namespace, configMap.Name, err)
 	}
 	return nil

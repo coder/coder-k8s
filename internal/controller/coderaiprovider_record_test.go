@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -151,4 +152,75 @@ func TestCoderAIProviderRecordBackfill(t *testing.T) {
 	require.NoError(t, k8sClient.Update(ctx, configMap))
 	_, err := env.r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(provider)})
 	require.ErrorContains(t, err, "is not a valid cleanup record")
+}
+
+// #374 review: a provider from before records gets one also while its key
+// Secret fails the credential contract and the controller disables it.
+func TestCoderAIProviderRecordBackfillOnDisable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, secret, provider := newReadyAIProvider(ctx, t)
+	require.NoError(t, k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: env.namespace, Name: "ck8s-cleanup-" + string(provider.UID)}}))
+	editSecret(ctx, t, secret, func(s *corev1.Secret) { delete(s.Labels, "coder.com/credential") })
+	got, _ := env.reconcile(ctx, t, provider)
+	stored, _ := env.fake.aiProvider("openai")
+	require.False(t, stored.enabled, "the disable still runs")
+	require.Equal(t, got.Status.ProviderID, cleanupRecord(ctx, t, env.namespace, provider.UID)["coderID"])
+}
+
+// #374 review: the controller reads records live. A cache that does not
+// show the record yet must not make it create the record twice.
+func TestCoderAIProviderRecordReadLive(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newAIProviderCreateEnv(ctx, t)
+	base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+	env.r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*corev1.ConfigMap); ok {
+				return apierrors.NewNotFound(corev1.Resource("configmaps"), key.Name) // A stale cache.
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	got, _ := env.reconcile(ctx, t, provider)
+	requireAIProviderReady(t, got)
+	require.Equal(t, got.Status.ProviderID, cleanupRecord(ctx, t, env.namespace, provider.UID)["coderID"])
+}
+
+// #374 review: a ConfigMap of the record's name that is not this object's
+// record is never deleted.
+func TestCoderAIProviderDeleteKeepsForeignConfigMap(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newAIProviderCreateEnv(ctx, t)
+	provider.Finalizers = []string{coderv1alpha1.CoderAIProviderCleanupFinalizer}
+	require.NoError(t, k8sClient.Update(ctx, provider))
+	foreign := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: env.namespace, Name: "ck8s-cleanup-" + string(provider.UID)}, Data: map[string]string{"owner": "someone else"}}
+	require.NoError(t, k8sClient.Create(ctx, foreign))
+	gone, _ := env.deleteAIProvider(ctx, t, provider)
+	require.Nil(t, gone, "nothing of the object exists in Coder, so the finalizer goes")
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(foreign), foreign), "the foreign ConfigMap stays")
+}
+
+// #374 review: when the status write after a create failed, the record holds
+// the only provider ID. A delete uses it even after the nonce is gone.
+func TestCoderAIProviderDeleteUsesRecordedID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newReadyAIProvider(ctx, t)
+	provider.Status.ProviderID = ""
+	provider.Status.CreateAttemptTime = &metav1.Time{Time: time.Now().Add(-time.Hour)}
+	require.NoError(t, k8sClient.Status().Update(ctx, provider))
+	env.fake.mu.Lock()
+	for _, p := range env.fake.aiProviders {
+		p.displayName = "Renamed in the dashboard"
+	}
+	env.fake.mu.Unlock()
+	gone, _ := env.deleteAIProvider(ctx, t, provider)
+	require.Nil(t, gone)
+	_, ok := env.fake.aiProvider("openai")
+	require.False(t, ok, "the recorded ID proves ownership")
+	require.Nil(t, cleanupRecord(ctx, t, env.namespace, provider.UID))
 }
