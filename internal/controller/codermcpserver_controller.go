@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -184,9 +185,10 @@ func (r *CoderMCPServerReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 }
 
 // check gets Coder access, resolves and pins the organization, applies the
-// control plane's opt-in, reads the credentials, and then creates the config
-// or records the one that this object created. Every Coder call before the
-// slug lookup is an organization lookup.
+// control plane's opt-in, reads the credentials, creates the config or
+// records the one that this object created, and applies a new generation of
+// the spec. Every Coder call before the slug lookup is an organization
+// lookup.
 func (r *CoderMCPServerReconciler) check(
 	ctx context.Context, server *coderv1alpha1.CoderMCPServer, before *coderv1alpha1.CoderMCPServerStatus,
 ) (*mcpServerStep, error) {
@@ -228,9 +230,16 @@ func (r *CoderMCPServerReconciler) check(
 			*before = *server.Status.DeepCopy()
 		}
 	}
-	if step == nil {
-		step = mcpServerWait(mcpServerResync, "Pending",
-			"MCP server config %s exists in Coder, disabled. This controller version does not apply the spec yet.", server.Status.ConfigID)
+	switch {
+	case step != nil:
+	case server.Status.AppliedGeneration == server.Generation &&
+		slices.Equal(server.Status.Credentials, mcpServerCredentialStatus(server.Spec.Auth, values)):
+		// A Secret change moves its change token without a new generation.
+		step = mcpServerReady(server)
+	default:
+		if step, err = applyMCPServer(ctx, sdk, server, org.ID, values); err != nil {
+			return nil, err
+		}
 	}
 	// Coder messages can echo the request, so scrub the credentials from them.
 	all := make([]credentialsecret.Value, 0, len(values))

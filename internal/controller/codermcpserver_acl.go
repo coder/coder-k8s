@@ -35,6 +35,23 @@ var mcpServerGroupNamePattern = regexp.MustCompile(`^[a-zA-Z0-9]+(?:-[a-zA-Z0-9]
 func syncMCPServerACL(
 	ctx context.Context, sdk *codersdk.Client, orgID, configID uuid.UUID, access *coderv1alpha1.CoderMCPServerAccess,
 ) (*mcpServerStep, error) {
+	return syncMCPServerACLPass(ctx, sdk, orgID, configID, access, false)
+}
+
+// narrowMCPServerACL removes every ACL entry that access does not list, and
+// adds nothing. A caller that changes the config runs it before the change
+// and syncMCPServerACL after it. Then no principal outside both the old and
+// the new access list can reach the config at any point, also when the
+// change fails. It returns nil when nothing is left to remove.
+func narrowMCPServerACL(
+	ctx context.Context, sdk *codersdk.Client, orgID, configID uuid.UUID, access *coderv1alpha1.CoderMCPServerAccess,
+) (*mcpServerStep, error) {
+	return syncMCPServerACLPass(ctx, sdk, orgID, configID, access, true)
+}
+
+func syncMCPServerACLPass(
+	ctx context.Context, sdk *codersdk.Client, orgID, configID uuid.UUID, access *coderv1alpha1.CoderMCPServerAccess, removeOnly bool,
+) (*mcpServerStep, error) {
 	if sdk == nil || orgID == uuid.Nil || configID == uuid.Nil {
 		return nil, fmt.Errorf("assertion failed: MCP server ACL sync needs a Coder client, an organization ID, and a config ID")
 	}
@@ -62,8 +79,10 @@ func syncMCPServerACL(
 		}
 		delete(want, g.ID)
 	}
-	for id := range want {
-		patch.GroupRoles[id.String()] = codersdk.MCPServerConfigRoleRead
+	if !removeOnly {
+		for id := range want {
+			patch.GroupRoles[id.String()] = codersdk.MCPServerConfigRoleRead
+		}
 	}
 	// access lists groups only, so every user entry goes.
 	for _, u := range acl.Users {

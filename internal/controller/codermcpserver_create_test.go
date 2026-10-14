@@ -48,11 +48,10 @@ func (env mcpServerEnv) requireCreated(t *testing.T, server *coderv1alpha1.Coder
 	return own[0]
 }
 
-// requireMCPServerCreatedStep checks the reason after a create in this
-// version, which does not apply the spec yet.
-func requireMCPServerCreatedStep(t *testing.T, server *coderv1alpha1.CoderMCPServer) {
+// requireMCPServerApplied checks that the spec was applied after the create.
+func requireMCPServerApplied(t *testing.T, server *coderv1alpha1.CoderMCPServer) {
 	t.Helper()
-	require.Contains(t, requireMCPServerStep(t, server, false, "Pending"), "exists in Coder, disabled.")
+	require.Contains(t, requireMCPServerStep(t, server, false, "Applied"), "matches generation")
 }
 
 // Plan 4.5 create steps 1 to 3 for every auth type: one create, disabled with
@@ -125,7 +124,7 @@ func TestCoderMCPServerCreate(t *testing.T) {
 			base := env.posts() // Creates of the test setup.
 			got, result := env.reconcile(ctx, t, env.create(ctx, t, tc.spec))
 			stored := env.requireCreated(t, got)
-			requireMCPServerCreatedStep(t, got)
+			requireMCPServerApplied(t, got)
 			require.Equal(t, 1, env.posts()-base)
 			require.Equal(t, 10*time.Minute, result.RequeueAfter)
 			require.Equal(t, "github", stored.view.Slug)
@@ -145,7 +144,7 @@ func TestCoderMCPServerCreate(t *testing.T) {
 
 			before := env.mcpRequests()
 			again, _ := env.reconcile(ctx, t, got)
-			require.Equal(t, before, env.mcpRequests(), "a recorded config needs no MCP request in this version")
+			require.Equal(t, before, env.mcpRequests(), "an applied generation needs no MCP request in this version")
 			require.Equal(t, got.ResourceVersion, again.ResourceVersion)
 		})
 	}
@@ -175,7 +174,7 @@ func TestCoderMCPServerCreateAnswers(t *testing.T) {
 		}}, reason: "ConfirmingCreate", requeue: 5 * time.Second, marker: true, posts: 1},
 		{name: "429", fault: fakeFault{Status: http.StatusTooManyRequests}, reason: "CreateRetrying", requeue: 30 * time.Second, posts: 2},
 		{name: "401", fault: fakeFault{Status: http.StatusUnauthorized}, reason: "CreateRetrying", requeue: 30 * time.Second, posts: 2},
-		{name: "400 after commit", fault: fakeFault{Status: http.StatusBadRequest, AfterCommit: true}, reason: "Pending", requeue: 10 * time.Minute, posts: 1},
+		{name: "400 after commit", fault: fakeFault{Status: http.StatusBadRequest, AfterCommit: true}, reason: "Applied", requeue: 10 * time.Minute, posts: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -189,12 +188,12 @@ func TestCoderMCPServerCreateAnswers(t *testing.T) {
 			require.Equal(t, tc.requeue, result.RequeueAfter)
 			require.Equal(t, 1, env.posts())
 			require.Equal(t, tc.marker, got.Status.CreateAttemptTime != nil, "create marker")
-			if tc.reason != "Pending" {
+			if tc.reason != "Applied" {
 				require.Empty(t, got.Status.ConfigID)
 				got, _ = env.reconcile(ctx, t, got)
 			}
 			env.requireCreated(t, got)
-			requireMCPServerCreatedStep(t, got)
+			requireMCPServerApplied(t, got)
 			require.Equal(t, tc.posts, env.posts())
 		})
 	}
@@ -233,7 +232,7 @@ func TestCoderMCPServerCreateRejected(t *testing.T) {
 	require.NoError(t, k8sClient.Update(ctx, got))
 	got, _ = env.reconcile(ctx, t, got)
 	env.requireCreated(t, got)
-	requireMCPServerCreatedStep(t, got)
+	requireMCPServerApplied(t, got)
 	require.Equal(t, 2, env.posts())
 }
 
@@ -269,8 +268,8 @@ func TestCoderMCPServerCreateRecovery(t *testing.T) {
 		reason   string
 		posts    int
 	}{
-		{name: "create committed", existing: true, reason: "Pending"},
-		{name: "nothing committed", reason: "Pending", posts: 1},
+		{name: "create committed", existing: true, reason: "Applied"},
+		{name: "nothing committed", reason: "Applied", posts: 1},
 		{name: "nothing visible to a non-owner", notOwner: true, reason: "ConfirmingCreate"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -296,9 +295,9 @@ func TestCoderMCPServerCreateRecovery(t *testing.T) {
 			env.r = &controller.CoderMCPServerReconciler{Client: k8sClient, Scheme: scheme}
 			base := env.posts() // Creates of the test setup.
 			got, _ := env.reconcile(ctx, t, server)
-			if tc.reason == "Pending" {
+			if tc.reason == "Applied" {
 				env.requireCreated(t, got)
-				requireMCPServerCreatedStep(t, got)
+				requireMCPServerApplied(t, got)
 			} else {
 				requireMCPServerStep(t, got, false, tc.reason)
 				require.NotNil(t, got.Status.CreateAttemptTime)
