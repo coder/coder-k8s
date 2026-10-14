@@ -41,6 +41,12 @@ func TestNextAIGatewayKeyAction(t *testing.T) {
 		// Carol's manual key.
 		{ID: uuid.New(), Name: prefix, KeyPrefix: "Aaaaaaaaaa1"},
 		{ID: uuid.New(), Name: prefix + "1a", KeyPrefix: "Aaaaaaaaaa2"},
+		// Serials that the controller never writes: leading zeros, a sign,
+		// and a value past int64.
+		{ID: uuid.New(), Name: prefix + "00", KeyPrefix: "Aaaaaaaaaa5"},
+		{ID: uuid.New(), Name: prefix + "01", KeyPrefix: "Aaaaaaaaaa6"},
+		{ID: uuid.New(), Name: prefix + "+1", KeyPrefix: "Aaaaaaaaaa7"},
+		{ID: uuid.New(), Name: prefix + "99999999999999999999", KeyPrefix: "Aaaaaaaaaa8"},
 		{ID: uuid.New(), Name: "ck8s-1f8e2a6c1b3d4e5f9a7b2c4d6e8f0a1b-1", KeyPrefix: "Aaaaaaaaaa3"},
 		{ID: uuid.New(), Name: "carol", KeyPrefix: "Aaaaaaaaaa4"},
 	}

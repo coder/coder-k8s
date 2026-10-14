@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -90,10 +91,16 @@ func TestCoderAIGatewayKeyLostStatusWrite(t *testing.T) {
 	require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: env.namespace, Name: testAIGatewaySecret}, secret))
 	require.Equal(t, []byte(keys[0].plaintext), secret.Data["key"])
 
+	// The spec changes before the recovery. The adopted key was issued for
+	// the older spec, so the new trigger stays unhandled.
+	got.Spec.Rotation.Trigger = "rotate-me"
+	require.NoError(t, k8sClient.Update(ctx, got))
 	got, _ = env.reconcile(ctx, t, got)
 	requireAIGatewayKeyReady(t, got)
 	require.Nil(t, got.Status.PendingKey)
 	require.Equal(t, keys[0].id.String(), got.Status.CurrentKey.ID)
+	require.Empty(t, got.Status.LastHandledTrigger)
+	require.Less(t, got.Status.AppliedGeneration, got.Generation)
 	require.Equal(t, int64(0), got.Status.CurrentKey.Serial)
 	require.Zero(t, got.Status.ConsecutiveIssueFailures)
 	require.Equal(t, 1, env.fake.requestCount(routeCreateAIGatewayKey))
@@ -185,6 +192,7 @@ func TestCoderAIGatewayKeyLateSecretWrite(t *testing.T) {
 	got, _ = env.reconcile(ctx, t, got)
 	requireAIGatewayKeyReady(t, got)
 	require.Equal(t, orphan.id.String(), got.Status.CurrentKey.ID)
+	require.Equal(t, got.Generation, got.Status.AppliedGeneration, "the spec did not change since the attempt")
 	got, _ = env.reconcile(ctx, t, got)
 	requireAIGatewayKeyReady(t, got)
 	require.Zero(t, env.fake.requestCount(routeDeleteAIGatewayKey))
@@ -201,7 +209,8 @@ func TestCoderAIGatewayKeyCreateGateAndSweep(t *testing.T) {
 	env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
 	key := env.createKey(ctx, t, "coder", testAIGatewaySecret)
 	sdk := env.fake.client(t, 5*time.Second)
-	for _, name := range []string{"ck8s-00000000000040008000000000000001-0", aiGatewayKeyPrefix(key) + "7", "carol"} {
+	foreign := []string{"ck8s-00000000000040008000000000000001-0", aiGatewayKeyPrefix(key) + "7", aiGatewayKeyPrefix(key) + "00", "carol"}
+	for _, name := range foreign {
 		_, err := sdk.CreateAIGatewayKey(ctx, codersdk.CreateAIGatewayKeyRequest{Name: name})
 		require.NoError(t, err)
 	}
@@ -236,7 +245,40 @@ func TestCoderAIGatewayKeyCreateGateAndSweep(t *testing.T) {
 	for _, k := range env.fake.aiGatewayKeys() {
 		names = append(names, k.name)
 	}
-	require.ElementsMatch(t, []string{"ck8s-00000000000040008000000000000001-0", aiGatewayKeyPrefix(key) + "7", "carol", aiGatewayKeyPrefix(key) + "1"}, names)
+	require.ElementsMatch(t, append(foreign, aiGatewayKeyPrefix(key)+"1"), names)
+}
+
+// A sweep keeps Ready=True while the Secret holds the current key, also when
+// the orphan's DELETE fails and is retried.
+func TestCoderAIGatewayKeySweepKeepsReady(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+	got, _ := env.reconcile(ctx, t, env.createKey(ctx, t, "coder", testAIGatewaySecret))
+	requireAIGatewayKeyReady(t, got)
+	// An orphan with serial 1, as after a lost answer of a later create.
+	_, err := env.fake.client(t, 5*time.Second).CreateAIGatewayKey(ctx, codersdk.CreateAIGatewayKeyRequest{Name: aiGatewayKeyPrefix(got) + "1"})
+	require.NoError(t, err)
+	got.Status.NextSerial = 2
+	require.NoError(t, k8sClient.Status().Update(ctx, got))
+	env.clock.Step(5 * time.Minute)
+
+	requireReadyWhile := func(key *coderv1alpha1.CoderAIGatewayKey, reason string) {
+		t.Helper()
+		for conditionType, status := range map[string]metav1.ConditionStatus{"Ready": metav1.ConditionTrue, "Reconciling": metav1.ConditionTrue, "Stalled": metav1.ConditionFalse} {
+			condition := meta.FindStatusCondition(key.Status.Conditions, conditionType)
+			require.Equal(t, status, condition.Status, conditionType)
+			require.Equal(t, reason, condition.Reason, conditionType)
+		}
+	}
+	env.fake.failNext(routeDeleteAIGatewayKey, fakeFault{Status: http.StatusServiceUnavailable})
+	got, _ = env.reconcile(ctx, t, got)
+	requireReadyWhile(got, "CoderUnavailable")
+	got, _ = env.reconcile(ctx, t, got)
+	requireReadyWhile(got, "DeletingOrphans")
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyReady(t, got)
+	require.Len(t, env.fake.aiGatewayKeys(), 1)
 }
 
 // Plan I1 at the sweep: a Secret that holds the orphan at the moment of the

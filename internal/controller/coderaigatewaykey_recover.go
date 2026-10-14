@@ -142,7 +142,11 @@ func adoptAIGatewayKey(key *coderv1alpha1.CoderAIGatewayKey, own []codersdk.AIGa
 	if pending := key.Status.PendingKey; pending != nil && pending.Serial == decision.serial {
 		key.Status.PendingKey = nil
 	}
-	return setAIGatewayKeyCurrent(key, decision.serial, decision.key.ID, decision.key.Name, now)
+	// The last status write was the attempt's marker write. When the spec
+	// changed since then, the key was issued for an older spec: a new
+	// trigger stays unhandled, so it still starts its rotation.
+	applied := key.Status.ObservedGeneration == key.Generation
+	return setAIGatewayKeyCurrent(key, decision.serial, decision.key.ID, decision.key.Name, now, applied)
 }
 
 // sweepOrphan deletes one orphan (plan 4.5) after the I1 live read: a key
@@ -170,6 +174,7 @@ func (r *CoderAIGatewayKeyReconciler) sweepOrphan(
 		unavailable := coderStepUnavailable(fmt.Sprintf("delete orphan key %s", orphan.Name), err)
 		s := aiGatewayKeyWait(aiGatewayKeyRetry, unavailable.reason, "%s", unavailable.message)
 		s.rateLimited = unavailable.rateLimited
+		s.ready, s.inProgress = decision.healthy, decision.healthy // The Secret stays valid.
 		return s
 	}
 	return step("Deleted orphan key %s.", orphan.Name)

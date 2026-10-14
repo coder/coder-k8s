@@ -372,15 +372,17 @@ func ownAIGatewayKeys(prefix string, keys []codersdk.AIGatewayKey) []codersdk.AI
 	return own
 }
 
-// aiGatewayKeySerial returns the serial of a key name that is prefix and
-// decimal digits.
+// aiGatewayKeySerial returns the serial of a key name that is prefix and a
+// serial in the canonical form that the controller writes: decimal digits
+// without leading zeros. "00" is not serial 0, so a key that someone else
+// named that way is never this object's.
 func aiGatewayKeySerial(prefix, name string) (int64, bool) {
 	digits, ok := strings.CutPrefix(name, prefix)
-	if !ok || digits == "" || strings.Trim(digits, "0123456789") != "" {
+	if !ok {
 		return 0, false
 	}
 	serial, err := strconv.ParseInt(digits, 10, 64)
-	return serial, err == nil
+	return serial, err == nil && serial >= 0 && strconv.FormatInt(serial, 10) == digits
 }
 
 // aiGatewayKeySecretHolds returns the ID of the key in own whose prefix the
