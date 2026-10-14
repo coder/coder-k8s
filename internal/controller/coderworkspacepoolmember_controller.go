@@ -131,8 +131,10 @@ func (r *CoderWorkspacePoolMemberReconciler) Reconcile(ctx context.Context, req 
 	}
 	keepBackoff = step.rateLimited && !step.failed
 	switch {
-	case step.failed, member.Spec.ClaimRef != nil && member.Status.BindExtended:
-		// The watch rules of a bound member (plan 6.2 step 11 rule 3) come later.
+	case step.failed, member.Spec.ClaimRef != nil && member.Status.BindExtended,
+		meta.IsStatusConditionTrue(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed):
+		// The watch rules of a bound member (plan 6.2 step 11 rule 3) come
+		// with claims. A used member waits for a person to delete it.
 		return ctrl.Result{}, nil
 	case member.Status.Phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseReady:
 		return ctrl.Result{RequeueAfter: r.retryAfter(req.NamespacedName, member, step)}, nil
@@ -445,6 +447,9 @@ func applyPoolMemberStep(member *coderv1alpha1.CoderWorkspacePoolMember, now tim
 	switch {
 	case !step.failed && member.Status.ReadyTime != nil:
 		member.Status.Phase, ready = coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, metav1.ConditionTrue
+		if step.reason == "AgentNotReady" {
+			ready = metav1.ConditionFalse // Watch rule 3: the phase stays.
+		}
 	case !step.failed && poolMemberMayHaveWorkspace(member):
 		member.Status.Phase = coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating
 	case !step.failed:
