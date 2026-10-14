@@ -620,14 +620,17 @@ func (r *CoderControlPlaneReconciler) finalizeWorkspaceRBAC(
 	// running while AI Gateway keys and AI providers that use it still
 	// delete their resources in Coder (#353). The grace period after the hold
 	// lets each of them run its bounded pass before Coder goes.
-	if holds, err := controlPlaneHolds(ctx, r.Client, coderControlPlane, r.now().Add(-controlPlaneDependentGrace)); err != nil {
+	now := r.now()
+	dependents, perKind, err := controlPlaneDependents(ctx, r.Client, coderControlPlane, now)
+	if err != nil {
 		return ctrl.Result{}, err
-	} else if holds {
-		dependents, err := controlPlaneDependents(ctx, r.Client, coderControlPlane)
+	}
+	if len(dependents) > 0 {
+		holds, err := controlPlaneHolds(ctx, r.Client, coderControlPlane, now.Add(-controlPlaneDependentGraceFor(perKind)))
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		if len(dependents) > 0 {
+		if holds {
 			log.FromContext(ctx).Info("Waiting for the objects that use this control plane to delete their resources in Coder",
 				"dependents", dependents, "until", coderControlPlane.DeletionTimestamp.Add(controlPlaneDependentHold).UTC())
 			return ctrl.Result{RequeueAfter: controlPlaneDependentPoll}, nil

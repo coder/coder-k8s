@@ -163,6 +163,7 @@ func (r *CoderAIGatewayKeyReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		if !controllerutil.ContainsFinalizer(key, coderv1alpha1.CoderAIGatewayKeyCleanupFinalizer) {
 			return ctrl.Result{}, nil
 		}
+		forgetReleasedWithoutDelete(key.UID)
 		release, deleteStep, err := r.deleteStep(ctx, key)
 		if err != nil {
 			return ctrl.Result{}, err

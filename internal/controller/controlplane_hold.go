@@ -29,11 +29,20 @@ import (
 // goes, and they release with ControlPlaneGone.
 const controlPlaneDependentHold = 10 * time.Minute
 
-// controlPlaneDependentGrace is how long a control plane stays after its
-// hold ends while dependents remain, so each of them sees the hold end and
-// runs its bounded pass while Coder still runs. Dependents requeue before the
-// hold ends (controlPlaneHoldRequeue), so they need only a short time.
+// controlPlaneDependentGrace is the base of how long a control plane stays
+// after its hold ends while dependents remain, so each of them sees the hold
+// end and runs its bounded pass while Coder still runs. Dependents requeue
+// before the hold ends (controlPlaneHoldRequeue). One worker runs the passes
+// of one kind one after the other, so controlPlaneDependentGraceFor adds one
+// bounded pass per dependent of the larger kind.
 const controlPlaneDependentGrace = 30 * time.Second
+
+// controlPlaneLiveDependentWait is how long a deleted control plane waits for
+// a dependent that is not being deleted itself. It covers one command that
+// deletes the control plane before its dependents (kubectl delete -f). After
+// it, only dependents that are being deleted hold the control plane: a live
+// dependent does no cleanup, so a longer wait for it does nothing.
+const controlPlaneLiveDependentWait = 30 * time.Second
 
 // controlPlaneDependentPoll is the requeue of a control plane that waits for
 // its dependents. A dependent's removal also requeues it at once.
@@ -43,7 +52,9 @@ const controlPlaneDependentPoll = 10 * time.Second
 // providers can stay in Coder (#353), by kind. Today the release log line is
 // the only other signal. countReleasedWithoutDelete records a release, and
 // releasedWithoutDeleteDone counts it once the finalizer is gone, so a
-// failed finalizer patch and its retry count once.
+// failed finalizer patch and its retry count once. Each delete reconcile
+// first drops an earlier record (forgetReleasedWithoutDelete), so a retry
+// that then deletes in Coder does not count.
 var releasedWithoutDelete = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "coder_k8s_cleanup_released_without_delete_total",
 	Help: "Finalizers released without deleting the object's resources in Coder, because Coder was not reachable.",
@@ -57,6 +68,10 @@ func init() {
 
 func countReleasedWithoutDelete(uid types.UID, kind string) { pendingReleases.Store(uid, kind) }
 
+// forgetReleasedWithoutDelete drops a release of uid that an earlier
+// reconcile recorded but whose finalizer patch failed.
+func forgetReleasedWithoutDelete(uid types.UID) { pendingReleases.Delete(uid) }
+
 // releasedWithoutDeleteDone counts the release of uid, if one was recorded,
 // after its finalizer patch succeeded.
 func releasedWithoutDeleteDone(uid types.UID) {
@@ -69,6 +84,12 @@ func releasedWithoutDeleteDone(uid types.UID) {
 // deleted ends.
 func controlPlaneHoldEnd(controlPlane *coderv1alpha1.CoderControlPlane) time.Time {
 	return controlPlane.DeletionTimestamp.Add(controlPlaneDependentHold)
+}
+
+// controlPlaneDependentGraceFor is the grace period after the hold when
+// perKind dependents of one kind remain (controlPlaneDependentGrace).
+func controlPlaneDependentGraceFor(perKind int) time.Duration {
+	return controlPlaneDependentGrace + time.Duration(perKind)*max(aiGatewayKeyBoundedDeleteTimeout, aiProviderBoundedDeleteTimeout)
 }
 
 // controlPlaneHoldRequeue caps a dependent's requeue under the hold, so it
@@ -102,28 +123,37 @@ func controlPlaneHolds(ctx context.Context, reader client.Reader, controlPlane *
 }
 
 // controlPlaneDependents returns the CoderAIGatewayKey and CoderAIProvider
-// objects in controlPlane's namespace that reference it, as kind/name.
-func controlPlaneDependents(ctx context.Context, reader client.Reader, controlPlane *coderv1alpha1.CoderControlPlane) ([]string, error) {
+// objects in controlPlane's namespace that reference it and hold it at now,
+// as kind/name, and the larger count of one kind. A dependent holds it while
+// it is being deleted, and a live one only for
+// controlPlaneLiveDependentWait after the control plane deletion.
+func controlPlaneDependents(ctx context.Context, reader client.Reader, controlPlane *coderv1alpha1.CoderControlPlane, now time.Time) ([]string, int, error) {
+	if controlPlane.DeletionTimestamp.IsZero() {
+		return nil, 0, errors.New("assertion failed: dependents hold only a control plane that is being deleted")
+	}
+	liveHolds := now.Before(controlPlane.DeletionTimestamp.Add(controlPlaneLiveDependentWait))
+	holds := func(o client.Object) bool { return liveHolds || !o.GetDeletionTimestamp().IsZero() }
 	var dependents []string
 	keys := &coderv1alpha1.CoderAIGatewayKeyList{}
 	if err := reader.List(ctx, keys, client.InNamespace(controlPlane.Namespace)); err != nil {
-		return nil, fmt.Errorf("list AI Gateway keys of namespace %s: %w", controlPlane.Namespace, err)
+		return nil, 0, fmt.Errorf("list AI Gateway keys of namespace %s: %w", controlPlane.Namespace, err)
 	}
-	for _, k := range keys.Items {
-		if k.Spec.ControlPlaneRef.Name == controlPlane.Name {
+	for i := range keys.Items {
+		if k := &keys.Items[i]; k.Spec.ControlPlaneRef.Name == controlPlane.Name && holds(k) {
 			dependents = append(dependents, "CoderAIGatewayKey/"+k.Name)
 		}
 	}
+	keyCount := len(dependents)
 	providers := &coderv1alpha1.CoderAIProviderList{}
 	if err := reader.List(ctx, providers, client.InNamespace(controlPlane.Namespace)); err != nil {
-		return nil, fmt.Errorf("list AI providers of namespace %s: %w", controlPlane.Namespace, err)
+		return nil, 0, fmt.Errorf("list AI providers of namespace %s: %w", controlPlane.Namespace, err)
 	}
-	for _, p := range providers.Items {
-		if p.Spec.ControlPlaneRef.Name == controlPlane.Name {
+	for i := range providers.Items {
+		if p := &providers.Items[i]; p.Spec.ControlPlaneRef.Name == controlPlane.Name && holds(p) {
 			dependents = append(dependents, "CoderAIProvider/"+p.Name)
 		}
 	}
-	return dependents, nil
+	return dependents, max(keyCount, len(dependents)-keyCount), nil
 }
 
 // dependentRemoved passes only the removal of a dependent object, the event
