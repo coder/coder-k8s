@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -10,10 +11,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 )
@@ -38,12 +42,30 @@ func readyWithOrphan(ctx context.Context, t *testing.T, env *aiGatewayKeyEnv) (*
 	return nil, fakeAIGatewayKey{}
 }
 
-// Plan 4.8, S4 and R9: every stall before the LIST, and the kill switch, keep sweeping
+func setOutputSecretData(ctx context.Context, t *testing.T, namespace string, data map[string][]byte) {
+	t.Helper()
+	secret := &corev1.Secret{}
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: testAIGatewaySecret}, secret))
+	secret.Data = data
+	require.NoError(t, k8sClient.Update(ctx, secret))
+}
+
+// Plan 4.8, S4 and R9: every stall that K7 can reach keeps sweeping
 // orphans in delete-only mode. The stall stays the reported condition, and
 // no create runs. A Secret that the object does not own still decides I1.
 func TestCoderAIGatewayKeyStallsKeepSweeping(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
+	emptySecret := func(ctx context.Context, t *testing.T, env *aiGatewayKeyEnv, _ *coderv1alpha1.CoderAIGatewayKey, _ fakeAIGatewayKey) {
+		setOutputSecretData(ctx, t, env.namespace, nil)
+	}
+	withStatus := func(edit func(*coderv1alpha1.CoderAIGatewayKeyStatus, *coderv1alpha1.CoderAIGatewayKey)) func(context.Context, *testing.T, *aiGatewayKeyEnv, *coderv1alpha1.CoderAIGatewayKey, fakeAIGatewayKey) {
+		return func(ctx context.Context, t *testing.T, env *aiGatewayKeyEnv, key *coderv1alpha1.CoderAIGatewayKey, orphan fakeAIGatewayKey) {
+			emptySecret(ctx, t, env, key, orphan)
+			edit(&key.Status, key)
+			require.NoError(t, k8sClient.Status().Update(ctx, key))
+		}
+	}
 	foreignSecret := func(value func(fakeAIGatewayKey) string) func(context.Context, *testing.T, *aiGatewayKeyEnv, *coderv1alpha1.CoderAIGatewayKey, fakeAIGatewayKey) {
 		return func(ctx context.Context, t *testing.T, env *aiGatewayKeyEnv, _ *coderv1alpha1.CoderAIGatewayKey, orphan fakeAIGatewayKey) {
 			require.NoError(t, k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: env.namespace, Name: testAIGatewaySecret}}))
@@ -69,6 +91,32 @@ func TestCoderAIGatewayKeyStallsKeepSweeping(t *testing.T) {
 		"secret replaced with the orphan": {reason: "SecretNotOwned", deletes: 0, mutate: foreignSecret(func(k fakeAIGatewayKey) string { return k.plaintext })},
 		"current key deleted": {reason: "KeyDeletedExternally", deletes: 1, mutate: func(ctx context.Context, t *testing.T, env *aiGatewayKeyEnv, key *coderv1alpha1.CoderAIGatewayKey, _ fakeAIGatewayKey) {
 			require.NoError(t, env.fake.client(t, 5*time.Second).DeleteAIGatewayKey(ctx, uuid.MustParse(key.Status.CurrentKey.ID)))
+		}},
+		"drift inside the grace period": {reason: "SecretConflict", deletes: 1, mutate: withStatus(func(s *coderv1alpha1.CoderAIGatewayKeyStatus, _ *coderv1alpha1.CoderAIGatewayKey) {
+			s.LastDriftReissueTime = &metav1.Time{Time: time.Now()}
+		})},
+		"failure cap": {reason: "IssueFailing", deletes: 1, mutate: withStatus(func(s *coderv1alpha1.CoderAIGatewayKeyStatus, _ *coderv1alpha1.CoderAIGatewayKey) {
+			s.ConsecutiveIssueFailures = 10
+		})},
+		"answer mismatch": {reason: "CoderAnswerMismatch", deletes: 1, mutate: withStatus(func(s *coderv1alpha1.CoderAIGatewayKeyStatus, key *coderv1alpha1.CoderAIGatewayKey) {
+			for i := range s.Conditions {
+				if s.Conditions[i].Type == "Stalled" {
+					s.Conditions[i].Status, s.Conditions[i].Reason, s.Conditions[i].ObservedGeneration = metav1.ConditionTrue, "CoderAnswerMismatch", key.Generation
+				}
+			}
+		})},
+		"secret write rejected": {reason: "SecretWriteRejected", deletes: 1, mutate: func(ctx context.Context, t *testing.T, env *aiGatewayKeyEnv, key *coderv1alpha1.CoderAIGatewayKey, orphan fakeAIGatewayKey) {
+			emptySecret(ctx, t, env, key, orphan)
+			base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+			require.NoError(t, err)
+			env.client = interceptor.NewClient(base, interceptor.Funcs{
+				Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+					if _, ok := obj.(*corev1.Secret); ok && isDryRunUpdate(opts) {
+						return apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, testAIGatewaySecret, errors.New("policy"))
+					}
+					return c.Update(ctx, obj, opts...)
+				},
+			})
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -140,6 +188,80 @@ func TestCoderAIGatewayKeyKillSwitch(t *testing.T) {
 	got, _ = env.reconcile(ctx, t, got)
 	requireAIGatewayKeyStep(t, got, true, "KeyDeletedExternally")
 	require.Equal(t, creates+1, env.fake.requestCount(routeCreateAIGatewayKey))
+}
+
+// Plan R16 and D7: a lost Secret value gives one new key per grace period,
+// and the replaced key retires. A second drift inside the grace period, or a
+// full retiringKeys list, gives SecretConflict and no create. A Secret
+// restored with an older key does not make that key current again.
+func TestCoderAIGatewayKeySecretDrift(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+	got, _ := env.reconcile(ctx, t, env.createKey(ctx, t, "coder", testAIGatewaySecret))
+	requireAIGatewayKeyReady(t, got)
+	first := env.fake.aiGatewayKeys()[0]
+	requireHolds := func(serial int64) {
+		t.Helper()
+		require.Equal(t, serial, got.Status.CurrentKey.Serial)
+		var want string
+		for _, k := range env.fake.aiGatewayKeys() {
+			if k.id.String() == got.Status.CurrentKey.ID {
+				want = k.plaintext
+			}
+		}
+		secret := &corev1.Secret{}
+		require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: env.namespace, Name: testAIGatewaySecret}, secret))
+		require.Equal(t, want, string(secret.Data["key"]))
+	}
+
+	// Someone deletes the Secret: a new key, the old one retires from now.
+	require.NoError(t, k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: env.namespace, Name: testAIGatewaySecret}}))
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyReady(t, got)
+	requireHolds(1)
+	require.Equal(t, []string{first.id.String()}, retiringIDs(got))
+	require.Equal(t, env.clock.Now().Unix(), got.Status.RetiringKeys[0].ReplacedAt.Unix())
+	require.Equal(t, env.clock.Now().Unix(), got.Status.LastDriftReissueTime.Unix())
+
+	// A second drift inside the grace period: no create, the Secret stays.
+	env.clock.Step(59 * time.Minute)
+	setOutputSecretData(ctx, t, env.namespace, map[string][]byte{"key": []byte("edited-by-someone")})
+	var result ctrl.Result
+	got, result = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyStep(t, got, true, "SecretConflict")
+	require.Equal(t, time.Minute, result.RequeueAfter, "the stall ends with the grace period")
+	require.Equal(t, 2, env.fake.requestCount(routeCreateAIGatewayKey))
+
+	// After the grace period the Secret is restored with the first key. It
+	// does not become current again: a new key replaces it.
+	env.clock.Step(time.Minute)
+	setOutputSecretData(ctx, t, env.namespace, map[string][]byte{"key": []byte(first.plaintext)})
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyReady(t, got)
+	requireHolds(2)
+	env.clock.Step(time.Hour)
+	setOutputSecretData(ctx, t, env.namespace, nil)
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyReady(t, got)
+	requireHolds(3)
+	require.Len(t, got.Status.RetiringKeys, 3)
+
+	// retiringKeys is full: no create, also after the grace period.
+	env.clock.Step(2 * time.Hour)
+	setOutputSecretData(ctx, t, env.namespace, nil)
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyStep(t, got, true, "SecretConflict")
+	require.Equal(t, 4, env.fake.requestCount(routeCreateAIGatewayKey))
+	require.Len(t, got.Status.RetiringKeys, 3)
+}
+
+func retiringIDs(key *coderv1alpha1.CoderAIGatewayKey) []string {
+	var ids []string
+	for _, r := range key.Status.RetiringKeys {
+		ids = append(ids, r.ID)
+	}
+	return ids
 }
 
 // Carry-forwards from #292. An orphan whose DELETE Coder refuses with 403

@@ -13,6 +13,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 )
@@ -24,7 +25,15 @@ import (
 // attempt can still land. The rest is margin for clock skew between leaders.
 const aiGatewayKeySettleWindow = 5 * time.Minute
 
-const reasonDeletingOrphans = "DeletingOrphans"
+const (
+	reasonDeletingOrphans = "DeletingOrphans"
+	reasonSecretConflict  = "SecretConflict"
+	// aiGatewayKeyMaxRetiring is the API limit of status.retiringKeys.
+	aiGatewayKeyMaxRetiring = 3
+	// aiGatewayKeyDefaultGraceSeconds is the API default of
+	// spec.rotation.gracePeriodSeconds.
+	aiGatewayKeyDefaultGraceSeconds = 3600
+)
 
 // aiGatewayKeyAction is the one mutating step that a reconcile takes.
 type aiGatewayKeyAction string
@@ -39,6 +48,7 @@ const (
 	aiGatewayKeyKillSwitch aiGatewayKeyAction = "KillSwitch" // Someone deleted the current key in Coder (4.7).
 	aiGatewayKeyRearm      aiGatewayKeyAction = "Rearm"      // The spec changed after the kill switch: forget the deleted key.
 	aiGatewayKeyReissue    aiGatewayKeyAction = "Reissue"    // The Secret lost the current key (D7).
+	aiGatewayKeyConflict   aiGatewayKeyAction = "Conflict"   // The Secret lost the key again too soon (D7).
 )
 
 // aiGatewayKeyDecision is the result of nextAIGatewayKeyAction.
@@ -114,6 +124,8 @@ func nextAIGatewayKeyAction(
 		decision.action = aiGatewayKeySweep
 	case decision.healthy:
 		decision.action = aiGatewayKeyReady
+	case aiGatewayKeyDriftBlocked(key, now) != nil:
+		decision.action = aiGatewayKeyConflict
 	default:
 		decision.action = aiGatewayKeyReissue
 	}
@@ -157,6 +169,26 @@ func aiGatewayKeyRearmed(key *coderv1alpha1.CoderAIGatewayKey) bool {
 	return fired > 0 && fired < key.Generation
 }
 
+// aiGatewayKeyDriftBlocked returns the SecretConflict stall when the Secret
+// lost the current key and a re-issue is not allowed (decision D7): one
+// already ran inside the grace period, or retiringKeys has no room left.
+func aiGatewayKeyDriftBlocked(key *coderv1alpha1.CoderAIGatewayKey, now time.Time) *aiGatewayKeyStep {
+	grace := time.Duration(ptr.Deref(key.Spec.Rotation.GracePeriodSeconds, aiGatewayKeyDefaultGraceSeconds)) * time.Second
+	if last := key.Status.LastDriftReissueTime; last != nil && now.Before(last.Add(grace)) {
+		step := aiGatewayKeyStalled(reasonSecretConflict,
+			"Secret %q lost key %s again within the grace period after the re-issue at %s. Another writer, such as a GitOps tool, likely manages the same Secret.",
+			key.Spec.SecretName, key.Status.CurrentKey.Name, last.UTC().Format(time.RFC3339))
+		step.requeue = min(step.requeue, max(last.Add(grace).Sub(now), time.Second))
+		return step
+	}
+	if n := len(key.Status.RetiringKeys); n >= aiGatewayKeyMaxRetiring {
+		return aiGatewayKeyStalled(reasonSecretConflict,
+			"Secret %q lost key %s, and %d replaced keys still wait for deletion, so the operator issues no new key. Another writer likely manages the same Secret.",
+			key.Spec.SecretName, key.Status.CurrentKey.Name, n)
+	}
+	return nil
+}
+
 func aiGatewayKeyRetiring(status *coderv1alpha1.CoderAIGatewayKeyStatus, id uuid.UUID) bool {
 	for _, r := range status.RetiringKeys {
 		if r.ID == id.String() {
@@ -173,9 +205,7 @@ func aiGatewayKeyRetiring(status *coderv1alpha1.CoderAIGatewayKeyStatus, id uuid
 // Secret proves that the controller held the plaintext.
 func adoptAIGatewayKey(key *coderv1alpha1.CoderAIGatewayKey, own []codersdk.AIGatewayKey, decision aiGatewayKeyDecision, now time.Time) *aiGatewayKeyStep {
 	if previous := key.Status.CurrentKey; previous != nil && aiGatewayKeyListed(own, previous.ID) {
-		key.Status.RetiringKeys = append(key.Status.RetiringKeys, coderv1alpha1.CoderAIGatewayKeyRetiring{
-			Serial: previous.Serial, ID: previous.ID, Name: previous.Name, ReplacedAt: metav1.NewTime(now),
-		})
+		retireAIGatewayKey(key, now)
 	}
 	if pending := key.Status.PendingKey; pending != nil && pending.Serial == decision.serial {
 		key.Status.PendingKey = nil
@@ -186,6 +216,15 @@ func adoptAIGatewayKey(key *coderv1alpha1.CoderAIGatewayKey, own []codersdk.AIGa
 	// newer trigger still starts its rotation. At worst one extra rotation
 	// runs, which is safe, while a consumed trigger would not be.
 	return setAIGatewayKeyCurrent(key, decision.serial, decision.key.ID, decision.key.Name, now, false)
+}
+
+// retireAIGatewayKey moves the current key to retiringKeys, with its grace
+// period counting from now.
+func retireAIGatewayKey(key *coderv1alpha1.CoderAIGatewayKey, now time.Time) {
+	previous := key.Status.CurrentKey
+	key.Status.RetiringKeys = append(key.Status.RetiringKeys, coderv1alpha1.CoderAIGatewayKeyRetiring{
+		Serial: previous.Serial, ID: previous.ID, Name: previous.Name, ReplacedAt: metav1.NewTime(now),
+	})
 }
 
 // sweepOrphan deletes one orphan (plan 4.5) after the I1 live read: a key
