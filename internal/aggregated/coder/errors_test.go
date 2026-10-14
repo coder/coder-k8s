@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -340,6 +341,28 @@ func TestMapCoderErrorHidesCoderURL(t *testing.T) {
 			wantMessage: `the Coder API could not be reached for coderworkspaces "acme.alice.dev"`,
 		},
 		{
+			// A 409 keeps Coder's message, which says what to do, but not the URL or the detail.
+			name: "409 without already exists",
+			err: func() error {
+				coderErr := codersdk.NewTestError(http.StatusConflict, http.MethodPost, coderURL)
+				coderErr.Message = "A workspace build is already active."
+				coderErr.Detail = coderInner
+				return fmt.Errorf("start workspace: %w", coderErr)
+			}(),
+			wantCode:    http.StatusConflict,
+			wantMessage: `Operation cannot be fulfilled on coderworkspaces.aggregation.coder.com "acme.alice.dev": A workspace build is already active.`,
+		},
+		{
+			name: "network error without a url.Error",
+			err: fmt.Errorf("read workspace: %w", &net.OpError{
+				Op: "read", Net: "tcp",
+				Addr: &net.TCPAddr{IP: net.ParseIP("10.0.0.7"), Port: 443},
+				Err:  errors.New("connection reset by peer"),
+			}),
+			wantCode:    http.StatusInternalServerError,
+			wantMessage: `the Coder API could not be reached for coderworkspaces "acme.alice.dev"`,
+		},
+		{
 			name:        "400 without a Coder message",
 			err:         fmt.Errorf("get workspace: %w", codersdk.NewTestError(http.StatusBadRequest, http.MethodGet, coderURL)),
 			wantCode:    http.StatusBadRequest,
@@ -350,7 +373,7 @@ func TestMapCoderErrorHidesCoderURL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if !strings.Contains(tt.err.Error(), coderHost) {
+			if !strings.Contains(tt.err.Error(), coderHost) && !strings.Contains(tt.err.Error(), "10.0.0.7") {
 				t.Fatalf("assertion failed: the test input must contain the Coder URL, got %q", tt.err.Error())
 			}
 

@@ -51,8 +51,10 @@ func MapCoderError(err error, resource schema.GroupResource, name string) error 
 	if !errors.As(err, &coderErr) {
 		// A request that did not reach Coder or got no answer. The transport error names the
 		// Coder URL, so the message is fixed.
+		// A net.Error that wraps no *url.Error, for example a connection reset while the body is
+		// read, names Coder's address and port.
 		var urlErr *url.Error
-		if errors.As(err, &urlErr) {
+		if errors.As(err, &urlErr) || errors.As(err, &netErr) {
 			logHiddenError(err, resource, name, 0)
 			return apierrors.NewInternalError(fmt.Errorf("the Coder API could not be reached for %s %q", resource.Resource, name))
 		}
@@ -73,7 +75,9 @@ func MapCoderError(err error, resource schema.GroupResource, name string) error 
 		if isAlreadyExistsConflict(coderErr) {
 			return apierrors.NewAlreadyExists(resource, name)
 		}
-		return apierrors.NewConflict(resource, name, err)
+		// The SDK error names the Coder URL and adds Coder's detail. Keep only Coder's message.
+		logHiddenError(err, resource, name, statusCode)
+		return apierrors.NewConflict(resource, name, errors.New(message))
 	case http.StatusBadRequest, http.StatusUnprocessableEntity:
 		return apierrors.NewBadRequest(message)
 	case http.StatusUnauthorized:
