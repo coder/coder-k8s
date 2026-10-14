@@ -222,9 +222,11 @@ func aiGatewayKeyRetiring(status *coderv1alpha1.CoderAIGatewayKeyStatus, id uuid
 // grace period only grows). The previous current key, when Coder still
 // lists it, retires from now. No key is created. This is safe because the
 // Secret proves that the controller held the plaintext.
-func adoptAIGatewayKey(key *coderv1alpha1.CoderAIGatewayKey, own []codersdk.AIGatewayKey, decision aiGatewayKeyDecision, now time.Time) *aiGatewayKeyStep {
+func adoptAIGatewayKey(key *coderv1alpha1.CoderAIGatewayKey, own []codersdk.AIGatewayKey, decision aiGatewayKeyDecision, now time.Time) (*aiGatewayKeyStep, error) {
 	if previous := key.Status.CurrentKey; previous != nil && aiGatewayKeyListed(own, previous.ID) {
-		retireAIGatewayKey(key, now)
+		if err := retireAIGatewayKey(key, now); err != nil {
+			return nil, err
+		}
 		// Status does not record whether the lost attempt was a drift
 		// re-issue, so the recovery counts it as one (fail closed): another
 		// loss of the Secret inside the grace period gives SecretConflict,
@@ -240,16 +242,25 @@ func adoptAIGatewayKey(key *coderv1alpha1.CoderAIGatewayKey, own []codersdk.AIGa
 	// counts the current trigger as handled or the generation as applied: a
 	// newer trigger still starts its rotation. At worst one extra rotation
 	// runs, which is safe, while a consumed trigger would not be.
-	return setAIGatewayKeyCurrent(key, decision.serial, decision.key.ID, decision.key.Name, now, false)
+	return setAIGatewayKeyCurrent(key, decision.serial, decision.key.ID, decision.key.Name, now, false), nil
 }
 
 // retireAIGatewayKey moves the current key to retiringKeys, with its grace
-// period counting from now.
-func retireAIGatewayKey(key *coderv1alpha1.CoderAIGatewayKey, now time.Time) {
+// period counting from now. Every create first checks that the list has room
+// (a drift re-issue below 3 entries, a requested rotation below 2, a
+// scheduled rotation at 0), so recovery 4.4 of that create also fits. A full
+// list here is a broken rule: the API's limit of 3 would refuse the status
+// write.
+func retireAIGatewayKey(key *coderv1alpha1.CoderAIGatewayKey, now time.Time) error {
 	previous := key.Status.CurrentKey
+	if n := len(key.Status.RetiringKeys); n >= aiGatewayKeyMaxRetiring {
+		return fmt.Errorf("assertion failed: AI Gateway key %s/%s already has %d retiring keys, so it cannot retire key %s",
+			key.Namespace, key.Name, n, previous.Name)
+	}
 	key.Status.RetiringKeys = append(key.Status.RetiringKeys, coderv1alpha1.CoderAIGatewayKeyRetiring{
 		Serial: previous.Serial, ID: previous.ID, Name: previous.Name, ReplacedAt: metav1.NewTime(now),
 	})
+	return nil
 }
 
 // sweepOrphan deletes one orphan (plan 4.5). One DELETE per reconcile,

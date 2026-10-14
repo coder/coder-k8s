@@ -430,3 +430,23 @@ func TestAIGatewayKeyRotationBlocked(t *testing.T) {
 	key.Status.CurrentKey.IssuedAt = metav1.NewTime(now.Add(-24*time.Hour + time.Minute))
 	require.Equal(t, time.Minute, aiGatewayKeyResyncAfter(key, now), "a future rotation still bounds the resync")
 }
+
+// retiringKeys never passes the API limit of 3: a fourth retirement, from
+// recovery 4.4 or an issue, fails with an assertion and changes nothing.
+func TestAIGatewayKeyRetireLimit(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1700000000, 0)
+	previous := codersdk.AIGatewayKey{ID: uuid.New(), Name: "ck8s-x-3"}
+	adopted := codersdk.AIGatewayKey{ID: uuid.New(), Name: "ck8s-x-4"}
+	key := &coderv1alpha1.CoderAIGatewayKey{}
+	key.Status.CurrentKey = &coderv1alpha1.CoderAIGatewayKeyCurrent{Serial: 3, ID: previous.ID.String(), Name: previous.Name}
+	key.Status.RetiringKeys = recentRetiring(codersdk.AIGatewayKey{ID: uuid.New()}, codersdk.AIGatewayKey{ID: uuid.New()})
+	require.NoError(t, retireAIGatewayKey(key.DeepCopy(), now), "the third entry fits")
+
+	key.Status.RetiringKeys = recentRetiring(codersdk.AIGatewayKey{ID: uuid.New()}, codersdk.AIGatewayKey{ID: uuid.New()}, codersdk.AIGatewayKey{ID: uuid.New()})
+	before := key.DeepCopy()
+	step, err := adoptAIGatewayKey(key, []codersdk.AIGatewayKey{previous, adopted}, aiGatewayKeyDecision{key: adopted, serial: 4}, now)
+	require.ErrorContains(t, err, "assertion failed")
+	require.Nil(t, step)
+	require.Equal(t, before.Status, key.Status)
+}

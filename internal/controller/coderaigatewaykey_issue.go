@@ -119,7 +119,9 @@ func (r *CoderAIGatewayKeyReconciler) issueKey(
 	key.Status.PendingKey = nil
 	written := r.Clock.Now()
 	if key.Status.CurrentKey != nil {
-		retireAIGatewayKey(key, written)
+		if err := retireAIGatewayKey(key, written); err != nil {
+			return nil, err // The marker stays, and the Secret holds the new key.
+		}
 	}
 	if action == aiGatewayKeyReissue {
 		key.Status.LastDriftReissueTime = &metav1.Time{Time: written}

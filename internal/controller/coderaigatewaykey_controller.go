@@ -274,7 +274,7 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 	decision := nextAIGatewayKeyAction(key, prefix, own, aiGatewayKeySecretHolds(secret, own), now)
 	switch decision.action {
 	case aiGatewayKeyAdopt:
-		return adoptAIGatewayKey(key, own, decision, now), nil
+		return adoptAIGatewayKey(key, own, decision, now)
 	case aiGatewayKeyRecover:
 		pending := key.Status.PendingKey
 		key.Status.PendingKey = nil
