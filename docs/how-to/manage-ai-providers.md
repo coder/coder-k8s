@@ -3,7 +3,7 @@
 A `CoderAIProvider` manages one AI provider in Coder (Coder's `/api/v2/ai/providers`). The operator creates the provider, keeps its settings and its API key equal to the spec, and deletes it when you delete the object. The object name is the Coder provider name.
 
 !!! warning "Who may write these resources"
-    The operator calls Coder as a site owner. Grant `create`, `update` and `patch` on `coderaiproviders` only to principals who may act as a Coder owner for AI providers in the whole deployment. Such a principal can use any credential Secret in the namespace that opted in, but only toward the origins that the Secret lists (see [Prepare the key Secret](#1-prepare-the-key-secret)).
+    The operator calls Coder as a site owner. Grant `create`, `update`, `patch` and `delete` on `coderaiproviders` only to principals who may act as a Coder owner for AI providers in the whole deployment. A delete makes the operator delete the provider in Coder. Such a principal can use any credential Secret in the namespace that opted in, but only toward the origins that the Secret lists (see [Prepare the key Secret](#1-prepare-the-key-secret)).
 
 ## Before you start
 
@@ -135,6 +135,7 @@ Each permission in the control plane's namespace maps to Coder power:
 | Permission | Coder power |
 | --- | --- |
 | `create`, `update`, `patch` on `coderaiproviders` | Coder owner for AI providers in the whole deployment, limited to the origins that opted-in Secrets list |
+| `delete` on `coderaiproviders` | Deletes the provider in Coder, for every user of the deployment |
 | `patch` on credential Secrets | Decides whether a key can be used (label) and where it can go (annotation) |
 | `get`, `list` on `coderaiproviders` | Sees names, URLs, Secret names and Coder IDs. No secrets. |
 
@@ -152,4 +153,4 @@ rules:
     verbs: ["get", "list", "watch"]
 ```
 
-Give the editor verbs (`create`, `update`, `patch`, `delete`) only to subjects who may also read the credential Secrets. A `ResourceQuota` on `count/coderaiproviders.coder.com` limits how many providers a namespace can create.
+Give the editor verbs (`create`, `update`, `patch`, `delete`) only to subjects who may act as a Coder owner for AI providers and may also read the credential Secrets. A `ResourceQuota` on `count/coderaiproviders.coder.com` limits how many providers a namespace can create.
