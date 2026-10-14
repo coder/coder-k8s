@@ -47,8 +47,8 @@ func TestControlPlaneAIGatewayAllowKeysRoundTrip(t *testing.T) {
 	}
 }
 
-// The field has no effect until the CoderAIGatewayKey controller ships:
-// turning it on must not roll the Coder Deployment.
+// The field gates only the CoderAIGatewayKey controller: turning it on must
+// not roll the Coder Deployment.
 func TestControlPlaneAIGatewayAllowKeysLeavesDeploymentUnchanged(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()

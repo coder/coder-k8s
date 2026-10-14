@@ -2,9 +2,7 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
@@ -293,7 +291,9 @@ func (r *CoderAIGatewayKeyReconciler) deleteOwnKey(
 	if held == k.ID {
 		return aiGatewayKeyWait(time.Second, reason, "Secret %q now holds key %s, so the operator does not delete it.", key.Spec.SecretName, k.Name)
 	}
-	if err := sdk.DeleteAIGatewayKey(ctx, k.ID); (err != nil && coderStatus(err) != http.StatusNotFound) || coderRouteMissing(err) {
+	// Only Coder's own 404 proves that the key is gone. An HTML 404 of a proxy
+	// or "Route not found." proves nothing.
+	if err := sdk.DeleteAIGatewayKey(ctx, k.ID); err != nil && !isCoderResourceNotFound(err) {
 		failure := aiGatewayKeyCoderFailure("delete "+noun+" "+k.Name, err)
 		if failure.stalled {
 			failure.message = fmt.Sprintf("The operator cannot delete %s %s. %s", noun, k.Name, failure.message)
@@ -316,14 +316,6 @@ func aiGatewayKeyKeepReady(key *coderv1alpha1.CoderAIGatewayKey, step *aiGateway
 		step.message = note + step.message
 	}
 	return step
-}
-
-// coderRouteMissing reports Coder's 404 for a route that it does not have
-// (plan F11). Unlike the 404 for a missing key, it proves nothing was
-// deleted.
-func coderRouteMissing(err error) bool {
-	var sdkErr *codersdk.Error
-	return errors.As(err, &sdkErr) && sdkErr.StatusCode() == http.StatusNotFound && sdkErr.Message == aiGatewayRouteNotFound
 }
 
 // liveSecretHolds live-reads the output Secret and returns the key in own

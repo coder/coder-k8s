@@ -10,7 +10,7 @@ A `CoderAIProvider` manages one AI provider in Coder (Coder's `/api/v2/ai/provid
 - A `CoderControlPlane` in the same namespace with `status.operatorAccessReady: true`. The operator user must be a site owner. Coder answers `403` to anyone else on the provider routes.
 - An API key for the provider, for example an OpenAI key.
 - Coder v2.37.2 or later. The Kind end-to-end test runs Coder v2.37.2, and the operator is built against the v2.37.3 SDK. Coder has the provider API since v2.34.0, but versions before v2.37.2 are not tested.
-- An operator release after v0.1.3. The `dist/install.yaml` on `main` installs the `CoderAIProvider` CRD, but its `ghcr.io/coder/coder-k8s:latest` image is v0.1.3 until the next release, and v0.1.3 has no `CoderAIProvider` controller. Install from a release tag that includes `CoderAIProvider`, and pin the image to the same version (see [Deploy a Coder Control Plane](../tutorials/getting-started.md#1-install-the-operator)).
+- coder-k8s v0.1.4 or later. Install from the release tag, and pin the image to the same version (see [Deploy a Coder Control Plane](../tutorials/getting-started.md#1-install-the-operator)).
 
 ## 1. Prepare the key Secret
 
@@ -76,7 +76,7 @@ The object has the conditions `Ready`, `Reconciling` and `Stalled`. A stalled ob
 | `CredentialSecretNotFound`, `CredentialNotOptedIn`, `CredentialDestinationNotAllowed`, `CredentialRefused`, `CredentialKeyMissing`, `CredentialMalformed` | The key Secret fails the credential contract. See [the credential kill switch](#the-credential-kill-switch). |
 | `NameConflict` | Coder has a provider with this name that the operator did not create. |
 | `NameReservedByEnv` | The control plane can seed a provider with this name. See [Seeding limits](#seeding-limits). |
-| `CoderRejected` | Coder rejected the create request. Fix the spec. |
+| `CoderRejected` | Coder rejected the create or update request. Fix the spec. |
 | `DisabledExternally`, `KeyChangedExternally`, `DeletedExternally` | Someone disabled the provider, changed its key or deleted it in Coder. See [Kill switches](#kill-switches). |
 
 ## Kill switches

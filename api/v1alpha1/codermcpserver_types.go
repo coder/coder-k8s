@@ -28,8 +28,11 @@ type MCPServersSpec struct {
 	// control plane's operator token. This delegates Coder organization-admin
 	// power over MCP servers in these organizations to everyone who can
 	// create CoderMCPServer objects here. A CoderMCPServer for an
-	// organization outside this list sends no MCP request. Removing an
-	// organization stops further changes to its servers. Deleting a
+	// organization outside this list creates and changes nothing. Removing
+	// an organization disables in Coder each server config that a
+	// CoderMCPServer created there, with one request that holds only
+	// enabled: false, and then changes nothing else. After the organization
+	// is listed again, a spec edit enables the server. Deleting a
 	// CoderMCPServer still deletes the config it created.
 	//
 	// This field has no effect yet: the CoderMCPServer controller is not
@@ -45,7 +48,8 @@ type MCPServersSpec struct {
 	// AllowForceOn lets CoderMCPServer objects use availability: force_on,
 	// which adds a server to every new chat of each user who can read it,
 	// without that user's choice. When false (the default), such objects
-	// send no MCP request.
+	// create and change nothing, and a server config that one of them
+	// created is disabled in Coder, as for a removed organization.
 	//
 	// This field has no effect yet: the CoderMCPServer controller is not
 	// shipped.
@@ -254,7 +258,10 @@ type CoderMCPServerOAuth2Auth struct {
 type CoderMCPServerAccess struct {
 	// Groups are Coder group names in the server's organization. Everyone is
 	// the group of all organization members. An empty list leaves the server
-	// to organization admins. Coder reserves the names new and create.
+	// to organization admins. Coder reserves the names new and create. While a
+	// listed group does not exist, the controller removes the access of every
+	// group that this list does not name, adds none, disables the server if
+	// the spec disables it, and waits with GroupNotFound for the rest.
 	// +kubebuilder:validation:MaxItems=64
 	// +kubebuilder:validation:XValidation:rule="self.all(g, g != 'new' && g != 'create')",message="access.groups must not hold new or create"
 	// +kubebuilder:validation:items:MinLength=1
@@ -293,7 +300,11 @@ type CoderMCPServerStatus struct {
 	// ObservedGeneration is the generation the controller last processed.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
-	// AppliedGeneration is the last generation whose spec Coder fully holds.
+	// AppliedGeneration is the last generation whose spec Coder fully holds,
+	// or that a kill switch holds: when the controller disables the config
+	// because a credential Secret or the control plane withdrew consent, it
+	// sets this field before it sends the disable, so only a later spec edit
+	// enables the config again. Ready tells whether Coder holds the spec.
 	// +optional
 	AppliedGeneration int64 `json:"appliedGeneration,omitempty"`
 	// OrganizationID is the Coder organization ID that spec.organization

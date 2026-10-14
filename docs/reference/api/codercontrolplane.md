@@ -40,8 +40,8 @@
 | `tolerations` | [Toleration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#toleration-v1-core) array | Tolerations are applied to the control plane pod. |
 | `affinity` | [Affinity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#affinity-v1-core) | Affinity configures pod affinity/anti-affinity rules. |
 | `topologySpreadConstraints` | [TopologySpreadConstraint](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#topologyspreadconstraint-v1-core) array | TopologySpreadConstraints control pod topology spread. |
-| `mcpServers` | [MCPServersSpec](#mcpserversspec) | MCPServers configures CoderMCPServer objects that use this control plane. It has no effect yet: the CoderMCPServer controller is not shipped. |
-| `aiGateway` | [AIGatewaySpec](#aigatewayspec) | AIGateway configures CoderAIGatewayKey objects that use this control plane. It has no effect yet: the CoderAIGatewayKey controller is not shipped. |
+| `mcpServers` | [MCPServersSpec](#mcpserversspec) | MCPServers configures CoderMCPServer objects that use this control plane. Removing it disables in Coder each server config that a CoderMCPServer created through this control plane. It has no effect yet: the CoderMCPServer controller is not shipped. |
+| `aiGateway` | [AIGatewaySpec](#aigatewayspec) | AIGateway configures CoderAIGatewayKey objects that use this control plane. |
 | `workspacePools` | [WorkspacePoolsSpec](#workspacepoolsspec) | WorkspacePools configures CoderWorkspacePool objects that use this control plane. It has no effect yet: the CoderWorkspacePool controller is not shipped. |
 | `templateTests` | [TemplateTestsSpec](#templatetestsspec) | TemplateTests configures CoderTemplateTest runs against this control plane. |
 
@@ -71,7 +71,7 @@ CoderControlPlane (CoderControlPlane.spec.aiGateway).
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `allowKeys` | boolean | AllowKeys lets CoderAIGatewayKey objects in this namespace create and rotate Coder AI Gateway keys with this control plane's operator token. A gateway key lets its holder load the API key of every enabled AI provider, so this delegates that power to everyone who can create CoderAIGatewayKey objects here. When false (the default), the controller creates no key. Setting it back to false stops new keys and rotations. The current key of each CoderAIGatewayKey stays until that object is deleted. This field has no effect yet: the CoderAIGatewayKey controller is not shipped. |
+| `allowKeys` | boolean | AllowKeys lets CoderAIGatewayKey objects in this namespace create and rotate Coder AI Gateway keys with this control plane's operator token. A gateway key lets its holder load the API key of every enabled AI provider, so this delegates that power to everyone who can create CoderAIGatewayKey objects here. When false (the default), the controller creates no key. Setting it back to false stops new keys and rotations. The current key of each CoderAIGatewayKey stays until that object is deleted. |
 
 ### CertSecretSelector
 
@@ -157,8 +157,8 @@ CoderControlPlane (CoderControlPlane.spec.mcpServers).
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `organizations` | string array | Organizations are the names of the Coder organizations whose MCP server configs CoderMCPServer objects can create, change and delete with this control plane's operator token. This delegates Coder organization-admin power over MCP servers in these organizations to everyone who can create CoderMCPServer objects here. A CoderMCPServer for an organization outside this list sends no MCP request. Removing an organization stops further changes to its servers. Deleting a CoderMCPServer still deletes the config it created. This field has no effect yet: the CoderMCPServer controller is not shipped. |
-| `allowForceOn` | boolean | AllowForceOn lets CoderMCPServer objects use availability: force_on, which adds a server to every new chat of each user who can read it, without that user's choice. When false (the default), such objects send no MCP request. This field has no effect yet: the CoderMCPServer controller is not shipped. |
+| `organizations` | string array | Organizations are the names of the Coder organizations whose MCP server configs CoderMCPServer objects can create, change and delete with this control plane's operator token. This delegates Coder organization-admin power over MCP servers in these organizations to everyone who can create CoderMCPServer objects here. A CoderMCPServer for an organization outside this list creates and changes nothing. Removing an organization disables in Coder each server config that a CoderMCPServer created there, with one request that holds only enabled: false, and then changes nothing else. After the organization is listed again, a spec edit enables the server. Deleting a CoderMCPServer still deletes the config it created. This field has no effect yet: the CoderMCPServer controller is not shipped. |
+| `allowForceOn` | boolean | AllowForceOn lets CoderMCPServer objects use availability: force_on, which adds a server to every new chat of each user who can read it, without that user's choice. When false (the default), such objects create and change nothing, and a server config that one of them created is disabled in Coder, as for a removed organization. This field has no effect yet: the CoderMCPServer controller is not shipped. |
 
 ### OperatorAccessSpec
 

@@ -1,0 +1,24 @@
+# Keeps one Coder AI Gateway key in an owned Secret and rotates it. See
+# docs/how-to/manage-ai-gateway-keys.md.
+#
+# Prerequisites:
+# - A Coder Premium license with the AI Gateway enabled.
+# - CoderControlPlane codercontrolplane-sample with status.operatorAccessReady
+#   true and spec.aiGateway.allowKeys true.
+# - No Secret named coder-ai-gateway-key in the namespace: the operator
+#   creates it.
+apiVersion: coder.com/v1alpha1
+kind: CoderAIGatewayKey
+metadata:
+  name: gateway
+  namespace: coder
+spec:
+  # Immutable.
+  controlPlaneRef:
+    name: codercontrolplane-sample
+  # Immutable. The key goes into data key "key".
+  secretName: coder-ai-gateway-key
+  rotation:
+    intervalSeconds: 2592000
+    gracePeriodSeconds: 3600
+    consumerWaitSeconds: 86400
