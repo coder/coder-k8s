@@ -1,9 +1,0 @@
-# Flux health check expressions for CoderMCPServer (coder.com/v1alpha1).
-# Add this entry to spec.healthCheckExprs of a Flux v2.5+ Kustomization
-# with spec.wait: true.
-# docs/how-to/manage-mcp-servers.md copies this file. A test keeps the copy equal.
-- apiVersion: coder.com/v1alpha1
-  kind: CoderMCPServer
-  inProgress: "!has(status.observedGeneration) || status.observedGeneration != metadata.generation || !has(status.conditions) || status.conditions.exists(c, c.type == 'Reconciling' && c.status == 'True')"
-  failed: "status.conditions.exists(c, c.type == 'Stalled' && c.status == 'True')"
-  current: "status.conditions.exists(c, c.type == 'Ready' && c.status == 'True')"

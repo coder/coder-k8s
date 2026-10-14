@@ -1,6 +1,5 @@
-// Package gitops_test checks the GitOps health rules for CoderTemplateTest
-// and CoderMCPServer. The rules are data files, so this package has no
-// production code.
+// Package gitops_test checks the GitOps health rules for CoderTemplateTest.
+// The rules are data files, so this package has no production code.
 package gitops_test
 
 import (
@@ -16,20 +15,11 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// ruleSet is the Argo CD script and the Flux entry of one kind, the doc page
-// that copies them, and the cases that both must pass.
-type ruleSet struct {
-	kind     string
-	luaPath  string
-	fluxPath string
-	docPath  string
-	cases    func() []healthCase
-}
-
-var ruleSets = []ruleSet{
-	{"CoderTemplateTest", "argocd-health-codertemplatetest.lua", "flux-healthcheck-codertemplatetest.yaml", "../../docs/how-to/gitops.md", healthCases},
-	{"CoderMCPServer", "argocd-health-codermcpserver.lua", "flux-healthcheck-codermcpserver.yaml", "../../docs/how-to/manage-mcp-servers.md", mcpServerCases},
-}
+const (
+	luaPath  = "argocd-health-codertemplatetest.lua"
+	fluxPath = "flux-healthcheck-codertemplatetest.yaml"
+	docPath  = "../../docs/how-to/gitops.md"
+)
 
 // fluxHealthCheck is one entry of a Flux Kustomization spec.healthCheckExprs.
 type fluxHealthCheck struct {
@@ -113,118 +103,48 @@ func healthCases() []healthCase {
 	}
 }
 
-// mcpServerObject returns a CoderMCPServer at generation 2 with the given
-// status.
-func mcpServerObject(status map[string]any) map[string]any {
-	obj := map[string]any{
-		"apiVersion": "coder.com/v1alpha1",
-		"kind":       "CoderMCPServer",
-		"metadata":   map[string]any{"name": "github", "namespace": "coder", "generation": int64(2)},
-		"spec":       map[string]any{"organization": "coder", "slug": "github"},
-	}
-	if status != nil {
-		obj["status"] = status
-	}
-	return obj
-}
-
-// mcpServerStatus returns the three conditions that the controller always
-// writes together, with one reason and message: ready, reconciling (neither
-// ready nor stalled), or stalled.
-func mcpServerStatus(state, reason string) map[string]any {
-	ready, reconciling, stalled := "False", "True", "False"
-	switch state {
-	case "ready":
-		ready, reconciling = "True", "False"
-	case "stalled":
-		reconciling, stalled = "False", "True"
-	case "reconciling":
-	default:
-		panic("assertion failed: unknown MCP server fixture state " + state)
-	}
-	condition := func(conditionType, status string) any {
-		return map[string]any{"type": conditionType, "status": status, "reason": reason, "message": "details", "observedGeneration": int64(2)}
-	}
-	return map[string]any{
-		"observedGeneration": int64(2),
-		"conditions":         []any{condition("Ready", ready), condition("Reconciling", reconciling), condition("Stalled", stalled)},
-	}
-}
-
-func mcpServerCases() []healthCase {
-	stale := mcpServerStatus("ready", "Applied")
-	stale["observedGeneration"] = int64(1)
-	noConditions := map[string]any{"observedGeneration": int64(2)}
-	deleting := mcpServerObject(mcpServerStatus("ready", "Applied"))
-	deleting["metadata"].(map[string]any)["deletionTimestamp"] = "2026-10-14T10:00:00Z"
-	deletingWait := mcpServerObject(mcpServerStatus("reconciling", "CoderUnavailable"))
-	deletingWait["metadata"].(map[string]any)["deletionTimestamp"] = "2026-10-14T10:00:00Z"
-	return []healthCase{
-		{"no status", mcpServerObject(nil), "Progressing", "Waiting for the controller", "Unknown", ""},
-		{"stale observedGeneration", mcpServerObject(stale), "Progressing", "Waiting for the controller", "InProgress", ""},
-		{"no conditions", mcpServerObject(noConditions), "Progressing", "Waiting for the controller", "InProgress", ""},
-		{"applied", mcpServerObject(mcpServerStatus("ready", "Applied")), "Healthy", "Applied: details", "Current", ""},
-		{"control plane not ready", mcpServerObject(mcpServerStatus("reconciling", "ControlPlaneNotReady")), "Progressing", "ControlPlaneNotReady: details", "InProgress", ""},
-		{"Coder unavailable", mcpServerObject(mcpServerStatus("reconciling", "CoderUnavailable")), "Progressing", "CoderUnavailable: details", "InProgress", ""},
-		{"group not found", mcpServerObject(mcpServerStatus("stalled", "GroupNotFound")), "Degraded", "GroupNotFound: details", "Failed", ""},
-		{"not allowed", mcpServerObject(mcpServerStatus("stalled", "MCPServersNotAllowed")), "Degraded", "MCPServersNotAllowed: details", "Failed", ""},
-		{"disabled externally", mcpServerObject(mcpServerStatus("stalled", "DisabledExternally")), "Degraded", "DisabledExternally: details", "Failed", ""},
-		{"credential not opted in", mcpServerObject(mcpServerStatus("stalled", "CredentialNotOptedIn")), "Degraded", "CredentialNotOptedIn: details", "Failed", ""},
-		{"slug conflict", mcpServerObject(mcpServerStatus("stalled", "SlugConflict")), "Degraded", "SlugConflict: details", "Failed", ""},
-		// Flux has no deletion rule: it waits for pruned objects separately.
-		{"being deleted", deleting, "Progressing", "Deleting the Coder MCP server config", "Current", "Deleting the Coder MCP server config"},
-		{"being deleted while Coder is down", deletingWait, "Progressing", "Deleting the Coder MCP server config", "InProgress", "Deleting the Coder MCP server config"},
-	}
-}
-
 func TestArgoCDHealth(t *testing.T) {
 	t.Parallel()
-	for _, rules := range ruleSets {
-		script := readFile(t, rules.luaPath)
-		for _, tc := range rules.cases() {
-			t.Run(rules.kind+"/"+tc.name, func(t *testing.T) {
-				t.Parallel()
-				gotStatus, gotMessage, gotDeletion := argoHealth(t, script, tc.obj)
-				if gotStatus != tc.argoStatus || gotMessage != tc.argoMessage || gotDeletion != tc.argoDeletion {
-					t.Fatalf("got %q %q %q, want %q %q %q", gotStatus, gotMessage, gotDeletion, tc.argoStatus, tc.argoMessage, tc.argoDeletion)
-				}
-			})
-		}
+	script := readFile(t, luaPath)
+	for _, tc := range healthCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotStatus, gotMessage, gotDeletion := argoHealth(t, script, tc.obj)
+			if gotStatus != tc.argoStatus || gotMessage != tc.argoMessage || gotDeletion != tc.argoDeletion {
+				t.Fatalf("got %q %q %q, want %q %q %q", gotStatus, gotMessage, gotDeletion, tc.argoStatus, tc.argoMessage, tc.argoDeletion)
+			}
+		})
 	}
 }
 
 func TestFluxHealth(t *testing.T) {
 	t.Parallel()
-	for _, rules := range ruleSets {
-		var checks []fluxHealthCheck
-		if err := yaml.UnmarshalStrict([]byte(readFile(t, rules.fluxPath)), &checks); err != nil {
-			t.Fatalf("parse %s: %v", rules.fluxPath, err)
-		}
-		if len(checks) != 1 || checks[0].APIVersion != "coder.com/v1alpha1" || checks[0].Kind != rules.kind {
-			t.Fatalf("want one %s entry, got %+v", rules.kind, checks)
-		}
-		for _, tc := range rules.cases() {
-			t.Run(rules.kind+"/"+tc.name, func(t *testing.T) {
-				t.Parallel()
-				if got := fluxHealth(t, checks[0], tc.obj); got != tc.fluxStatus {
-					t.Fatalf("got %q, want %q", got, tc.fluxStatus)
-				}
-			})
-		}
+	var checks []fluxHealthCheck
+	if err := yaml.UnmarshalStrict([]byte(readFile(t, fluxPath)), &checks); err != nil {
+		t.Fatalf("parse %s: %v", fluxPath, err)
+	}
+	if len(checks) != 1 || checks[0].APIVersion != "coder.com/v1alpha1" || checks[0].Kind != "CoderTemplateTest" {
+		t.Fatalf("want one CoderTemplateTest entry, got %+v", checks)
+	}
+	for _, tc := range healthCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := fluxHealth(t, checks[0], tc.obj); got != tc.fluxStatus {
+				t.Fatalf("got %q, want %q", got, tc.fluxStatus)
+			}
+		})
 	}
 }
 
-// TestDocCopiesRules keeps the copies in the docs equal to the source files,
-// because the docs build has no snippet include.
+// TestDocCopiesRules keeps the copies in docs/how-to/gitops.md equal to the
+// source files, because the docs build has no snippet include.
 func TestDocCopiesRules(t *testing.T) {
 	t.Parallel()
-	for _, rules := range ruleSets {
-		doc := readFile(t, rules.docPath)
-		for lang, path := range map[string]string{"lua": rules.luaPath, "yaml": rules.fluxPath} {
-			block := "```" + lang + "\n" + readFile(t, path) + "```\n"
-			if !strings.Contains(doc, block) {
-				t.Errorf("%s has no ```%s block equal to %s", rules.docPath, lang, path)
-			}
+	doc := readFile(t, docPath)
+	for lang, path := range map[string]string{"lua": luaPath, "yaml": fluxPath} {
+		block := "```" + lang + "\n" + readFile(t, path) + "```\n"
+		if !strings.Contains(doc, block) {
+			t.Errorf("%s has no ```%s block equal to %s", docPath, lang, path)
 		}
 	}
 }
