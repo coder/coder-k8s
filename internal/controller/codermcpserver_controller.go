@@ -215,8 +215,9 @@ func (r *CoderMCPServerReconciler) check(
 	}
 	server.Status.OrganizationID = org.ID.String()
 	if step, err := mcpServerScopeGate(ctx, sdk, controlPlane, server.Spec, org.ID); step != nil || err != nil {
-		if step != nil && step.stalled && server.Status.ConfigID != "" {
-			// Fail closed when the opt-in goes (#336).
+		if step != nil && (step.reason == "MCPServersNotAllowed" || step.reason == "ForceOnNotAllowed") && server.Status.ConfigID != "" {
+			// Fail closed when the opt-in goes (#336). Any other step, such
+			// as a mismatched Coder answer, keeps the config as it is.
 			return r.disableMCPServerWithoutOptIn(ctx, sdk, server, org.ID, step)
 		}
 		return step, err

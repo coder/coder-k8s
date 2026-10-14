@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/coder/v2/codersdk"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -153,4 +154,67 @@ func TestCoderMCPServerOrganizationNotCoder404(t *testing.T) {
 			})
 		}
 	}
+}
+
+// A disable answer can be lost after Coder committed it. The next reconcile
+// then finds the config disabled and records the generation, so the
+// restored opt-in does not apply a pending generation that enables it.
+func TestCoderMCPServerOptInFoundDisabledHolds(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	got, id := env.applied(ctx, t, nil)
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(got), got))
+	got.Spec.Description = "pending"
+	require.NoError(t, k8sClient.Update(ctx, got))
+	env.fake.failNext(routeUpdateMCPServer, fakeFault{Status: http.StatusBadGateway})
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerStep(t, got, false, "CoderUnavailable")
+
+	env.setOptIn(ctx, t, nil)
+	env.fake.failNext(routeUpdateMCPServer, fakeFault{Status: http.StatusBadGateway, AfterCommit: true})
+	got, _ = env.reconcile(ctx, t, got)
+	require.Contains(t, requireMCPServerStep(t, got, false, "MCPServersNotAllowed"), "the disable failed")
+	require.False(t, env.stored(t, got).view.Enabled, "the PATCH committed")
+
+	mark := len(env.writeRoutes())
+	got, _ = env.reconcile(ctx, t, got)
+	require.Contains(t, requireMCPServerStep(t, got, true, "MCPServersNotAllowed"), "is disabled in Coder")
+	require.Equal(t, got.Generation, got.Status.AppliedGeneration)
+
+	env.setOptIn(ctx, t, &coderv1alpha1.MCPServersSpec{Organizations: []string{"coder"}})
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerStep(t, got, true, "DisabledExternally")
+	require.Empty(t, env.writesSince(mark))
+	stored := env.stored(t, got)
+	require.False(t, stored.view.Enabled)
+	require.Empty(t, stored.view.Description, "the pending generation is not applied")
+	require.Equal(t, id, stored.view.ID)
+}
+
+// Only a withdrawn opt-in disables the config. Another stall of the scope
+// check, such as a mismatched Coder answer for a listed name, keeps the
+// config as it is and sends no MCP request.
+func TestCoderMCPServerScopeMismatchKeepsConfig(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	env.fake.addOrganization("alias")
+	got, _ := env.applied(ctx, t, nil)
+	env.setOptIn(ctx, t, &coderv1alpha1.MCPServersSpec{Organizations: []string{"alias"}})
+	// The object's own organization resolves, then the listed name gets an
+	// answer for another organization.
+	env.fake.failNext(routeOrganization, fakeFault{Rewrite: func(answer any) any { return answer }})
+	env.fake.failNext(routeOrganization, fakeFault{Rewrite: func(answer any) any {
+		org := answer.(codersdk.Organization)
+		org.Name = "other"
+		return org
+	}})
+	mcp := env.mcpRequests()
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerStep(t, got, true, "CoderAnswerMismatch")
+	require.Equal(t, mcp, env.mcpRequests())
+	require.True(t, env.stored(t, got).view.Enabled)
 }

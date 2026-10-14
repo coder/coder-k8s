@@ -93,6 +93,11 @@ func readMCPServerToDisable(
 			"assertion failed: Coder answered MCP server config %s with slug %s in organization %s when asked for %s", found.ID, found.Slug, found.OrganizationID, id)
 	}
 	if !found.Enabled {
+		// The disable answer can be lost after Coder committed it. Whoever
+		// disabled the config, the kill switch now holds this generation too,
+		// so an opt-in or consent that comes back does not apply a pending
+		// generation that enables the config.
+		server.Status.AppliedGeneration = server.Generation
 		return found, stalled("MCP server config %s is disabled in Coder.", id)
 	}
 	return found, nil
