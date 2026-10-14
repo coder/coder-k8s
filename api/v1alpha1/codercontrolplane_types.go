@@ -133,8 +133,7 @@ type CoderControlPlaneSpec struct {
 	MCPServers *MCPServersSpec `json:"mcpServers,omitempty"`
 
 	// AIGateway configures CoderAIGatewayKey objects that use this control
-	// plane. It has no effect yet: the CoderAIGatewayKey controller is not
-	// shipped.
+	// plane.
 	// +optional
 	AIGateway *AIGatewaySpec `json:"aiGateway,omitempty"`
 

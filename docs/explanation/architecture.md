@@ -31,7 +31,7 @@ graph TD
 | --- | --- | --- | --- |
 | Code | `internal/app/controllerapp/`, `internal/controller/` | `internal/app/apiserverapp/`, `internal/aggregated/storage/`, `internal/aggregated/coder/` | `internal/app/mcpapp/` |
 | Listens on | `:8081` (`/healthz`, `/readyz`) | `:6443` HTTPS (default) | `127.0.0.1:8090` only. `/mcp` requires the bearer token. `/healthz` and `/readyz` do not. |
-| Resources | `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy`, `CoderTemplateTest`, `CoderAIProvider` | `coderworkspaces`, `codertemplates`, `codertemplateversions` | Tools for control planes, templates, workspaces, events, pod logs, and run state |
+| Resources | `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy`, `CoderTemplateTest`, `CoderAIProvider`, `CoderAIGatewayKey` | `coderworkspaces`, `codertemplates`, `codertemplateversions` | Tools for control planes, templates, workspaces, events, pod logs, and run state |
 
 ### Controller
 
@@ -75,7 +75,7 @@ graph TD
 
 | Path | Contents |
 | --- | --- |
-| `config/crd/bases/` | The generated CRDs for `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy`, `CoderTemplateTest`, and `CoderAIProvider` |
+| `config/crd/bases/` | The generated CRDs for `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy`, `CoderTemplateTest`, `CoderAIProvider`, and `CoderAIGatewayKey` |
 | `config/rbac/` | The `coder-k8s` ServiceAccount, the `manager-role` ClusterRole, and the bindings (including auth-delegator) |
 | `config/apiserver-standalone/` | For standalone `--app=aggregated-apiserver`: the `coder-k8s-apiserver` ServiceAccount, its RBAC, and the placeholder Secret for the serving CA |
 | `deploy/deployment.yaml` | The `coder-k8s` Deployment (default `--app=all`) |

@@ -85,12 +85,6 @@ rules:
   - coder.com
   resources:
   - coderaigatewaykeys
-  - codermcpservers
-  verbs:
-  - list
-- apiGroups:
-  - coder.com
-  resources:
   - coderaiproviders
   verbs:
   - get
@@ -100,6 +94,7 @@ rules:
 - apiGroups:
   - coder.com
   resources:
+  - coderaigatewaykeys/finalizers
   - coderaiproviders/finalizers
   - codercontrolplanes/finalizers
   - coderprovisioners/finalizers
@@ -110,6 +105,7 @@ rules:
 - apiGroups:
   - coder.com
   resources:
+  - coderaigatewaykeys/status
   - coderaiproviders/status
   verbs:
   - get
@@ -139,6 +135,12 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - coder.com
+  resources:
+  - codermcpservers
+  verbs:
+  - list
 - apiGroups:
   - coder.com
   resources:
