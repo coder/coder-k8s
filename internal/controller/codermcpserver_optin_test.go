@@ -367,3 +367,85 @@ func TestCoderMCPServerOptInGoneConfigHolds(t *testing.T) {
 	requireMCPServerApplied(t, got)
 	require.Equal(t, 2, env.posts())
 }
+
+// #365: the process stops after the status write that records the disable
+// and before the disable PATCH. While the opt-in stays withdrawn, the next
+// reconcile still sends the PATCH: whether the config is disabled comes from
+// Coder's answer, not from appliedGeneration.
+func TestCoderMCPServerOptInDisableAfterStopBeforePatch(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	got, _ := env.applied(ctx, t, nil)
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(got), got))
+	got.Spec.Description = "pending"
+	require.NoError(t, k8sClient.Update(ctx, got))
+	env.fake.failNext(routeUpdateMCPServer, fakeFault{Status: http.StatusBadGateway})
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerStep(t, got, false, "CoderUnavailable")
+	env.setOptIn(ctx, t, nil)
+
+	// The status write succeeds, then the process stops: the context ends
+	// before the PATCH can go out.
+	stopCtx, stop := context.WithCancel(ctx)
+	base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+	r := &controller.CoderMCPServerReconciler{Client: interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			err := c.SubResource(sub).Update(ctx, obj, opts...)
+			stop()
+			return err
+		},
+	}), Scheme: scheme}
+	mark := len(env.writeRoutes())
+	_, _ = r.Reconcile(stopCtx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(got)})
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(got), got))
+	require.Equal(t, got.Generation, got.Status.AppliedGeneration, "the marker is written")
+	require.Empty(t, env.writesSince(mark), "the PATCH never went out")
+	require.True(t, env.stored(t, got).view.Enabled)
+
+	got, _ = env.reconcile(ctx, t, got)
+	require.Contains(t, requireMCPServerStep(t, got, true, "MCPServersNotAllowed"), "The controller disabled MCP server config")
+	writes := env.writesSince(mark)
+	require.Len(t, writes, 1)
+	require.JSONEq(t, `{"enabled":false}`, string(writes[0].body))
+	require.False(t, env.stored(t, got).view.Enabled)
+}
+
+// #365, second case: the controller writes the disable marker, the PATCH
+// fails without a commit, and the opt-in comes back while the config is
+// still enabled. The pending generation then counts as applied, but the
+// sync compares Coder with the spec on every reconcile, so it sends the
+// pending spec edit as drift: the edit is not lost.
+func TestCoderMCPServerOptInFailedDisableKeepsPendingEdit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	got, _ := env.applied(ctx, t, nil)
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(got), got))
+	got.Spec.Description = "pending"
+	require.NoError(t, k8sClient.Update(ctx, got))
+	env.fake.failNext(routeUpdateMCPServer, fakeFault{Status: http.StatusBadGateway})
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerStep(t, got, false, "CoderUnavailable")
+
+	env.setOptIn(ctx, t, nil)
+	env.fake.failNext(routeUpdateMCPServer, fakeFault{Status: http.StatusBadGateway})
+	got, _ = env.reconcile(ctx, t, got)
+	require.Contains(t, requireMCPServerStep(t, got, false, "MCPServersNotAllowed"), "the disable failed")
+	require.Equal(t, got.Generation, got.Status.AppliedGeneration, "the marker is written")
+	stored := env.stored(t, got)
+	require.True(t, stored.view.Enabled, "the PATCH did not commit")
+	require.Empty(t, stored.view.Description)
+
+	env.setOptIn(ctx, t, &coderv1alpha1.MCPServersSpec{Organizations: []string{"coder"}})
+	mark := len(env.writeRoutes())
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerApplied(t, got)
+	writes := env.writesSince(mark)
+	require.Len(t, writes, 1)
+	require.JSONEq(t, `{"description":"pending"}`, string(writes[0].body), "the drift sync sends the pending edit")
+	require.Equal(t, "pending", env.stored(t, got).view.Description)
+}
