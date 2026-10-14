@@ -112,7 +112,7 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 			members = append(members, m)
 		}
 	}
-	if err := r.deleteFailedMembers(ctx, pool, before, members); err != nil {
+	if err := r.deleteFailedMembers(ctx, pool, before, members, step == nil); err != nil {
 		return ctrl.Result{}, err
 	}
 	counts := countPoolMembers(pool, members)
@@ -165,9 +165,14 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 // status.resolved or member ready time. A failure counts once, and only when it
 // happened after the run start; a failure in the same second as the start
 // does not count. A failed member with old inputs never counts.
+//
+// While the pool's inputs do not resolve (count is false), failures do not
+// count either: the members then fail on inputs that the pool no longer
+// selects, or on a Coder that does not answer, and a revert of a bad spec
+// edit resolves to the same inputs, which starts no new run.
 func (r *CoderWorkspacePoolReconciler) deleteFailedMembers(
 	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, before *coderv1alpha1.CoderWorkspacePoolStatus,
-	members []coderv1alpha1.CoderWorkspacePoolMember,
+	members []coderv1alpha1.CoderWorkspacePoolMember, count bool,
 ) error {
 	st := &pool.Status
 	var runStart time.Time
@@ -201,7 +206,7 @@ func (r *CoderWorkspacePoolReconciler) deleteFailedMembers(
 		// A member with an old readyTimeoutSeconds is current for claims, but
 		// its failure says nothing about the new timeout.
 		oldTimeout := st.Resolved != nil && m.Spec.ReadyTimeoutSeconds != st.Resolved.ReadyTimeoutSeconds
-		if poolMemberInputMismatch(m, pool) != "" || oldTimeout || !at.After(runStart) ||
+		if !count || poolMemberInputMismatch(m, pool) != "" || oldTimeout || !at.After(runStart) ||
 			slices.ContainsFunc(run, func(f coderv1alpha1.CoderWorkspacePoolFailure) bool { return f.Member == m.Name }) {
 			continue
 		}
@@ -289,7 +294,7 @@ func (r *CoderWorkspacePoolReconciler) createMembers(
 		return nil, 0, nil
 	}
 	if n := len(st.RunFailures); n >= poolFailureLimit {
-		return coderFail("MemberFailureLimit", "%d members failed in a row. Change the template, version, preset, parameters, or readyTimeoutSeconds, or wait for a new version.", n), 0, nil
+		return coderFail("MemberFailureLimit", "%d members failed in a row. Change the version, preset, parameters, or readyTimeoutSeconds, or wait for a new version.", n), 0, nil
 	} else if n > 0 {
 		last := st.RunFailures[n-1]
 		if retryAt := last.Time.Add(min(poolFailureBackoffBase<<(n-1), poolFailureBackoffCap)); now.Before(retryAt) {

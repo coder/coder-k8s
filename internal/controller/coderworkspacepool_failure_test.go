@@ -249,6 +249,24 @@ func TestPoolFailureRunSurvivesRescale(t *testing.T) {
 	}
 }
 
+// TestPoolFailuresUncountedWhileUnresolved: a spec edit that does not
+// resolve leaves status.resolved as it was. Members that fail meanwhile are
+// deleted without counting, so reverting the edit, which starts no new run,
+// leaves no failures behind.
+func TestPoolFailuresUncountedWhileUnresolved(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	pending := e.createMember(t, nil) // The one replica.
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Version.Name = "nope" })
+	requirePool(t, e.reconcilePool(t, 1), "TemplateVersionNotFound", false, false)
+	e.tick()
+	e.setMemberStatus(t, pending, e.failedStatus("DeadlineExceeded"))
+	require.Zero(t, e.reconcilePool(t, 1).Status.ConsecutiveFailures)
+	require.True(t, e.gone(t, pending), "deleted without counting")
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Version.Name = "v1" })
+	require.Zero(t, e.reconcilePool(t, 1).Status.ConsecutiveFailures)
+}
+
 // deleteHookClient runs hook before each member delete and fails the pool
 // status writes after a member delete when failStatus is set.
 type deleteHookClient struct {
