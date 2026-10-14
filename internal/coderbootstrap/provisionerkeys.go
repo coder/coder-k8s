@@ -279,6 +279,9 @@ func newAuthenticatedClient(coderURL, sessionToken string) (*codersdk.Client, er
 	// net/http copies custom headers such as Coder-Session-Token to every
 	// redirect target, so refuse redirects that leave the configured origin.
 	client.HTTPClient.CheckRedirect = sameorigin.RedirectPolicy(coderAPIURL)
+	// This client dials no websocket. codersdk websocket dials keep only the
+	// Transport and skip CheckRedirect, so before adding one, also wrap the
+	// Transport with sameorigin.RoundTripper (#299).
 
 	return client, nil
 }

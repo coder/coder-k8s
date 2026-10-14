@@ -257,6 +257,14 @@ spec:
                 - name
                 - serial
                 type: object
+              killSwitchGeneration:
+                description: |-
+                  KillSwitchGeneration is the generation in which the controller found
+                  the current key deleted in Coder. The controller creates no key until
+                  the generation changes. 0 means the kill switch is not active.
+                format: int64
+                minimum: 0
+                type: integer
               lastCreateAttemptTime:
                 description: |-
                   LastCreateAttemptTime is when the controller last sent a key create

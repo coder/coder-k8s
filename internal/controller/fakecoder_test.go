@@ -1,8 +1,10 @@
 package controller_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -49,6 +51,9 @@ type fakeFault struct {
 	// Rewrite changes a successful answer, to model Coder answering for
 	// something other than what was asked.
 	Rewrite func(answer any) any
+	// Inspect receives the request body, and the request is then served
+	// normally. It runs under the fake's lock, so it must not call the fake.
+	Inspect func(body []byte)
 	// Detail goes into the error answer's detail and a validation error.
 	Detail string
 	// Message replaces the error answer's message.
@@ -171,12 +176,20 @@ func (f *fakeCoder) route(mux *http.ServeMux, pattern, route string, h func(*htt
 		if queue := f.faults[route]; len(queue) > 0 {
 			fault, f.faults[route] = &queue[0], queue[1:]
 		}
+		if fault != nil && fault.Inspect != nil {
+			body, _ := io.ReadAll(r.Body)
+			fault.Inspect(body)
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		}
 		status, resp := 0, any(nil)
-		if fault == nil || fault.AfterCommit || fault.Rewrite != nil {
+		if fault == nil || fault.AfterCommit || fault.Rewrite != nil || fault.Inspect != nil {
 			status, resp = h(r)
 		}
 		if fault != nil && fault.Rewrite != nil {
-			resp, fault = fault.Rewrite(resp), nil
+			resp = fault.Rewrite(resp)
+		}
+		if fault != nil && (fault.Rewrite != nil || fault.Inspect != nil) {
+			fault = nil
 		}
 		f.mu.Unlock()
 
