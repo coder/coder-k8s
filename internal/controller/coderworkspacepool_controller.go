@@ -145,6 +145,9 @@ func (r *CoderWorkspacePoolReconciler) createMembers(
 	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Spec.ControlPlaneRef.Name}, controlPlane); err != nil {
 		return nil, 0, fmt.Errorf("get CoderControlPlane %s/%s: %w", pool.Namespace, pool.Spec.ControlPlaneRef.Name, err)
 	}
+	if !controlPlane.DeletionTimestamp.IsZero() {
+		return coderWait("ControlPlaneDeleting", "CoderControlPlane %s is being deleted.", controlPlane.Name), poolResolvePoll, nil
+	}
 	// The consent check again, on the uncached control plane: a consent that
 	// an admin just withdrew holds even while the cache has the old one.
 	if step := workspacePoolConsent(controlPlane, st.Resolved.OwnerID, pool.Spec.Template); step != nil {

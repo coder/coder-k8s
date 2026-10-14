@@ -212,6 +212,11 @@ func (r *CoderWorkspacePoolMemberReconciler) checkCreate(
 	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: member.Namespace, Name: controlPlane.Name}, fresh); err != nil {
 		return nil, nil, fmt.Errorf("get CoderControlPlane %s/%s: %w", member.Namespace, controlPlane.Name, err)
 	}
+	if !fresh.DeletionTimestamp.IsZero() {
+		// The cleanup releases members of a deleting control plane without a
+		// Coder call, so a workspace created now would be left behind.
+		return nil, coderWait("ControlPlaneDeleting", "CoderControlPlane %s is being deleted.", fresh.Name), nil
+	}
 	if step := workspacePoolConsent(fresh, spec.OwnerID, pool.Spec.Template); step != nil {
 		return nil, step, nil
 	}

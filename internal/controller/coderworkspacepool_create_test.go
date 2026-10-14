@@ -283,3 +283,52 @@ func TestPoolMemberReadsPoolUncached(t *testing.T) {
 	member := e.reconcileMember(t, key, 0)
 	require.Equal(t, coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, member.Status.Phase, member.Status.Message)
 }
+
+// staleDeletingControlPlaneClient answers control plane reads from a cache
+// that has not seen the start of its deletion.
+type staleDeletingControlPlaneClient struct{ client.Client }
+
+func (c staleDeletingControlPlaneClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := c.Client.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	if cp, ok := obj.(*coderv1alpha1.CoderControlPlane); ok {
+		cp.DeletionTimestamp, cp.Finalizers = nil, nil
+	}
+	return nil
+}
+
+// TestPoolNoCreateWhileControlPlaneDeletes: once the control plane's
+// deletion starts, neither the pool nor a member creates anything, whatever
+// the cache still says. The cleanup releases members of a deleting control
+// plane without a Coder call, so a new workspace would be left behind.
+func TestPoolNoCreateWhileControlPlaneDeletes(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	member := e.createMember(t, nil)
+	cp := &coderv1alpha1.CoderControlPlane{}
+	cpKey := types.NamespacedName{Namespace: e.ns, Name: "coder"}
+	require.NoError(t, k8sClient.Get(e.ctx, cpKey, cp))
+	cp.Finalizers = append(cp.Finalizers, "test.coder.com/hold")
+	require.NoError(t, k8sClient.Update(e.ctx, cp))
+	require.NoError(t, k8sClient.Delete(e.ctx, cp))
+	t.Cleanup(func() {
+		cp := &coderv1alpha1.CoderControlPlane{}
+		if k8sClient.Get(e.ctx, cpKey, cp) == nil {
+			cp.Finalizers = nil
+			_ = k8sClient.Update(e.ctx, cp)
+		}
+	})
+	stale := staleDeletingControlPlaneClient{k8sClient}
+	m := &controller.CoderWorkspacePoolMemberReconciler{Client: stale, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	p := &controller.CoderWorkspacePoolReconciler{Client: stale, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	for range 3 {
+		_, err := m.Reconcile(e.ctx, ctrl.Request{NamespacedName: member})
+		require.NoError(t, err)
+		_, err = p.Reconcile(e.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}})
+		require.NoError(t, err)
+	}
+	require.Equal(t, "ControlPlaneDeleting", e.reconcileMember(t, member, 0).Status.Reason)
+	require.Zero(t, e.fake.requestCount(routeCreateWorkspace), "no create request")
+	require.Len(t, e.poolMembers(t, e.pool.Name), 1, "no new member")
+}
