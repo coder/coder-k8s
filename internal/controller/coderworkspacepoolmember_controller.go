@@ -220,9 +220,6 @@ func (r *CoderWorkspacePoolMemberReconciler) checkCreate(
 	if step := workspacePoolConsent(fresh, spec.OwnerID, pool.Spec.Template); step != nil {
 		return nil, step, nil
 	}
-	if step, err := r.checkOwnerCap(ctx, member, fresh); step != nil || err != nil {
-		return nil, step, err
-	}
 	ownerUser, step, err := checkCoderWorkspaceOwner(ctx, sdk, uuid.MustParse(spec.OwnerID))
 	if step != nil || err != nil {
 		return nil, step, err
@@ -275,19 +272,35 @@ func (r *CoderWorkspacePoolMemberReconciler) checkCreate(
 	case !isCoderNotFound(err):
 		return nil, coderStepUnavailable("get workspace by name", err), nil
 	}
+	// Last, after the Coder reads: the owner cap and the consent again.
+	if step, err := r.checkOwnerCap(ctx, member, pool.Spec.Template); step != nil || err != nil {
+		return nil, step, err
+	}
 	return sdk, nil, nil
 }
 
-// checkOwnerCap counts, without the cache, the owner's other members on the
-// control plane that may have a workspace. At maxWorkspaces the member
+// checkOwnerCap reads the control plane again without the cache, right
+// before the create marker, and counts, also without the cache, the owner's
+// other members on it that may have a workspace. At maxWorkspaces the member
 // waits, so a member that the pool created under a higher cap creates
-// nothing above a cap that an admin lowered since (Codex 4271920249).
+// nothing above a cap that an admin lowered since (Codex 4271920249 and
+// 4274565367). The consent check runs again on the same read.
 func (r *CoderWorkspacePoolMemberReconciler) checkOwnerCap(
-	ctx context.Context, member *coderv1alpha1.CoderWorkspacePoolMember, controlPlane *coderv1alpha1.CoderControlPlane,
+	ctx context.Context, member *coderv1alpha1.CoderWorkspacePoolMember, template string,
 ) (*coderStep, error) {
+	controlPlane := &coderv1alpha1.CoderControlPlane{}
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: member.Namespace, Name: member.Spec.ControlPlaneRef.Name}, controlPlane); err != nil {
+		return nil, fmt.Errorf("get CoderControlPlane %s/%s: %w", member.Namespace, member.Spec.ControlPlaneRef.Name, err)
+	}
+	if !controlPlane.DeletionTimestamp.IsZero() {
+		return coderWait("ControlPlaneDeleting", "CoderControlPlane %s is being deleted.", controlPlane.Name), nil
+	}
+	if step := workspacePoolConsent(controlPlane, member.Spec.OwnerID, template); step != nil {
+		return step, nil
+	}
 	owner := workspacePoolOwner(controlPlane, member.Spec.OwnerID)
-	if owner == nil || owner.MaxWorkspaces == nil {
-		return nil, fmt.Errorf("assertion failed: CoderControlPlane %s has no defaulted maxWorkspaces for Coder user %s after the consent check", controlPlane.Name, member.Spec.OwnerID)
+	if owner.MaxWorkspaces == nil {
+		return nil, fmt.Errorf("assertion failed: CoderControlPlane %s has no defaulted maxWorkspaces for Coder user %s", controlPlane.Name, member.Spec.OwnerID)
 	}
 	all := &coderv1alpha1.CoderWorkspacePoolMemberList{}
 	if err := r.APIReader.List(ctx, all, client.InNamespace(member.Namespace)); err != nil {

@@ -1,12 +1,16 @@
 package controller_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/controller"
 )
 
 // setOwnerCap sets maxWorkspaces of the control plane's only owner entry.
@@ -88,4 +92,44 @@ func TestPoolLoweredOwnerCapDeletesOnce(t *testing.T) {
 	}
 	require.Equal(t, 2, deleting, "one member stays at maxWorkspaces 1")
 	require.Len(t, e.poolMembers(t, e.pool.Name), 3, "no new member")
+}
+
+// firstReadOldCap answers the first control plane read with maxWorkspaces
+// 10, as before an admin lowered it, and later reads as stored.
+type firstReadOldCap struct {
+	client.Reader
+	reads *int
+}
+
+func (c firstReadOldCap) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := c.Reader.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	if cp, ok := obj.(*coderv1alpha1.CoderControlPlane); ok && cp.Spec.WorkspacePools != nil {
+		if *c.reads++; *c.reads == 1 {
+			for i := range cp.Spec.WorkspacePools.Owners {
+				cp.Spec.WorkspacePools.Owners[i].MaxWorkspaces = new(int32(10))
+			}
+		}
+	}
+	return nil
+}
+
+// TestPoolMemberRechecksCapLast: the member reads the cap again after its
+// Coder reads, right before the marker, so a cap that an admin lowered
+// during those reads holds (Codex 4274565367).
+func TestPoolMemberRechecksCapLast(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.setOwnerCap(t, 1)
+	e.reconcileMember(t, e.createMember(t, nil), 2)
+	require.Equal(t, 1, e.fake.workspaceCount())
+	second := e.createMember(t, nil)
+	r := &controller.CoderWorkspacePoolMemberReconciler{Client: k8sClient, APIReader: firstReadOldCap{k8sClient, new(0)}, Scheme: scheme, Clock: e.clock}
+	for range 2 { // The finalizer, then the checks.
+		_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: second})
+		require.NoError(t, err)
+	}
+	require.Equal(t, 1, e.fake.workspaceCount(), "no workspace above maxWorkspaces 1")
+	require.Equal(t, "OwnerWorkspaceLimit", e.reconcileMember(t, second, 0).Status.Reason)
 }

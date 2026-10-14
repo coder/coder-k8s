@@ -126,10 +126,18 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		// its own object shows the new resolved inputs stored.
 		requeue = time.Second
 	default:
-		if err := r.trimToOwnerCap(ctx, pool, all.Items); err != nil {
+		var maxWorkspaces int32
+		if maxWorkspaces, step, err = r.freshOwnerCap(ctx, pool); err != nil {
 			return ctrl.Result{}, err
 		}
-		step, requeue, err = r.createMembers(ctx, pool, all.Items, &counts)
+		if step != nil {
+			requeue = poolResolvePoll
+			break
+		}
+		if err := r.trimToOwnerCap(ctx, pool, maxWorkspaces, all.Items); err != nil {
+			return ctrl.Result{}, err
+		}
+		step, requeue, err = r.createMembers(ctx, pool, maxWorkspaces, all.Items, &counts)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -243,13 +251,37 @@ func poolMemberFailedAt(m *coderv1alpha1.CoderWorkspacePoolMember) time.Time {
 	return m.CreationTimestamp.Time
 }
 
+// freshOwnerCap reads the pool's control plane without the cache, whatever
+// the pool's demand: a deletion or a consent that an admin just withdrew
+// holds even while the cache has the old object. It returns the owner's
+// maxWorkspaces from that read, or the wait.
+func (r *CoderWorkspacePoolReconciler) freshOwnerCap(ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool) (int32, *coderStep, error) {
+	controlPlane := &coderv1alpha1.CoderControlPlane{}
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Spec.ControlPlaneRef.Name}, controlPlane); err != nil {
+		return 0, nil, fmt.Errorf("get CoderControlPlane %s/%s: %w", pool.Namespace, pool.Spec.ControlPlaneRef.Name, err)
+	}
+	if !controlPlane.DeletionTimestamp.IsZero() {
+		return 0, coderWait("ControlPlaneDeleting", "CoderControlPlane %s is being deleted.", controlPlane.Name), nil
+	}
+	if step := workspacePoolConsent(controlPlane, pool.Status.Resolved.OwnerID, pool.Spec.Template); step != nil {
+		return 0, step, nil
+	}
+	owner := workspacePoolOwner(controlPlane, pool.Status.Resolved.OwnerID)
+	if owner.MaxWorkspaces == nil {
+		return 0, nil, fmt.Errorf("assertion failed: CoderControlPlane %s has no defaulted maxWorkspaces for Coder user %s", controlPlane.Name, pool.Status.Resolved.OwnerID)
+	}
+	return *owner.MaxWorkspaces, nil, nil
+}
+
 // createMembers creates current members while all caps hold (plan 6.3 step
 // 7): current unclaimed members fewer than spec.replicas, building members
 // fewer than spec.maxInFlight, the owner's live members on this control
-// plane fewer than maxWorkspaces, and the failure backoff passed. It returns
-// the wait that stops it, if any, and when to read again.
+// plane fewer than maxWorkspaces (from an uncached read), and the failure
+// backoff passed. It returns the wait that stops it, if any, and when to
+// read again.
 func (r *CoderWorkspacePoolReconciler) createMembers(
-	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, all []coderv1alpha1.CoderWorkspacePoolMember, counts *poolMemberCounts,
+	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, maxWorkspaces int32,
+	all []coderv1alpha1.CoderWorkspacePoolMember, counts *poolMemberCounts,
 ) (*coderStep, time.Duration, error) {
 	st, now := &pool.Status, r.Clock.Now()
 	need := *pool.Spec.Replicas - counts.current // Claims add their demand in PR 11.
@@ -265,25 +297,8 @@ func (r *CoderWorkspacePoolReconciler) createMembers(
 				last.Member, last.Reason, retryAt.UTC().Format(time.RFC3339)), retryAt.Sub(now), nil
 		}
 	}
-	// The cap and the count both come from uncached reads, so that neither
-	// a cap that an admin just lowered nor two pools on a stale cache pass it.
-	controlPlane := &coderv1alpha1.CoderControlPlane{}
-	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Spec.ControlPlaneRef.Name}, controlPlane); err != nil {
-		return nil, 0, fmt.Errorf("get CoderControlPlane %s/%s: %w", pool.Namespace, pool.Spec.ControlPlaneRef.Name, err)
-	}
-	if !controlPlane.DeletionTimestamp.IsZero() {
-		return coderWait("ControlPlaneDeleting", "CoderControlPlane %s is being deleted.", controlPlane.Name), poolResolvePoll, nil
-	}
-	// The consent check again, on the uncached control plane: a consent that
-	// an admin just withdrew holds even while the cache has the old one.
-	if step := workspacePoolConsent(controlPlane, st.Resolved.OwnerID, pool.Spec.Template); step != nil {
-		return step, poolResolvePoll, nil
-	}
-	owner := workspacePoolOwner(controlPlane, st.Resolved.OwnerID)
-	if owner.MaxWorkspaces == nil {
-		return nil, 0, fmt.Errorf("assertion failed: CoderControlPlane %s has no defaulted maxWorkspaces for Coder user %s", controlPlane.Name, st.Resolved.OwnerID)
-	}
-	maxWorkspaces := *owner.MaxWorkspaces
+	// The count comes from the uncached list, so two pools on a stale cache
+	// never pass the cap together.
 	live := poolOwnerLiveMembers(all, st.Resolved.OwnerID, pool.Spec.ControlPlaneRef.Name, nil)
 	n := min(need, *pool.Spec.MaxInFlight-counts.building, maxWorkspaces-live)
 	for range n {
@@ -329,17 +344,9 @@ func poolOwnerLiveMembers(
 // member is marked deleting in all, so the later steps of this reconcile
 // skip it.
 func (r *CoderWorkspacePoolReconciler) trimToOwnerCap(
-	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, all []coderv1alpha1.CoderWorkspacePoolMember,
+	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, maxWorkspaces int32, all []coderv1alpha1.CoderWorkspacePoolMember,
 ) error {
-	controlPlane := &coderv1alpha1.CoderControlPlane{}
-	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Spec.ControlPlaneRef.Name}, controlPlane); err != nil {
-		return fmt.Errorf("get CoderControlPlane %s/%s: %w", pool.Namespace, pool.Spec.ControlPlaneRef.Name, err)
-	}
-	owner := workspacePoolOwner(controlPlane, pool.Status.Resolved.OwnerID)
-	if !controlPlane.DeletionTimestamp.IsZero() || owner == nil || owner.MaxWorkspaces == nil {
-		return nil // createMembers reports these.
-	}
-	excess := poolOwnerLiveMembers(all, pool.Status.Resolved.OwnerID, pool.Spec.ControlPlaneRef.Name, nil) - *owner.MaxWorkspaces
+	excess := poolOwnerLiveMembers(all, pool.Status.Resolved.OwnerID, pool.Spec.ControlPlaneRef.Name, nil) - maxWorkspaces
 	if excess <= 0 {
 		return nil
 	}
