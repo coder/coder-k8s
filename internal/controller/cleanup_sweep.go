@@ -81,8 +81,8 @@ type CleanupRecordReconciler struct {
 // record when its CoderAIProvider is deleted, and every record when a control
 // plane gets operator access, since that control plane can match them.
 func (r *CleanupRecordReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if r.Client == nil || r.APIReader == nil || r.OperatorNamespace == "" || r.Clock == nil || r.Recorder == nil {
-		return errors.New("assertion failed: the cleanup record reconciler needs a client, an API reader, the operator namespace, a clock and an event recorder")
+	if mgr == nil || r.Client == nil || r.APIReader == nil || r.OperatorNamespace == "" || r.Clock == nil || r.Recorder == nil {
+		return errors.New("assertion failed: the cleanup record reconciler needs a manager, a client, an API reader, the operator namespace, a clock and an event recorder")
 	}
 	isRecord := predicate.NewPredicateFuncs(func(obj client.Object) bool {
 		return obj.GetNamespace() == r.OperatorNamespace && obj.GetLabels()[cleanupRecordLabel] != ""
@@ -216,9 +216,14 @@ func (r *CleanupRecordReconciler) matchingControlPlane(ctx context.Context, depl
 	unknown := false
 	for i := range controlPlanes.Items {
 		cp := &controlPlanes.Items[i]
-		sdk, _, wait, err := controlPlaneCoderClient(ctx, r.Client, cp.Namespace, cp.Name)
+		// A live read: the cache can show the control plane ready before
+		// it shows its new operator token Secret.
+		sdk, _, wait, err := controlPlaneCoderClient(ctx, r.APIReader, cp.Namespace, cp.Name)
 		if err != nil || wait != nil {
-			continue // Not ready: it cannot sweep now.
+			// A control plane that reports operator access can still match
+			// once its access works.
+			unknown = unknown || cp.Status.OperatorAccessReady
+			continue
 		}
 		id, err := coderDeploymentID(ctx, sdk)
 		if err != nil {

@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
 	clocktesting "k8s.io/utils/clock/testing"
@@ -209,6 +210,28 @@ func TestCleanupSweepAIProviderCases(t *testing.T) {
 		require.Empty(t, s.recorder.Events, "no NoMatchingDeployment Event for an unknown deployment")
 		require.Zero(t, s.sweep(ctx, t).RequeueAfter)
 		require.Nil(t, cleanupRecord(ctx, t, s.namespace, s.provider.UID))
+	})
+	t.Run("stale cache of the token Secret", func(t *testing.T) {
+		t.Parallel()
+		s := newSweepEnv(ctx, t)
+		createTestControlPlane(ctx, t, s.namespace, "coder-b", s.fake.server.URL)
+		cached := s.sweeper.Client
+		s.sweeper.Client = interceptor.NewClient(cached.(client.WithWatch), interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.Secret); ok {
+					return apierrors.NewNotFound(corev1.Resource("secrets"), key.Name) // Not in the cache yet.
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		})
+		s.clock.Step(6 * time.Minute)
+		require.Zero(t, s.sweep(ctx, t).RequeueAfter, "the sweep reads the operator access live")
+		require.Nil(t, cleanupRecord(ctx, t, s.namespace, s.provider.UID))
+	})
+	t.Run("setup needs a manager", func(t *testing.T) {
+		t.Parallel()
+		s := newSweepEnv(ctx, t)
+		require.ErrorContains(t, s.sweeper.SetupWithManager(nil), "assertion failed: the cleanup record reconciler needs a manager")
 	})
 	t.Run("operator not a site owner", func(t *testing.T) {
 		t.Parallel()
