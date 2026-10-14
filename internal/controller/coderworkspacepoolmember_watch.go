@@ -91,14 +91,15 @@ func (r *CoderWorkspacePoolMemberReconciler) checkPoolMemberUse(
 	if !templateWide {
 		// The template can change again after the write. Another unclaimed
 		// member of the pool that moved its baseline to the same value
-		// shows the same write.
+		// shows the same write. This member's own baseline is earlier, so
+		// it never matches.
 		members := &coderv1alpha1.CoderWorkspacePoolMemberList{}
 		label := coderv1alpha1.CoderWorkspacePoolSelectorLabel
 		if err := r.List(ctx, members, client.InNamespace(member.Namespace), client.MatchingLabels{label: member.Labels[label]}); err != nil {
 			return nil, fmt.Errorf("list members of pool %s/%s: %w", member.Namespace, member.Spec.PoolName, err)
 		}
 		templateWide = slices.ContainsFunc(members.Items, func(m coderv1alpha1.CoderWorkspacePoolMember) bool {
-			return m.UID != member.UID && m.Spec.ClaimRef == nil && m.Status.ReadyLastUsedAt != nil && m.Status.ReadyLastUsedAt.Time.Equal(lastUsed)
+			return m.Spec.ClaimRef == nil && m.Status.ReadyLastUsedAt != nil && m.Status.ReadyLastUsedAt.Time.Equal(lastUsed)
 		})
 	}
 	if templateWide {
