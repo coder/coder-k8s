@@ -60,6 +60,12 @@ func (r *CoderMCPServerReconciler) deleteStep(ctx context.Context, server *coder
 		}
 		deleting = !holds
 		if holds {
+			// A pass under the hold ends at the hold end, however slowly
+			// Coder answers. The bounded pass after it then still fits in
+			// the control plane's grace period.
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithDeadline(ctx, controlPlaneHoldEnd(controlPlane))
+			defer cancel()
 			defer func() {
 				if step != nil {
 					step.requeue = controlPlaneHoldRequeue(controlPlane, now, step.requeue)
