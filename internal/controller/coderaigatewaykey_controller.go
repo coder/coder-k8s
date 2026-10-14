@@ -89,6 +89,7 @@ type CoderAIGatewayKeyReconciler struct {
 // for a change of the spec or an input. Any other step waits for progress.
 type aiGatewayKeyStep struct {
 	ready       bool
+	inProgress  bool // With ready: Reconciling=True too, for work that keeps the Secret valid.
 	stalled     bool
 	reason      string
 	message     string
@@ -235,18 +236,42 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 	}
 	own := ownAIGatewayKeys(prefix, listed)
 
-	switch action := nextAIGatewayKeyAction(&key.Status, own, aiGatewayKeySecretHolds(secret, own)); action {
-	case aiGatewayKeyReady:
-		return &aiGatewayKeyStep{ready: true, reason: "Ready", requeue: aiGatewayKeyResync, message: fmt.Sprintf(
-			"Secret %q holds key %s, and Coder lists it.", key.Spec.SecretName, key.Status.CurrentKey.Name)}, nil
+	now := r.Clock.Now()
+	decision := nextAIGatewayKeyAction(&key.Status, prefix, own, aiGatewayKeySecretHolds(secret, own), now)
+	switch decision.action {
+	case aiGatewayKeyAdopt:
+		return adoptAIGatewayKey(key, own, decision, now), nil
+	case aiGatewayKeyRecover:
+		pending := key.Status.PendingKey
+		key.Status.PendingKey = nil
+		return aiGatewayKeyIssueFailed(key, fmt.Sprintf(
+			"The create of key %s did not finish: the operator restarted, or a status write was lost. A committed key is an orphan.", pending.Name)), nil
+	case aiGatewayKeySweep:
+		return r.sweepOrphan(ctx, sdk, key, decision), nil
+	case aiGatewayKeySettle:
+		if step := aiGatewayKeyIssueBlocked(key); step != nil {
+			// The stall stays, and the sweep still runs after the window.
+			step.requeue = max(decision.settleAt.Sub(now), time.Second)
+			return step, nil
+		}
+		return aiGatewayKeyWait(max(decision.settleAt.Sub(now), time.Second), reasonDeletingOrphans,
+			"Key %s of this object is an orphan. The operator creates no key until it deletes the orphan at %s, when no write of the last create attempt can still land.",
+			decision.key.Name, decision.settleAt.UTC().Format(time.RFC3339)), nil
 	case aiGatewayKeyIssue:
 		return r.issueKey(ctx, sdk, key, before, prefix)
 	case aiGatewayKeyKillSwitch:
 		return aiGatewayKeyStalled(reasonKeyDeletedExternal,
 			"Coder no longer lists the current key %s. Someone deleted it outside the operator, so the operator creates no new key.", key.Status.CurrentKey.Name), nil
+	case aiGatewayKeyReady:
+		step := aiGatewayKeyReadyStep(key)
+		if !decision.settleAt.IsZero() {
+			// An orphan waits for the settle window. Come back to sweep it.
+			step.requeue = min(step.requeue, max(decision.settleAt.Sub(now), time.Second))
+		}
+		return step, nil
 	default:
-		// Recovery of a pending create (K6) and a drift re-issue (K7).
-		return aiGatewayKeyWait(aiGatewayKeyResync, reasonIssuingKey, "This controller version does not run step %q yet.", action), nil
+		// A drift re-issue arrives in K7.
+		return aiGatewayKeyWait(aiGatewayKeyResync, reasonIssuingKey, "This controller version does not run step %q yet.", decision.action), nil
 	}
 }
 
@@ -340,11 +365,24 @@ func aiGatewayKeyNamePrefix(uid types.UID) (string, error) {
 func ownAIGatewayKeys(prefix string, keys []codersdk.AIGatewayKey) []codersdk.AIGatewayKey {
 	var own []codersdk.AIGatewayKey
 	for _, k := range keys {
-		if serial, ok := strings.CutPrefix(k.Name, prefix); ok && serial != "" && strings.Trim(serial, "0123456789") == "" {
+		if _, ok := aiGatewayKeySerial(prefix, k.Name); ok {
 			own = append(own, k)
 		}
 	}
 	return own
+}
+
+// aiGatewayKeySerial returns the serial of a key name that is prefix and a
+// serial in the canonical form that the controller writes: decimal digits
+// without leading zeros. "00" is not serial 0, so a key that someone else
+// named that way is never this object's.
+func aiGatewayKeySerial(prefix, name string) (int64, bool) {
+	digits, ok := strings.CutPrefix(name, prefix)
+	if !ok {
+		return 0, false
+	}
+	serial, err := strconv.ParseInt(digits, 10, 64)
+	return serial, err == nil && serial >= 0 && strconv.FormatInt(serial, 10) == digits
 }
 
 // aiGatewayKeySecretHolds returns the ID of the key in own whose prefix the
@@ -365,35 +403,6 @@ func aiGatewayKeySecretHolds(secret *corev1.Secret, own []codersdk.AIGatewayKey)
 		}
 	}
 	return uuid.Nil
-}
-
-// aiGatewayKeyAction is the one mutating step that a reconcile takes.
-type aiGatewayKeyAction string
-
-const (
-	aiGatewayKeyReady      aiGatewayKeyAction = "Ready"      // Nothing to do.
-	aiGatewayKeyIssue      aiGatewayKeyAction = "Issue"      // Issue the first key (4.3).
-	aiGatewayKeyRecover    aiGatewayKeyAction = "Recover"    // A create can be in flight (4.3, 4.4).
-	aiGatewayKeyKillSwitch aiGatewayKeyAction = "KillSwitch" // Someone deleted the current key in Coder (4.7).
-	aiGatewayKeyReissue    aiGatewayKeyAction = "Reissue"    // The Secret lost the current key (D7).
-)
-
-// nextAIGatewayKeyAction is the pure decision of plan 4.2 step 7. own holds
-// the listed keys of this object, and holds is the key that the Secret holds
-// (uuid.Nil for none). K6 to K9 add rows.
-func nextAIGatewayKeyAction(status *coderv1alpha1.CoderAIGatewayKeyStatus, own []codersdk.AIGatewayKey, holds uuid.UUID) aiGatewayKeyAction {
-	switch {
-	case status.PendingKey != nil:
-		return aiGatewayKeyRecover
-	case status.CurrentKey == nil:
-		return aiGatewayKeyIssue
-	case !aiGatewayKeyListed(own, status.CurrentKey.ID):
-		return aiGatewayKeyKillSwitch
-	case holds != uuid.Nil && holds.String() == status.CurrentKey.ID:
-		return aiGatewayKeyReady
-	default:
-		return aiGatewayKeyReissue
-	}
 }
 
 func aiGatewayKeyListed(keys []codersdk.AIGatewayKey, id string) bool {
@@ -429,6 +438,8 @@ func (r *CoderAIGatewayKeyReconciler) patchFinalizer(ctx context.Context, key *c
 func (r *CoderAIGatewayKeyReconciler) applyStep(key *coderv1alpha1.CoderAIGatewayKey, step *aiGatewayKeyStep) {
 	ready, reconciling, stalled := metav1.ConditionFalse, metav1.ConditionTrue, metav1.ConditionFalse
 	switch {
+	case step.ready && step.inProgress:
+		ready = metav1.ConditionTrue
 	case step.ready:
 		ready, reconciling = metav1.ConditionTrue, metav1.ConditionFalse
 	case step.stalled:

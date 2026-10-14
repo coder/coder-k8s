@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
@@ -40,6 +41,12 @@ func TestNextAIGatewayKeyAction(t *testing.T) {
 		// Carol's manual key.
 		{ID: uuid.New(), Name: prefix, KeyPrefix: "Aaaaaaaaaa1"},
 		{ID: uuid.New(), Name: prefix + "1a", KeyPrefix: "Aaaaaaaaaa2"},
+		// Serials that the controller never writes: leading zeros, a sign,
+		// and a value past int64.
+		{ID: uuid.New(), Name: prefix + "00", KeyPrefix: "Aaaaaaaaaa5"},
+		{ID: uuid.New(), Name: prefix + "01", KeyPrefix: "Aaaaaaaaaa6"},
+		{ID: uuid.New(), Name: prefix + "+1", KeyPrefix: "Aaaaaaaaaa7"},
+		{ID: uuid.New(), Name: prefix + "99999999999999999999", KeyPrefix: "Aaaaaaaaaa8"},
 		{ID: uuid.New(), Name: "ck8s-1f8e2a6c1b3d4e5f9a7b2c4d6e8f0a1b-1", KeyPrefix: "Aaaaaaaaaa3"},
 		{ID: uuid.New(), Name: "carol", KeyPrefix: "Aaaaaaaaaa4"},
 	}
@@ -67,26 +74,80 @@ func TestNextAIGatewayKeyAction(t *testing.T) {
 	}
 
 	currentStatus := &coderv1alpha1.CoderAIGatewayKeyCurrent{Serial: 1, ID: current.ID.String(), Name: current.Name}
+	otherStatus := &coderv1alpha1.CoderAIGatewayKeyCurrent{Serial: 2, ID: other.ID.String(), Name: other.Name}
+	now := time.Unix(1700000000, 0)
+	recent, settled := &metav1.Time{Time: now.Add(-time.Minute)}, &metav1.Time{Time: now.Add(-aiGatewayKeySettleWindow)}
 	for name, tc := range map[string]struct {
-		status coderv1alpha1.CoderAIGatewayKeyStatus
-		own    []codersdk.AIGatewayKey
-		holds  uuid.UUID
-		want   aiGatewayKeyAction
+		status   coderv1alpha1.CoderAIGatewayKeyStatus
+		own      []codersdk.AIGatewayKey
+		holds    uuid.UUID
+		want     aiGatewayKeyAction
+		key      uuid.UUID // The adopted or swept key.
+		settleAt *metav1.Time
 	}{
-		"new object":                 {want: aiGatewayKeyIssue},
-		"new object, orphans listed": {own: own, want: aiGatewayKeyIssue},
-		"create in flight":           {status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 1, PendingKey: &coderv1alpha1.CoderAIGatewayKeyPending{}}, want: aiGatewayKeyRecover},
+		"new object": {want: aiGatewayKeyIssue},
+		// Keys with serials this object never sent are not its keys (I6).
+		"new object, keys with unused serials": {own: own, holds: other.ID, want: aiGatewayKeyIssue},
+		"create in flight":                     {status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 1, PendingKey: &coderv1alpha1.CoderAIGatewayKeyPending{}}, want: aiGatewayKeyRecover},
 		"in flight during rotation": {
-			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus, PendingKey: &coderv1alpha1.CoderAIGatewayKeyPending{Serial: 2}},
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus, PendingKey: &coderv1alpha1.CoderAIGatewayKeyPending{Serial: 1}},
 			own:    own, holds: current.ID, want: aiGatewayKeyRecover,
+		},
+		"lost status write after the first key": {
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 3, PendingKey: &coderv1alpha1.CoderAIGatewayKeyPending{Serial: 2}, LastCreateAttemptTime: recent},
+			own:    own, holds: other.ID, want: aiGatewayKeyAdopt, key: other.ID,
+		},
+		"lost status write after a newer key": {
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 3, CurrentKey: currentStatus, LastCreateAttemptTime: recent},
+			own:    own, holds: other.ID, want: aiGatewayKeyAdopt, key: other.ID,
+		},
+		// A Secret restored with an older key is not taken back (4.4), and
+		// the held key is never swept.
+		"secret restored with an older key": {
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 3, CurrentKey: otherStatus, LastCreateAttemptTime: settled},
+			own:    own, holds: current.ID, want: aiGatewayKeyReissue, settleAt: nil,
+		},
+		"orphan inside the settle window": {
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 3, LastCreateAttemptTime: recent},
+			own:    own, want: aiGatewayKeySettle, key: current.ID, settleAt: &metav1.Time{Time: recent.Add(aiGatewayKeySettleWindow)},
+		},
+		"orphan after the settle window": {
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 3, LastCreateAttemptTime: settled},
+			own:    own, want: aiGatewayKeySweep, key: current.ID, settleAt: &metav1.Time{Time: now},
+		},
+		"steady state, orphan inside the settle window": {
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 3, CurrentKey: currentStatus, LastCreateAttemptTime: recent},
+			own:    own, holds: current.ID, want: aiGatewayKeyReady, key: other.ID, settleAt: &metav1.Time{Time: recent.Add(aiGatewayKeySettleWindow)},
+		},
+		"steady state, orphan after the settle window": {
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 3, CurrentKey: currentStatus, LastCreateAttemptTime: settled},
+			own:    own, holds: current.ID, want: aiGatewayKeySweep, key: other.ID, settleAt: &metav1.Time{Time: now},
+		},
+		"retiring key is not an orphan": {
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{
+				NextSerial: 3, CurrentKey: currentStatus, LastCreateAttemptTime: settled,
+				RetiringKeys: []coderv1alpha1.CoderAIGatewayKeyRetiring{{Serial: 2, ID: other.ID.String(), Name: other.Name}},
+			},
+			own: own, holds: current.ID, want: aiGatewayKeyReady,
 		},
 		"steady state":         {status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus}, own: own, holds: current.ID, want: aiGatewayKeyReady},
 		"current key deleted":  {status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus}, own: own[1:], holds: uuid.Nil, want: aiGatewayKeyKillSwitch},
 		"secret emptied":       {status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus}, own: own, holds: uuid.Nil, want: aiGatewayKeyReissue},
 		"secret holds another": {status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus}, own: own, holds: other.ID, want: aiGatewayKeyReissue},
 	} {
-		require.Equal(t, tc.want, nextAIGatewayKeyAction(&tc.status, tc.own, tc.holds), name)
+		got := nextAIGatewayKeyAction(&tc.status, prefix, tc.own, tc.holds, now)
+		require.Equal(t, tc.want, got.action, name)
+		if tc.key != uuid.Nil {
+			require.Equal(t, tc.key, got.key.ID, name)
+		}
+		if tc.settleAt != nil {
+			require.Equal(t, tc.settleAt.Time, got.settleAt, name)
+		} else {
+			require.True(t, got.settleAt.IsZero(), name)
+		}
 	}
+	require.Greater(t, aiGatewayKeySettleWindow, aiGatewayKeyMaxWriteAge+time.Minute,
+		"the settle window must outlast the latest write start plus the API server's 60 s request timeout (plan R18)")
 }
 
 // Plan 4.2 step 4: every LIST failure class, with Coder's details left out.

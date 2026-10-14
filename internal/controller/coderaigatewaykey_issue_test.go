@@ -119,9 +119,19 @@ func TestCoderAIGatewayKeyDuplicateName(t *testing.T) {
 	require.Zero(t, got.Status.ConsecutiveIssueFailures)
 	require.Equal(t, int64(1), got.Status.NextSerial)
 
+	// The key with the used name is an orphan now: the create gate waits
+	// for the settle window, the sweep deletes it, then serial 1 is issued.
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyStep(t, got, false, "DeletingOrphans")
+	require.Equal(t, 2, env.fake.requestCount(routeCreateAIGatewayKey), "the test's create and one from the controller")
+	env.clock.Step(5 * time.Minute)
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyStep(t, got, false, "DeletingOrphans")
+	require.Equal(t, 1, env.fake.requestCount(routeDeleteAIGatewayKey))
 	got, _ = env.reconcile(ctx, t, got)
 	requireAIGatewayKeyReady(t, got)
 	require.Equal(t, prefix+"1", got.Status.CurrentKey.Name)
+	require.Len(t, env.fake.aiGatewayKeys(), 1)
 }
 
 // Plan 4.3 step 5: an answer that does not match the request stalls with
@@ -145,8 +155,13 @@ func TestCoderAIGatewayKeyAnswerMismatch(t *testing.T) {
 	requireAIGatewayKeyStep(t, got, true, "CoderAnswerMismatch")
 	require.Equal(t, 1, env.fake.requestCount(routeCreateAIGatewayKey))
 
+	// A spec change re-arms the issue step. The mismatched key is an orphan,
+	// so the sweep deletes it after the settle window first.
 	got.Spec.Rotation.Trigger = "after-the-fix"
 	require.NoError(t, k8sClient.Update(ctx, got))
+	env.clock.Step(5 * time.Minute)
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyStep(t, got, false, "DeletingOrphans")
 	got, _ = env.reconcile(ctx, t, got)
 	requireAIGatewayKeyReady(t, got)
 	require.Equal(t, int64(2), got.Status.AppliedGeneration, "the issue applied the changed spec")
@@ -186,21 +201,34 @@ func TestCoderAIGatewayKeyIssueFailingCap(t *testing.T) {
 	})
 	got := env.createKey(ctx, t, "coder", testAIGatewaySecret)
 	for i := int32(1); i < 10; i++ {
+		if i > 1 {
+			// The failed attempt left an orphan: after the settle window
+			// the sweep deletes it, and only then the next create runs.
+			env.clock.Step(5 * time.Minute)
+			got, _ = env.reconcile(ctx, t, got)
+			requireAIGatewayKeyStep(t, got, false, "DeletingOrphans")
+		}
 		got, _ = env.reconcile(ctx, t, got)
 		message := requireAIGatewayKeyStep(t, got, false, "IssuingKey")
 		require.Contains(t, message, "Forbidden, HTTP 403")
 		require.NotContains(t, message, errServerText.Error())
 		require.Equal(t, i, got.Status.ConsecutiveIssueFailures)
 	}
+	env.clock.Step(5 * time.Minute)
+	got, _ = env.reconcile(ctx, t, got)
 	got, _ = env.reconcile(ctx, t, got)
 	requireAIGatewayKeyStep(t, got, true, "IssueFailing")
 	got, _ = env.reconcile(ctx, t, got)
 	requireAIGatewayKeyStep(t, got, true, "IssueFailing")
 	require.Equal(t, 10, env.fake.requestCount(routeCreateAIGatewayKey))
+	require.Equal(t, 9, env.fake.requestCount(routeDeleteAIGatewayKey))
 	requireOutputSecretEmpty(ctx, t, env.namespace)
 
 	got.Spec.Rotation.Trigger = "retry"
 	require.NoError(t, k8sClient.Update(ctx, got))
+	env.clock.Step(5 * time.Minute)
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyStep(t, got, false, "DeletingOrphans")
 	got, _ = env.reconcile(ctx, t, got)
 	require.Equal(t, int32(1), got.Status.ConsecutiveIssueFailures, "a spec change re-arms the issue step")
 	require.Equal(t, 11, env.fake.requestCount(routeCreateAIGatewayKey))
@@ -226,6 +254,36 @@ func TestCoderAIGatewayKeyLateCreateAnswer(t *testing.T) {
 	require.Zero(t, writes)
 	require.Len(t, env.fake.aiGatewayKeys(), 1)
 	require.Equal(t, int32(1), got.Status.ConsecutiveIssueFailures)
+	requireOutputSecretEmpty(ctx, t, env.namespace)
+}
+
+// A marker write that takes 2 minutes uses up the time for Secret writes:
+// the write-age limit counts from the marker's timestamp, the same instant
+// that starts the settle window.
+func TestCoderAIGatewayKeySlowMarkerWrite(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+	writes := 0
+	base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+	env.client = interceptor.NewClient(base, interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if _, ok := obj.(*corev1.Secret); ok && !isDryRunUpdate(opts) {
+				writes++
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subResource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if key, ok := obj.(*coderv1alpha1.CoderAIGatewayKey); ok && key.Status.PendingKey != nil {
+				env.clock.Step(2 * time.Minute)
+			}
+			return c.SubResource(subResource).Update(ctx, obj, opts...)
+		},
+	})
+	got, _ := env.reconcile(ctx, t, env.createKey(ctx, t, "coder", testAIGatewaySecret))
+	require.Contains(t, requireAIGatewayKeyStep(t, got, false, "IssuingKey"), "took too long")
+	require.Zero(t, writes)
 	requireOutputSecretEmpty(ctx, t, env.namespace)
 }
 
