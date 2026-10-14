@@ -9,6 +9,8 @@ A `CoderAIProvider` manages one AI provider in Coder (Coder's `/api/v2/ai/provid
 
 - A `CoderControlPlane` in the same namespace with `status.operatorAccessReady: true`. The operator user must be a site owner. Coder answers `403` to anyone else on the provider routes.
 - An API key for the provider, for example an OpenAI key.
+- Coder v2.37.2 or later. The Kind end-to-end test runs Coder v2.37.2, and the operator is built against the v2.37.3 SDK. Coder has the provider API since v2.34.0, but versions before v2.37.2 are not tested.
+- An operator release after v0.1.3. The `dist/install.yaml` on `main` installs the `CoderAIProvider` CRD, but its `ghcr.io/coder/coder-k8s:latest` image is v0.1.3 until the next release, and v0.1.3 has no `CoderAIProvider` controller. Install from a release tag that includes `CoderAIProvider`, and pin the image to the same version (see [Deploy a Coder Control Plane](../tutorials/getting-started.md#1-install-the-operator)).
 
 ## 1. Prepare the key Secret
 
