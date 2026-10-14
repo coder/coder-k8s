@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
@@ -91,27 +92,38 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if pool.Generation != before.ObservedGeneration {
 		pool.Status.ConsecutiveFailures = 0 // A spec change lifts the failure limit.
 	}
+	// Taken before any status write of this reconcile.
+	resolvedChanged := !poolResolvedEqual(before.Resolved, pool.Status.Resolved)
 
-	members := &coderv1alpha1.CoderWorkspacePoolMemberList{}
-	if err := r.APIReader.List(ctx, members, client.InNamespace(pool.Namespace),
-		client.MatchingLabels{coderv1alpha1.CoderWorkspacePoolSelectorLabel: string(pool.UID)}); err != nil {
-		return ctrl.Result{}, fmt.Errorf("list members of pool %s: %w", req, err)
+	// One uncached list of the namespace's members: the pool's own members
+	// by label or by controller (a label can drift), and the owner's members
+	// of every pool for the cap.
+	all := &coderv1alpha1.CoderWorkspacePoolMemberList{}
+	if err := r.APIReader.List(ctx, all, client.InNamespace(pool.Namespace)); err != nil {
+		return ctrl.Result{}, fmt.Errorf("list pool members in namespace %s: %w", pool.Namespace, err)
 	}
-	if err := r.deleteFailedMember(ctx, pool, before, members.Items); err != nil {
+	var members []coderv1alpha1.CoderWorkspacePoolMember
+	for _, m := range all.Items {
+		owner := metav1.GetControllerOf(&m)
+		if m.Labels[coderv1alpha1.CoderWorkspacePoolSelectorLabel] == string(pool.UID) || (owner != nil && owner.UID == pool.UID) {
+			members = append(members, m)
+		}
+	}
+	if err := r.deleteFailedMember(ctx, pool, before, members); err != nil {
 		return ctrl.Result{}, err
 	}
-	counts := countPoolMembers(pool, members.Items)
+	counts := countPoolMembers(pool, members)
 
 	var requeue time.Duration
 	switch {
 	case step != nil:
-	case !poolResolvedEqual(before.Resolved, pool.Status.Resolved):
+	case resolvedChanged:
 		// Members check their inputs against the pool's status.resolved in
 		// the shared cache. So the pool creates members only after a read
 		// of its own object shows the new resolved inputs.
 		requeue = time.Second
 	default:
-		step, requeue, err = r.createMembers(ctx, pool, &counts)
+		step, requeue, err = r.createMembers(ctx, pool, all.Items, &counts)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -169,7 +181,10 @@ func (r *CoderWorkspacePoolReconciler) deleteFailedMember(
 	if failed == nil {
 		return nil
 	}
-	if st.LastFailure == nil || st.LastFailure.Member != failed.Name {
+	// A failure of a member with old inputs belongs to a run that a new
+	// version or a spec change already ended: delete it without counting.
+	current := poolMemberInputMismatch(failed, pool) == ""
+	if current && (st.LastFailure == nil || st.LastFailure.Member != failed.Name) {
 		// Store the count before the delete, so a failed delete or a crash
 		// never counts the member twice.
 		st.ConsecutiveFailures++
@@ -193,10 +208,12 @@ func (r *CoderWorkspacePoolReconciler) deleteFailedMember(
 	return nil
 }
 
-// poolMemberFailedAt is when a failed member failed: the last change of its
-// Ready condition, else its creation.
+// poolMemberFailedAt is when a failed member failed. The member sets its
+// WorkspaceDeleted condition first when it fails, so its transition time is
+// the failure time. Ready is already False while a member builds, so its
+// time is the start of the build. Without the condition: the creation.
 func poolMemberFailedAt(m *coderv1alpha1.CoderWorkspacePoolMember) time.Time {
-	if c := meta.FindStatusCondition(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionReady); c != nil {
+	if c := meta.FindStatusCondition(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionWorkspaceDeleted); c != nil {
 		return c.LastTransitionTime.Time
 	}
 	return m.CreationTimestamp.Time
@@ -208,7 +225,7 @@ func poolMemberFailedAt(m *coderv1alpha1.CoderWorkspacePoolMember) time.Time {
 // plane fewer than maxWorkspaces, and the failure backoff passed. It returns
 // the wait that stops it, if any, and when to read again.
 func (r *CoderWorkspacePoolReconciler) createMembers(
-	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, counts *poolMemberCounts,
+	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, all []coderv1alpha1.CoderWorkspacePoolMember, counts *poolMemberCounts,
 ) (*coderStep, time.Duration, error) {
 	st, now := &pool.Status, r.Clock.Now()
 	need := *pool.Spec.Replicas - counts.current // Claims add their demand in PR 11.
@@ -232,23 +249,20 @@ func (r *CoderWorkspacePoolReconciler) createMembers(
 	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Spec.ControlPlaneRef.Name}, controlPlane); err != nil {
 		return nil, 0, fmt.Errorf("get CoderControlPlane %s/%s: %w", pool.Namespace, pool.Spec.ControlPlaneRef.Name, err)
 	}
-	owner := workspacePoolOwner(controlPlane, st.Resolved.OwnerID)
-	if owner == nil {
-		return coderWait("OwnerNotAllowed", "CoderControlPlane %s does not list Coder user %s in spec.workspacePools.owners.",
-			controlPlane.Name, st.Resolved.OwnerID), poolResolvePoll, nil
+	// The consent check again, on the uncached control plane: a consent that
+	// an admin just withdrew holds even while the cache has the old one.
+	if step := workspacePoolConsent(controlPlane, st.Resolved.OwnerID, pool.Spec.Template); step != nil {
+		return step, poolResolvePoll, nil
 	}
+	owner := workspacePoolOwner(controlPlane, st.Resolved.OwnerID)
 	if owner.MaxWorkspaces == nil {
 		return nil, 0, fmt.Errorf("assertion failed: CoderControlPlane %s has no defaulted maxWorkspaces for Coder user %s", controlPlane.Name, st.Resolved.OwnerID)
 	}
 	maxWorkspaces := *owner.MaxWorkspaces
-	all := &coderv1alpha1.CoderWorkspacePoolMemberList{}
-	if err := r.APIReader.List(ctx, all, client.InNamespace(pool.Namespace)); err != nil {
-		return nil, 0, fmt.Errorf("list pool members in namespace %s: %w", pool.Namespace, err)
-	}
 	ownerID := uuid.MustParse(st.Resolved.OwnerID) // resolve parsed it.
 	var live int32
-	for i := range all.Items {
-		m := &all.Items[i]
+	for i := range all {
+		m := &all[i]
 		id, err := uuid.Parse(m.Spec.OwnerID)
 		if err == nil && id == ownerID && m.Spec.ControlPlaneRef.Name == pool.Spec.ControlPlaneRef.Name &&
 			!meta.IsStatusConditionTrue(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionWorkspaceDeleted) {
@@ -271,6 +285,14 @@ func (r *CoderWorkspacePoolReconciler) createMembers(
 	return nil, 0, nil
 }
 
+// poolMemberGenerateName is the member name prefix: the pool name, cut so
+// that the API server's generated name stays a DNS subdomain. It keeps at
+// most 57 characters (the server keeps 58 of the prefix and adds 5) and
+// never ends in a dot or a dash before its own dash.
+func poolMemberGenerateName(poolName string) string {
+	return strings.TrimRight(poolName[:min(len(poolName), 57)], ".-") + "-"
+}
+
 // createMember creates one member that pins the pool's resolved inputs.
 func (r *CoderWorkspacePoolReconciler) createMember(ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool) error {
 	resolved := pool.Status.Resolved
@@ -280,7 +302,7 @@ func (r *CoderWorkspacePoolReconciler) createMember(ctx context.Context, pool *c
 	}
 	member := &coderv1alpha1.CoderWorkspacePoolMember{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: pool.Name + "-", Namespace: pool.Namespace,
+			GenerateName: poolMemberGenerateName(pool.Name), Namespace: pool.Namespace,
 			Labels: map[string]string{coderv1alpha1.CoderWorkspacePoolSelectorLabel: string(pool.UID)},
 		},
 		Spec: coderv1alpha1.CoderWorkspacePoolMemberSpec{

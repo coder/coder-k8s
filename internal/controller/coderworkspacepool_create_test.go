@@ -3,9 +3,11 @@ package controller_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/coder/coder/v2/codersdk"
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -128,14 +130,18 @@ func TestPoolCreationCaps(t *testing.T) {
 }
 
 // failedStatus fails a member now, as the member reconciler does: phase
-// Failed and a Ready condition that changed at the test clock's time.
+// Failed, Ready=False since the build started 10 minutes ago, and a
+// WorkspaceDeleted condition set at the test clock's time.
 func (e *poolMemberEnv) failedStatus(reason string) func(*coderv1alpha1.CoderWorkspacePoolMemberStatus) {
 	return func(s *coderv1alpha1.CoderWorkspacePoolMemberStatus) {
 		s.Phase, s.Reason, s.Message = coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed, reason, "The start build failed."
-		meta.SetStatusCondition(&s.Conditions, metav1.Condition{
-			Type: coderv1alpha1.CoderWorkspacePoolMemberConditionReady, Status: metav1.ConditionFalse,
-			Reason: reason, Message: reason, LastTransitionTime: metav1.NewTime(e.clock.Now()),
-		})
+		for _, c := range []metav1.Condition{
+			{Type: coderv1alpha1.CoderWorkspacePoolMemberConditionReady, Status: metav1.ConditionFalse, LastTransitionTime: metav1.NewTime(e.clock.Now().Add(-10 * time.Minute))},
+			{Type: coderv1alpha1.CoderWorkspacePoolMemberConditionWorkspaceDeleted, Status: metav1.ConditionFalse, LastTransitionTime: metav1.NewTime(e.clock.Now())},
+		} {
+			c.Reason, c.Message = reason, reason
+			meta.SetStatusCondition(&s.Conditions, c)
+		}
 	}
 }
 
@@ -326,10 +332,10 @@ func TestPoolFailureRunOrder(t *testing.T) {
 }
 
 // staleControlPlaneClient answers control plane reads from a cache that
-// still holds a higher maxWorkspaces.
+// still holds the owner entry before an admin changed it.
 type staleControlPlaneClient struct {
 	client.Client
-	maxWorkspaces int32
+	stale func(*coderv1alpha1.WorkspacePoolOwner)
 }
 
 func (c staleControlPlaneClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -338,14 +344,16 @@ func (c staleControlPlaneClient) Get(ctx context.Context, key client.ObjectKey, 
 	}
 	if cp, ok := obj.(*coderv1alpha1.CoderControlPlane); ok && cp.Spec.WorkspacePools != nil {
 		for i := range cp.Spec.WorkspacePools.Owners {
-			cp.Spec.WorkspacePools.Owners[i].MaxWorkspaces = new(c.maxWorkspaces)
+			c.stale(&cp.Spec.WorkspacePools.Owners[i])
 		}
 	}
 	return nil
 }
 
-// TestPoolOwnerCapUncached: the cap comes from an uncached read, so a cap
-// that an admin just lowered holds even while the cache has the old one.
+// TestPoolOwnerCapUncached: the cap and the consent come from an uncached
+// read right before the creates, so a cap that an admin just lowered, or a
+// template that the admin just removed, holds even while the cache has the
+// old values.
 func TestPoolOwnerCapUncached(t *testing.T) {
 	t.Parallel()
 	e := newPoolMemberEnv(t)
@@ -354,13 +362,25 @@ func TestPoolOwnerCapUncached(t *testing.T) {
 	require.NoError(t, k8sClient.Get(e.ctx, types.NamespacedName{Namespace: e.ns, Name: "coder"}, cp))
 	cp.Spec.WorkspacePools.Owners[0].MaxWorkspaces = new(int32(1))
 	require.NoError(t, k8sClient.Update(e.ctx, cp))
-	r := &controller.CoderWorkspacePoolReconciler{Client: staleControlPlaneClient{k8sClient, 10}, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
-	for range 2 {
-		_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}})
-		require.NoError(t, err)
+	reconcileStale := func(t *testing.T, stale func(*coderv1alpha1.WorkspacePoolOwner)) {
+		t.Helper()
+		r := &controller.CoderWorkspacePoolReconciler{Client: staleControlPlaneClient{k8sClient, stale}, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+		for range 2 {
+			_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}})
+			require.NoError(t, err)
+		}
 	}
+	reconcileStale(t, func(o *coderv1alpha1.WorkspacePoolOwner) { o.MaxWorkspaces = new(int32(10)) })
 	require.Len(t, e.poolMembers(t, e.pool.Name), 1)
 	requirePool(t, e.reconcilePool(t, 0), "OwnerWorkspaceLimit", false, false)
+
+	// The same for consent: the admin removed the template, the cache still
+	// allows it.
+	cp.Spec.WorkspacePools.Owners[0].MaxWorkspaces, cp.Spec.WorkspacePools.Owners[0].Templates = new(int32(10)), []string{"default.other"}
+	require.NoError(t, k8sClient.Update(e.ctx, cp))
+	reconcileStale(t, func(o *coderv1alpha1.WorkspacePoolOwner) { o.Templates = []string{"default.docker"} })
+	require.Len(t, e.poolMembers(t, e.pool.Name), 1, "no member after consent is withdrawn")
+	require.Equal(t, "TemplateNotAllowed", e.reconcilePool(t, 0).Status.Reason)
 }
 
 // TestPoolPublishesResolvedBeforeCreating: members check their inputs
@@ -375,10 +395,69 @@ func TestPoolPublishesResolvedBeforeCreating(t *testing.T) {
 	require.NotNil(t, pool.Status.Resolved)
 	require.Empty(t, e.poolMembers(t, e.pool.Name), "no member before status.resolved is stored")
 	require.Equal(t, time.Second, e.lastStep.RequeueAfter)
+	// The same when a failure write comes first in that reconcile.
+	e.pool = pool // createMember pins the stored resolved inputs.
+	failedKey := e.createMember(t, nil)
+	e.setMemberStatus(t, failedKey, e.failedStatus("BuildFailed"))
+	pool = e.reconcilePool(t, 0)
+	pool.Status.Resolved = nil
+	require.NoError(t, k8sClient.Status().Update(e.ctx, pool))
+	pool = e.reconcilePool(t, 1)
+	require.Equal(t, int32(1), pool.Status.ConsecutiveFailures)
+	require.Empty(t, e.poolMembers(t, e.pool.Name), "the failure write does not count as publishing")
+	pool.Status.ConsecutiveFailures, pool.Status.LastFailure = 0, nil
+	require.NoError(t, k8sClient.Status().Update(e.ctx, pool))
 	e.reconcilePool(t, 1)
 	members := e.poolMembers(t, e.pool.Name)
 	require.Len(t, members, 1)
 	// The member accepts its inputs: it passes the check and creates.
 	member := e.reconcileMember(t, memberKey(members[0]), 3)
 	require.Equal(t, coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, member.Status.Phase, member.Status.Message)
+}
+
+// TestPoolMemberDiscovery: a member that the pool controls counts even
+// after its label drifts (as outdated), a failure of a member with old inputs is deleted
+// without counting, and a pool with a 253-character name still creates
+// members.
+func TestPoolMemberDiscovery(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.reconcilePool(t, 1)
+	members := e.poolMembers(t, e.pool.Name)
+	require.Len(t, members, 1)
+	member := e.reconcileMember(t, memberKey(members[0]), 0)
+	member.Labels = nil
+	require.NoError(t, k8sClient.Update(e.ctx, member))
+	// The member no longer matches the pool's inputs, so the pool counts it
+	// as outdated and builds one current member, but never more.
+	pool := e.reconcilePool(t, 3)
+	require.Equal(t, int32(2), pool.Status.Replicas, "the controlled member still counts")
+	require.Equal(t, int32(1), pool.Status.UpdatedReplicas)
+	list := &coderv1alpha1.CoderWorkspacePoolMemberList{}
+	require.NoError(t, k8sClient.List(e.ctx, list, client.InNamespace(e.ns)))
+	require.Len(t, list.Items, 2, "one replacement for a member whose label drifted")
+
+	// A failed member with old inputs is deleted, not counted.
+	outdated := e.createMember(t, func(m *coderv1alpha1.CoderWorkspacePoolMember) {
+		m.Spec.TemplateVersionID = e.fake.addVersion(e.tplID, "v0", codersdk.ProvisionerJobSucceeded).String()
+	})
+	e.setMemberStatus(t, outdated, e.failedStatus("BuildFailed"))
+	pool = e.reconcilePool(t, 1)
+	require.Zero(t, pool.Status.ConsecutiveFailures)
+	require.Nil(t, e.reconcileMember(t, outdated, 0))
+
+	// The longest pool name: the member prefix stays within the limit.
+	long := strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 61)
+	require.Len(t, long, 253)
+	other := &coderv1alpha1.CoderWorkspacePool{ObjectMeta: metav1.ObjectMeta{Name: long, Namespace: e.ns}, Spec: *e.pool.Spec.DeepCopy()}
+	require.NoError(t, k8sClient.Create(e.ctx, other))
+	r := &controller.CoderWorkspacePoolReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	for range 2 {
+		_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.ns, Name: long}})
+		require.NoError(t, err)
+	}
+	created := e.poolMembers(t, long)
+	require.Len(t, created, 1)
+	require.Equal(t, long, created[0].Spec.PoolName)
+	require.LessOrEqual(t, len(created[0].Name), 63)
 }
