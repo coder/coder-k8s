@@ -88,8 +88,6 @@ jobs:
               - 'internal/controller/coderaiprovider*'
               - 'internal/controller/coderaigatewaykey*'
               - 'internal/controller/codermcpserver*'
-              # The credential Secret contract that CoderAIProvider and CoderMCPServer read through.
-              - 'internal/credentialsecret/**'
               - 'internal/controller/owned_secret.go'
               - 'internal/controller/reserved_secret_names.go'
               - 'internal/controller/credential_checks.go'
