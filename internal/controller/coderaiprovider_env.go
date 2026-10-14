@@ -37,17 +37,28 @@ var (
 	// CODER_..._PROVIDER_<N>_* configures an indexed provider, whose name
 	// any of its variables can set. These have no flags.
 	aiProviderIndexedEnvPrefixes = []string{"CODER_AI_GATEWAY_PROVIDER_", "CODER_AIBRIDGE_PROVIDER_"}
+	// A config file can set the YAML keys bedrock_base_url, bedrock_region,
+	// bedrock_model and bedrock_small_fast_model, and each one seeds
+	// anthropic (codersdk/deployment.go:1968-2026, :4493-4568 and
+	// coderd/ai_providers_migrate.go:321-357). Keys and indexed providers
+	// have no YAML keys (cli/server.go:994), so a config file seeds no other
+	// name. The file is not read: the check fails closed (#154).
+	aiProviderConfigFileEnv  = "CODER_CONFIG_PATH"
+	aiProviderConfigFileFlag = "config"
 )
 
 // aiProviderSeededNames maps each provider name that the control plane can
 // seed in coderd to the setting that seeds it. blocker names a setting that
-// can seed any name. envFrom sources and config files are not inspected.
+// can seed any name. envFrom sources are not inspected.
 func aiProviderSeededNames(controlPlane *coderv1alpha1.CoderControlPlane) (names map[string]string, blocker string) {
 	names = map[string]string{}
 	for _, e := range controlPlane.Spec.ExtraEnv {
 		name := strings.ToUpper(e.Name)
 		if seeded, ok := aiProviderLegacyEnv[name]; ok {
 			names[seeded] = "spec.extraEnv sets " + e.Name
+		}
+		if name == aiProviderConfigFileEnv {
+			names["anthropic"] = "spec.extraEnv sets " + e.Name + ", and a config file can hold Bedrock settings"
 		}
 		for _, prefix := range aiProviderBedrockEnvPrefixes {
 			if strings.HasPrefix(name, prefix) {
@@ -74,6 +85,9 @@ func aiProviderSeededNames(controlPlane *coderv1alpha1.CoderControlPlane) (names
 		if seeded, ok := aiProviderLegacyFlags[flag]; ok {
 			names[seeded] = "spec.extraArgs passes --" + flag
 		}
+		if flag == aiProviderConfigFileFlag || aiProviderShorthandConfig(arg) {
+			names["anthropic"] = "spec.extraArgs passes --" + aiProviderConfigFileFlag + ", and a config file can hold Bedrock settings"
+		}
 		for _, prefix := range aiProviderBedrockFlagPrefixes {
 			if strings.HasPrefix(flag, prefix) {
 				names["anthropic"] = "spec.extraArgs passes --" + flag
@@ -81,6 +95,22 @@ func aiProviderSeededNames(controlPlane *coderv1alpha1.CoderControlPlane) (names
 		}
 	}
 	return names, blocker
+}
+
+// aiProviderShorthandConfig reports whether arg passes -c, the shorthand of
+// --config, in any pflag form: "-c", "-c=FILE", "-cFILE", or after the boolean
+// shorthand -v, as in "-vc". Other coder server shorthands (-a, -l) take a
+// value, so the rest of the argument is that value.
+func aiProviderShorthandConfig(arg string) bool {
+	if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") {
+		return false
+	}
+	for _, c := range strings.ToLower(arg[1:]) {
+		if c != 'v' {
+			return c == 'c'
+		}
+	}
+	return false
 }
 
 // aiProviderReservedName returns a stall when the control plane can seed a

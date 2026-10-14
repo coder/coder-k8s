@@ -3,14 +3,18 @@ package controller_test
 import (
 	"context"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/credentialsecret"
@@ -287,4 +291,82 @@ func TestCoderAIProviderKeyNotUTF8(t *testing.T) {
 		require.False(t, stored.enabled)
 		require.Equal(t, testAIProviderKey, stored.keys[0].plaintext)
 	})
+}
+
+// A key with a NUL, CR, LF or other control byte cannot reach the provider
+// in an HTTP header, so it is a malformed credential with no Coder request.
+func TestCoderAIProviderKeyNotHeaderValue(t *testing.T) {
+	t.Parallel()
+	for name, key := range map[string]string{"NUL": testAIProviderKey + "\x00x", "CR": testAIProviderKey + "\rx", "DEL": testAIProviderKey + "\x7fx"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			env := newAIProviderEnv(ctx, t, true)
+			createSecret(ctx, t, env.keySecret(consentedObjectMeta("", "", testAIProviderOrigin), key))
+			got, _ := env.reconcile(ctx, t, env.createProvider(ctx, t, nil))
+			require.Contains(t, requireAIProviderStep(t, got, true, credentialsecret.ReasonMalformed), "is not a valid HTTP header value")
+			require.Zero(t, env.fake.totalRequests())
+		})
+	}
+}
+
+// #154 A7: a transient error of the key Secret read, such as an API server
+// timeout, is not a credential failure. The reconcile returns the error, so
+// the object retries with backoff. The controller does not disable the
+// provider, and a failed first read sends no request to Coder. A failed
+// second read in the disable path sends no write.
+func TestCoderAIProviderTransientSecretError(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name            string
+		failGet         int32
+		withdrawConsent bool
+	}{
+		{name: "first read", failGet: 1},
+		{name: "second read in the disable path", failGet: 2, withdrawConsent: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			env, secret, provider := newReadyAIProvider(ctx, t)
+			if tc.withdrawConsent {
+				editSecret(ctx, t, secret, func(s *corev1.Secret) { delete(s.Labels, credentialsecret.LabelKey) })
+			}
+			base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+			require.NoError(t, err)
+			var gets atomic.Int32
+			env.r.Client = interceptor.NewClient(base, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*corev1.Secret); ok && key == client.ObjectKeyFromObject(secret) && gets.Add(1) == tc.failGet {
+						return apierrors.NewTimeoutError("the server was unable to return a response in the time allotted", 1)
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			})
+
+			requests, writes := env.fake.totalRequests(), env.writes()
+			_, err = env.r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(provider)})
+			require.True(t, apierrors.IsTimeout(err), "the reconcile returns the error, so the object retries: %v", err)
+			require.Equal(t, tc.failGet, gets.Load())
+			require.Equal(t, writes, env.writes(), "no disable")
+			if !tc.withdrawConsent {
+				require.Equal(t, requests, env.fake.totalRequests(), "no Coder request")
+			}
+			got := &coderv1alpha1.CoderAIProvider{}
+			require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(provider), got))
+			requireAIProviderReady(t, got)
+			stored, _ := env.fake.aiProvider("openai")
+			require.True(t, stored.enabled)
+
+			// The retry reads the Secret again.
+			got, _ = env.reconcile(ctx, t, got)
+			if tc.withdrawConsent {
+				require.Contains(t, requireAIProviderStep(t, got, true, credentialsecret.ReasonNotOptedIn), "The controller disabled provider openai in Coder")
+				require.Equal(t, writes+1, env.writes())
+				return
+			}
+			requireAIProviderReady(t, got)
+			require.Equal(t, writes, env.writes())
+		})
+	}
 }

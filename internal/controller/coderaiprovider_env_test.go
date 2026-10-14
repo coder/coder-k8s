@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 
@@ -65,12 +66,12 @@ func TestCoderAIProviderNameReservedByEnv(t *testing.T) {
 // marker, and the check then refuses a new create request.
 func TestCoderAIProviderPendingCreateBeforeEnvCheck(t *testing.T) {
 	t.Parallel()
-	for _, committed := range []bool{true, false} {
-		t.Run(map[bool]string{true: "committed", false: "not committed"}[committed], func(t *testing.T) {
+	for _, tc := range []string{"committed", "not committed", "read fails"} {
+		t.Run(tc, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
 			env, secret, provider := newAIProviderCreateEnv(ctx, t)
-			if committed {
+			if tc == "committed" {
 				_, err := env.fake.client(t, 2*time.Second).CreateAIProvider(ctx, codersdk.CreateAIProviderRequest{
 					Type: codersdk.AIProviderTypeOpenAI, Name: provider.Name, DisplayName: "coder-k8s:" + string(provider.UID),
 					BaseURL: provider.Spec.BaseURL, APIKeys: []string{testAIProviderKey},
@@ -86,9 +87,20 @@ func TestCoderAIProviderPendingCreateBeforeEnvCheck(t *testing.T) {
 			require.NoError(t, k8sClient.Update(ctx, controlPlane))
 			posts := env.fake.requestCount(routeCreateAIProvider)
 
+			if tc == "read fails" {
+				// An uncertain read keeps the marker: the create can still
+				// be committed.
+				env.fake.failNext(routeAIProvider, fakeFault{Status: http.StatusBadGateway})
+				got, _ := env.reconcile(ctx, t, provider)
+				requireAIProviderStep(t, got, false, "CoderUnavailable")
+				require.NotNil(t, got.Status.CreateAttemptTime)
+				require.Equal(t, posts, env.fake.requestCount(routeCreateAIProvider), "no create is sent")
+				provider = got
+			}
+
 			got, _ := env.reconcile(ctx, t, provider)
 			require.Equal(t, posts, env.fake.requestCount(routeCreateAIProvider), "no create is sent")
-			if committed {
+			if tc == "committed" {
 				stored, _ := env.fake.aiProvider("openai")
 				require.Equal(t, stored.id.String(), got.Status.ProviderID, "the committed create is recorded")
 				return

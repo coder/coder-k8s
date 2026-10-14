@@ -76,6 +76,14 @@ func TestAIProviderSeededNames(t *testing.T) {
 		},
 		{name: "flag values", args: []string{"--oauth2-github-client-id", "ai-gateway-openai-key"}, want: map[string]string{}},
 		{name: "argument reference", args: []string{"--log-human", "$(SEED_FLAG)"}, want: map[string]string{}, blocker: "spec.extraArgs[1] holds a $(VAR) reference"},
+		{
+			name: "config file path", env: []corev1.EnvVar{{Name: "coder_config_path", ValueFrom: fromSecret}},
+			want: map[string]string{"anthropic": "spec.extraEnv sets coder_config_path, and a config file can hold Bedrock settings"},
+		},
+		{
+			name: "config file flag", args: []string{"-c/etc/coder/secret-name.yaml"},
+			want: map[string]string{"anthropic": "spec.extraArgs passes --config, and a config file can hold Bedrock settings"},
+		},
 		{name: "other settings", env: []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_PROVIDERS", Value: "openai"}}, args: []string{"--ai-gateway-openai-base-url=https://llm.example.com"}, want: map[string]string{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -84,6 +92,21 @@ func TestAIProviderSeededNames(t *testing.T) {
 			require.Equal(t, tc.want, names)
 			require.Equal(t, tc.blocker, blocker)
 		})
+	}
+}
+
+// #154 A7: every pflag form of --config and its shorthand -c passes a config
+// file, which can seed anthropic. Other coder server shorthands take a value.
+func TestAIProviderConfigFileFlagForms(t *testing.T) {
+	t.Parallel()
+	for arg, want := range map[string]bool{
+		"--config": true, "--config=/etc/coder.yaml": true, "--CONFIG": true, "---config": true,
+		"-c": true, "-c=/etc/coder.yaml": true, "-c/etc/coder.yaml": true, "-C": true, "-vc": true, "-vvc=/etc/coder.yaml": true,
+		"-v": false, "-acoder.example.com": false, "-l0.0.0.0:3000": false, "--config-dir": false, "--cache-dir": false, "c": false, "config": false, "-": false,
+	} {
+		names, _ := aiProviderSeededNames(&coderv1alpha1.CoderControlPlane{Spec: coderv1alpha1.CoderControlPlaneSpec{ExtraArgs: []string{arg}}})
+		_, got := names["anthropic"]
+		require.Equal(t, want, got, "%q", arg)
 	}
 }
 
