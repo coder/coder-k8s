@@ -225,6 +225,66 @@ These limits come from Coder, and the operator cannot change them:
 - Coder has no address guard for MCP traffic. A server URL can point at a cluster-internal or private address. `auth.type: none` needs no Secret, so only the control plane opt-in and RBAC limit it.
 - Coder's MCP client sets the API key, the header values and users' bearer tokens on every request, also after a redirect to another origin. A Secret's destination list therefore means "this origin and every place that it sends Coder".
 
+## GitOps health checks
+
+Argo CD and Flux need health rules to wait for a `CoderMCPServer`. The rules live in `config/gitops/`. This page copies them, and a unit test keeps the copies equal to the files. Both rules wait until `status.observedGeneration` equals `metadata.generation`. Then they read the conditions:
+
+| Conditions | Argo CD | Flux |
+| --- | --- | --- |
+| no status, or a stale `observedGeneration` | `Progressing` | `InProgress` (`Unknown` before the first status) |
+| `Reconciling=True` | `Progressing` | `InProgress` |
+| `Ready=True` | `Healthy` | `Current` |
+| `Stalled=True` | `Degraded` | `Failed` |
+
+The Argo CD message is `<reason>: <message>` of the `Ready` condition. While the object is being deleted, Argo CD shows `Deleting the Coder MCP server config`.
+
+Add the script as the `argocd-cm` key `resource.customizations.health.coder.com_CoderMCPServer` (`config/gitops/argocd-health-codermcpserver.lua`):
+
+```lua
+-- Argo CD health check for CoderMCPServer (coder.com/v1alpha1).
+-- Install it as the argocd-cm key
+-- resource.customizations.health.coder.com_CoderMCPServer.
+-- docs/how-to/manage-mcp-servers.md copies this file. A test keeps the copy equal.
+local hs = { status = "Progressing", message = "Waiting for the controller" }
+if obj.metadata.deletionTimestamp ~= nil then
+  -- Argo CD shows deletionMessage, not message, for a resource being deleted.
+  hs.deletionMessage = "Deleting the Coder MCP server config"
+  hs.message = hs.deletionMessage
+  return hs
+end
+local st = obj.status
+if st == nil or st.observedGeneration == nil or st.observedGeneration ~= obj.metadata.generation then
+  return hs
+end
+for _, c in ipairs(st.conditions or {}) do
+  if c.type == "Ready" and c.reason ~= nil and c.message ~= nil then
+    hs.message = c.reason .. ": " .. c.message
+  end
+end
+for _, c in ipairs(st.conditions or {}) do
+  if c.type == "Ready" and c.status == "True" then
+    hs.status = "Healthy"
+  elseif c.type == "Stalled" and c.status == "True" then
+    hs.status = "Degraded"
+  end
+end
+return hs
+```
+
+Add this entry (`config/gitops/flux-healthcheck-codermcpserver.yaml`) to `spec.healthCheckExprs` of a Flux v2.5+ Kustomization with `spec.wait: true`:
+
+```yaml
+# Flux health check expressions for CoderMCPServer (coder.com/v1alpha1).
+# Add this entry to spec.healthCheckExprs of a Flux v2.5+ Kustomization
+# with spec.wait: true.
+# docs/how-to/manage-mcp-servers.md copies this file. A test keeps the copy equal.
+- apiVersion: coder.com/v1alpha1
+  kind: CoderMCPServer
+  inProgress: "!has(status.observedGeneration) || status.observedGeneration != metadata.generation || !has(status.conditions) || status.conditions.exists(c, c.type == 'Reconciling' && c.status == 'True')"
+  failed: "status.conditions.exists(c, c.type == 'Stalled' && c.status == 'True')"
+  current: "status.conditions.exists(c, c.type == 'Ready' && c.status == 'True')"
+```
+
 ## Grant access
 
 The operator acts as a Coder site owner. So each permission in the control plane's namespace maps to Coder power:
