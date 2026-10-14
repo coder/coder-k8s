@@ -283,4 +283,4 @@ The emergency path needs no Kubernetes access: a Coder admin disables the server
 kubectl apply -f config/admission/
 ```
 
-The policy needs Kubernetes v1.30 or later. If the operator runs as another ServiceAccount or in another namespace, change the user name in the policy's expression first, or the operator cannot write status. To fix a status by hand, delete the binding `coder-k8s-status-operator-only` first, then apply it again.
+`ValidatingAdmissionPolicy` is GA in Kubernetes v1.30, so the policy needs v1.30 or later. If the operator runs as another ServiceAccount or in another namespace, change the user name in the policy's expression first, or the operator cannot write status. To fix a status by hand, delete the binding `coder-k8s-status-operator-only` first, then apply it again.
