@@ -18,6 +18,7 @@ import (
 	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 )
@@ -26,8 +27,9 @@ import (
 // an input, and while it follows the template's active version.
 const poolResolvePoll = 60 * time.Second
 
-// CoderWorkspacePoolReconciler resolves the inputs of one CoderWorkspacePool
-// and reports its members (#153 plan 6.3). Nothing registers it yet.
+// CoderWorkspacePoolReconciler resolves the inputs of one CoderWorkspacePool,
+// creates its members, and reports them (#153 plan 6.3). Nothing registers
+// it yet.
 type CoderWorkspacePoolReconciler struct {
 	client.Client
 	// APIReader reads members without the cache, so a stale cache never
@@ -40,6 +42,7 @@ type CoderWorkspacePoolReconciler struct {
 // poolMemberCounts sorts the members of one pool.
 type poolMemberCounts struct {
 	unclaimed, ready, current, readyCurrent, outdated, bound, used int32
+	building                                                       int32 // Unclaimed members that are not ready yet.
 }
 
 // Reconcile resolves the pool's inputs, counts its members, and writes the
@@ -73,19 +76,45 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		resolved.ResolvedTime = &metav1.Time{Time: r.Clock.Now()}
 		pool.Status.Resolved = resolved
 	}
+	resolvedChanged := !poolResolvedEqual(before.Resolved, pool.Status.Resolved)
 
-	members := &coderv1alpha1.CoderWorkspacePoolMemberList{}
-	if err := r.APIReader.List(ctx, members, client.InNamespace(pool.Namespace),
-		client.MatchingLabels{coderv1alpha1.CoderWorkspacePoolSelectorLabel: string(pool.UID)}); err != nil {
-		return ctrl.Result{}, fmt.Errorf("list members of pool %s: %w", req, err)
+	// One uncached list of the namespace's members: the pool's own members
+	// by label or by controller (a label can drift), and the owner's members
+	// of every pool for the cap.
+	all := &coderv1alpha1.CoderWorkspacePoolMemberList{}
+	if err := r.APIReader.List(ctx, all, client.InNamespace(pool.Namespace)); err != nil {
+		return ctrl.Result{}, fmt.Errorf("list pool members in namespace %s: %w", pool.Namespace, err)
 	}
-	counts := countPoolMembers(pool, members.Items)
+	var members []coderv1alpha1.CoderWorkspacePoolMember
+	for _, m := range all.Items {
+		owner := metav1.GetControllerOf(&m)
+		if m.Labels[coderv1alpha1.CoderWorkspacePoolSelectorLabel] == string(pool.UID) || (owner != nil && owner.UID == pool.UID) {
+			members = append(members, m)
+		}
+	}
+	counts := countPoolMembers(pool, members)
 
+	var requeue time.Duration
+	switch {
+	case step != nil:
+	case resolvedChanged:
+		// Members check their inputs against the pool's status.resolved in
+		// the shared cache. So the pool creates members only after a read
+		// of its own object shows the new resolved inputs.
+		requeue = time.Second
+	default:
+		step, requeue, err = r.createMembers(ctx, pool, all.Items, &counts)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	r.applyPoolStatus(pool, counts, step)
 	if err := r.writePoolStatus(ctx, pool, before); err != nil {
 		return ctrl.Result{}, err
 	}
 	switch {
+	case requeue > 0:
+		return ctrl.Result{RequeueAfter: requeue}, nil
 	case step != nil, pool.Spec.Version.Active != nil && *pool.Spec.Version.Active:
 		// A stall polls too: someone can fix the input in Coder, for example
 		// unarchive the version, which no Kubernetes event reports.
@@ -94,6 +123,93 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{RequeueAfter: poolMemberPendingPoll}, nil
 	}
 	return ctrl.Result{}, nil
+}
+
+// createMembers creates current members while all caps hold (plan 6.3 step
+// 7): current unclaimed members fewer than spec.replicas, building members
+// fewer than spec.maxInFlight, the owner's live members on this control
+// plane fewer than maxWorkspaces. It returns the wait that stops it, if any,
+// and when to read again. Failed members never count, so the pool replaces
+// them; the owner cap bounds the members that a failing template leaves.
+func (r *CoderWorkspacePoolReconciler) createMembers(
+	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, all []coderv1alpha1.CoderWorkspacePoolMember, counts *poolMemberCounts,
+) (*coderStep, time.Duration, error) {
+	st := &pool.Status
+	need := *pool.Spec.Replicas - counts.current // Claims add their demand in PR 11.
+	if need <= 0 {
+		return nil, 0, nil
+	}
+	// The cap and the count both come from uncached reads, so that neither
+	// a cap that an admin just lowered nor two pools on a stale cache pass it.
+	controlPlane := &coderv1alpha1.CoderControlPlane{}
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Spec.ControlPlaneRef.Name}, controlPlane); err != nil {
+		return nil, 0, fmt.Errorf("get CoderControlPlane %s/%s: %w", pool.Namespace, pool.Spec.ControlPlaneRef.Name, err)
+	}
+	if !controlPlane.DeletionTimestamp.IsZero() {
+		return coderWait("ControlPlaneDeleting", "CoderControlPlane %s is being deleted.", controlPlane.Name), poolResolvePoll, nil
+	}
+	// The consent check again, on the uncached control plane: a consent that
+	// an admin just withdrew holds even while the cache has the old one.
+	if step := workspacePoolConsent(controlPlane, st.Resolved.OwnerID, pool.Spec.Template); step != nil {
+		return step, poolResolvePoll, nil
+	}
+	owner := workspacePoolOwner(controlPlane, st.Resolved.OwnerID)
+	if owner.MaxWorkspaces == nil {
+		return nil, 0, fmt.Errorf("assertion failed: CoderControlPlane %s has no defaulted maxWorkspaces for Coder user %s", controlPlane.Name, st.Resolved.OwnerID)
+	}
+	maxWorkspaces := *owner.MaxWorkspaces
+	ownerID := uuid.MustParse(st.Resolved.OwnerID) // resolve parsed it.
+	var live int32
+	for i := range all {
+		m := &all[i]
+		id, err := uuid.Parse(m.Spec.OwnerID)
+		if err == nil && id == ownerID && m.Spec.ControlPlaneRef.Name == pool.Spec.ControlPlaneRef.Name &&
+			!meta.IsStatusConditionTrue(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionWorkspaceDeleted) {
+			live++
+		}
+	}
+	n := min(need, *pool.Spec.MaxInFlight-counts.building, maxWorkspaces-live)
+	for range n {
+		if err := r.createMember(ctx, pool); err != nil {
+			return nil, 0, err
+		}
+		counts.unclaimed++
+		counts.current++
+		counts.building++
+	}
+	if live+max(n, 0) >= maxWorkspaces && n < need {
+		return coderWait("OwnerWorkspaceLimit", "Coder user %s has %d of at most %d workspaces on CoderControlPlane %s.",
+			st.Resolved.OwnerID, live+max(n, 0), maxWorkspaces, pool.Spec.ControlPlaneRef.Name), poolResolvePoll, nil
+	}
+	return nil, 0, nil
+}
+
+// createMember creates one member that pins the pool's resolved inputs.
+func (r *CoderWorkspacePoolReconciler) createMember(ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool) error {
+	resolved := pool.Status.Resolved
+	params := make([]coderv1alpha1.CoderWorkspacePoolMemberParameter, 0, len(pool.Spec.Parameters))
+	for _, p := range pool.Spec.Parameters {
+		params = append(params, coderv1alpha1.CoderWorkspacePoolMemberParameter(p))
+	}
+	member := &coderv1alpha1.CoderWorkspacePoolMember{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: pool.Name + "-", Namespace: pool.Namespace,
+			Labels: map[string]string{coderv1alpha1.CoderWorkspacePoolSelectorLabel: string(pool.UID)},
+		},
+		Spec: coderv1alpha1.CoderWorkspacePoolMemberSpec{
+			ControlPlaneRef: pool.Spec.ControlPlaneRef, PoolName: pool.Name,
+			OwnerID: resolved.OwnerID, OrganizationID: resolved.OrganizationID, TemplateID: resolved.TemplateID,
+			TemplateVersionID: resolved.TemplateVersionID, PresetID: resolved.PresetID,
+			Parameters: params, ParametersHash: resolved.ParametersHash, ReadyTimeoutSeconds: *pool.Spec.ReadyTimeoutSeconds,
+		},
+	}
+	if err := controllerutil.SetControllerReference(pool, member, r.Scheme); err != nil {
+		return fmt.Errorf("assertion failed: set the pool as controller of a new member: %w", err)
+	}
+	if err := r.Create(ctx, member); err != nil {
+		return fmt.Errorf("create member of pool %s/%s: %w", pool.Namespace, pool.Name, err)
+	}
+	return nil
 }
 
 // resolve reads the pool's inputs from Coder (plan 6.3 step 2) with the
@@ -192,6 +308,9 @@ func countPoolMembers(pool *coderv1alpha1.CoderWorkspacePool, members []coderv1a
 			continue
 		}
 		c.unclaimed++
+		if m.Status.Phase != coderv1alpha1.CoderWorkspacePoolMemberPhaseReady {
+			c.building++
+		}
 		ready := m.Status.Phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseReady &&
 			meta.IsStatusConditionTrue(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionReady)
 		current := poolMemberInputMismatch(m, pool) == ""
