@@ -67,11 +67,13 @@ func aiGatewayKeyRotationDue(key *coderv1alpha1.CoderAIGatewayKey, now time.Time
 
 // aiGatewayKeyResyncAfter is the requeue of a Ready object: the resync with
 // up to 10 % jitter, so objects do not list keys in step, and never later
-// than the next rotation (plan 3.4 item 5).
+// than the next rotation (plan 3.4 item 5). A rotation that is already due
+// here is blocked, and only the retire step can unblock it, so a past due
+// time does not shorten the resync.
 func aiGatewayKeyResyncAfter(key *coderv1alpha1.CoderAIGatewayKey, now time.Time) time.Duration {
 	requeue := aiGatewayKeyResync - rand.N(aiGatewayKeyResync/10) // #nosec G404 -- spreads requeues; not a secret.
-	if next := aiGatewayKeyNextRotation(key); next != nil {
-		requeue = min(requeue, max(next.Sub(now), time.Second))
+	if next := aiGatewayKeyNextRotation(key); next != nil && next.After(now) {
+		requeue = min(requeue, next.Sub(now))
 	}
 	return requeue
 }

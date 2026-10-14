@@ -417,4 +417,16 @@ func TestAIGatewayKeyRotationBlocked(t *testing.T) {
 	require.Contains(t, blocked.message, "ck8s-x-0")
 	require.LessOrEqual(t, aiGatewayKeyResyncAfter(key, now), aiGatewayKeyResync)
 	require.Greater(t, aiGatewayKeyResyncAfter(key, now), aiGatewayKeyResync*9/10)
+
+	// An overdue scheduled rotation while a key retires is blocked too, and
+	// its past due time does not make the resync a one-second poll.
+	key.Spec.Rotation = coderv1alpha1.CoderAIGatewayKeyRotationSpec{IntervalSeconds: ptrToInt32(86400)}
+	key.Status.CurrentKey.IssuedAt = metav1.NewTime(now.Add(-25 * time.Hour))
+	key.Status.RetiringKeys = key.Status.RetiringKeys[:1]
+	due, blocked = aiGatewayKeyRotationDue(key, now)
+	require.False(t, due)
+	require.NotNil(t, blocked)
+	require.Greater(t, aiGatewayKeyResyncAfter(key, now), aiGatewayKeyResync*9/10)
+	key.Status.CurrentKey.IssuedAt = metav1.NewTime(now.Add(-24*time.Hour + time.Minute))
+	require.Equal(t, time.Minute, aiGatewayKeyResyncAfter(key, now), "a future rotation still bounds the resync")
 }
