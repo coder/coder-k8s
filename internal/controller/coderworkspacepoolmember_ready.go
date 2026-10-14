@@ -146,7 +146,10 @@ func checkPoolMemberReadiness(
 // identity (plan 6.2, identity guard) against values that no status writer
 // can change: the owner from the immutable spec, the kwp- name derived from
 // the UID, and the template. It also requires that the latest build is the
-// start build. A nil step means the workspace is this member's own.
+// start build, and that the operator user started it with the pinned version:
+// a status writer can name another build or another kwp- workspace, but not
+// one that the operator built for this member. A nil step means the workspace
+// is this member's own.
 func readOwnPoolMemberWorkspace(
 	ctx context.Context, sdk *codersdk.Client, member *coderv1alpha1.CoderWorkspacePoolMember,
 ) (codersdk.Workspace, *coderStep, error) {
@@ -155,6 +158,13 @@ func readOwnPoolMemberWorkspace(
 	if err != nil || workspaceID == uuid.Nil || member.Status.StartBuildID == "" {
 		return codersdk.Workspace{}, nil, fmt.Errorf("assertion failed: pool member %s/%s has workspace ID %q and start build ID %q",
 			member.Namespace, member.Name, member.Status.WorkspaceID, member.Status.StartBuildID)
+	}
+	operator, err := sdk.User(ctx, codersdk.Me)
+	if err != nil {
+		return codersdk.Workspace{}, coderStepUnavailable("get operator user", err), nil
+	}
+	if operator.ID == uuid.Nil {
+		return codersdk.Workspace{}, nil, &coderAnswerError{msg: "assertion failed: Coder answered the operator user without an ID"}
 	}
 	workspace, err := sdk.Workspace(ctx, workspaceID)
 	// Only 410 proves deletion: Coder also answers 404 when the caller may
@@ -179,6 +189,11 @@ func readOwnPoolMemberWorkspace(
 	}
 	if build.ID.String() != member.Status.StartBuildID {
 		return workspace, coderFail("ChangedExternally", "Someone else started build %d of workspace %s.", build.BuildNumber, name), nil
+	}
+	if build.InitiatorID != operator.ID || build.Transition != codersdk.WorkspaceTransitionStart || build.TemplateVersionID.String() != spec.TemplateVersionID {
+		step := coderFail("OwnershipUnknown", "Nothing proves that the controller started build %d of workspace %s.", build.BuildNumber, name)
+		step.deleted = &metav1.Condition{Status: metav1.ConditionUnknown, Reason: "OwnershipUnknown", Message: step.message}
+		return workspace, step, nil
 	}
 	return workspace, nil, nil
 }
