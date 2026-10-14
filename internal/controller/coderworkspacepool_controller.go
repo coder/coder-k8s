@@ -190,7 +190,7 @@ func (r *CoderWorkspacePoolReconciler) deleteFailedMembers(
 	if !runStart.IsZero() {
 		st.FailureRunStart = &metav1.Time{Time: runStart}
 	}
-	st.RunFailures, st.ConsecutiveFailures = run, int32(len(run))
+	st.RunFailures, st.ConsecutiveFailures = run, int32(len(run)) //nolint:gosec // At most poolFailureLimit entries.
 	if len(run) > 0 {
 		st.LastFailure = run[len(run)-1].DeepCopy()
 	}
