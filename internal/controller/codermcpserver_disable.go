@@ -230,6 +230,10 @@ func (r *CoderMCPServerReconciler) mcpServerConsentHolds(ctx context.Context, se
 				if err != nil {
 					return false, nil //nolint:nilerr // An origin that does not parse has no proof of consent.
 				}
+				if raw == found.OAuth2RevocationURL && destination.Scheme != "https" {
+					// The spec allows only an https revocation URL (#334).
+					return false, nil
+				}
 				value, err := credentialsecret.Read(ctx, r.Client, server.Namespace, coderv1alpha1.SecretKeySelector{Name: c.SecretName, Key: c.SecretKey}, destination)
 				if credErr := (*credentialsecret.Error)(nil); errors.As(err, &credErr) {
 					return false, nil
