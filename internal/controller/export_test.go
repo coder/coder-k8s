@@ -6,6 +6,7 @@ import (
 
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
+	"k8s.io/apimachinery/pkg/types"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 )
@@ -31,4 +32,11 @@ func SyncMCPServerACL(
 		return MCPServerACLResult{}, err
 	}
 	return MCPServerACLResult{Reason: step.reason, Stalled: step.stalled, Message: step.message, Requeue: step.requeue}, err
+}
+
+// HasSentCredentials reports whether the reconciler keeps credential hashes
+// for the object uid.
+func HasSentCredentials(r *CoderMCPServerReconciler, uid types.UID) bool {
+	_, ok := r.sentCredentials.Load(uid)
+	return ok
 }

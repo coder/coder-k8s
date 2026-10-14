@@ -34,9 +34,6 @@ type MCPServersSpec struct {
 	// enabled: false, and then changes nothing else. After the organization
 	// is listed again, a spec edit enables the server. Deleting a
 	// CoderMCPServer still deletes the config it created.
-	//
-	// This field has no effect yet: the CoderMCPServer controller is not
-	// shipped.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=64
 	// +kubebuilder:validation:items:MinLength=1
@@ -50,9 +47,6 @@ type MCPServersSpec struct {
 	// without that user's choice. When false (the default), such objects
 	// create and change nothing, and a server config that one of them
 	// created is disabled in Coder, as for a removed organization.
-	//
-	// This field has no effect yet: the CoderMCPServer controller is not
-	// shipped.
 	// +optional
 	AllowForceOn bool `json:"allowForceOn,omitempty"`
 }
@@ -76,7 +70,7 @@ type CoderMCPServerSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="organization is immutable"
 	Organization string `json:"organization"`
 	// Slug is the Coder slug of the config, unique in its organization. The
-	// model sees the server's tools as <slug>__<tool>.
+	// model sees the server's tools as `<slug>__<tool>`.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=32
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]+(-[a-z0-9]+)*$`
@@ -175,7 +169,7 @@ type CoderMCPServerAuth struct {
 }
 
 // CoderMCPServerAPIKeyAuth sends one Secret value in one header. Coder sends
-// the value as it is, so a bearer token is stored as "Bearer <token>".
+// the value as it is, so a bearer token is stored as `Bearer <token>`.
 type CoderMCPServerAPIKeyAuth struct {
 	// Header is the HTTP header name.
 	// +kubebuilder:validation:MinLength=1
@@ -277,7 +271,7 @@ type CoderMCPServerAccess struct {
 // from it.
 type CoderMCPServerCredentialStatus struct {
 	// Field names the credential: apiKey, oauth2ClientSecret, or
-	// header:<name>.
+	// `header:<name>`.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=160
 	Field string `json:"field"`
