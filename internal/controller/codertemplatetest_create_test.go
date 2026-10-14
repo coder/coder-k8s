@@ -3,6 +3,9 @@ package controller_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -192,6 +195,37 @@ func TestTemplateTestMarkerConflictSendsNoRequest(t *testing.T) {
 	tt := &coderv1alpha1.CoderTemplateTest{}
 	require.NoError(t, k8sClient.Get(e.ctx, key, tt))
 	require.Nil(t, tt.Status.CreateAttemptTime)
+}
+
+// After an uncertain create answer, every later wait keeps the answer's HTTP
+// status, also after a failed confirm read, so the final DeadlineExceeded
+// message still says why the test waited (#342).
+func TestTemplateTestConfirmKeepsCreateAnswer(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	for _, status := range []int{408, 499, 502} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) { // Not parallel: the cases share e and its clock.
+			note := fmt.Sprintf("The create request got HTTP %d from Coder or a proxy.", status)
+			creates := e.fake.requestCount(routeCreateWorkspace)
+			key := e.createTest(t, "default.docker", coderv1alpha1.CoderTemplateTestVersion{Name: "v1"})
+			e.fake.failNext(routeCreateWorkspace, fakeFault{Status: status})
+			tt := e.reconcile(t, key, 3) // Finalizer, initialization, then lookups and create.
+			requireTemplateTestRunning(t, tt, "ConfirmingCreate", fmt.Sprintf("Coder answered %d", status))
+
+			requireTemplateTestRunning(t, e.reconcile(t, key, 1), "ConfirmingCreate", "Reading again. "+note)
+			e.fake.failNext(routeWorkspaceByName, fakeFault{Status: 503})
+			requireTemplateTestRunning(t, e.reconcile(t, key, 1), "CoderUnavailable", note)
+			requireTemplateTestRunning(t, e.reconcile(t, key, 1), "ConfirmingCreate", "Reading again. "+note)
+
+			e.clock.SetTime(e.clock.Now().Add(900 * time.Second))
+			tt = e.reconcile(t, key, 1)
+			require.Equal(t, "DeadlineExceeded", tt.Status.Reason, tt.Status.Message)
+			require.Contains(t, tt.Status.Message, "Last wait: ConfirmingCreate")
+			require.Contains(t, tt.Status.Message, note)
+			require.Equal(t, 1, strings.Count(tt.Status.Message, note), "the note is never added twice")
+			require.Equal(t, creates+1, e.fake.requestCount(routeCreateWorkspace), "never a second create request")
+		})
+	}
 }
 
 func TestTemplateTestDeadlineAfterCreate(t *testing.T) {

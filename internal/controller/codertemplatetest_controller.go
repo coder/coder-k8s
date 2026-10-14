@@ -201,6 +201,9 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if step, err = waitOnWrongAnswer(ctx, step, err); err != nil {
 		return ctrl.Result{}, err
 	}
+	if tt.Status.CreateAttemptTime != nil && tt.Status.WorkspaceID == "" {
+		keepCreateAnswer(step, tt.Status.Message)
+	}
 	// Coder calls can take up to their timeout, so check the deadline again.
 	if now = r.Clock.Now(); !now.Before(deadline) && (step == nil || !step.failed) {
 		last := cmp.Or(step, &templateTestStep{reason: tt.Status.Reason, message: tt.Status.Message})
