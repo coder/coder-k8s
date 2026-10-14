@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -334,4 +335,42 @@ func TestReleasedWithoutDeleteMetricRecovered(t *testing.T) {
 	require.Nil(t, gone)
 	require.Empty(t, env.fake.aiGatewayKeys(), "the retry deletes the keys in Coder")
 	require.Equal(t, before, releasedWithoutDelete(t, "CoderAIGatewayKey"), "a release that deleted in Coder does not count")
+}
+
+// #353: the hold keeps the Coder Deployment and its service account, so the
+// control plane revokes the managed workspace RBAC before it waits.
+func TestControlPlaneHoldRevokesWorkspaceRBAC(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	namespace := createTestNamespace(ctx, t, "hold-rbac")
+	workspaceNamespace := createTestNamespace(ctx, t, "hold-rbac-ws")
+	cp := createCoderControlPlaneUnstructured(ctx, t, "coder", namespace, map[string]any{
+		"image":          "test-workspace-rbac:latest",
+		"serviceAccount": map[string]any{"name": "coder-hold-sa"},
+		"rbac":           map[string]any{"workspacePerms": true, "workspaceNamespaces": []any{workspaceNamespace}},
+	})
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	ref := types.NamespacedName{Namespace: namespace, Name: cp.Name}
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ref})
+	require.NoError(t, err)
+	bindingRef := types.NamespacedName{Namespace: workspaceNamespace, Name: expectedWorkspaceRoleBindingName(t, cp, "coder-hold-sa")}
+	require.NoError(t, k8sClient.Get(ctx, bindingRef, &rbacv1.RoleBinding{}), "the reconcile grants workspace RBAC")
+
+	key := &coderv1alpha1.CoderAIGatewayKey{
+		ObjectMeta: metav1.ObjectMeta{Name: "gateway", Namespace: namespace, Finalizers: []string{coderv1alpha1.CoderAIGatewayKeyCleanupFinalizer}},
+		Spec:       coderv1alpha1.CoderAIGatewayKeySpec{ControlPlaneRef: coderv1alpha1.CoderControlPlaneReference{Name: cp.Name}, SecretName: "gateway-key"},
+	}
+	require.NoError(t, k8sClient.Create(ctx, key))
+	t.Cleanup(func() {
+		if k8sClient.Get(context.Background(), client.ObjectKeyFromObject(key), key) == nil {
+			key.Finalizers = nil
+			_ = k8sClient.Update(context.Background(), key)
+		}
+	})
+	require.NoError(t, k8sClient.Delete(ctx, key))
+	require.NoError(t, k8sClient.Delete(ctx, cp))
+	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ref})
+	require.NoError(t, err)
+	require.Equal(t, 10*time.Second, result.RequeueAfter, "the control plane holds for the key")
+	require.True(t, apierrors.IsNotFound(k8sClient.Get(ctx, bindingRef, &rbacv1.RoleBinding{})), "the hold does not keep workspace RBAC")
 }

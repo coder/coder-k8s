@@ -616,6 +616,12 @@ func (r *CoderControlPlaneReconciler) finalizeWorkspaceRBAC(
 	if !controllerutil.ContainsFinalizer(coderControlPlane, workspaceRBACFinalizer) {
 		return ctrl.Result{}, nil
 	}
+	// Revoke Coder's workspace RBAC first: the hold below keeps the Coder
+	// Deployment and its service account, but the AI cleanup calls Coder with
+	// the operator's token and does not need that Kubernetes access.
+	if err := r.cleanupManagedWorkspaceRBAC(ctx, coderControlPlane, nil, nil); err != nil {
+		return ctrl.Result{}, err
+	}
 	// The finalizer keeps the Coder Deployment (owned by this object)
 	// running while AI Gateway keys and AI providers that use it still
 	// delete their resources in Coder (#353). The grace period after the hold
@@ -635,10 +641,6 @@ func (r *CoderControlPlaneReconciler) finalizeWorkspaceRBAC(
 				"dependents", dependents, "until", coderControlPlane.DeletionTimestamp.Add(controlPlaneDependentHold).UTC())
 			return ctrl.Result{RequeueAfter: controlPlaneDependentPoll}, nil
 		}
-	}
-
-	if err := r.cleanupManagedWorkspaceRBAC(ctx, coderControlPlane, nil, nil); err != nil {
-		return ctrl.Result{}, err
 	}
 
 	original := coderControlPlane.DeepCopy()
