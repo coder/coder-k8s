@@ -152,15 +152,16 @@ func (r *CoderAIProviderReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if !controllerutil.ContainsFinalizer(provider, coderv1alpha1.CoderAIProviderCleanupFinalizer) {
 			return ctrl.Result{}, nil
 		}
-		if provider.Status.ProviderID == "" && provider.Status.CreateAttemptTime == nil {
-			// Nothing of this provider can exist in Coder.
+		release, step, err := r.deleteStep(ctx, provider)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if release {
+			r.sentKeys.Delete(provider.UID)
 			return ctrl.Result{}, r.patchFinalizer(ctx, provider, false)
 		}
-		// Keep the finalizer: this controller version cannot prove what Coder
-		// holds, so it neither deletes nor forgets the provider.
-		applyAIProviderStep(provider, aiProviderWait(0, "DeletePending",
-			"Provider %s can exist in Coder. This controller version keeps the finalizer and deletes nothing.", provider.Name))
-		return ctrl.Result{}, r.writeStatus(ctx, provider, before)
+		applyAIProviderStep(provider, step)
+		return ctrl.Result{RequeueAfter: step.requeue}, r.writeStatus(ctx, provider, before)
 	}
 
 	if err := r.patchFinalizer(ctx, provider, true); err != nil {
