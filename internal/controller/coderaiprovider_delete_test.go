@@ -326,3 +326,92 @@ func TestCoderAIProviderDeleteWithControlPlaneGoing(t *testing.T) {
 		require.Equal(t, requests, env.fake.totalRequests(), "no Coder request")
 	})
 }
+
+// #323: status.providerID goes into /api/v2/ai/providers/{id}, which also
+// takes a name, and the SDK resolves "..". A value that is not a canonical
+// UUID fails an assertion before any Coder request, on the delete, sync and
+// disable paths.
+func TestCoderAIProviderForgedProviderID(t *testing.T) {
+	t.Parallel()
+	forged := map[string]string{
+		"path traversal": "../../users/5d0c6c2e-3a4d-4c55-9d2f-3f1b1f0c9a11",
+		"name":           "openai",
+		"braces":         "{5d0c6c2e-3a4d-4c55-9d2f-3f1b1f0c9a11}",
+		"upper case":     "5D0C6C2E-3A4D-4C55-9D2F-3F1B1F0C9A11",
+		"nil UUID":       "00000000-0000-0000-0000-000000000000",
+	}
+	for _, path := range []string{"delete", "sync", "disable"} {
+		for name, id := range forged {
+			t.Run(path+"/"+name, func(t *testing.T) {
+				t.Parallel()
+				ctx := context.Background()
+				env, secret, provider := newReadyAIProvider(ctx, t)
+				provider.Status.ProviderID = id
+				require.NoError(t, k8sClient.Status().Update(ctx, provider))
+				switch path {
+				case "delete":
+					require.NoError(t, k8sClient.Delete(ctx, provider))
+				case "disable":
+					editSecret(ctx, t, secret, func(s *corev1.Secret) { delete(s.Labels, "coder.com/credential") })
+				}
+				requests := env.fake.totalRequests()
+				_, err := env.r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(provider)})
+				require.ErrorContains(t, err, "assertion failed: AI provider "+env.namespace+"/openai has status.providerID")
+				require.ErrorContains(t, err, "which is not a canonical UUID")
+				require.Equal(t, requests, env.fake.totalRequests(), "no Coder request")
+				got := &coderv1alpha1.CoderAIProvider{}
+				require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(provider), got))
+				require.Equal(t, []string{coderv1alpha1.CoderAIProviderCleanupFinalizer}, got.Finalizers)
+			})
+		}
+	}
+}
+
+// #323: a delete answered 404 without Coder's JSON error, for example an
+// HTML page of a proxy, does not prove that the provider is gone. The
+// finalizer stays and the delete is retried.
+func TestCoderAIProviderDeleteNotFoundFromProxy(t *testing.T) {
+	t.Parallel()
+	for name, fault := range map[string]fakeFault{
+		"HTML page":     {Status: http.StatusNotFound, HTML: "<html>404 Not Found</html>"},
+		"other message": {Status: http.StatusNotFound, Message: "Route not found."},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			env, _, provider := newReadyAIProvider(ctx, t)
+			env.fake.failNext(routeDeleteAIProvider, fault)
+			got, result := env.deleteAIProvider(ctx, t, provider)
+			require.NotNil(t, got)
+			requireAIProviderStep(t, got, false, "CoderUnavailable")
+			require.Equal(t, []string{coderv1alpha1.CoderAIProviderCleanupFinalizer}, got.Finalizers)
+			require.Equal(t, 60*time.Second, result.RequeueAfter)
+			_, found := env.fake.aiProvider("openai")
+			require.True(t, found)
+
+			got, _ = env.reconcileDeleting(ctx, t, got)
+			require.Nil(t, got, "Coder's own answer releases the finalizer")
+			_, found = env.fake.aiProvider("openai")
+			require.False(t, found)
+		})
+	}
+}
+
+// #323: with only a create marker, a lookup 404 that Coder did not answer
+// proves nothing either.
+func TestCoderAIProviderDeletePendingCreateNotFoundFromProxy(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newAIProviderCreateEnv(ctx, t)
+	provider.Finalizers = []string{coderv1alpha1.CoderAIProviderCleanupFinalizer}
+	require.NoError(t, k8sClient.Update(ctx, provider))
+	provider.Status.CreateAttemptTime = &metav1.Time{Time: time.Now().Add(-3 * time.Minute)}
+	require.NoError(t, k8sClient.Status().Update(ctx, provider))
+	env.fake.failNext(routeAIProvider, fakeFault{Status: http.StatusNotFound, HTML: "<html>404 Not Found</html>"})
+	got, _ := env.deleteAIProvider(ctx, t, provider)
+	require.NotNil(t, got)
+	requireAIProviderStep(t, got, false, "CoderUnavailable")
+	require.Equal(t, []string{coderv1alpha1.CoderAIProviderCleanupFinalizer}, got.Finalizers)
+	got, _ = env.reconcileDeleting(ctx, t, got)
+	require.Nil(t, got, "Coder's own 404 releases the finalizer")
+}

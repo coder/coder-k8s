@@ -382,6 +382,9 @@ func (r *CoderTemplateTestReconciler) releaseFinalizer(ctx context.Context, tt *
 // no other object can use it: the 4-character prefix ("ktt-" for tests) and 28
 // hex characters (32 in all, Coder's limit).
 func uidWorkspaceName(prefix string, uid types.UID) (string, error) {
+	if len(prefix) != 4 {
+		return "", fmt.Errorf("assertion failed: workspace name prefix %q needs 4 characters, or the name passes Coder's 32", prefix)
+	}
 	hex := strings.ReplaceAll(string(uid), "-", "")
 	if len(hex) < templateTestUIDHexLength || strings.Trim(hex, "0123456789abcdef") != "" {
 		return "", fmt.Errorf("assertion failed: object UID %q needs at least %d lowercase hex characters", uid, templateTestUIDHexLength)
