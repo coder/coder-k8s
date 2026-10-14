@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -23,6 +24,7 @@ const promoteTemplateName = "acme.starter-template"
 
 type promoteFixture struct {
 	state      *mockCoderServerState
+	client     *codersdk.Client
 	storage    *TemplatePromoteStorage
 	templateID uuid.UUID
 	v1, v2, v3 uuid.UUID // v1 is active at the start
@@ -39,7 +41,7 @@ func newPromoteFixture(t *testing.T) promoteFixture {
 	if err != nil {
 		t.Fatalf("build Coder client: %v", err)
 	}
-	f := promoteFixture{state: state, storage: NewTemplatePromoteStorage(&coder.StaticClientProvider{Client: client, Namespace: "control-plane"})}
+	f := promoteFixture{state: state, client: client, storage: NewTemplatePromoteStorage(&coder.StaticClientProvider{Client: client, Namespace: "control-plane"})}
 	for id, template := range state.templatesByID {
 		f.templateID, f.v1 = id, template.ActiveVersionID
 	}
@@ -47,6 +49,50 @@ func newPromoteFixture(t *testing.T) promoteFixture {
 	f.v3 = seedTemplateVersion(t, state, "v3").ID
 	state.resetRequests()
 	return f
+}
+
+// holdPatchTransport makes a PATCH time out only after the fake Coder received it. The PATCH
+// budget starts before the request is sent, so under CPU load it can end before the PATCH
+// reaches the fake, and the fake then records no PATCH (#288). This transport sends the PATCH
+// without the budget, waits until the fake closes arrived, then waits for the PATCH's own
+// deadline (at most 2s) and abandons the request with that deadline's error.
+type holdPatchTransport struct {
+	base    http.RoundTripper
+	arrived <-chan struct{}
+}
+
+func (h holdPatchTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method != http.MethodPatch {
+		return h.base.RoundTrip(req)
+	}
+	sendCtx, cancelSend := context.WithCancel(context.WithoutCancel(req.Context()))
+	defer cancelSend()
+	sent := make(chan error, 1)
+	go func() {
+		res, err := h.base.RoundTrip(req.WithContext(sendCtx))
+		if res != nil {
+			_ = res.Body.Close()
+			err = fmt.Errorf("assertion failed: the hanging PATCH got an answer with status %d", res.StatusCode)
+		}
+		sent <- err
+	}()
+	select {
+	case <-h.arrived:
+	case err := <-sent:
+		return nil, fmt.Errorf("assertion failed: the PATCH ended before it reached the fake Coder: %w", err)
+	}
+	select {
+	case <-req.Context().Done():
+	case <-time.After(2 * time.Second):
+		// Without a PATCH budget the PATCH would hang for the whole request. The test's elapsed
+		// check reports that, so end it here instead of hanging the test.
+	}
+	cancelSend()
+	<-sent
+	if err := req.Context().Err(); err != nil {
+		return nil, err
+	}
+	return nil, errors.New("assertion failed: the PATCH had no deadline within 2s")
 }
 
 func mustParseURL(t *testing.T, raw string) *url.URL {
@@ -294,11 +340,11 @@ func TestTemplatePromoteConfirmation(t *testing.T) {
 	}{
 		{name: "dropped after apply", fault: promoteFault{apply: true}, promoted: true},
 		{name: "5xx after apply", fault: promoteFault{apply: true, status: http.StatusBadGateway}, promoted: true},
-		{name: "timeout after apply", fault: promoteFault{apply: true, delay: 2 * time.Second}, patchBudget: 50 * time.Millisecond, promoted: true},
+		{name: "timeout after apply", fault: promoteFault{apply: true}, patchBudget: 50 * time.Millisecond, promoted: true},
 		{name: "dropped before apply", fault: promoteFault{}, check: apierrors.IsServiceUnavailable, message: "could not confirm"},
 		{name: "5xx before apply", fault: promoteFault{status: http.StatusInternalServerError}, check: apierrors.IsServiceUnavailable, message: "could not confirm"},
 		{
-			name: "timeout before apply", fault: promoteFault{delay: 2 * time.Second}, patchBudget: 50 * time.Millisecond,
+			name: "timeout before apply", fault: promoteFault{}, patchBudget: 50 * time.Millisecond,
 			check: apierrors.IsServiceUnavailable, message: "could not confirm",
 		},
 		{
@@ -336,6 +382,11 @@ func TestTemplatePromoteConfirmation(t *testing.T) {
 				f.storage.patchBudget = tc.patchBudget
 			}
 			fault := tc.fault
+			if tc.patchBudget > 0 {
+				// The PATCH hangs until the client gives up at the PATCH budget.
+				fault.hang = make(chan struct{})
+				f.client.HTTPClient.Transport = holdPatchTransport{base: f.client.HTTPClient.Transport, arrived: fault.hang}
+			}
 			switch tc.activateAfter {
 			case third:
 				fault.activateAfter = f.v3
