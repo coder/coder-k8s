@@ -88,7 +88,8 @@ func (r *CoderMCPServerReconciler) disableMCPServerWithoutConsent(
 
 // mcpServerConsentHolds reports whether every credential that found holds
 // comes from a Secret in status.credentials that still passes the contract,
-// with the same UID, for each URL of found that receives it (plan 5.2).
+// with the same UID and a value that Coder can store, for each URL of found
+// that receives it (plan 5.2).
 // Coder holds the value of that Secret, so the spec's current refs and URLs
 // do not matter here.
 func (r *CoderMCPServerReconciler) mcpServerConsentHolds(ctx context.Context, server *coderv1alpha1.CoderMCPServer, found codersdk.MCPServerConfig) (bool, error) {
@@ -101,10 +102,11 @@ func (r *CoderMCPServerReconciler) mcpServerConsentHolds(ctx context.Context, se
 		held         bool
 		match        func(field string) bool
 		destinations []string
+		headerValue  bool
 	}{
-		{found.HasAPIKey, func(f string) bool { return f == "apiKey" }, toURL},
-		{found.HasCustomHeaders, func(f string) bool { return strings.HasPrefix(f, "header:") }, toURL},
-		{found.HasOAuth2Secret, func(f string) bool { return f == "oauth2ClientSecret" }, toOAuth2},
+		{found.HasAPIKey, func(f string) bool { return f == "apiKey" }, toURL, true},
+		{found.HasCustomHeaders, func(f string) bool { return strings.HasPrefix(f, "header:") }, toURL, true},
+		{found.HasOAuth2Secret, func(f string) bool { return f == "oauth2ClientSecret" }, toOAuth2, false},
 	}
 	for _, h := range held {
 		if !h.held {
@@ -122,10 +124,15 @@ func (r *CoderMCPServerReconciler) mcpServerConsentHolds(ctx context.Context, se
 					return false, nil //nolint:nilerr // An origin that does not parse has no proof of consent.
 				}
 				value, err := credentialsecret.Read(ctx, r.Client, server.Namespace, coderv1alpha1.SecretKeySelector{Name: c.SecretName, Key: c.SecretKey}, destination)
-				if credErr := (*credentialsecret.Error)(nil); errors.As(err, &credErr) || err == nil && string(value.Token.SecretUID) != c.SecretUID {
+				if credErr := (*credentialsecret.Error)(nil); errors.As(err, &credErr) {
 					return false, nil
 				} else if err != nil {
 					return false, err
+				}
+				// A malformed value also withdraws consent, as in the read of
+				// readMCPServerCredentials.
+				if string(value.Token.SecretUID) != c.SecretUID || mcpServerValueProblem(value, h.headerValue) != "" {
+					return false, nil
 				}
 			}
 		}

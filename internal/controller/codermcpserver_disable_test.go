@@ -35,6 +35,7 @@ func TestCoderMCPServerDisablesWithoutConsent(t *testing.T) {
 		{name: "origin removed", reason: credentialsecret.ReasonDestinationNotAllowed, edit: func(s *corev1.Secret) {
 			s.Annotations[credentialsecret.DestinationsAnnotation] = "https://other.example.com"
 		}},
+		{name: "value malformed", reason: credentialsecret.ReasonMalformed, edit: func(s *corev1.Secret) { s.Data["token"] = []byte(testMCPKey + "\nx") }},
 		{
 			name: "OAuth2 token origin removed", reason: credentialsecret.ReasonDestinationNotAllowed, spec: oauth2,
 			secret: func(ctx context.Context, t *testing.T, env mcpServerEnv) *corev1.Secret {
@@ -90,7 +91,9 @@ func TestCoderMCPServerDisablesWithoutConsent(t *testing.T) {
 				consented.ResourceVersion, consented.UID = "", ""
 				createSecret(ctx, t, consented)
 			} else {
-				editSecret(ctx, t, secret, func(s *corev1.Secret) { s.Labels, s.Annotations = consented.Labels, consented.Annotations })
+				editSecret(ctx, t, secret, func(s *corev1.Secret) {
+					s.Labels, s.Annotations, s.Data = consented.Labels, consented.Annotations, consented.Data
+				})
 			}
 			got, _ = env.reconcile(ctx, t, got)
 			requireMCPServerStep(t, got, true, "DisabledExternally")
