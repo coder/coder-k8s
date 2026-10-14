@@ -393,7 +393,9 @@ func TestCoderAIProviderWatches(t *testing.T) {
 	})
 
 	secret := createSecret(ctx, t, env.keySecret(consentedObjectMeta("", "", testAIProviderOrigin), testAIProviderKey))
-	provider := env.createProvider(ctx, t, nil)
+	// A disabled provider: a credential failure of an enabled one disables it
+	// in Coder (a kill switch), and this test checks only the requeues.
+	provider := env.createProvider(ctx, t, func(s *coderv1alpha1.CoderAIProviderSpec) { s.Enabled = ptrTo(false) })
 	requireReason := func(reason string) {
 		t.Helper()
 		require.Eventually(t, func() bool {

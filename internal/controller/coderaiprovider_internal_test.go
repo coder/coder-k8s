@@ -113,3 +113,12 @@ func TestAIProviderNamesSeededByEnv(t *testing.T) {
 		})
 	}
 }
+
+// The disable path refuses an object without a Coder provider ID: it has
+// nothing to disable, and the caller must stall instead.
+func TestDisableWithoutConsentNeedsProviderID(t *testing.T) {
+	t.Parallel()
+	r := &CoderAIProviderReconciler{}
+	_, err := r.disableWithoutConsent(context.Background(), &coderv1alpha1.CoderAIProvider{}, &credentialsecret.Error{Reason: credentialsecret.ReasonSecretNotFound})
+	require.ErrorContains(t, err, "assertion failed: AI provider")
+}

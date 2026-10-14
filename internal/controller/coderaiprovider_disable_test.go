@@ -9,6 +9,7 @@ import (
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
@@ -188,4 +189,74 @@ func TestCoderAIProviderDisableAnswerMismatch(t *testing.T) {
 	got, result := env.reconcile(ctx, t, provider)
 	requireAIProviderStep(t, got, false, "CoderAnswerMismatch")
 	require.Equal(t, 30*time.Second, result.RequeueAfter)
+}
+
+// #290: the controller fails closed on every credential failure of the
+// recorded key Secret, also when a second read for Coder's base URL fails the
+// same way. The disable PATCH body holds only the enabled flag.
+func TestCoderAIProviderDisablesOnEveryCredentialFailure(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		reason string
+		edit   func(ctx context.Context, t *testing.T, env aiProviderEnv, secret *corev1.Secret)
+	}{
+		{name: "Secret deleted", reason: credentialsecret.ReasonSecretNotFound, edit: func(ctx context.Context, t *testing.T, _ aiProviderEnv, secret *corev1.Secret) {
+			require.NoError(t, k8sClient.Delete(ctx, secret))
+		}},
+		{name: "control plane references the Secret", reason: credentialsecret.ReasonRefused, edit: func(ctx context.Context, t *testing.T, env aiProviderEnv, secret *corev1.Secret) {
+			controlPlane := &coderv1alpha1.CoderControlPlane{}
+			require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: env.namespace, Name: "coder"}, controlPlane))
+			controlPlane.Spec.LicenseSecretRef = &coderv1alpha1.SecretKeySelector{Name: secret.Name, Key: "api-key"}
+			require.NoError(t, k8sClient.Update(ctx, controlPlane))
+		}},
+		{name: "malformed annotation", reason: credentialsecret.ReasonMalformed, edit: func(ctx context.Context, t *testing.T, _ aiProviderEnv, secret *corev1.Secret) {
+			editSecret(ctx, t, secret, func(s *corev1.Secret) { s.Annotations[credentialsecret.DestinationsAnnotation] = "api.openai.com" })
+		}},
+		{name: "key removed", reason: credentialsecret.ReasonKeyMissing, edit: func(ctx context.Context, t *testing.T, _ aiProviderEnv, secret *corev1.Secret) {
+			editSecret(ctx, t, secret, func(s *corev1.Secret) { s.Data = map[string][]byte{"other": []byte("x")} })
+		}},
+		{name: "malformed key value", reason: credentialsecret.ReasonMalformed, edit: func(ctx context.Context, t *testing.T, _ aiProviderEnv, secret *corev1.Secret) {
+			editSecret(ctx, t, secret, func(s *corev1.Secret) { s.Data["api-key"] = []byte(testAIProviderKey + "\n") })
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			env, secret, provider := newReadyAIProvider(ctx, t)
+			before, _ := env.fake.aiProvider("openai")
+			tc.edit(ctx, t, env, secret)
+
+			var bodies []string
+			env.fake.failNext(routeUpdateAIProvider, fakeFault{Inspect: func(body []byte) { bodies = append(bodies, string(body)) }})
+			writes := env.writes()
+			got, result := env.reconcile(ctx, t, provider)
+			require.Contains(t, requireAIProviderStep(t, got, true, tc.reason), "The controller disabled provider openai in Coder")
+			requireAIProviderRequeue(t, 10*time.Minute, result.RequeueAfter)
+			require.Equal(t, writes+1, env.writes(), "one PATCH")
+			require.Len(t, bodies, 1)
+			require.JSONEq(t, `{"enabled":false}`, bodies[0], "the PATCH body holds only the enabled flag")
+			stored, _ := env.fake.aiProvider("openai")
+			require.False(t, stored.enabled)
+			require.Equal(t, before.baseURL, stored.baseURL)
+			require.Equal(t, before.keys, stored.keys)
+		})
+	}
+}
+
+// The disable needs a Coder provider ID. Without one, a credential failure
+// sends nothing to Coder, also while a create can be in flight: the
+// controller creates providers disabled.
+func TestCoderAIProviderNoDisableWithoutProviderID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, secret, provider := newAIProviderCreateEnv(ctx, t)
+	provider.Status.CreateAttemptTime = &metav1.Time{Time: time.Now()}
+	provider.Status.Credential = &coderv1alpha1.CoderAIProviderCredentialStatus{SecretName: secret.Name, SecretKey: "api-key"}
+	require.NoError(t, k8sClient.Status().Update(ctx, provider))
+	require.NoError(t, k8sClient.Delete(ctx, secret))
+	got, result := env.reconcile(ctx, t, provider)
+	requireAIProviderStep(t, got, true, credentialsecret.ReasonSecretNotFound)
+	require.Zero(t, result.RequeueAfter)
+	require.Zero(t, env.fake.totalRequests())
 }
