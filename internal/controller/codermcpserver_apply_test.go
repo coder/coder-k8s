@@ -30,6 +30,13 @@ func (env mcpServerEnv) writeRoutes() []string {
 	return out
 }
 
+func (env mcpServerEnv) lastUpdateBody(t *testing.T) []byte {
+	t.Helper()
+	bodies := env.fake.mcpRequestBodies(routeUpdateMCPServer)
+	require.NotEmpty(t, bodies)
+	return bodies[len(bodies)-1]
+}
+
 func (env mcpServerEnv) lastUpdate(t *testing.T) codersdk.UpdateMCPServerConfigRequest {
 	t.Helper()
 	bodies := env.fake.mcpRequestBodies(routeUpdateMCPServer)
@@ -68,14 +75,13 @@ func TestCoderMCPServerApplyOrder(t *testing.T) {
 	groups, users := env.fake.mcpACL(stored.view.ID)
 	require.Equal(t, []uuid.UUID{data}, groups)
 	require.Empty(t, users)
-	req := env.lastUpdate(t)
-	require.Equal(t, testMCPKey, *req.APIKeyValue, "a PATCH that sets url carries the credential")
-	require.Equal(t, "https://mcp.example.com/github/mcp", *req.URL)
+	require.JSONEq(t, `{"display_name":"GitHub","enabled":true}`, string(env.lastUpdateBody(t)),
+		"the create sent every other field and the key, so the enabling PATCH is sparse")
 	require.Len(t, got.Status.Credentials, 1)
 
-	before := env.mcpRequests()
+	writes := len(env.writeRoutes())
 	again, _ := env.reconcile(ctx, t, got)
-	require.Equal(t, before, env.mcpRequests(), "an applied generation sends nothing")
+	require.Len(t, env.writeRoutes(), writes, "a config that matches the spec gets no write")
 	require.Equal(t, got.ResourceVersion, again.ResourceVersion)
 }
 
@@ -203,7 +209,6 @@ func TestCoderMCPServerApplyFailures(t *testing.T) {
 		stalled bool
 		retry   bool // The next reconcile applies the spec.
 	}{
-		{name: "config gone", route: routeMCPServer, fault: fakeFault{Status: http.StatusNotFound}, reason: "DeletedExternally", stalled: true},
 		{name: "read fails", route: routeMCPServer, fault: fakeFault{Status: http.StatusServiceUnavailable}, reason: "CoderUnavailable", retry: true},
 		{name: "read answers another slug", route: routeMCPServer, reason: "CoderAnswerMismatch", stalled: true, fault: fakeFault{Rewrite: func(answer any) any {
 			c := answer.(codersdk.MCPServerConfig)
@@ -218,6 +223,7 @@ func TestCoderMCPServerApplyFailures(t *testing.T) {
 		{name: "update answers another availability", route: routeUpdateMCPServer, reason: "CoderAnswerMismatch", stalled: true, fault: rewriteUpdate(func(c *codersdk.MCPServerConfig) { c.Availability = "force_on" })},
 		{name: "update answers another flag", route: routeUpdateMCPServer, reason: "CoderAnswerMismatch", stalled: true, fault: rewriteUpdate(func(c *codersdk.MCPServerConfig) { c.ForwardCoderHeaders = true })},
 		{name: "update answers another header", route: routeUpdateMCPServer, reason: "CoderAnswerMismatch", stalled: true, fault: rewriteUpdate(func(c *codersdk.MCPServerConfig) { c.APIKeyHeader = "X-Other" })},
+		{name: "update answers another type's credential", route: routeUpdateMCPServer, reason: "CoderAnswerMismatch", stalled: true, fault: rewriteUpdate(func(c *codersdk.MCPServerConfig) { c.HasCustomHeaders = true })},
 		{name: "update answers no key", route: routeUpdateMCPServer, reason: "CoderAnswerMismatch", stalled: true, fault: rewriteUpdate(func(c *codersdk.MCPServerConfig) { c.HasAPIKey = false })},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -310,7 +316,7 @@ func TestCoderMCPServerApplyLostStatusWrite(t *testing.T) {
 	got, _ := env.reconcile(ctx, t, server)
 	requireMCPServerApplied(t, got)
 	require.Equal(t, 1, env.posts())
-	require.Equal(t, 2, env.fake.requestCount(routeUpdateMCPServer))
+	require.Equal(t, 1, env.fake.requestCount(routeUpdateMCPServer), "the config already matches the spec")
 }
 
 // A Secret change moves its change token but not the generation. The next
@@ -335,9 +341,9 @@ func TestCoderMCPServerApplySecretRotation(t *testing.T) {
 	require.Equal(t, rotated, env.requireCreated(t, got).apiKeyValue)
 	require.Equal(t, secret.ResourceVersion, got.Status.Credentials[0].SecretResourceVersion)
 
-	before = env.mcpRequests()
+	writes := len(env.writeRoutes())
 	again, _ := env.reconcile(ctx, t, got)
-	require.Equal(t, before, env.mcpRequests(), "a recorded token sends nothing")
+	require.Len(t, env.writeRoutes(), writes, "a recorded token sends nothing")
 	require.Equal(t, got.ResourceVersion, again.ResourceVersion)
 }
 

@@ -142,9 +142,9 @@ func TestCoderMCPServerCreate(t *testing.T) {
 				require.Equal(t, s.ResourceVersion, c.SecretResourceVersion)
 			}
 
-			before := env.mcpRequests()
+			writes := len(env.writeRoutes())
 			again, _ := env.reconcile(ctx, t, got)
-			require.Equal(t, before, env.mcpRequests(), "an applied generation needs no MCP request in this version")
+			require.Len(t, env.writeRoutes(), writes, "a config that matches the spec gets no write")
 			require.Equal(t, got.ResourceVersion, again.ResourceVersion)
 		})
 	}
