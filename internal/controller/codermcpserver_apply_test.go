@@ -39,9 +39,12 @@ func (env mcpServerEnv) lastUpdate(t *testing.T) codersdk.UpdateMCPServerConfigR
 	return req
 }
 
-// Plan S20 and 4.5 steps 5 and 6: the config is created disabled, its ACL
-// matches spec.access, and only then one PATCH enables it with the spec
-// values. That PATCH sets url, so it carries the credential too.
+// Plan S20 and 4.5 steps 5 and 6: the config is created disabled with
+// Coder's default Everyone entry. The entries that spec.access does not list
+// go first, then one PATCH enables the config with the spec values, and only
+// then are the missing groups added. So the enabled config never has a group
+// that the spec does not list. The PATCH sets url, so it carries the
+// credential too.
 func TestCoderMCPServerApplyOrder(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -49,17 +52,21 @@ func TestCoderMCPServerApplyOrder(t *testing.T) {
 	env.keySecret(ctx, t, testMCPKey)
 	data := env.fake.addGroup(env.orgID, "data", "")
 	got, result := env.reconcile(ctx, t, env.create(ctx, t, func(s *coderv1alpha1.CoderMCPServerSpec) {
-		s.Access = &coderv1alpha1.CoderMCPServerAccess{Groups: []string{"Everyone", "data"}}
+		s.Access = &coderv1alpha1.CoderMCPServerAccess{Groups: []string{"data"}}
 	}))
 	requireMCPServerApplied(t, got)
 	require.Equal(t, 10*time.Minute, result.RequeueAfter)
-	require.Equal(t, []string{routeCreateMCPServer, routeUpdateMCPServerACL, routeUpdateMCPServer}, env.writeRoutes(), "create, then the ACL, then enable")
+	require.Equal(t, []string{routeCreateMCPServer, routeUpdateMCPServerACL, routeUpdateMCPServer, routeUpdateMCPServerACL}, env.writeRoutes(),
+		"create, remove Everyone, enable, then add data")
+	acls := env.fake.mcpRequestBodies(routeUpdateMCPServerACL)
+	require.JSONEq(t, `{"group_roles":{"`+env.orgID.String()+`":""}}`, string(acls[0]), "the first ACL write only removes")
+	require.JSONEq(t, `{"group_roles":{"`+data.String()+`":"read"}}`, string(acls[1]))
 	stored := env.requireCreated(t, got)
 	require.True(t, stored.view.Enabled)
 	require.Equal(t, "GitHub", stored.view.DisplayName)
 	require.Equal(t, testMCPKey, stored.apiKeyValue)
 	groups, users := env.fake.mcpACL(stored.view.ID)
-	require.ElementsMatch(t, []uuid.UUID{env.orgID, data}, groups)
+	require.Equal(t, []uuid.UUID{data}, groups)
 	require.Empty(t, users)
 	req := env.lastUpdate(t)
 	require.Equal(t, testMCPKey, *req.APIKeyValue, "a PATCH that sets url carries the credential")
@@ -70,6 +77,48 @@ func TestCoderMCPServerApplyOrder(t *testing.T) {
 	again, _ := env.reconcile(ctx, t, got)
 	require.Equal(t, before, env.mcpRequests(), "an applied generation sends nothing")
 	require.Equal(t, got.ResourceVersion, again.ResourceVersion)
+}
+
+// A new generation that moves an enabled config to other groups and also
+// disables or changes it: when the PATCH fails, the ACL holds only groups
+// that both generations allow, so no newly listed group can use the old
+// configuration.
+func TestCoderMCPServerApplyNeverBroadensBeforeTheChange(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		edit  func(*coderv1alpha1.CoderMCPServerSpec)
+		fault fakeFault
+	}{
+		{name: "disable rejected", edit: func(s *coderv1alpha1.CoderMCPServerSpec) { s.Enabled = ptrTo(false) }, fault: fakeFault{Status: http.StatusBadRequest}},
+		{name: "URL change fails", edit: func(s *coderv1alpha1.CoderMCPServerSpec) { s.URL = "https://mcp.example.com/v2/mcp" }, fault: fakeFault{Status: http.StatusBadGateway}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			env := newMCPServerEnv(ctx, t, true)
+			env.keySecret(ctx, t, testMCPKey)
+			data := env.fake.addGroup(env.orgID, "data", "")
+			env.fake.addGroup(env.orgID, "ops", "")
+			got, _ := env.reconcile(ctx, t, env.create(ctx, t, func(s *coderv1alpha1.CoderMCPServerSpec) {
+				s.Access = &coderv1alpha1.CoderMCPServerAccess{Groups: []string{"Everyone", "data"}}
+			}))
+			requireMCPServerApplied(t, got)
+
+			require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(got), got))
+			got.Spec.Access.Groups = []string{"data", "ops"}
+			tc.edit(&got.Spec)
+			require.NoError(t, k8sClient.Update(ctx, got))
+			env.fake.failNext(routeUpdateMCPServer, tc.fault)
+			got, _ = env.reconcile(ctx, t, got)
+			require.NotEqual(t, got.Generation, got.Status.AppliedGeneration)
+			groups, _ := env.fake.mcpACL(env.requireCreated(t, got).view.ID)
+			require.Equal(t, []uuid.UUID{data}, groups, "Everyone is gone, ops is not added yet")
+
+			got, _ = env.reconcile(ctx, t, got)
+			requireMCPServerApplied(t, got)
+		})
+	}
 }
 
 // Plan S15: access with no groups and enabled false reach Coder as an empty
@@ -133,6 +182,15 @@ func TestCoderMCPServerApplyGroupNotFound(t *testing.T) {
 	require.True(t, env.requireCreated(t, got).view.Enabled)
 }
 
+// rewriteUpdate changes the update answer after Coder applied the update.
+func rewriteUpdate(edit func(*codersdk.MCPServerConfig)) fakeFault {
+	return fakeFault{AfterCommit: true, Rewrite: func(answer any) any {
+		c := answer.(codersdk.MCPServerConfig)
+		edit(&c)
+		return c
+	}}
+}
+
 // Each failure of the apply leaves the generation unapplied, sends no other
 // write, and never puts a credential into status or logs.
 func TestCoderMCPServerApplyFailures(t *testing.T) {
@@ -154,12 +212,13 @@ func TestCoderMCPServerApplyFailures(t *testing.T) {
 		}}},
 		{name: "update fails", route: routeUpdateMCPServer, fault: fakeFault{Status: http.StatusInternalServerError, Detail: "upstream " + testMCPKey}, reason: "CoderUnavailable", retry: true},
 		{name: "update rejected", route: routeUpdateMCPServer, fault: fakeFault{Status: http.StatusBadRequest, Detail: "rejected " + testMCPKey}, reason: "CoderRejected", stalled: true},
-		{name: "update gone", route: routeUpdateMCPServer, fault: fakeFault{Status: http.StatusNotFound}, reason: "DeletedExternally", stalled: true},
-		{name: "update answers other values", route: routeUpdateMCPServer, reason: "CoderAnswerMismatch", stalled: true, fault: fakeFault{AfterCommit: true, Rewrite: func(answer any) any {
-			c := answer.(codersdk.MCPServerConfig)
-			c.Enabled = false
-			return c
-		}}},
+		{name: "update answers 404", route: routeUpdateMCPServer, fault: fakeFault{Status: http.StatusNotFound}, reason: "CoderUnavailable", retry: true},
+		{name: "update answers another enabled", route: routeUpdateMCPServer, reason: "CoderAnswerMismatch", stalled: true, fault: rewriteUpdate(func(c *codersdk.MCPServerConfig) { c.Enabled = false })},
+		{name: "update answers another description", route: routeUpdateMCPServer, reason: "CoderAnswerMismatch", stalled: true, fault: rewriteUpdate(func(c *codersdk.MCPServerConfig) { c.Description = "x" })},
+		{name: "update answers another availability", route: routeUpdateMCPServer, reason: "CoderAnswerMismatch", stalled: true, fault: rewriteUpdate(func(c *codersdk.MCPServerConfig) { c.Availability = "force_on" })},
+		{name: "update answers another flag", route: routeUpdateMCPServer, reason: "CoderAnswerMismatch", stalled: true, fault: rewriteUpdate(func(c *codersdk.MCPServerConfig) { c.ForwardCoderHeaders = true })},
+		{name: "update answers another header", route: routeUpdateMCPServer, reason: "CoderAnswerMismatch", stalled: true, fault: rewriteUpdate(func(c *codersdk.MCPServerConfig) { c.APIKeyHeader = "X-Other" })},
+		{name: "update answers no key", route: routeUpdateMCPServer, reason: "CoderAnswerMismatch", stalled: true, fault: rewriteUpdate(func(c *codersdk.MCPServerConfig) { c.HasAPIKey = false })},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
