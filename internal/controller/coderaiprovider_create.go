@@ -134,16 +134,22 @@ func recordAIProvider(ctx context.Context, provider *coderv1alpha1.CoderAIProvid
 	return nil, nil
 }
 
-// createAIProvider writes the create marker and the change token of the key,
-// then sends the only create request of this attempt. A conflict on the
-// marker write ends the reconcile before any request. The provider starts
-// disabled with the nonce as its display name. The apply step then sets the
-// spec values.
+// createAIProvider writes the cleanup record, then the create marker and the
+// change token of the key, then sends the only create request of this
+// attempt. A failed record write or a conflict on the marker write ends the
+// reconcile before any request. The provider starts disabled with the nonce
+// as its display name. The apply step then sets the spec values.
 func (r *CoderAIProviderReconciler) createAIProvider(
 	ctx context.Context, sdk *codersdk.Client, provider *coderv1alpha1.CoderAIProvider, key credentialsecret.Value, before *coderv1alpha1.CoderAIProviderStatus,
 ) (*aiProviderStep, error) {
 	token := key.Token
-	provider.Status.CreateAttemptTime = &metav1.Time{Time: time.Now()}
+	now := time.Now()
+	// The record goes first: without it, a provider that a namespace
+	// deletion leaves behind cannot be found again (#353 invariant 1).
+	if step, err := r.writeAIProviderRecord(ctx, sdk, provider, &now); step != nil || err != nil {
+		return step, err
+	}
+	provider.Status.CreateAttemptTime = &metav1.Time{Time: now}
 	provider.Status.Credential = &coderv1alpha1.CoderAIProviderCredentialStatus{
 		SecretName: token.SecretName, SecretKey: token.SecretKey, SecretUID: string(token.SecretUID), SecretResourceVersion: token.ResourceVersion,
 	}

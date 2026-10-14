@@ -76,7 +76,7 @@ graph TD
 | Path | Contents |
 | --- | --- |
 | `config/crd/bases/` | The generated CRDs for `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy`, `CoderTemplateTest`, `CoderAIProvider`, and `CoderAIGatewayKey` |
-| `config/rbac/` | The `coder-k8s` ServiceAccount, the `manager-role` ClusterRole, and the bindings (including auth-delegator) |
+| `config/rbac/` | The `coder-k8s` ServiceAccount, the `manager-role` ClusterRole, the `manager-role` Role in `coder-system` (write access to the cleanup-record ConfigMaps there), and the bindings (including auth-delegator) |
 | `config/apiserver-standalone/` | For standalone `--app=aggregated-apiserver`: the `coder-k8s-apiserver` ServiceAccount, its RBAC, and the placeholder Secret for the serving CA |
 | `deploy/deployment.yaml` | The `coder-k8s` Deployment (default `--app=all`) |
 | `deploy/apiserver-service.yaml`, `deploy/apiserver-apiservice.yaml` | The Service and APIService that make the aggregated API available |

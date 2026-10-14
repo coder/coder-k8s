@@ -59,8 +59,9 @@ func checkAIProviderID(provider *coderv1alpha1.CoderAIProvider) error {
 // the finalizer stays.
 func (r *CoderAIProviderReconciler) deleteStep(ctx context.Context, provider *coderv1alpha1.CoderAIProvider) (release bool, step *aiProviderStep, err error) {
 	if provider.Status.ProviderID == "" && provider.Status.CreateAttemptTime == nil {
-		// Nothing of this object can exist in Coder.
-		return true, nil, nil
+		// Nothing of this object can exist in Coder: earlier Coder answers
+		// cleared the create marker, so the record goes too.
+		return true, nil, deleteCleanupRecord(ctx, r.Client, r.OperatorNamespace, provider.UID)
 	}
 	ref := types.NamespacedName{Namespace: provider.Namespace, Name: provider.Spec.ControlPlaneRef.Name}
 	controlPlane := &coderv1alpha1.CoderControlPlane{}
@@ -107,7 +108,14 @@ func (r *CoderAIProviderReconciler) deleteStep(ctx context.Context, provider *co
 		ctx, cancel = context.WithTimeout(ctx, aiProviderBoundedDeleteTimeout)
 		defer cancel()
 	}
-	if step, err = r.deleteInCoder(ctx, sdk, provider); err != nil && deleting {
+	step, err = r.deleteInCoder(ctx, sdk, provider)
+	if err == nil && step == nil {
+		// Coder confirmed that it holds no provider of this object. Only
+		// then does the record go (#353 invariant 7). A failed record
+		// delete retries, and the retry gets Coder's 404 for the provider.
+		return true, nil, deleteCleanupRecord(ctx, r.Client, r.OperatorNamespace, provider.UID)
+	}
+	if err != nil && deleting {
 		// The attempt ended with an impossible answer. Log it, and still
 		// release: the one attempt is over.
 		log.FromContext(ctx).Error(err, "The one delete attempt while CoderControlPlane is being deleted got an impossible answer")
