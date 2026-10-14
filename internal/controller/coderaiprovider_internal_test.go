@@ -49,67 +49,40 @@ func TestAIProviderBadBaseURLMessage(t *testing.T) {
 	require.NotContains(t, step.message, "api%.example.com")
 }
 
-// Plan F9: the names that coderd seeds from env (Coder v2.37.3).
-func TestAIProviderNamesSeededByEnv(t *testing.T) {
+// Plan F9 and #296: the names that a control plane can seed in coderd. The
+// rule fails closed: any value or none, any case.
+func TestAIProviderSeededNames(t *testing.T) {
 	t.Parallel()
 	fromSecret := &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "keys"}, Key: "key"}}
 	for _, tc := range []struct {
-		name       string
-		env        []corev1.EnvVar
-		want       map[string]string
-		unresolved string
+		name    string
+		env     []corev1.EnvVar
+		args    []string
+		want    map[string]string
+		blocker string
 	}{
-		{name: "legacy OpenAI key", env: []corev1.EnvVar{{Name: "CODER_AIBRIDGE_OPENAI_KEY", ValueFrom: fromSecret}}, want: map[string]string{"openai": "CODER_AIBRIDGE_OPENAI_KEY"}},
-		{name: "legacy Anthropic key", env: []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_ANTHROPIC_KEY", Value: "sk-ant"}}, want: map[string]string{"anthropic": "CODER_AI_GATEWAY_ANTHROPIC_KEY"}},
-		{name: "legacy Bedrock region", env: []corev1.EnvVar{{Name: "CODER_AIBRIDGE_BEDROCK_REGION", Value: "us-east-1"}}, want: map[string]string{"anthropic": "CODER_AIBRIDGE_BEDROCK_REGION"}},
-		{name: "legacy Bedrock models only", env: []corev1.EnvVar{
-			{Name: "CODER_AI_GATEWAY_BEDROCK_MODEL", Value: "claude"}, {Name: "CODER_AIBRIDGE_BEDROCK_SMALL_FAST_MODEL", Value: "haiku"},
-		}, want: map[string]string{}},
+		{name: "legacy OpenAI key from a Secret", env: []corev1.EnvVar{{Name: "CODER_AIBRIDGE_OPENAI_KEY", ValueFrom: fromSecret}}, want: map[string]string{"openai": "spec.extraEnv sets CODER_AIBRIDGE_OPENAI_KEY"}},
+		{name: "empty legacy key", env: []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_OPENAI_KEY"}}, want: map[string]string{"openai": "spec.extraEnv sets CODER_AI_GATEWAY_OPENAI_KEY"}},
+		{name: "lowercase legacy key", env: []corev1.EnvVar{{Name: "coder_ai_gateway_anthropic_key", Value: "sk"}}, want: map[string]string{"anthropic": "spec.extraEnv sets coder_ai_gateway_anthropic_key"}},
+		{name: "any Bedrock variable", env: []corev1.EnvVar{{Name: "CODER_AIBRIDGE_BEDROCK_MODEL", Value: "claude"}}, want: map[string]string{"anthropic": "spec.extraEnv sets CODER_AIBRIDGE_BEDROCK_MODEL"}},
 		{name: "legacy base URL only", env: []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_OPENAI_BASE_URL", Value: "https://llm.example.com"}}, want: map[string]string{}},
-		{name: "empty legacy key", env: []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_OPENAI_KEY"}}, want: map[string]string{}},
 		{
-			name: "indexed type without name", env: []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_PROVIDER_0_TYPE", Value: "openai"}, {Name: "CODER_AI_GATEWAY_PROVIDER_0_NAME"}},
-			want: map[string]string{"openai": "CODER_AI_GATEWAY_PROVIDER_0_TYPE"},
-		},
-		{name: "indexed name", env: []corev1.EnvVar{
-			{Name: "CODER_AIBRIDGE_PROVIDER_0_TYPE", Value: "openai"},
-			{Name: "CODER_AIBRIDGE_PROVIDER_0_NAME", Value: "team-openai"},
-			{Name: "CODER_AIBRIDGE_PROVIDER_1_NAME", Value: "first"},
-			{Name: "CODER_AIBRIDGE_PROVIDER_1_NAME", Value: "last"},
-			{Name: "CODER_AIBRIDGE_PROVIDER_1_KEY", Value: "sk"},
-			{Name: "CODER_AIBRIDGE_PROVIDER_2_NAME", Value: "literal"},
-			{Name: "CODER_AIBRIDGE_PROVIDER_2_TYPE", Value: "$(TYPE)"},
-		}, want: map[string]string{"team-openai": "CODER_AIBRIDGE_PROVIDER_0_NAME", "last": "CODER_AIBRIDGE_PROVIDER_1_NAME", "literal": "CODER_AIBRIDGE_PROVIDER_2_NAME"}},
-		{
-			name: "mixed case", env: []corev1.EnvVar{{Name: "coder_aibridge_openai_key", Value: "sk"}, {Name: "Coder_AI_Gateway_Provider_0_Name", Value: "team"}},
-			want: map[string]string{"openai": "CODER_AIBRIDGE_OPENAI_KEY", "team": "CODER_AI_GATEWAY_PROVIDER_0_NAME"},
-		},
-		{name: "empty last duplicates", env: []corev1.EnvVar{
-			{Name: "CODER_AI_GATEWAY_PROVIDER_0_TYPE", Value: "openai"},
-			{Name: "CODER_AI_GATEWAY_PROVIDER_0_NAME", Value: "custom"},
-			{Name: "CODER_AI_GATEWAY_PROVIDER_0_NAME"},
-			{Name: "CODER_AIBRIDGE_ANTHROPIC_KEY", Value: "sk-ant"},
-			{Name: "CODER_AIBRIDGE_ANTHROPIC_KEY"},
-		}, want: map[string]string{"openai": "CODER_AI_GATEWAY_PROVIDER_0_TYPE"}},
-		{
-			name: "indexed name from a Secret", env: []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_PROVIDER_0_TYPE", Value: "openai"}, {Name: "CODER_AI_GATEWAY_PROVIDER_0_NAME", ValueFrom: fromSecret}},
-			want: map[string]string{}, unresolved: "CODER_AI_GATEWAY_PROVIDER_0_NAME",
+			name: "indexed variable", env: []corev1.EnvVar{{Name: "CODER_AIBRIDGE_PROVIDER_0_TYPE", Value: "openai"}, {Name: "coder_ai_gateway_provider_00_name"}},
+			want: map[string]string{}, blocker: "spec.extraEnv sets CODER_AIBRIDGE_PROVIDER_0_TYPE",
 		},
 		{
-			name: "indexed name with a reference", env: []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_PROVIDER_0_NAME", Value: "$(PROVIDER_NAME)"}},
-			want: map[string]string{}, unresolved: "CODER_AI_GATEWAY_PROVIDER_0_NAME",
+			name: "flags", args: []string{"--ai-gateway-openai-key=sk-1", "-AIBRIDGE-BEDROCK-REGION", "us-east-1"},
+			want: map[string]string{"openai": "spec.extraArgs passes --ai-gateway-openai-key", "anthropic": "spec.extraArgs passes --aibridge-bedrock-region"},
 		},
-		{
-			name: "indexed type with a reference", env: []corev1.EnvVar{{Name: "CODER_AIBRIDGE_PROVIDER_0_TYPE", Value: "$(TYPE)"}},
-			want: map[string]string{}, unresolved: "CODER_AIBRIDGE_PROVIDER_0_TYPE",
-		},
-		{name: "other variables", env: []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_PROVIDERS", Value: "openai"}, {Name: "CODER_ACCESS_URL", Value: "https://coder.example.com"}}, want: map[string]string{}},
+		{name: "flag values", args: []string{"--oauth2-github-client-id", "ai-gateway-openai-key"}, want: map[string]string{}},
+		{name: "argument reference", args: []string{"--log-human", "$(SEED_FLAG)"}, want: map[string]string{}, blocker: "spec.extraArgs[1] holds a $(VAR) reference"},
+		{name: "other settings", env: []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_PROVIDERS", Value: "openai"}}, args: []string{"--ai-gateway-openai-base-url=https://llm.example.com"}, want: map[string]string{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			names, unresolved := aiProviderNamesSeededByEnv(tc.env)
+			names, blocker := aiProviderSeededNames(&coderv1alpha1.CoderControlPlane{Spec: coderv1alpha1.CoderControlPlaneSpec{ExtraEnv: tc.env, ExtraArgs: tc.args}})
 			require.Equal(t, tc.want, names)
-			require.Equal(t, tc.unresolved, unresolved)
+			require.Equal(t, tc.blocker, blocker)
 		})
 	}
 }
