@@ -155,10 +155,18 @@ func requireMemberFailed(t *testing.T, member *coderv1alpha1.CoderWorkspacePoolM
 		"WorkspaceDeleted=True exactly when no create request can have had an effect")
 }
 
-func TestPoolMemberChecksBeforeCreate(t *testing.T) {
+func TestPoolMemberCreatesWorkspace(t *testing.T) {
 	t.Parallel()
 	e := newPoolMemberEnv(t)
-	key := e.createMember(t, nil)
+	region := coderv1alpha1.CoderWorkspacePoolMemberParameter{Name: "region", Value: "eu-west-1"}
+	size := coderv1alpha1.CoderWorkspacePoolMemberParameter{Name: "size", Value: ""}
+	preset := e.fake.addPreset(e.v1, "small")
+	e.resolve(t, func(r *coderv1alpha1.CoderWorkspacePoolResolved) {
+		r.PresetID, r.ParametersHash = preset.String(), parametersHash(size, region)
+	})
+	key := e.createMember(t, func(m *coderv1alpha1.CoderWorkspacePoolMember) {
+		m.Spec.Parameters = []coderv1alpha1.CoderWorkspacePoolMemberParameter{region, size}
+	})
 
 	member := e.reconcileMember(t, key, 1)
 	require.True(t, controllerutil.ContainsFinalizer(member, coderv1alpha1.CoderWorkspacePoolMemberCleanupFinalizer))
@@ -166,10 +174,103 @@ func TestPoolMemberChecksBeforeCreate(t *testing.T) {
 	require.Zero(t, e.fake.totalRequests(), "no Coder call before the finalizer is stored")
 
 	member = e.reconcileMember(t, key, 1)
-	requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhasePending, "CreatePending", "Every check passed")
-	require.Equal(t, 15*time.Second, e.lastStep.RequeueAfter)
-	require.Positive(t, e.fake.requestCount(routeOrgMember), "the owner rules ran")
-	require.Zero(t, e.fake.requestCount(routeCreateWorkspace))
+	requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, "WaitingForBuild", "was created")
+	require.Equal(t, "kwp-"+strings.ReplaceAll(string(member.UID), "-", "")[:28], member.Status.WorkspaceName)
+	require.NotNil(t, member.Status.CreateAttemptTime)
+	require.Equal(t, 5*time.Second, e.lastStep.RequeueAfter)
+	ws, err := e.fake.client(t, 5*time.Second).Workspace(e.ctx, uuid.MustParse(member.Status.WorkspaceID))
+	require.NoError(t, err)
+	require.Equal(t, member.Status.WorkspaceName, ws.Name)
+	require.Equal(t, e.tester, ws.OwnerID)
+	require.Equal(t, member.Status.StartBuildID, ws.LatestBuild.ID.String())
+	require.Equal(t, e.v1, ws.LatestBuild.TemplateVersionID)
+	require.Equal(t, &preset, ws.LatestBuild.TemplateVersionPresetID)
+	require.Equal(t, codersdk.AutomaticUpdatesNever, ws.AutomaticUpdates)
+	require.ElementsMatch(t, []codersdk.WorkspaceBuildParameter{{Name: "region", Value: "eu-west-1"}, {Name: "size", Value: ""}}, e.fake.createParams(ws.ID))
+
+	member = e.reconcileMember(t, key, 3)
+	requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, "WaitingForBuild", "")
+	require.Equal(t, 1, e.fake.requestCount(routeCreateWorkspace), "never a second create request")
+
+	// A member whose workspace can exist keeps its finalizer on deletion
+	// until the delete steps run.
+	require.NoError(t, k8sClient.Delete(e.ctx, member))
+	require.NotNil(t, e.reconcileMember(t, key, 2))
+}
+
+// TestPoolMemberCreateResults covers the CoderTemplateTest result table and
+// mutation check 2: after an uncertain result, the member never sends a
+// second create request.
+func TestPoolMemberCreateResults(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	cases := []struct {
+		name    string
+		fault   fakeFault
+		phase   string
+		reason  string
+		message string
+	}{
+		{name: "429", fault: fakeFault{Status: 429}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhasePending, reason: "CreateRetrying", message: "Coder answered 429"},
+		{name: "401", fault: fakeFault{Status: 401}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhasePending, reason: "CreateRetrying", message: "Coder answered 401"},
+		{name: "406", fault: fakeFault{Status: 406}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhasePending, reason: "TemplateVersionImporting"},
+		{name: "409", fault: fakeFault{Status: 409}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed, reason: "WorkspaceNameConflict"},
+		{name: "400", fault: fakeFault{Status: 400}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed, reason: "CreateRejected", message: "Coder answered 400: fake fault 400"},
+		{name: "502 before commit", fault: fakeFault{Status: 502}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate", message: "Coder answered 502"},
+		{name: "504 after commit", fault: fakeFault{Status: 504, AfterCommit: true}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate"},
+		{name: "connection reset", fault: fakeFault{Reset: true}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate"},
+		{name: "201 proxy page after commit", fault: fakeFault{Status: 201, AfterCommit: true, HTML: "<html>proxy</html>"}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate"},
+		{name: "wrong workspace in the answer", fault: fakeFault{Rewrite: func(a any) any {
+			ws := a.(codersdk.Workspace)
+			ws.OwnerID = uuid.New()
+			return ws
+		}}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "CoderAnswerMismatch", message: "Coder answered workspace owner "},
+	}
+	for _, tc := range cases {
+		creates := e.fake.requestCount(routeCreateWorkspace)
+		key := e.createMember(t, nil)
+		e.reconcileMember(t, key, 1) // Finalizer.
+		e.fake.failNext(routeCreateWorkspace, tc.fault)
+		member := e.reconcileMember(t, key, 1)
+		require.Equal(t, creates+1, e.fake.requestCount(routeCreateWorkspace), tc.name)
+		require.Empty(t, member.Status.WorkspaceID, tc.name)
+
+		switch tc.phase {
+		case coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed:
+			requireMemberFailed(t, member, tc.reason, tc.message, metav1.ConditionTrue)
+			// A refused request had no effect, so deletion releases the member.
+			require.NoError(t, k8sClient.Delete(e.ctx, member))
+			require.Nil(t, e.reconcileMember(t, key, 1), tc.name)
+		case coderv1alpha1.CoderWorkspacePoolMemberPhasePending:
+			requireMember(t, member, tc.phase, tc.reason, tc.message)
+			require.Nil(t, member.Status.CreateAttemptTime, "%s: a result without effect clears the marker", tc.name)
+			if tc.name == "429" {
+				require.InDelta(t, 2*time.Second, e.lastStep.RequeueAfter, float64(400*time.Millisecond), "429 backs off with jitter")
+			}
+			requireMember(t, e.reconcileMember(t, key, 1), coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, "WaitingForBuild", "")
+			require.Equal(t, creates+2, e.fake.requestCount(routeCreateWorkspace), "%s: one more request after the retry", tc.name)
+		default:
+			requireMember(t, member, tc.phase, tc.reason, tc.message)
+			require.NotNil(t, member.Status.CreateAttemptTime, tc.name)
+			requireMember(t, e.reconcileMember(t, key, 4), tc.phase, tc.reason, tc.message)
+			require.Equal(t, creates+1, e.fake.requestCount(routeCreateWorkspace), "%s: never a second create request", tc.name)
+		}
+	}
+}
+
+// TestPoolMemberMarkerConflictSendsNoRequest is mutation check 1: the marker
+// is stored before the create request.
+func TestPoolMemberMarkerConflictSendsNoRequest(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	key := e.createMember(t, nil)
+	e.reconcileMember(t, key, 1) // Finalizer.
+
+	r := &controller.CoderWorkspacePoolMemberReconciler{Client: markerConflictClient{k8sClient}, Scheme: scheme, Clock: e.clock}
+	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+	require.True(t, apierrors.IsConflict(err), "the marker write conflict ends the reconcile: %v", err)
+	require.Zero(t, e.fake.requestCount(routeCreateWorkspace), "no create request without a stored marker")
+	require.Nil(t, e.reconcileMember(t, key, 0).Status.CreateAttemptTime)
 }
 
 func TestPoolMemberOwnershipGate(t *testing.T) {
@@ -222,12 +323,12 @@ func TestPoolMemberWaitsForConsentAndOwner(t *testing.T) {
 	})
 	requireWait("OwnerNotEligible", "site role")
 	e.fake.updateUser(e.tester, func(u *codersdk.User) { u.Roles = nil })
-	e.fake.failNext(routeOrgMember, fakeFault{Status: 503})
-	requireWait("CoderUnavailable", "get owner membership: Coder answered 503")
+	e.fake.failNext(routeTemplateByName, fakeFault{Status: 503})
+	requireWait("CoderUnavailable", "get template: Coder answered 503")
 	require.Zero(t, e.fake.requestCount(routeCreateWorkspace), "no create request while consent or an owner rule fails")
 
 	// Template names match without case, as in Coder.
-	requireWait("CreatePending", "Every check passed")
+	requireMember(t, e.reconcileMember(t, key, 1), coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, "WaitingForBuild", "")
 }
 
 // TestTemplateTestRefusesPrebuildsOwner covers the shared owner rule: Coder's
@@ -245,6 +346,46 @@ func TestTemplateTestRefusesPrebuildsOwner(t *testing.T) {
 	require.Zero(t, e.fake.requestCount(routeCreateWorkspace))
 }
 
+func TestPoolMemberRefusesOtherInputs(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	v2 := e.fake.addVersion(e.tplID, "v2", codersdk.ProvisionerJobSucceeded)
+	otherTpl := e.fake.addTemplate(e.orgID, "other")
+	otherVersion := e.fake.addVersion(otherTpl, "v1", codersdk.ProvisionerJobSucceeded)
+	type member = coderv1alpha1.CoderWorkspacePoolMember
+	for _, tc := range []struct {
+		name    string
+		edit    func(*member)
+		resolve func(*coderv1alpha1.CoderWorkspacePoolResolved)
+		message string
+	}{
+		{name: "other version", edit: func(m *member) { m.Spec.TemplateVersionID = v2.String() }, message: "spec.templateVersionID"},
+		{name: "parameters without their hash", edit: func(m *member) {
+			m.Spec.Parameters = []coderv1alpha1.CoderWorkspacePoolMemberParameter{{Name: "region", Value: "us"}}
+		}, message: "spec.parameters"},
+		{name: "no pool label", edit: func(m *member) { m.Labels = nil }, message: "label coder.com/workspace-pool-uid"},
+		// Someone with write access to the pool status points it at another
+		// template. The member resolves the allowed template name again.
+		{name: "pool status names another template", resolve: func(r *coderv1alpha1.CoderWorkspacePoolResolved) {
+			r.TemplateID, r.TemplateVersionID = otherTpl.String(), otherVersion.String()
+		}, message: "is not the pinned template"},
+	} {
+		e.resolve(t, tc.resolve)
+		key := e.createMember(t, tc.edit)
+		requireMemberFailed(t, e.reconcileMember(t, key, 2), "InputsMismatch", tc.message, metav1.ConditionTrue)
+	}
+	e.resolve(t, nil)
+	key := e.createMember(t, nil)
+	e.pool.Status.Resolved = nil
+	require.NoError(t, k8sClient.Status().Update(e.ctx, e.pool))
+	requireMemberFailed(t, e.reconcileMember(t, key, 2), "InputsMismatch", "status.resolved", metav1.ConditionTrue)
+
+	e.resolve(t, func(r *coderv1alpha1.CoderWorkspacePoolResolved) { r.PresetID = uuid.NewString() })
+	key = e.createMember(t, nil)
+	requireMember(t, e.reconcileMember(t, key, 2), coderv1alpha1.CoderWorkspacePoolMemberPhasePending, "PresetNotFound", "has no preset")
+	require.Zero(t, e.fake.requestCount(routeCreateWorkspace))
+}
+
 func TestPoolMemberDeadline(t *testing.T) {
 	t.Parallel()
 	e := newPoolMemberEnv(t)
@@ -253,4 +394,29 @@ func TestPoolMemberDeadline(t *testing.T) {
 	e.clock.SetTime(member.CreationTimestamp.Add(900 * time.Second))
 	requireMemberFailed(t, e.reconcileMember(t, key, 1), "DeadlineExceeded", "not ready within 900s", metav1.ConditionTrue)
 	require.Zero(t, e.fake.totalRequests(), "a member past its deadline asks Coder nothing")
+
+	// After a create request, the failed member keeps its finalizer: the
+	// workspace exists until the delete steps remove it.
+	e.clock.SetTime(time.Now().Truncate(time.Second))
+	key = e.createMember(t, nil)
+	member = e.reconcileMember(t, key, 2)
+	require.NotEmpty(t, member.Status.WorkspaceID)
+	e.clock.SetTime(member.CreationTimestamp.Add(901 * time.Second))
+	member = e.reconcileMember(t, key, 1)
+	requireMemberFailed(t, member, "DeadlineExceeded", "Last wait: WaitingForBuild", metav1.ConditionFalse)
+	require.NoError(t, k8sClient.Delete(e.ctx, member))
+	require.NotNil(t, e.reconcileMember(t, key, 1))
+}
+
+func TestPoolMemberNeverTakesAnotherWorkspace(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	key := e.createMember(t, nil)
+	member := e.reconcileMember(t, key, 1)
+	name := "kwp-" + strings.ReplaceAll(string(member.UID), "-", "")[:28]
+	_, err := e.fake.client(t, 5*time.Second).CreateUserWorkspace(e.ctx, e.tester.String(), codersdk.CreateWorkspaceRequest{TemplateVersionID: e.v1, Name: name})
+	require.NoError(t, err)
+
+	requireMemberFailed(t, e.reconcileMember(t, key, 2), "WorkspaceNameConflict", "already has a workspace named "+name, metav1.ConditionTrue)
+	require.Equal(t, 1, e.fake.requestCount(routeCreateWorkspace), "only the test's own create request")
 }

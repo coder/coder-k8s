@@ -63,6 +63,7 @@ type fakeWorkspace struct {
 	workspace codersdk.Workspace
 	builds    []codersdk.WorkspaceBuild // Oldest first.
 	deleted   bool
+	params    []codersdk.WorkspaceBuildParameter // The create request's rich parameter values.
 }
 
 // fakeCoder is a stateful in-memory Coder API for CoderTemplateTest controller
@@ -449,6 +450,13 @@ func (f *fakeCoder) totalRequests() int {
 	return total
 }
 
+// createParams returns the rich parameter values of a workspace's create request.
+func (f *fakeCoder) createParams(workspaceID uuid.UUID) []codersdk.WorkspaceBuildParameter {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.mustWorkspace(workspaceID).params
+}
+
 func (f *fakeCoder) workspaceCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -583,7 +591,7 @@ func (f *fakeCoder) createWorkspace(r *http.Request) (int, any) {
 		OrganizationID: tpl.OrganizationID, OrganizationName: tpl.OrganizationName,
 		TemplateID: tpl.ID, TemplateName: tpl.Name, Name: req.Name, AutomaticUpdates: req.AutomaticUpdates,
 		TTLMillis: createTTL(req, tpl), LastUsedAt: now,
-	}}
+	}, params: req.RichParameterValues}
 	f.appendBuild(fw, v.ID, codersdk.WorkspaceTransitionStart)
 	if req.TemplateVersionPresetID != uuid.Nil {
 		presetID := req.TemplateVersionPresetID

@@ -3,8 +3,11 @@ package controller
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
@@ -33,8 +36,8 @@ const (
 
 // CoderWorkspacePoolMemberReconciler makes the Coder workspace of one
 // CoderWorkspacePoolMember (#153 plan 6.2). Nothing registers it yet. This
-// version runs the checks before the create request. The create request,
-// readiness, the watch rules, and cleanup follow before activation.
+// version runs the steps up to the create request: readiness, the watch
+// rules, and cleanup follow before activation.
 type CoderWorkspacePoolMemberReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -59,7 +62,8 @@ func (r *CoderWorkspacePoolMemberReconciler) Reconcile(ctx context.Context, req 
 	if err := r.Get(ctx, req.NamespacedName, member); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	if _, err := assertPoolMember(member, req.NamespacedName); err != nil {
+	workspaceName, err := assertPoolMember(member, req.NamespacedName)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if !member.DeletionTimestamp.IsZero() {
@@ -95,15 +99,18 @@ func (r *CoderWorkspacePoolMemberReconciler) Reconcile(ctx context.Context, req 
 		// steps 7 and 8).
 		step = coderWait(cmp.Or(member.Status.Reason, "ConfirmingCreate"), "%s", member.Status.Message)
 	default:
-		// The create request needs the client that checkCreate returns.
-		// It comes in the next version of this controller.
-		var err error
-		_, step, err = r.checkCreate(ctx, member)
+		var sdk *codersdk.Client
+		sdk, step, err = r.checkCreate(ctx, member, workspaceName)
 		if step, err = memberWaitOnWrongAnswer(ctx, step, err); err != nil {
 			return ctrl.Result{}, err
 		}
 		if now = r.Clock.Now(); step == nil && now.Before(deadline) {
-			step = coderWait("CreatePending", "Every check passed. This controller version sends no create request.")
+			// Every check passed: write the marker, then create.
+			step, err = r.createWorkspace(ctx, sdk, member, before, now, deadline)
+			if step, err = memberWaitOnWrongAnswer(ctx, step, err); err != nil {
+				return ctrl.Result{}, err
+			}
+			now = r.Clock.Now()
 		}
 		// Coder calls can take up to their timeout, so check the deadline again.
 		if last := cmp.Or(step, &coderStep{reason: member.Status.Reason, message: member.Status.Message}); !last.failed && !now.Before(deadline) {
@@ -148,10 +155,8 @@ func assertPoolMember(member *coderv1alpha1.CoderWorkspacePoolMember, req types.
 
 // checkCreate runs the ownership gate and the consent check (plan 6.2 steps
 // 4 and 5). A nil step means the member can create its workspace with sdk.
-// The checks of the pinned template, version, preset, and workspace name
-// come with the create request.
 func (r *CoderWorkspacePoolMemberReconciler) checkCreate(
-	ctx context.Context, member *coderv1alpha1.CoderWorkspacePoolMember,
+	ctx context.Context, member *coderv1alpha1.CoderWorkspacePoolMember, workspaceName string,
 ) (*codersdk.Client, *coderStep, error) {
 	spec := member.Spec
 	// Only a member that its pool controls can create. The member keeps no
@@ -172,6 +177,9 @@ func (r *CoderWorkspacePoolMemberReconciler) checkCreate(
 	case !pool.DeletionTimestamp.IsZero():
 		return nil, coderWait("PoolDeleting", "CoderWorkspacePool %s is being deleted.", spec.PoolName), nil
 	}
+	if field := poolMemberInputMismatch(member, pool); field != "" {
+		return nil, coderFail("InputsMismatch", "Member input %s differs from what CoderWorkspacePool %s builds.", field, spec.PoolName), nil
+	}
 
 	sdk, controlPlane, wait, err := controlPlaneCoderClient(ctx, r.Client, member.Namespace, spec.ControlPlaneRef.Name)
 	if wait != nil || err != nil {
@@ -183,11 +191,89 @@ func (r *CoderWorkspacePoolMemberReconciler) checkCreate(
 	if step := workspacePoolConsent(controlPlane, spec.OwnerID, pool.Spec.Template); step != nil {
 		return nil, step, nil
 	}
-	_, step, err := checkCoderWorkspaceOwner(ctx, sdk, uuid.MustParse(spec.OwnerID))
+	ownerUser, step, err := checkCoderWorkspaceOwner(ctx, sdk, uuid.MustParse(spec.OwnerID))
 	if step != nil || err != nil {
 		return nil, step, err
 	}
+	// The pool resolved these IDs, and anyone who can write its status can
+	// change them. So the member resolves the allowed template again and
+	// builds only from it.
+	template, step, err := resolveCoderTemplate(ctx, sdk, pool.Spec.Template, ownerUser)
+	if step != nil || err != nil {
+		return nil, step, err
+	}
+	if template.ID.String() != spec.TemplateID || template.OrganizationID.String() != spec.OrganizationID {
+		return nil, coderFail("InputsMismatch", "Coder template %q is not the pinned template %s.", pool.Spec.Template, spec.TemplateID), nil
+	}
+	version, step, err := readCoderTemplateVersion(ctx, sdk, pool.Spec.Template, template, spec.TemplateVersionID, "")
+	if step != nil || err != nil {
+		return nil, step, err
+	}
+	if step := checkCoderTemplateVersionUsable(version); step != nil {
+		return nil, step, nil
+	}
+	if spec.PresetID != "" {
+		presets, err := sdk.TemplateVersionPresets(ctx, version.ID)
+		if err != nil {
+			return nil, coderStepUnavailable("get presets", err), nil
+		}
+		if !slices.ContainsFunc(presets, func(p codersdk.Preset) bool { return p.ID.String() == spec.PresetID }) {
+			return nil, coderWait("PresetNotFound", "Version %s has no preset %s.", version.Name, spec.PresetID), nil
+		}
+	}
+	member.Status.WorkspaceName = workspaceName
+	_, err = sdk.WorkspaceByOwnerAndName(ctx, spec.OwnerID, workspaceName, codersdk.WorkspaceOptions{})
+	switch {
+	case err == nil:
+		// Nothing of this member exists yet, so the workspace belongs to
+		// someone else. The controller never touches it.
+		return nil, coderFail("WorkspaceNameConflict", "Coder user %s already has a workspace named %s.", spec.OwnerID, workspaceName), nil
+	case !isCoderNotFound(err):
+		return nil, coderStepUnavailable("get workspace by name", err), nil
+	}
 	return sdk, nil, nil
+}
+
+// poolMemberInputMismatch names the first pinned input that differs from the
+// pool, or returns "". A member can only build what its pool builds.
+func poolMemberInputMismatch(member *coderv1alpha1.CoderWorkspacePoolMember, pool *coderv1alpha1.CoderWorkspacePool) string {
+	spec, resolved := member.Spec, pool.Status.Resolved
+	if resolved == nil {
+		return "the pool's status.resolved, which is empty,"
+	}
+	params := make([]codersdk.WorkspaceBuildParameter, 0, len(spec.Parameters))
+	for _, p := range spec.Parameters {
+		params = append(params, codersdk.WorkspaceBuildParameter{Name: p.Name, Value: p.Value})
+	}
+	for _, c := range []struct{ field, got, want string }{
+		{"spec.controlPlaneRef", spec.ControlPlaneRef.Name, pool.Spec.ControlPlaneRef.Name},
+		{"spec.ownerID", spec.OwnerID, pool.Spec.OwnerUserID},
+		{"spec.ownerID", spec.OwnerID, resolved.OwnerID},
+		{"spec.organizationID", spec.OrganizationID, resolved.OrganizationID},
+		{"spec.templateID", spec.TemplateID, resolved.TemplateID},
+		{"spec.templateVersionID", spec.TemplateVersionID, resolved.TemplateVersionID},
+		{"spec.presetID", spec.PresetID, resolved.PresetID},
+		{"spec.parametersHash", spec.ParametersHash, resolved.ParametersHash},
+		{"spec.parameters", workspacePoolParametersHash(params), spec.ParametersHash},
+		{"label " + coderv1alpha1.CoderWorkspacePoolSelectorLabel, member.Labels[coderv1alpha1.CoderWorkspacePoolSelectorLabel], string(pool.UID)},
+	} {
+		if c.got != c.want {
+			return c.field
+		}
+	}
+	return ""
+}
+
+// workspacePoolParametersHash identifies a set of rich parameter values,
+// whatever their order: the hex SHA-256 of each name and value with its
+// length, sorted by name. No parameters give the hash of empty input.
+func workspacePoolParametersHash(params []codersdk.WorkspaceBuildParameter) string {
+	sorted := slices.SortedFunc(slices.Values(params), func(a, b codersdk.WorkspaceBuildParameter) int { return strings.Compare(a.Name, b.Name) })
+	h := sha256.New()
+	for _, p := range sorted {
+		_, _ = fmt.Fprintf(h, "%d:%s%d:%s", len(p.Name), p.Name, len(p.Value), p.Value)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // workspacePoolConsent checks the admin's consent in the control plane's
@@ -207,6 +293,78 @@ func workspacePoolConsent(controlPlane *coderv1alpha1.CoderControlPlane, ownerID
 		return coderWait("TemplateNotAllowed", "CoderControlPlane %s does not allow template %q for Coder user %s.", controlPlane.Name, template, ownerID)
 	}
 	return nil
+}
+
+// createWorkspace writes the create marker, then sends the only create
+// request of this attempt, and sorts the answer by the CoderTemplateTest
+// result table. A marker write conflict ends the reconcile before any request.
+func (r *CoderWorkspacePoolMemberReconciler) createWorkspace(
+	ctx context.Context, sdk *codersdk.Client, member *coderv1alpha1.CoderWorkspacePoolMember, before *coderv1alpha1.CoderWorkspacePoolMemberStatus, now, deadline time.Time,
+) (*coderStep, error) {
+	spec, name := member.Spec, member.Status.WorkspaceName
+	member.Status.CreateAttemptTime = &metav1.Time{Time: now}
+	applyPoolMemberStep(member, now, coderWait("CreatingWorkspace", "Creating workspace %s.", name))
+	if err := r.writeStatus(ctx, member, before); err != nil {
+		return nil, err
+	}
+	// The marker write can take a while. No request was sent yet, so a
+	// member past its deadline clears the marker and fails without a workspace.
+	if !r.Clock.Now().Before(deadline) {
+		member.Status.CreateAttemptTime = nil
+		return coderWait("CreatingWorkspace", "No create request was sent."), nil
+	}
+	params := make([]codersdk.WorkspaceBuildParameter, 0, len(spec.Parameters))
+	for _, p := range spec.Parameters {
+		params = append(params, codersdk.WorkspaceBuildParameter{Name: p.Name, Value: p.Value})
+	}
+	var presetID uuid.UUID
+	if spec.PresetID != "" {
+		presetID = uuid.MustParse(spec.PresetID) // assertPoolMember checked it.
+	}
+	// Only TemplateVersionID, never TemplateID, so Coder checks the archived flag.
+	workspace, err := sdk.CreateUserWorkspace(ctx, spec.OwnerID, codersdk.CreateWorkspaceRequest{
+		TemplateVersionID:       uuid.MustParse(spec.TemplateVersionID),
+		TemplateVersionPresetID: presetID,
+		Name:                    name,
+		RichParameterValues:     params,
+		AutomaticUpdates:        codersdk.AutomaticUpdatesNever,
+	})
+	status := coderStatus(err)
+	switch {
+	case err == nil:
+		if workspace.ID == uuid.Nil || workspace.LatestBuild.ID == uuid.Nil {
+			return nil, &coderAnswerError{msg: "assertion failed: Coder answered start build without a workspace or build ID"}
+		}
+		if err := errors.Join(
+			coderAnswerFor("workspace", name, workspace.Name),
+			coderAnswerFor("start build workspace", workspace.ID.String(), workspace.LatestBuild.WorkspaceID.String()),
+			coderAnswerFor("start build transition", string(codersdk.WorkspaceTransitionStart), string(workspace.LatestBuild.Transition)),
+			coderAnswerFor("workspace owner", spec.OwnerID, workspace.OwnerID.String()),
+			coderAnswerFor("start build version", spec.TemplateVersionID, workspace.LatestBuild.TemplateVersionID.String()),
+		); err != nil {
+			return nil, err // The marker stays: only reads decide now.
+		}
+		member.Status.WorkspaceID, member.Status.StartBuildID = workspace.ID.String(), workspace.LatestBuild.ID.String()
+		return coderWait("WaitingForBuild", "Workspace %s was created.", workspace.Name), nil
+	case createHadNoEffect(err):
+		member.Status.CreateAttemptTime = nil
+		if status == http.StatusNotAcceptable {
+			return coderWait("TemplateVersionImporting", "Version %s is still importing.", spec.TemplateVersionID), nil
+		}
+		step := coderWait("CreateRetrying", "The create request had no effect: %s", coderErrorSummary(err))
+		step.rateLimited = status == http.StatusTooManyRequests
+		return step, nil
+	case status == http.StatusConflict:
+		// The marker came right before this request, so someone else holds
+		// the name. The controller never adopts that workspace.
+		member.Status.CreateAttemptTime = nil
+		return coderFail("WorkspaceNameConflict", "Workspace %s already exists: %s", name, coderErrorSummary(err)), nil
+	case status >= 400 && status < 500:
+		member.Status.CreateAttemptTime = nil
+		return coderFail("CreateRejected", "Coder rejected the create request: %s", coderErrorSummary(err)), nil
+	default:
+		return coderWait("ConfirmingCreate", "The create result is uncertain (%s). The controller reads Coder instead of sending it again.", coderErrorSummary(err)), nil
+	}
 }
 
 // memberWaitOnWrongAnswer turns a wrong Coder answer into a wait, as
