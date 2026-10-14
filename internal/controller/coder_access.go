@@ -11,6 +11,7 @@ import (
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -68,6 +69,9 @@ type coderStep struct {
 	reason      string
 	message     string
 	rateLimited bool // Coder answered 429: retry with backoff.
+	// deleted overrides the WorkspaceDeleted condition of a failure, for
+	// controllers that report one.
+	deleted *metav1.Condition
 }
 
 func coderWait(reason, format string, args ...any) *coderStep {

@@ -74,8 +74,11 @@ func (r *CoderWorkspacePoolMemberReconciler) Reconcile(ctx context.Context, req 
 		}
 		return ctrl.Result{}, r.releaseFinalizer(ctx, member)
 	}
-	if member.Status.Phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed {
+	switch member.Status.Phase {
+	case coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed:
 		return ctrl.Result{}, nil // Final: the pool deletes failed members.
+	case coderv1alpha1.CoderWorkspacePoolMemberPhaseReady:
+		return ctrl.Result{}, nil // The watch rules (plan 6.2 step 10) come later.
 	}
 	if !controllerutil.ContainsFinalizer(member, coderv1alpha1.CoderWorkspacePoolMemberCleanupFinalizer) {
 		// No Coder call happens before the finalizer is stored.
@@ -94,10 +97,16 @@ func (r *CoderWorkspacePoolMemberReconciler) Reconcile(ctx context.Context, req 
 	case !now.Before(deadline):
 		step = poolMemberDeadlineExceeded(member, member.Status.Reason, member.Status.Message)
 	case poolMemberMayHaveWorkspace(member):
-		// A create request may exist: never send it again. Confirming an
-		// uncertain result and the readiness rules come later (plan 6.2
-		// steps 7 and 8).
-		step = coderWait(cmp.Or(member.Status.Reason, "ConfirmingCreate"), "%s", member.Status.Message)
+		// A create request may exist: read Coder, never send it again.
+		step, err = r.readWorkspace(ctx, member, workspaceName, now)
+		if step, err = memberWaitOnWrongAnswer(ctx, step, err); err != nil {
+			return ctrl.Result{}, err
+		}
+		// Coder calls can take up to their timeout, so check the deadline
+		// again. A workspace that became ready in time stays ready.
+		if now = r.Clock.Now(); !step.failed && member.Status.ReadyTime == nil && !now.Before(deadline) {
+			step = poolMemberDeadlineExceeded(member, step.reason, step.message)
+		}
 	default:
 		var sdk *codersdk.Client
 		sdk, step, err = r.checkCreate(ctx, member, workspaceName)
@@ -121,7 +130,7 @@ func (r *CoderWorkspacePoolMemberReconciler) Reconcile(ctx context.Context, req 
 	if err := r.writeStatus(ctx, member, before); err != nil {
 		return ctrl.Result{}, err
 	}
-	if step.failed {
+	if step.failed || member.Status.Phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseReady {
 		return ctrl.Result{}, nil
 	}
 	keepBackoff = step.rateLimited
@@ -303,7 +312,13 @@ func workspacePoolConsent(controlPlane *coderv1alpha1.CoderControlPlane, ownerID
 	if controlPlane.Spec.WorkspacePools != nil {
 		owners = controlPlane.Spec.WorkspacePools.Owners
 	}
-	i := slices.IndexFunc(owners, func(o coderv1alpha1.WorkspacePoolOwner) bool { return o.UserID == ownerID })
+	// Both CRDs require lower-case UUIDs. Comparing parsed UUIDs keeps the
+	// match right even if one of the patterns changes.
+	want, err := uuid.Parse(ownerID)
+	i := slices.IndexFunc(owners, func(o coderv1alpha1.WorkspacePoolOwner) bool {
+		got, gotErr := uuid.Parse(o.UserID)
+		return err == nil && gotErr == nil && got == want
+	})
 	if i < 0 {
 		return coderWait("OwnerNotAllowed", "CoderControlPlane %s does not list Coder user %s in spec.workspacePools.owners.", controlPlane.Name, ownerID)
 	}
@@ -423,21 +438,26 @@ func poolMemberMayHaveWorkspace(member *coderv1alpha1.CoderWorkspacePoolMember) 
 
 func applyPoolMemberStep(member *coderv1alpha1.CoderWorkspacePoolMember, now time.Time, step *coderStep) {
 	member.Status.Reason, member.Status.Message = step.reason, step.message
-	setPoolMemberCondition(member, now, coderv1alpha1.CoderWorkspacePoolMemberConditionReady, metav1.ConditionFalse, step.reason, step.message)
+	ready := metav1.ConditionFalse
 	switch {
+	case !step.failed && member.Status.ReadyTime != nil:
+		member.Status.Phase, ready = coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, metav1.ConditionTrue
 	case !step.failed && poolMemberMayHaveWorkspace(member):
 		member.Status.Phase = coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating
 	case !step.failed:
 		member.Status.Phase = coderv1alpha1.CoderWorkspacePoolMemberPhasePending
-	case poolMemberMayHaveWorkspace(member):
-		member.Status.Phase = coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed
-		setPoolMemberCondition(member, now, coderv1alpha1.CoderWorkspacePoolMemberConditionWorkspaceDeleted, metav1.ConditionFalse,
-			"CleanupPending", "The workspace can exist. The controller deletes it.")
 	default:
 		member.Status.Phase = coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed
-		setPoolMemberCondition(member, now, coderv1alpha1.CoderWorkspacePoolMemberConditionWorkspaceDeleted, metav1.ConditionTrue,
-			"NotCreated", "The controller never sent a workspace create request, or Coder refused it.")
+		deleted := metav1.Condition{Status: metav1.ConditionTrue, Reason: "NotCreated", Message: "The controller never sent a workspace create request, or Coder refused it."}
+		switch {
+		case step.deleted != nil:
+			deleted = *step.deleted
+		case poolMemberMayHaveWorkspace(member):
+			deleted = metav1.Condition{Status: metav1.ConditionFalse, Reason: "CleanupPending", Message: "The workspace can exist. The controller deletes it."}
+		}
+		setPoolMemberCondition(member, now, coderv1alpha1.CoderWorkspacePoolMemberConditionWorkspaceDeleted, deleted.Status, deleted.Reason, deleted.Message)
 	}
+	setPoolMemberCondition(member, now, coderv1alpha1.CoderWorkspacePoolMemberConditionReady, ready, step.reason, step.message)
 }
 
 func setPoolMemberCondition(member *coderv1alpha1.CoderWorkspacePoolMember, now time.Time, conditionType string, status metav1.ConditionStatus, reason, message string) {
