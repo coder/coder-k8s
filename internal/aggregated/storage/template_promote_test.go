@@ -53,17 +53,38 @@ func newPromoteFixture(t *testing.T) promoteFixture {
 
 // holdPatchTransport makes a PATCH time out only after the fake Coder received it. The PATCH
 // budget starts before the request is sent, so under CPU load it can end before the PATCH
-// reaches the fake, and the fake then records no PATCH (#288). This transport sends the PATCH
-// without the budget, waits until the fake closes arrived, then waits for the PATCH's own
-// deadline (at most 2s) and abandons the request with that deadline's error.
+// reaches the fake, and the fake then records no PATCH (#288). This transport first checks that
+// the PATCH has a deadline at most budget away, then sends it without that deadline, waits until
+// the fake closes arrived, waits for the PATCH's own deadline, and abandons the request with that
+// deadline's error. The check reads only the deadline that the storage set, never the wall clock
+// of this test, so CPU load cannot fail it (#354): time only shortens the remaining budget.
+// The storage takes any PATCH error as an uncertain result, so the transport also sends each
+// failed check to problems, which the test reads.
 type holdPatchTransport struct {
-	base    http.RoundTripper
-	arrived <-chan struct{}
+	base     http.RoundTripper
+	arrived  <-chan struct{}
+	budget   time.Duration
+	problems chan<- error // Buffered: a full channel already holds a failure.
+}
+
+func (h holdPatchTransport) fail(err error) (*http.Response, error) {
+	select {
+	case h.problems <- err:
+	default:
+	}
+	return nil, err
 }
 
 func (h holdPatchTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.Method != http.MethodPatch {
 		return h.base.RoundTrip(req)
+	}
+	if h.budget <= 0 {
+		return h.fail(errors.New("assertion failed: holdPatchTransport needs the PATCH budget"))
+	}
+	// A slow activation is cut at the PATCH budget, so the re-read still fits the request deadline.
+	if deadline, ok := req.Context().Deadline(); !ok || time.Until(deadline) > h.budget {
+		return h.fail(fmt.Errorf("assertion failed: the PATCH deadline (set: %t) is not within the PATCH budget %s", ok, h.budget))
 	}
 	sendCtx, cancelSend := context.WithCancel(context.WithoutCancel(req.Context()))
 	defer cancelSend()
@@ -79,20 +100,40 @@ func (h holdPatchTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	select {
 	case <-h.arrived:
 	case err := <-sent:
-		return nil, fmt.Errorf("assertion failed: the PATCH ended before it reached the fake Coder: %w", err)
+		return h.fail(fmt.Errorf("assertion failed: the PATCH ended before it reached the fake Coder: %w", err))
+	}
+	<-req.Context().Done() // The deadline checked above ends it.
+	cancelSend()
+	if err := <-sent; err != nil && !errors.Is(err, context.Canceled) {
+		return h.fail(err)
+	}
+	return nil, req.Context().Err()
+}
+
+// rereadDeadlineTransport stands in for a confirming re-read that is still running at its
+// deadline. It records the deadline of the re-read (GET /api/v2/templates/{id}) and fails the
+// re-read at once with that deadline's error, so the test checks the storage's deadline math
+// without waiting for it (#354).
+type rereadDeadlineTransport struct {
+	base       http.RoundTripper
+	templateID uuid.UUID
+	deadline   chan<- time.Time
+}
+
+func (r rereadDeadlineTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method != http.MethodGet || req.URL.Path != "/api/v2/templates/"+r.templateID.String() {
+		return r.base.RoundTrip(req)
+	}
+	deadline, ok := req.Context().Deadline()
+	if !ok {
+		return nil, errors.New("assertion failed: the confirming re-read has no deadline")
 	}
 	select {
-	case <-req.Context().Done():
-	case <-time.After(2 * time.Second):
-		// Without a PATCH budget the PATCH would hang for the whole request. The test's elapsed
-		// check reports that, so end it here instead of hanging the test.
+	case r.deadline <- deadline:
+	default:
+		return nil, errors.New("assertion failed: a second confirming re-read")
 	}
-	cancelSend()
-	<-sent
-	if err := req.Context().Err(); err != nil {
-		return nil, err
-	}
-	return nil, errors.New("assertion failed: the PATCH had no deadline within 2s")
+	return nil, context.DeadlineExceeded
 }
 
 func mustParseURL(t *testing.T, raw string) *url.URL {
@@ -382,10 +423,11 @@ func TestTemplatePromoteConfirmation(t *testing.T) {
 				f.storage.patchBudget = tc.patchBudget
 			}
 			fault := tc.fault
+			problems := make(chan error, 1)
 			if tc.patchBudget > 0 {
 				// The PATCH hangs until the client gives up at the PATCH budget.
 				fault.hang = make(chan struct{})
-				f.client.HTTPClient.Transport = holdPatchTransport{base: f.client.HTTPClient.Transport, arrived: fault.hang}
+				f.client.HTTPClient.Transport = holdPatchTransport{base: f.client.HTTPClient.Transport, arrived: fault.hang, budget: tc.patchBudget, problems: problems}
 			}
 			switch tc.activateAfter {
 			case third:
@@ -397,11 +439,11 @@ func TestTemplatePromoteConfirmation(t *testing.T) {
 			f.state.promoteFault = &fault
 			f.state.mu.Unlock()
 
-			start := time.Now()
 			got, err := f.promote(t, f.v2.String(), false)
-			// A slow activation is cut at the PATCH budget, so the re-read still fits the request deadline.
-			if elapsed := time.Since(start); tc.patchBudget > 0 && elapsed > time.Second {
-				t.Fatalf("promotion waited %s for a slow activation; the PATCH budget is %s", elapsed, tc.patchBudget)
+			select {
+			case problem := <-problems:
+				t.Fatal(problem) // For example a slow activation that the PATCH budget did not cut.
+			default:
 			}
 			if tc.promoted {
 				if err != nil {
@@ -477,11 +519,14 @@ func TestTemplatePromoteDeadline(t *testing.T) {
 	t.Run("slow re-read ends before the deadline", func(t *testing.T) {
 		t.Parallel()
 		f := newPromoteFixture(t)
-		f.storage.patchBudget, f.storage.rereadReserve = 100*time.Millisecond, time.Second
+		rereadDeadline := make(chan time.Time, 1)
+		f.client.HTTPClient.Transport = rereadDeadlineTransport{base: f.client.HTTPClient.Transport, templateID: f.templateID, deadline: rereadDeadline}
 		f.state.mu.Lock()
-		f.state.promoteFault = &promoteFault{apply: true, status: http.StatusOK, rereadDelay: 3 * time.Second}
+		f.state.promoteFault = &promoteFault{apply: true, status: http.StatusOK}
 		f.state.mu.Unlock()
-		ctx, cancel := context.WithTimeout(namespacedContext("control-plane"), 1500*time.Millisecond)
+		// The default budgets with 5s to spare, so no step of this test waits on the CPU load. The
+		// client's own 30s request timeout ends later, so the storage sets the re-read deadline.
+		ctx, cancel := context.WithTimeout(namespacedContext("control-plane"), TemplatePromotePatchBudget+TemplatePromoteRereadReserve+5*time.Second)
 		defer cancel()
 		deadline, _ := ctx.Deadline()
 		request := &aggregationv1alpha1.CoderTemplateVersionPromotion{Spec: aggregationv1alpha1.CoderTemplateVersionPromotionSpec{VersionID: f.v2.String()}}
@@ -489,8 +534,15 @@ func TestTemplatePromoteDeadline(t *testing.T) {
 		if !apierrors.IsServiceUnavailable(err) || !strings.Contains(err.Error(), "could not confirm") {
 			t.Fatalf("expected 503 could-not-confirm, got %v", err)
 		}
-		if !time.Now().Before(deadline) {
-			t.Fatal("the storage answered after the request deadline, so the API server would have answered 504 first")
+		// The re-read ends a fifth of the reserve before the request deadline, so the storage answers
+		// before the API server's own 504.
+		select {
+		case got := <-rereadDeadline:
+			if want := deadline.Add(-TemplatePromoteRereadReserve / 5); !got.Equal(want) {
+				t.Fatalf("the confirming re-read ends at %s, want %s (a fifth of the reserve before the request deadline %s)", got, want, deadline)
+			}
+		default:
+			t.Fatal("the storage sent no confirming re-read")
 		}
 		if mutations := f.state.mutations(); len(mutations) != 1 {
 			t.Fatalf("expected exactly one PATCH, got %v", mutations)
