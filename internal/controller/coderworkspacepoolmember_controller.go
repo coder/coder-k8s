@@ -314,10 +314,24 @@ func workspacePoolParametersHash(params []codersdk.WorkspaceBuildParameter) stri
 // spec.workspacePools: the owner is listed, with the template. A refusal is
 // a wait, because the admin can still add them.
 func workspacePoolConsent(controlPlane *coderv1alpha1.CoderControlPlane, ownerID, template string) *coderStep {
-	var owners []coderv1alpha1.WorkspacePoolOwner
-	if controlPlane.Spec.WorkspacePools != nil {
-		owners = controlPlane.Spec.WorkspacePools.Owners
+	owner := workspacePoolOwner(controlPlane, ownerID)
+	if owner == nil {
+		return coderWait("OwnerNotAllowed", "CoderControlPlane %s does not list Coder user %s in spec.workspacePools.owners.", controlPlane.Name, ownerID)
 	}
+	// Coder matches organization and template names without case.
+	if !slices.ContainsFunc(owner.Templates, func(t string) bool { return strings.EqualFold(t, template) }) {
+		return coderWait("TemplateNotAllowed", "CoderControlPlane %s does not allow template %q for Coder user %s.", controlPlane.Name, template, ownerID)
+	}
+	return nil
+}
+
+// workspacePoolOwner returns the control plane's spec.workspacePools entry
+// for ownerID, or nil.
+func workspacePoolOwner(controlPlane *coderv1alpha1.CoderControlPlane, ownerID string) *coderv1alpha1.WorkspacePoolOwner {
+	if controlPlane.Spec.WorkspacePools == nil {
+		return nil
+	}
+	owners := controlPlane.Spec.WorkspacePools.Owners
 	// Both CRDs require lower-case UUIDs. Comparing parsed UUIDs keeps the
 	// match right even if one of the patterns changes.
 	want, err := uuid.Parse(ownerID)
@@ -326,13 +340,9 @@ func workspacePoolConsent(controlPlane *coderv1alpha1.CoderControlPlane, ownerID
 		return err == nil && gotErr == nil && got == want
 	})
 	if i < 0 {
-		return coderWait("OwnerNotAllowed", "CoderControlPlane %s does not list Coder user %s in spec.workspacePools.owners.", controlPlane.Name, ownerID)
+		return nil
 	}
-	// Coder matches organization and template names without case.
-	if !slices.ContainsFunc(owners[i].Templates, func(t string) bool { return strings.EqualFold(t, template) }) {
-		return coderWait("TemplateNotAllowed", "CoderControlPlane %s does not allow template %q for Coder user %s.", controlPlane.Name, template, ownerID)
-	}
-	return nil
+	return &owners[i]
 }
 
 // createWorkspace writes the create marker, then sends the only create
