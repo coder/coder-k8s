@@ -9,8 +9,10 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/controller"
 )
 
 // readyMember runs a member up to a ready workspace. The start build
@@ -47,10 +49,15 @@ func TestPoolMemberKeepsUnclaimedWorkspaceWarm(t *testing.T) {
 	requireReady(t, e.reconcileMember(t, key, 1), "")
 	require.Equal(t, time.Minute, e.lastStep.RequeueAfter)
 	require.Zero(t, e.fake.requestCount(routeExtendWorkspace), "a deadline an hour away needs nothing")
+	// A failed read shows in status, and the next good read clears it.
+	e.fake.failNext(routeWorkspace, fakeFault{Status: 503})
+	member := e.reconcileMember(t, key, 1)
+	requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "CoderUnavailable", "Coder answered 503")
+	requireMember(t, e.reconcileMember(t, key, 1), coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "WorkspaceReady", "is ready")
 
 	// 14 minutes before the deadline, the controller moves it to now + TTL.
 	e.clock.SetTime(started.Add(46 * time.Minute))
-	member := e.reconcileMember(t, key, 1)
+	member = e.reconcileMember(t, key, 1)
 	requireReady(t, member, "extended the deadline")
 	require.Equal(t, 1, e.fake.requestCount(routeExtendWorkspace))
 	require.True(t, member.Status.LastExtendTime.Time.Equal(e.clock.Now()))
@@ -90,30 +97,65 @@ func TestPoolMemberExtendsOnceAtBind(t *testing.T) {
 		member.Spec.ClaimRef = &coderv1alpha1.CoderWorkspaceClaimReference{Name: "build-1", UID: uuid.NewString()}
 		require.NoError(t, k8sClient.Update(e.ctx, member))
 	}
+	started := e.clock.Now()
 	e.fake.setTemplateSchedule(e.tplID, time.Hour, 0)
 	key, workspaceID := e.readyMember(t)
-	e.clock.SetTime(e.clock.Now().Add(10 * time.Minute)) // 50 minutes left.
+	e.clock.SetTime(started.Add(10 * time.Minute)) // 50 minutes left.
 	bind(t, key)
+	// A 409 (the workspace changed after the read) is read again, not the end.
+	e.fake.failNext(routeExtendWorkspace, fakeFault{Status: 409})
 	member := e.reconcileMember(t, key, 1)
+	requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "Bound", "could not extend")
+	require.False(t, member.Status.BindExtended)
+	require.Equal(t, time.Minute, e.lastStep.RequeueAfter)
+	member = e.reconcileMember(t, key, 1)
 	requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "Bound", "bound to claim build-1")
 	require.True(t, member.Status.BindExtended)
-	require.Equal(t, 1, e.fake.requestCount(routeExtendWorkspace), "the bind extends even with 50 minutes left")
-	require.Equal(t, e.clock.Now().Add(time.Hour).UTC(), e.deadline(t, workspaceID).Time.UTC())
+	require.Equal(t, 2, e.fake.requestCount(routeExtendWorkspace), "the bind extends even with 50 minutes left")
+	require.True(t, e.deadline(t, workspaceID).Time.Equal(e.clock.Now().Add(time.Hour)))
 	require.Zero(t, e.lastStep.RequeueAfter)
 
 	e.clock.SetTime(e.clock.Now().Add(55 * time.Minute)) // 5 minutes left.
 	requireMember(t, e.reconcileMember(t, key, 2), coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "Bound", "")
-	require.Equal(t, 1, e.fake.requestCount(routeExtendWorkspace), "never a second extension after bind")
+	require.Equal(t, 2, e.fake.requestCount(routeExtendWorkspace), "never a second extension after bind")
+
+	// A deadline later than now + TTL (the TTL shrank) is never moved earlier.
+	e.clock.SetTime(started)
+	e.fake.setTemplateSchedule(e.tplID, 2*time.Hour, 0)
+	key, workspaceID = e.readyMember(t)
+	before := e.deadline(t, workspaceID)
+	e.fake.setTemplateSchedule(e.tplID, 30*time.Minute, 0)
+	bind(t, key)
+	member = e.reconcileMember(t, key, 1)
+	requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "Bound", "needs no extension")
+	require.True(t, member.Status.BindExtended)
+	require.Equal(t, before, e.deadline(t, workspaceID))
+	require.Equal(t, 2, e.fake.requestCount(routeExtendWorkspace))
+
+	// The new deadline counts from a clock reading right before the request,
+	// not from the start of a slow reconcile.
+	e.clock.SetTime(started)
+	e.fake.setTemplateSchedule(e.tplID, 10*time.Minute, 0)
+	key, workspaceID = e.readyMember(t)
+	bind(t, key)
+	late := started.Add(90 * time.Second)
+	e.clock.SetTime(late) // The fake checks the 29-minute rule against this time.
+	r := &controller.CoderWorkspacePoolMemberReconciler{Client: k8sClient, Scheme: scheme, Clock: &lateClock{times: []time.Time{started, late}}}
+	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+	requireMember(t, e.reconcileMember(t, key, 0), coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "Bound", "bound to claim build-1")
+	require.True(t, e.deadline(t, workspaceID).Time.Equal(late.Add(30*time.Minute)))
 
 	// Without a deadline, the bind needs no extension.
 	e.fake.setTemplateSchedule(e.tplID, 0, 0)
 	e.clock.SetTime(time.Now().Truncate(time.Second))
 	key, _ = e.readyMember(t)
 	bind(t, key)
+	extends := e.fake.requestCount(routeExtendWorkspace)
 	member = e.reconcileMember(t, key, 1)
 	requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "Bound", "no autostop deadline")
 	require.True(t, member.Status.BindExtended)
-	require.Equal(t, 1, e.fake.requestCount(routeExtendWorkspace))
+	require.Equal(t, extends, e.fake.requestCount(routeExtendWorkspace))
 }
 
 // TestPoolMemberGuardsEveryExtension: the read right before an extension

@@ -35,7 +35,7 @@ func (r *CoderWorkspacePoolMemberReconciler) readWorkspace(
 	case member.Status.ReadyTime == nil:
 		return checkPoolMemberReadiness(ctx, sdk, member, now)
 	default:
-		return keepPoolMemberWarm(ctx, sdk, member, now)
+		return keepPoolMemberWarm(ctx, sdk, member, r.Clock, now)
 	}
 }
 

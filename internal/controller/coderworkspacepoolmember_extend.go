@@ -8,6 +8,7 @@ import (
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/clock"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 )
@@ -29,12 +30,16 @@ const (
 // bind, so the claimant has a full TTL, and then never another. Each
 // extension follows a fresh read that proves the workspace is this member's.
 func keepPoolMemberWarm(
-	ctx context.Context, sdk *codersdk.Client, member *coderv1alpha1.CoderWorkspacePoolMember, now time.Time,
+	ctx context.Context, sdk *codersdk.Client, member *coderv1alpha1.CoderWorkspacePoolMember, clock clock.PassiveClock, now time.Time,
 ) (*coderStep, error) {
 	name, bound := member.Status.WorkspaceName, member.Spec.ClaimRef != nil
 	if bound && member.Status.BindExtended {
 		// The one extension at bind is done: Coder's own autostop applies.
 		return coderWait(member.Status.Reason, "%s", member.Status.Message), nil
+	}
+	reason := "WorkspaceReady" // A successful read replaces an earlier wait.
+	if bound {
+		reason = "Bound"
 	}
 	workspace, step, err := readOwnPoolMemberWorkspace(ctx, sdk, member)
 	if step != nil || err != nil {
@@ -44,11 +49,11 @@ func keepPoolMemberWarm(
 	switch {
 	case (!deadline.Valid || deadline.Time.IsZero()) && bound:
 		member.Status.BindExtended = true
-		return coderWait("Bound", "Workspace %s has no autostop deadline, so the bind needs no extension.", name), nil
+		return coderWait(reason, "Workspace %s has no autostop deadline, so the bind needs no extension.", name), nil
 	case !deadline.Valid || deadline.Time.IsZero():
-		return coderWait("WorkspaceReady", "Workspace %s is ready and has no autostop deadline.", name), nil
+		return coderWait(reason, "Workspace %s is ready and has no autostop deadline.", name), nil
 	case !bound && deadline.Time.Sub(now) >= poolMemberExtendBefore:
-		return coderWait(member.Status.Reason, "%s", member.Status.Message), nil
+		return coderWait(reason, "Every agent of workspace %s is ready.", name), nil
 	}
 
 	template, err := sdk.Template(ctx, uuid.MustParse(member.Spec.TemplateID))
@@ -58,23 +63,36 @@ func keepPoolMemberWarm(
 	if err := coderAnswerFor("template", member.Spec.TemplateID, template.ID.String()); err != nil {
 		return nil, err
 	}
+	// The reads can take a while, so the new deadline counts from a fresh
+	// clock reading. Coder refuses one less than about 30 minutes ahead.
+	now = clock.Now()
 	extendTo := now.Add(max(time.Duration(template.DefaultTTLMillis)*time.Millisecond, poolMemberMinExtension))
+	if bound && !deadline.Time.Before(extendTo) {
+		// The workspace already has a full TTL: an extension would shorten it.
+		member.Status.BindExtended = true
+		return coderWait(reason, "Workspace %s is bound to claim %s. Its deadline %s needs no extension.",
+			name, member.Spec.ClaimRef.Name, deadline.Time.UTC().Format(time.RFC3339)), nil
+	}
 	err = sdk.PutExtendWorkspace(ctx, workspace.ID, codersdk.PutExtendWorkspaceRequest{Deadline: extendTo})
 	switch status := coderStatus(err); {
 	case err == nil:
-	case status == http.StatusBadRequest || status == http.StatusConflict:
+	case status == http.StatusConflict:
+		// The workspace changed after the read, for example a new build.
+		// Read again at the next poll.
+		return coderWait(reason, "Coder could not extend workspace %s now: %s", name, coderErrorSummary(err)), nil
+	case status == http.StatusBadRequest:
 		// For example the template's max deadline. The deadline stays, and
 		// a bound member does not try again.
 		member.Status.BindExtended = bound
-		return coderWait(member.Status.Reason, "Coder refused to extend workspace %s: %s", name, coderErrorSummary(err)), nil
+		return coderWait(reason, "Coder refused to extend workspace %s: %s", name, coderErrorSummary(err)), nil
 	default:
 		return coderStepUnavailable("extend workspace", err), nil
 	}
 	deadlineText := extendTo.UTC().Format(time.RFC3339)
 	if bound {
 		member.Status.BindExtended = true
-		return coderWait("Bound", "Workspace %s is bound to claim %s. Its deadline is now %s.", name, member.Spec.ClaimRef.Name, deadlineText), nil
+		return coderWait(reason, "Workspace %s is bound to claim %s. Its deadline is now %s.", name, member.Spec.ClaimRef.Name, deadlineText), nil
 	}
 	member.Status.LastExtendTime = &metav1.Time{Time: now}
-	return coderWait("WorkspaceReady", "The controller extended the deadline of workspace %s to %s.", name, deadlineText), nil
+	return coderWait(reason, "The controller extended the deadline of workspace %s to %s.", name, deadlineText), nil
 }
