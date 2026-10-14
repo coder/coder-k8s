@@ -61,7 +61,7 @@ func (r *CoderAIProviderReconciler) deleteStep(ctx context.Context, provider *co
 	if provider.Status.ProviderID == "" && provider.Status.CreateAttemptTime == nil {
 		// Nothing of this object can exist in Coder: earlier Coder answers
 		// cleared the create marker, so the record goes too.
-		return true, nil, deleteCleanupRecord(ctx, r.Client, r.OperatorNamespace, provider.UID)
+		return true, nil, deleteCleanupRecord(ctx, r.Client, r.APIReader, r.OperatorNamespace, provider.UID)
 	}
 	ref := types.NamespacedName{Namespace: provider.Namespace, Name: provider.Spec.ControlPlaneRef.Name}
 	controlPlane := &coderv1alpha1.CoderControlPlane{}
@@ -113,7 +113,7 @@ func (r *CoderAIProviderReconciler) deleteStep(ctx context.Context, provider *co
 		// Coder confirmed that it holds no provider of this object. Only
 		// then does the record go (#353 invariant 7). A failed record
 		// delete retries, and the retry gets Coder's 404 for the provider.
-		return true, nil, deleteCleanupRecord(ctx, r.Client, r.OperatorNamespace, provider.UID)
+		return true, nil, deleteCleanupRecord(ctx, r.Client, r.APIReader, r.OperatorNamespace, provider.UID)
 	}
 	if err != nil && deleting {
 		// The attempt ended with an impossible answer. Log it, and still
@@ -134,9 +134,25 @@ func (r *CoderAIProviderReconciler) deleteStep(ctx context.Context, provider *co
 // only the nonce and the type prove that the provider is this object's.
 func (r *CoderAIProviderReconciler) deleteInCoder(ctx context.Context, sdk *codersdk.Client, provider *coderv1alpha1.CoderAIProvider) (*aiProviderStep, error) {
 	id := provider.Status.ProviderID
-	if id != "" {
-		if err := checkAIProviderID(provider); err != nil {
+	if id == "" {
+		// A failed status write after the create can leave the provider ID
+		// only in the record. It proves ownership after the nonce is gone.
+		record, _, err := readCleanupRecord(ctx, r.APIReader, r.OperatorNamespace, provider.UID)
+		if err != nil {
 			return nil, err
+		}
+		if record != nil && record.CoderID != "" {
+			id = record.CoderID
+			if parsed, err := uuid.Parse(id); err != nil || parsed == uuid.Nil || parsed.String() != id {
+				return nil, fmt.Errorf("assertion failed: the cleanup record of AI provider %s/%s has coderID %q, which is not a canonical UUID", provider.Namespace, provider.Name, id)
+			}
+		}
+	}
+	if id != "" {
+		if provider.Status.ProviderID != "" {
+			if err := checkAIProviderID(provider); err != nil {
+				return nil, err
+			}
 		}
 	} else {
 		found, err := sdk.AIProvider(ctx, provider.Name)

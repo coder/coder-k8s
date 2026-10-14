@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/coder/coder/v2/codersdk"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/credentialsecret"
@@ -61,6 +62,11 @@ func (r *CoderAIProviderReconciler) disableWithoutConsent(
 	}
 	if step := checkAIProviderAnswer(ctx, provider, found); step != nil {
 		return step, nil
+	}
+	// A provider from before cleanup records gets its record here too. A
+	// failed record never delays the disable: the next reconcile retries it.
+	if step, err := r.ensureAIProviderRecord(ctx, sdk, provider); err != nil || step != nil {
+		log.FromContext(ctx).Info("Cannot write the cleanup record of a provider with a failing key Secret", "error", err, "step", step)
 	}
 	if !found.Enabled {
 		return stalled("Provider %s is disabled in Coder.", provider.Name), nil
