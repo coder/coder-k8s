@@ -278,6 +278,18 @@ func TestControlPlaneLiveDependentWait(t *testing.T) {
 		}
 	}
 	t.Cleanup(removeFinalizer)
+	// A deleted key whose cleanup finalizer is gone, held only by another
+	// finalizer, does not hold the control plane.
+	foreign := env.createNamedKey(ctx, t, "foreign", "coder", "foreign-secret")
+	foreign.Finalizers = []string{"example.com/keep"}
+	require.NoError(t, k8sClient.Update(ctx, foreign))
+	t.Cleanup(func() {
+		if k8sClient.Get(context.Background(), client.ObjectKeyFromObject(foreign), foreign) == nil {
+			foreign.Finalizers = nil
+			_ = k8sClient.Update(context.Background(), foreign)
+		}
+	})
+	require.NoError(t, k8sClient.Delete(ctx, foreign))
 	deleteFinalizedControlPlane(ctx, t, env.namespace, "coder")
 	ref := client.ObjectKey{Namespace: env.namespace, Name: "coder"}
 	controlPlane := &coderv1alpha1.CoderControlPlane{}
@@ -295,7 +307,7 @@ func TestControlPlaneLiveDependentWait(t *testing.T) {
 	ccpClock.SetTime(controlPlane.DeletionTimestamp.Add(31 * time.Second))
 	require.False(t, gone(), "a key that is being deleted still holds it")
 	removeFinalizer()
-	require.True(t, gone(), "after 30 s a live key does not hold it")
+	require.True(t, gone(), "after 30 s a live key, or a deleted key without its cleanup finalizer, does not hold it")
 }
 
 // #353: a release that a failed finalizer patch left recorded does not count

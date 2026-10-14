@@ -37,6 +37,10 @@ const controlPlaneDependentHold = 10 * time.Minute
 // bounded pass per dependent of the larger kind.
 const controlPlaneDependentGrace = 30 * time.Second
 
+// controlPlaneDependentGraceMax caps the grace period, so dependents that
+// someone keeps creating cannot keep the control plane forever.
+const controlPlaneDependentGraceMax = 5 * time.Minute
+
 // controlPlaneLiveDependentWait is how long a deleted control plane waits for
 // a dependent that is not being deleted itself. It covers one command that
 // deletes the control plane before its dependents (kubectl delete -f). After
@@ -89,7 +93,7 @@ func controlPlaneHoldEnd(controlPlane *coderv1alpha1.CoderControlPlane) time.Tim
 // controlPlaneDependentGraceFor is the grace period after the hold when
 // perKind dependents of one kind remain (controlPlaneDependentGrace).
 func controlPlaneDependentGraceFor(perKind int) time.Duration {
-	return controlPlaneDependentGrace + time.Duration(perKind)*max(aiGatewayKeyBoundedDeleteTimeout, aiProviderBoundedDeleteTimeout)
+	return min(controlPlaneDependentGrace+time.Duration(perKind)*max(aiGatewayKeyBoundedDeleteTimeout, aiProviderBoundedDeleteTimeout), controlPlaneDependentGraceMax)
 }
 
 // controlPlaneHoldRequeue caps a dependent's requeue under the hold, so it
@@ -125,21 +129,27 @@ func controlPlaneHolds(ctx context.Context, reader client.Reader, controlPlane *
 // controlPlaneDependents returns the CoderAIGatewayKey and CoderAIProvider
 // objects in controlPlane's namespace that reference it and hold it at now,
 // as kind/name, and the larger count of one kind. A dependent holds it while
-// it is being deleted, and a live one only for
-// controlPlaneLiveDependentWait after the control plane deletion.
+// it is being deleted and still has its cleanup finalizer (another finalizer
+// does not hold it), and a live one only for controlPlaneLiveDependentWait
+// after the control plane deletion.
 func controlPlaneDependents(ctx context.Context, reader client.Reader, controlPlane *coderv1alpha1.CoderControlPlane, now time.Time) ([]string, int, error) {
 	if controlPlane.DeletionTimestamp.IsZero() {
 		return nil, 0, errors.New("assertion failed: dependents hold only a control plane that is being deleted")
 	}
 	liveHolds := now.Before(controlPlane.DeletionTimestamp.Add(controlPlaneLiveDependentWait))
-	holds := func(o client.Object) bool { return liveHolds || !o.GetDeletionTimestamp().IsZero() }
+	holds := func(o client.Object, finalizer string) bool {
+		if o.GetDeletionTimestamp().IsZero() {
+			return liveHolds
+		}
+		return controllerutil.ContainsFinalizer(o, finalizer)
+	}
 	var dependents []string
 	keys := &coderv1alpha1.CoderAIGatewayKeyList{}
 	if err := reader.List(ctx, keys, client.InNamespace(controlPlane.Namespace)); err != nil {
 		return nil, 0, fmt.Errorf("list AI Gateway keys of namespace %s: %w", controlPlane.Namespace, err)
 	}
 	for i := range keys.Items {
-		if k := &keys.Items[i]; k.Spec.ControlPlaneRef.Name == controlPlane.Name && holds(k) {
+		if k := &keys.Items[i]; k.Spec.ControlPlaneRef.Name == controlPlane.Name && holds(k, coderv1alpha1.CoderAIGatewayKeyCleanupFinalizer) {
 			dependents = append(dependents, "CoderAIGatewayKey/"+k.Name)
 		}
 	}
@@ -149,7 +159,7 @@ func controlPlaneDependents(ctx context.Context, reader client.Reader, controlPl
 		return nil, 0, fmt.Errorf("list AI providers of namespace %s: %w", controlPlane.Namespace, err)
 	}
 	for i := range providers.Items {
-		if p := &providers.Items[i]; p.Spec.ControlPlaneRef.Name == controlPlane.Name && holds(p) {
+		if p := &providers.Items[i]; p.Spec.ControlPlaneRef.Name == controlPlane.Name && holds(p, coderv1alpha1.CoderAIProviderCleanupFinalizer) {
 			dependents = append(dependents, "CoderAIProvider/"+p.Name)
 		}
 	}
