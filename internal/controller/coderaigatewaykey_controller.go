@@ -243,6 +243,9 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 		return aiGatewayKeyCoderFailure("list AI Gateway keys", err), nil
 	}
 	own := ownAIGatewayKeys(prefix, listed)
+	// A retiring key that Coder no longer lists is gone: deleted by a
+	// retire step whose answer was lost, or by someone else (plan 4.7).
+	dropAIGatewayKeyRetiring(key, func(r coderv1alpha1.CoderAIGatewayKeyRetiring) bool { return !aiGatewayKeyListed(own, r.ID) })
 
 	now := r.Clock.Now()
 	if key.Status.LastCreateAttemptTime == nil && key.Status.NextSerial > 0 {
@@ -277,7 +280,7 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 		return aiGatewayKeyIssueFailed(key, fmt.Sprintf(
 			"The create of key %s did not finish: the operator restarted, or a status write was lost. A committed key is an orphan.", pending.Name)), nil
 	case aiGatewayKeySweep:
-		if stall := aiGatewayKeyIssueBlocked(key); stall != nil && key.Status.CurrentKey == nil {
+		if stall := aiGatewayKeyIssueBlocked(key); stall != nil && !decision.healthy {
 			return r.deleteOnly(ctx, sdk, key, decision, stall, now), nil
 		}
 		return r.sweepOrphan(ctx, sdk, key, decision), nil
@@ -312,11 +315,19 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 			"The spec changed after the kill switch, so the operator issues a new key in place of deleted key %s.", deleted), nil
 	case aiGatewayKeyConflict:
 		return r.deleteOnly(ctx, sdk, key, decision, aiGatewayKeyDriftBlocked(key, now), now), nil
+	case aiGatewayKeyRetire:
+		return r.retireKey(ctx, sdk, key, decision), nil
 	case aiGatewayKeyReady:
 		step := aiGatewayKeyReadyStep(key)
-		if !decision.settleAt.IsZero() {
-			// An orphan waits for the settle window. Come back to sweep it.
-			step.requeue = min(step.requeue, max(decision.settleAt.Sub(now), time.Second))
+		if waiting := decision.retirement; waiting.reason != "" {
+			// A replaced key waits: Ready stays True (plan 3.3).
+			step.inProgress, step.reason, step.message = true, waiting.reason, waiting.message
+		}
+		for _, at := range []time.Time{decision.settleAt, decision.retirement.next} {
+			if !at.IsZero() {
+				// Come back to sweep the orphan or to retire the key.
+				step.requeue = min(step.requeue, max(at.Sub(now), time.Second))
+			}
 		}
 		return step, nil
 	}

@@ -79,6 +79,7 @@ func TestCoderAIGatewayKeyStallsKeepSweeping(t *testing.T) {
 		mutate  func(context.Context, *testing.T, *aiGatewayKeyEnv, *coderv1alpha1.CoderAIGatewayKey, fakeAIGatewayKey)
 		reason  string
 		deletes int
+		gated   bool // The first reconcile sweeps without the stall.
 	}{
 		"not allowed": {reason: "NotAllowed", deletes: 1, mutate: func(ctx context.Context, t *testing.T, env *aiGatewayKeyEnv, _ *coderv1alpha1.CoderAIGatewayKey, _ fakeAIGatewayKey) {
 			cp := &coderv1alpha1.CoderControlPlane{}
@@ -105,7 +106,9 @@ func TestCoderAIGatewayKeyStallsKeepSweeping(t *testing.T) {
 				}
 			}
 		})},
-		"secret write rejected": {reason: "SecretWriteRejected", deletes: 1, mutate: func(ctx context.Context, t *testing.T, env *aiGatewayKeyEnv, key *coderv1alpha1.CoderAIGatewayKey, orphan fakeAIGatewayKey) {
+		// The re-issue waits behind the create gate, so the sweep runs before
+		// the dry run.
+		"secret write rejected": {reason: "SecretWriteRejected", deletes: 1, gated: true, mutate: func(ctx context.Context, t *testing.T, env *aiGatewayKeyEnv, key *coderv1alpha1.CoderAIGatewayKey, orphan fakeAIGatewayKey) {
 			emptySecret(ctx, t, env, key, orphan)
 			base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
 			require.NoError(t, err)
@@ -128,7 +131,11 @@ func TestCoderAIGatewayKeyStallsKeepSweeping(t *testing.T) {
 			creates, deletes := env.fake.requestCount(routeCreateAIGatewayKey), env.fake.requestCount(routeDeleteAIGatewayKey)
 
 			got, _ = env.reconcile(ctx, t, got)
-			requireAIGatewayKeyStep(t, got, true, tc.reason)
+			if tc.gated {
+				requireAIGatewayKeyStep(t, got, false, "DeletingOrphans")
+			} else {
+				requireAIGatewayKeyStep(t, got, true, tc.reason)
+			}
 			require.Equal(t, deletes+tc.deletes, env.fake.requestCount(routeDeleteAIGatewayKey))
 			got, _ = env.reconcile(ctx, t, got)
 			requireAIGatewayKeyStep(t, got, true, tc.reason)
@@ -247,12 +254,20 @@ func TestCoderAIGatewayKeySecretDrift(t *testing.T) {
 	requireHolds(3)
 	require.Len(t, got.Status.RetiringKeys, 3)
 
-	// retiringKeys is full: no create, also after the grace period.
+	// retiringKeys is full: no create. The stall retires key 0, whose grace
+	// period ended (delete-only mode), and the freed slot allows the next
+	// re-issue.
 	env.clock.Step(2 * time.Hour)
 	setOutputSecretData(ctx, t, env.namespace, nil)
 	got, _ = env.reconcile(ctx, t, got)
 	requireAIGatewayKeyStep(t, got, true, "SecretConflict")
+	require.NotContains(t, retiringIDs(got), first.id.String())
 	require.Equal(t, 4, env.fake.requestCount(routeCreateAIGatewayKey))
+	require.Equal(t, 1, env.fake.requestCount(routeDeleteAIGatewayKey))
+	require.Len(t, got.Status.RetiringKeys, 2)
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyReady(t, got)
+	requireHolds(4)
 	require.Len(t, got.Status.RetiringKeys, 3)
 }
 
@@ -299,25 +314,38 @@ func TestCoderAIGatewayKeyUndeletableOrphan(t *testing.T) {
 	require.Equal(t, 1, env.fake.requestCount(routeCreateAIGatewayKey))
 }
 
-// A DELETE that Coder refuses with 403 while the Secret holds the current
-// key reports both facts: the key works (Ready=True), and a person must act
-// on the orphan (Stalled=True).
+// A DELETE that Coder refuses with 403, or with 404 "Route not found.",
+// while the Secret holds the current key reports both facts: the key works
+// (Ready=True, and the message says so), and a person must act on the
+// orphan (Stalled=True).
 func TestCoderAIGatewayKeyUndeletableOrphanWhileReady(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
-	got, orphan := readyWithOrphan(ctx, t, &env)
-	env.fake.failNext(routeDeleteAIGatewayKey, fakeFault{Status: http.StatusForbidden})
-	got, _ = env.reconcile(ctx, t, got)
-	for conditionType, status := range map[string]metav1.ConditionStatus{"Ready": metav1.ConditionTrue, "Reconciling": metav1.ConditionFalse, "Stalled": metav1.ConditionTrue} {
-		condition := meta.FindStatusCondition(got.Status.Conditions, conditionType)
-		require.Equal(t, status, condition.Status, conditionType)
-		require.Equal(t, "CoderRejected", condition.Reason, conditionType)
-		require.Contains(t, condition.Message, "cannot delete orphan key "+orphan.name)
+	for name, tc := range map[string]struct {
+		fault  fakeFault
+		reason string
+	}{
+		"forbidden":       {fault: fakeFault{Status: http.StatusForbidden}, reason: "CoderRejected"},
+		"route not found": {fault: fakeFault{Status: http.StatusNotFound, Message: "Route not found."}, reason: "NotSupported"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+			got, orphan := readyWithOrphan(ctx, t, &env)
+			env.fake.failNext(routeDeleteAIGatewayKey, tc.fault)
+			got, _ = env.reconcile(ctx, t, got)
+			for conditionType, status := range map[string]metav1.ConditionStatus{"Ready": metav1.ConditionTrue, "Reconciling": metav1.ConditionFalse, "Stalled": metav1.ConditionTrue} {
+				condition := meta.FindStatusCondition(got.Status.Conditions, conditionType)
+				require.Equal(t, status, condition.Status, conditionType)
+				require.Equal(t, tc.reason, condition.Reason, conditionType)
+				require.Contains(t, condition.Message, "still works")
+				require.Contains(t, condition.Message, "cannot delete orphan key "+orphan.name)
+			}
+			require.Len(t, env.fake.aiGatewayKeys(), 2, "the orphan stays")
+			got, _ = env.reconcile(ctx, t, got)
+			stalled := meta.FindStatusCondition(got.Status.Conditions, "Stalled")
+			require.Equal(t, metav1.ConditionFalse, stalled.Status, "the next DELETE succeeds")
+			require.Len(t, env.fake.aiGatewayKeys(), 1)
+		})
 	}
-	got, _ = env.reconcile(ctx, t, got)
-	stalled := meta.FindStatusCondition(got.Status.Conditions, "Stalled")
-	require.Equal(t, metav1.ConditionFalse, stalled.Status, "the next DELETE succeeds")
-	require.Equal(t, "DeletingOrphans", stalled.Reason)
-	require.Len(t, env.fake.aiGatewayKeys(), 1)
 }
