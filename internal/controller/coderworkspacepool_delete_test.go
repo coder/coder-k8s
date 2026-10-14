@@ -211,3 +211,22 @@ func TestPoolScaleDownAndLoweredCap(t *testing.T) {
 	}
 	require.Equal(t, 2, deleting, "the cap deletes one, the scale-down one more")
 }
+
+// TestPoolConsentLossUncachedWhenFull: a pool that needs no create still
+// checks consent on an uncached read, so a cache that still allows the
+// template keeps no unclaimed member after the admin removed it (Codex
+// 4274557698).
+func TestPoolConsentLossUncachedWhenFull(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	ready := e.createMember(t, nil)
+	e.setMemberStatus(t, ready, withWorkspace(readyStatus))
+	requirePool(t, e.reconcilePool(t, 1), "Ready", true, false)
+	e.allowOwner(t, e.tester.String(), "default.other")
+	stale := staleControlPlaneClient{k8sClient, func(o *coderv1alpha1.WorkspacePoolOwner) { o.Templates = []string{"default.docker"} }}
+	r := &controller.CoderWorkspacePoolReconciler{Client: stale, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}})
+	require.NoError(t, err)
+	require.True(t, e.gone(t, ready))
+	require.Equal(t, "TemplateNotAllowed", e.reconcilePool(t, 0).Status.Reason)
+}
