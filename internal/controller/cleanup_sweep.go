@@ -63,8 +63,8 @@ func init() {
 // CleanupRecordReconciler sweeps the cleanup records of objects that went
 // without a confirmed delete in Coder (#353). It acts only through a ready
 // control plane whose current Coder deployment ID equals the record's, and
-// it deletes only the recorded provider ID or the provider with the
-// recorded nonce.
+// it deletes only the recorded provider ID, the provider with the recorded
+// nonce, or the AI Gateway keys whose names start with the recorded prefix.
 type CleanupRecordReconciler struct {
 	client.Client
 	// APIReader reads the object of a record live, so a stale cache never
@@ -78,8 +78,9 @@ type CleanupRecordReconciler struct {
 }
 
 // SetupWithManager watches the records in the operator namespace. It wakes a
-// record when its CoderAIProvider is deleted, and every record when a control
-// plane gets operator access, since that control plane can match them.
+// record when its CoderAIProvider or CoderAIGatewayKey is deleted, and every
+// record when a control plane gets operator access, since that control plane
+// can match them.
 func (r *CleanupRecordReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if mgr == nil || r.Client == nil || r.APIReader == nil || r.OperatorNamespace == "" || r.Clock == nil || r.Recorder == nil {
 		return errors.New("assertion failed: the cleanup record reconciler needs a manager, a client, an API reader, the operator namespace, a clock and an event recorder")
@@ -87,11 +88,13 @@ func (r *CleanupRecordReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	isRecord := predicate.NewPredicateFuncs(func(obj client.Object) bool {
 		return obj.GetNamespace() == r.OperatorNamespace && obj.GetLabels()[cleanupRecordLabel] != ""
 	})
+	recordOf := handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
+		return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: r.OperatorNamespace, Name: cleanupRecordObjectName(obj.GetUID())}}}
+	})
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.ConfigMap{}, builder.WithPredicates(isRecord)).
-		Watches(&coderv1alpha1.CoderAIProvider{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
-			return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: r.OperatorNamespace, Name: cleanupRecordObjectName(obj.GetUID())}}}
-		}), builder.WithPredicates(dependentRemoved)).
+		Watches(&coderv1alpha1.CoderAIProvider{}, recordOf, builder.WithPredicates(dependentRemoved)).
+		Watches(&coderv1alpha1.CoderAIGatewayKey{}, recordOf, builder.WithPredicates(dependentRemoved)).
 		Watches(&coderv1alpha1.CoderControlPlane{}, handler.EnqueueRequestsFromMapFunc(r.allRecords), builder.WithPredicates(operatorAccessGained)).
 		Named("cleanuprecord").
 		Complete(r)
@@ -149,13 +152,14 @@ func (r *CleanupRecordReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		log.FromContext(ctx).Error(err, "Ignoring a ConfigMap that is not a valid cleanup record")
 		return ctrl.Result{}, nil
 	}
-	if record.Kind != cleanupRecordKindAIProvider {
-		return ctrl.Result{}, nil // Only provider records are swept so far.
+	kind, ok := cleanupRecordKinds[record.Kind]
+	if !ok {
+		return ctrl.Result{}, nil // A kind that this operator does not sweep.
 	}
 
 	// Act only when the object with that UID no longer exists (invariant 6).
-	provider := &coderv1alpha1.CoderAIProvider{}
-	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: record.Namespace, Name: record.Name}, provider); err == nil && provider.UID == record.UID {
+	object := kind.object()
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: record.Namespace, Name: record.Name}, object); err == nil && object.GetUID() == record.UID {
 		r.setUnmatched(record.UID, record.Kind, false)
 		return ctrl.Result{RequeueAfter: cleanupObjectRecheck}, nil
 	} else if err != nil && !apierrors.IsNotFound(err) {
@@ -181,23 +185,23 @@ func (r *CleanupRecordReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if len(matches) == 0 {
 		r.setUnmatched(record.UID, record.Kind, true)
 		r.Recorder.Eventf(configMap, nil, corev1.EventTypeWarning, "NoMatchingDeployment", "Sweep",
-			"No ready CoderControlPlane in namespace %s reaches Coder deployment %s, which holds the provider of deleted %s %s/%s. Delete the provider in Coder by hand, then delete this ConfigMap.",
-			record.Namespace, record.DeploymentID, record.Kind, record.Namespace, record.Name)
+			"No ready CoderControlPlane in namespace %s reaches Coder deployment %s, which holds %s of deleted %s %s/%s. Delete %s in Coder by hand, then delete this ConfigMap.",
+			record.Namespace, record.DeploymentID, kind.what, record.Kind, record.Namespace, record.Name, kind.what)
 		return ctrl.Result{RequeueAfter: cleanupUnmatchedRecheck}, nil
 	}
 	r.setUnmatched(record.UID, record.Kind, false)
-	logger := log.FromContext(ctx).WithValues("record", configMap.Name, "deploymentID", record.DeploymentID, "provider", record.Namespace+"/"+record.Name)
+	logger := log.FromContext(ctx).WithValues("record", configMap.Name, "deploymentID", record.DeploymentID, "object", record.Kind+" "+record.Namespace+"/"+record.Name)
 	// Each matching control plane has its own operator token, so a failure
 	// through one tries the next.
 	gone, why, through := false, "", logger
 	for _, m := range matches {
 		through = logger.WithValues("controlPlane", types.NamespacedName{Namespace: m.controlPlane.Namespace, Name: m.controlPlane.Name})
-		if gone, why, err = sweepAIProvider(ctx, m.sdk, record); err != nil {
+		if gone, why, err = kind.sweep(ctx, m.sdk, record); err != nil {
 			return ctrl.Result{}, err
 		} else if gone {
 			break
 		}
-		through.Info("The cleanup of a deleted provider in Coder failed", "why", why)
+		through.Info("The cleanup of a deleted object in Coder failed", "why", why)
 	}
 	if !gone {
 		return ctrl.Result{RequeueAfter: cleanupRetry}, nil
@@ -207,8 +211,24 @@ func (r *CleanupRecordReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 	cleanupRecordsSwept.WithLabelValues(record.Kind).Inc()
-	through.Info("Swept the provider of a deleted CoderAIProvider in Coder", "result", why, "providerID", record.CoderID)
+	through.Info("Swept the Coder resources of a deleted object", "result", why, "coderID", record.CoderID)
 	return ctrl.Result{}, nil
+}
+
+// cleanupSweepKind is how a sweep handles the records of one object kind.
+type cleanupSweepKind struct {
+	object func() client.Object
+	what   string // What the object holds in Coder, for the Event.
+	sweep  func(context.Context, *codersdk.Client, *cleanupRecord) (gone bool, why string, err error)
+}
+
+var cleanupRecordKinds = map[string]cleanupSweepKind{
+	cleanupRecordKindAIProvider: {
+		object: func() client.Object { return &coderv1alpha1.CoderAIProvider{} }, what: "the provider", sweep: sweepAIProvider,
+	},
+	cleanupRecordKindAIGatewayKey: {
+		object: func() client.Object { return &coderv1alpha1.CoderAIGatewayKey{} }, what: "the AI Gateway keys", sweep: sweepAIGatewayKeys,
+	},
 }
 
 // controlPlaneMatch is a control plane whose Coder deployment is a record's.
@@ -309,6 +329,44 @@ func sweepAIProvider(ctx context.Context, sdk *codersdk.Client, record *cleanupR
 	return true, "deleted provider " + id, nil
 }
 
+// sweepAIGatewayKeys deletes the keys of record in Coder: every key whose
+// name is the record's prefix ck8s-<uid>- and a serial (invariant 5). The
+// object is gone, so no serial bound applies: the settle window has passed,
+// and no create of the object can still commit. It returns gone only when a
+// LIST, read by a site owner, shows no such key.
+func sweepAIGatewayKeys(ctx context.Context, sdk *codersdk.Client, record *cleanupRecord) (gone bool, why string, err error) {
+	prefix, err := aiGatewayKeyNamePrefix(record.UID)
+	if err != nil {
+		return false, "", err
+	}
+	if record.Nonce != prefix {
+		return false, "", fmt.Errorf("assertion failed: cleanup record of %s has key prefix %q, not the prefix of its UID", record.UID, record.Nonce)
+	}
+	if step := requireSiteOwner(ctx, sdk); step != nil {
+		// Only a site owner's LIST shows every key.
+		return false, step.message, nil
+	}
+	deleted := 0
+	for range 2 {
+		listed, err := sdk.ListAIGatewayKeys(ctx)
+		if err != nil {
+			return false, "list AI Gateway keys: " + coderErrorSummary(err), nil
+		}
+		own := ownAIGatewayKeys(prefix, listed)
+		if len(own) == 0 {
+			return true, fmt.Sprintf("deleted %d keys, and a list shows none left", deleted), nil
+		}
+		for _, k := range own {
+			// Only Coder's own 404 proves that the key is gone (#325).
+			if err := sdk.DeleteAIGatewayKey(ctx, k.ID); err != nil && !isCoderResourceNotFound(err) {
+				return false, "delete key " + k.Name + ": " + coderErrorSummary(err), nil
+			}
+			deleted++
+		}
+	}
+	return false, "Coder still lists keys of the object after their delete", nil
+}
+
 // setUnmatched keeps the unmatched gauge equal to the records that no
 // deployment reaches.
 func (r *CleanupRecordReconciler) setUnmatched(uid types.UID, kind string, unmatched bool) {
@@ -317,7 +375,7 @@ func (r *CleanupRecordReconciler) setUnmatched(uid types.UID, kind string, unmat
 	} else {
 		r.unmatched.Delete(uid)
 	}
-	counts := map[string]float64{cleanupRecordKindAIProvider: 0}
+	counts := map[string]float64{cleanupRecordKindAIProvider: 0, cleanupRecordKindAIGatewayKey: 0}
 	r.unmatched.Range(func(_, v any) bool {
 		counts[v.(string)]++
 		return true
