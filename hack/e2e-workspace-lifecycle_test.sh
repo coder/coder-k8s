@@ -184,6 +184,7 @@ case "${pos[0]}:${pos[1]:-}" in
       if [[ $raw == */coderworkspaces/coder.e2e-tester.e2e-agent/log ]]; then # terraform init of the agent build; mirror-* break it
         case $SCENARIO in
           mirror-missing) ;;
+          mirror-cached) echo '2026-10-02T10:00:01Z [info] [provisioner|Initializing terraform] coder/coder v2.19.0: Using from the shared cache directory' ;;
           mirror-signed | mirror-unchecked) echo '2026-10-02T10:00:01Z [info] [provisioner|Initializing terraform] Installed provider version: coder/coder v2.19.0 (signed by a HashiCorp partnerkey_id: 93C75807601AA0EC)' ;;
           *) echo '2026-10-02T10:00:01Z [info] [provisioner|Initializing terraform] Installed provider version: coder/coder v2.19.0 (unauthenticated)' ;;
         esac
@@ -416,7 +417,7 @@ summary() { echo "  (native driver exit=$RC, ${SECS}s)"; }
 echo "TEST pass: full lifecycle against a well-behaved fake"
 run_scenario pass; summary
 check "driver exits 0 and prints PASS" eval '[[ $RC -eq 0 ]] && out_has "PASS: workspace lifecycle"'
-check "the agent build installed coder/coder from the provider mirror (#369)" out_has "agent build: coder/coder v2.19.0 installed from the provider mirror"
+check "the agent build installed coder/coder from the provider mirror (#369)" out_has "agent build: coder/coder v2.19.0 installed from the provider mirror or its cache"
 # shellcheck disable=SC2034 # rv is used by the eval'd check below
 rv=$(jq -r .metadata.resourceVersion "$S/first_update.json")
 check "watch URL uses the current token and only watch/resourceVersion/timeoutSeconds" \
@@ -650,6 +651,11 @@ echo "TEST mirror-missing (#369): the agent build log shows no install of coder/
 run_scenario mirror-missing; summary
 check "fails after the start build; no delete" eval 'failed_with "the agent build did not install coder/coder v2.19.0 from the provider mirror" &&
   no_mutations_after "$LIFECYCLE,curl POST,curl PUT,kubectl apply,kubectl create"'
+
+echo "TEST mirror-cached (#369): the agent build took coder/coder from the shared plugin cache, which only the mirror fills"
+run_scenario mirror-cached; summary
+check "driver exits 0 and accepts the cache" eval '[[ $RC -eq 0 ]] && out_has "PASS: workspace lifecycle" &&
+  out_has "agent build: coder/coder v2.19.0 installed from the provider mirror or its cache"'
 
 echo "TEST mirror-signed (#369): the agent build installed coder/coder from the registry"
 run_scenario mirror-signed; summary

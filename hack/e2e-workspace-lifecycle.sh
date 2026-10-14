@@ -409,13 +409,15 @@ AGENT_UID=$(jq -er '.metadata.uid' <<<"$OBJ") || fail "agent workspace lacks uid
 BUILD=$(jq -er '.status.latestBuildID' <<<"$OBJ") || fail "agent workspace lacks latestBuildID: $OBJ"
 wait_until "start build $BUILD" build_done "$AGENT_NAME" "$BUILD" running
 if [[ -n $TF_MIRROR_PROVIDER ]]; then
-  # Terraform reports a filesystem-mirror install as unauthenticated and a registry install as signed.
+  # Terraform 1.15 reports a filesystem-mirror install as unauthenticated and a registry install as signed.
+  # With a lock file it takes the provider from Coder's shared plugin cache, which only the mirror can fill.
   k get --raw "$API/$AGENT_NAME/log" >"$WORK/agent-build.log" || fail "cannot read coderworkspaces/log of $AGENT_NAME"
   ! grep -qF "Installed provider version: $TF_MIRROR_PROVIDER (signed" "$WORK/agent-build.log" ||
     fail "the agent build installed $TF_MIRROR_PROVIDER from the registry"
-  grep -qF "Installed provider version: $TF_MIRROR_PROVIDER (unauthenticated)" "$WORK/agent-build.log" ||
+  grep -qF -e "Installed provider version: $TF_MIRROR_PROVIDER (unauthenticated)" \
+    -e "$TF_MIRROR_PROVIDER: Using from the shared cache directory" "$WORK/agent-build.log" ||
     fail "the agent build did not install $TF_MIRROR_PROVIDER from the provider mirror (log contents not printed)"
-  log "agent build: $TF_MIRROR_PROVIDER installed from the provider mirror"
+  log "agent build: $TF_MIRROR_PROVIDER installed from the provider mirror or its cache"
 fi
 AGENTS_SEEN=""
 agents_ready() { # every agent of build $BUILD is connected and ready; a failed lifecycle fails at once
