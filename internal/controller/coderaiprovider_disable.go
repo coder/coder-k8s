@@ -53,7 +53,8 @@ func (r *CoderAIProviderReconciler) disableWithoutConsent(
 	}
 	found, err := sdk.AIProvider(ctx, provider.Status.ProviderID)
 	switch {
-	case isCoderNotFound(err):
+	case isCoderResourceNotFound(err):
+		// Only Coder's own 404 proves that nothing can use the key (#327).
 		return stalled("Provider %s does not exist in Coder.", provider.Name), nil
 	case err != nil:
 		return unchecked("get provider: %s", coderErrorSummary(err)), nil
