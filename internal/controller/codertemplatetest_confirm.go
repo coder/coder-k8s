@@ -61,7 +61,8 @@ func (r *CoderTemplateTestReconciler) confirmCreate(
 	// a deleted one only without a live one (workspaceByOwnerAndName).
 	workspace, err := sdk.WorkspaceByOwnerAndName(ctx, tt.Status.OwnerID, tt.Status.WorkspaceName, codersdk.WorkspaceOptions{IncludeDeleted: true})
 	found := err == nil
-	if !found && !isCoderNotFound(err) {
+	// Only Coder's own 404 proves that no workspace exists (#351).
+	if !found && !isCoderResourceNotFound(err) {
 		return coderUnavailable("get workspace by name", err), nil
 	}
 	live := false
