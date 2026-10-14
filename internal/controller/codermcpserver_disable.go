@@ -47,7 +47,8 @@ func (r *CoderMCPServerReconciler) disableMCPServerWithoutConsent(
 	}
 	found, err := sdk.MCPServerConfigByID(ctx, orgID, id)
 	switch {
-	case isCoderNotFound(err):
+	case isCoderResourceNotFound(err):
+		// Only Coder's own 404 proves that the config is gone (#337).
 		return stalled("MCP server config %s does not exist in Coder.", id), nil
 	case err != nil:
 		return unchecked("get MCP server config: %s", coderErrorSummary(err)), nil
