@@ -67,12 +67,7 @@ func (r *CoderWorkspacePoolMemberReconciler) Reconcile(ctx context.Context, req 
 		return ctrl.Result{}, err
 	}
 	if !member.DeletionTimestamp.IsZero() {
-		// The delete steps (plan 6.5) come later. Until then, a member whose
-		// workspace can exist keeps its finalizer.
-		if poolMemberMayHaveWorkspace(member) {
-			return ctrl.Result{}, nil
-		}
-		return ctrl.Result{}, r.releaseFinalizer(ctx, member)
+		return r.cleanup(ctx, member)
 	}
 	switch member.Status.Phase {
 	case coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed:
