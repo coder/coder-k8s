@@ -155,8 +155,8 @@ The operator removes the record only after a list in the record's deployment sho
 
 1. It waits until the object with that UID is gone and 5 minutes have passed since the last create, so that a create still in flight commits first.
 2. It looks for a ready `CoderControlPlane` in the object's namespace whose Coder answers the record's deployment ID now. It never matches by URL or name: a new Coder database behind the same URL has another deployment ID and is never swept. A control plane in another namespace never sweeps the record.
-3. Through that control plane, whose operator user must be a site owner, it lists the keys and deletes every key whose name starts with the record's prefix `ck8s-<UID without dashes>-`. It never deletes any other key.
-4. It removes the record when a list shows no key with that prefix. A failed list or delete, or a `404` that is not Coder's own, keeps the record, and the operator retries every minute.
+3. Through that control plane, whose operator user must be a site owner, it lists the keys and deletes every key whose name is the record's prefix `ck8s-<UID without dashes>-` followed by a serial number (the names that the operator gives, such as `ck8s-<UID without dashes>-3`). It never deletes any other key.
+4. It removes the record when a list shows no such key. A failed list or delete, or a `404` that is not Coder's own, keeps the record, and the operator retries every minute.
 
 So after a namespace deletion with an external database, the leftover keys go once you create the namespace again with a control plane that uses the same database. The metric `coder_k8s_cleanup_records_swept_total` (label `kind`) counts the swept records.
 
