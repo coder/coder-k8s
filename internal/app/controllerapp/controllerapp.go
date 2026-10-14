@@ -153,6 +153,8 @@ func SetupControllers(mgr manager.Manager) error {
 		APIReader: mgr.GetAPIReader(),
 		Scheme:    managerScheme,
 		Clock:     clock.RealClock{},
+		// The same namespace as the provider records, so one sweep finds both.
+		OperatorNamespace: aiProviderReconciler.OperatorNamespace,
 	}
 	if err := aiGatewayKeyReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create AI Gateway key controller: %w", err)

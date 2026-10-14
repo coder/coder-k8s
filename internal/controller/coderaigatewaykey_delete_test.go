@@ -178,7 +178,7 @@ func TestCoderAIGatewayKeyDeleteWithControlPlaneGoing(t *testing.T) {
 				require.NoError(t, err)
 				env.fake.failNext(routeDeleteAIGatewayKey, fakeFault{Status: http.StatusBadGateway})
 			}
-			r := &controller.CoderAIGatewayKeyReconciler{Client: env.client, APIReader: env.client, Scheme: scheme, Clock: env.clock}
+			r := &controller.CoderAIGatewayKeyReconciler{Client: env.client, APIReader: env.client, Scheme: scheme, Clock: env.clock, OperatorNamespace: env.records}
 			logCtx, logs := capturingContext(ctx)
 			_, err := r.Reconcile(logCtx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(got)})
 			require.NoError(t, err)

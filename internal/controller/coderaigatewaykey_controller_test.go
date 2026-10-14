@@ -35,6 +35,7 @@ const testAIGatewaySecret = "coder-ai-gateway-key"
 // plane named coder that points at it.
 type aiGatewayKeyEnv struct {
 	namespace string
+	records   string // The operator namespace, which holds the cleanup records.
 	fake      *fakeCoder
 	client    client.Client // The reconciler's client. Tests can wrap it.
 	clock     *clocktesting.FakeClock
@@ -44,7 +45,7 @@ func newAIGatewayKeyEnv(ctx context.Context, t *testing.T, allowKeys *bool) aiGa
 	t.Helper()
 	// Status times have second precision, so the fake clock starts on a second.
 	env := aiGatewayKeyEnv{
-		namespace: createTestNamespace(ctx, t, "aigk"), fake: newFakeCoder(t), client: k8sClient,
+		namespace: createTestNamespace(ctx, t, "aigk"), records: createTestNamespace(ctx, t, "aigk-ops"), fake: newFakeCoder(t), client: k8sClient,
 		clock: clocktesting.NewFakeClock(time.Now().Truncate(time.Second)),
 	}
 	cp := createTestControlPlane(ctx, t, env.namespace, "coder", env.fake.server.URL)
@@ -93,7 +94,7 @@ func (env aiGatewayKeyEnv) reconcile(ctx context.Context, t *testing.T, key *cod
 // metadata, the logs or the error (plan S3).
 func (env aiGatewayKeyEnv) reconcileErr(ctx context.Context, t *testing.T, key *coderv1alpha1.CoderAIGatewayKey) (*coderv1alpha1.CoderAIGatewayKey, ctrl.Result, error) {
 	t.Helper()
-	r := &controller.CoderAIGatewayKeyReconciler{Client: env.client, APIReader: env.client, Scheme: scheme, Clock: env.clock}
+	r := &controller.CoderAIGatewayKeyReconciler{Client: env.client, APIReader: env.client, Scheme: scheme, Clock: env.clock, OperatorNamespace: env.records}
 	logCtx, logs := capturingContext(ctx)
 	result, reconcileErr := r.Reconcile(logCtx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(key)})
 	got := &coderv1alpha1.CoderAIGatewayKey{}
@@ -104,6 +105,10 @@ func (env aiGatewayKeyEnv) reconcileErr(ctx context.Context, t *testing.T, key *
 		require.NoError(t, err)
 	}
 	haystacks := map[string]any{"logs": logs.String(), "error": fmt.Sprint(reconcileErr)}
+	record := &corev1.ConfigMap{}
+	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: env.records, Name: "ck8s-cleanup-" + string(key.UID)}, record); err == nil {
+		haystacks["cleanup record"] = record.Data // #353 invariant 2.
+	}
 	if got != nil {
 		haystacks["status"] = got.Status
 		secret := &corev1.Secret{}
@@ -361,7 +366,9 @@ func TestCoderAIGatewayKeyIssuesFirstKey(t *testing.T) {
 	require.Zero(t, writes)
 	require.Equal(t, got.ResourceVersion, again.ResourceVersion)
 	require.Equal(t, 2, env.fake.requestCount(routeAIGatewayKeys))
-	require.Equal(t, 3, env.fake.totalRequests())
+	// The deployment ID read before the create is for the cleanup record (#353).
+	require.Equal(t, 1, env.fake.requestCount(routeBuildInfo))
+	require.Equal(t, 4, env.fake.totalRequests())
 }
 
 func requireAIGatewayKeyReady(t *testing.T, key *coderv1alpha1.CoderAIGatewayKey) {
@@ -552,7 +559,7 @@ func TestCoderAIGatewayKeyWatches(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, (&controller.CoderAIGatewayKeyReconciler{
-		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Clock: env.clock,
+		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Clock: env.clock, OperatorNamespace: env.records,
 	}).SetupWithManager(mgr))
 	mgrCtx, cancel := context.WithCancel(ctx)
 	mgrDone := make(chan error, 1)

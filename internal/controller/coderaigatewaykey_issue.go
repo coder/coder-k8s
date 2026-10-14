@@ -70,15 +70,22 @@ func (r *CoderAIGatewayKeyReconciler) issueKey(
 		return step, err
 	}
 
+	// One instant stamps the cleanup record and the marker
+	// (lastCreateAttemptTime, which starts the settle window) and starts the
+	// write-age limit, so a slow record or marker write shortens the time left
+	// for Secret writes, never the window. In production the instant carries
+	// Go's monotonic reading.
+	attemptStart := r.Clock.Now()
+	// The record goes first, so a key that the create makes can always be
+	// found after the object is gone (#353 invariant 1).
+	if step, err := r.writeAIGatewayKeyRecord(ctx, sdk, key, prefix, &attemptStart); step != nil || err != nil {
+		return step, err
+	}
+
 	// The marker and the serial go into one optimistic status update before
 	// the create (plan I3). A conflict stops here, before any request.
 	serial := key.Status.NextSerial
 	name := prefix + strconv.FormatInt(serial, 10)
-	// One instant stamps the marker (lastCreateAttemptTime, which starts the
-	// settle window) and starts the write-age limit, so a slow marker write
-	// shortens the time left for Secret writes, never the window. In
-	// production the instant carries Go's monotonic reading.
-	attemptStart := r.Clock.Now()
 	now := metav1.NewTime(attemptStart)
 	key.Status.PendingKey = &coderv1alpha1.CoderAIGatewayKeyPending{Serial: serial, Name: name, CreateAttemptTime: now}
 	key.Status.NextSerial = serial + 1
@@ -134,6 +141,7 @@ func (r *CoderAIGatewayKeyReconciler) issueKey(
 		return nil, err
 	}
 	*before = *key.Status.DeepCopy()
+	r.recordIssuedKeyID(ctx, key, created.ID.String())
 	return step, nil
 }
 
