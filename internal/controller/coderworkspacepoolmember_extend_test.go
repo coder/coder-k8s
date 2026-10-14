@@ -206,6 +206,9 @@ func TestPoolMemberBindExtensionAtMostOnce(t *testing.T) {
 	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
 	require.True(t, apierrors.IsConflict(err), "the lost write ends the reconcile: %v", err)
 	require.Equal(t, 1, e.fake.requestCount(routeExtendWorkspace))
+	// A minute later, now + TTL is past the new deadline, so only the
+	// stored flag stops a second extension.
+	e.clock.SetTime(e.clock.Now().Add(time.Minute))
 	require.True(t, e.reconcileMember(t, key, 2).Status.BindExtended)
 	require.Equal(t, 1, e.fake.requestCount(routeExtendWorkspace), "no second extension after a lost status write")
 
