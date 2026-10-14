@@ -84,6 +84,10 @@ func readMCPServerToDisable(
 	found, err := sdk.MCPServerConfigByID(ctx, orgID, id)
 	switch {
 	case isCoderResourceNotFound(err):
+		// The kill switch holds a gone config too: a pending generation must
+		// not create an enabled config again once consent or the opt-in comes
+		// back, before a spec edit.
+		server.Status.AppliedGeneration = server.Generation
 		return found, stalled("MCP server config %s does not exist in Coder.", id)
 	case err != nil:
 		return found, unchecked("get MCP server config: %s", coderErrorSummary(err))

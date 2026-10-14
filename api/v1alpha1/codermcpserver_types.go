@@ -297,7 +297,11 @@ type CoderMCPServerStatus struct {
 	// ObservedGeneration is the generation the controller last processed.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
-	// AppliedGeneration is the last generation whose spec Coder fully holds.
+	// AppliedGeneration is the last generation whose spec Coder fully holds,
+	// or that a kill switch holds: when the controller disables the config
+	// because a credential Secret or the control plane withdrew consent, it
+	// sets this field before it sends the disable, so only a later spec edit
+	// enables the config again. Ready tells whether Coder holds the spec.
 	// +optional
 	AppliedGeneration int64 `json:"appliedGeneration,omitempty"`
 	// OrganizationID is the Coder organization ID that spec.organization

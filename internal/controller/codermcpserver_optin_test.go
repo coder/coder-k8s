@@ -329,3 +329,41 @@ func TestCoderMCPServerOptInUsesPinnedOrganization(t *testing.T) {
 		})
 	}
 }
+
+// A config that is gone while a generation is pending and the opt-in is
+// withdrawn: the kill switch holds it too. The restored opt-in gives
+// DeletedExternally and no create, and only a spec edit creates the config
+// again.
+func TestCoderMCPServerOptInGoneConfigHolds(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	got, id := env.applied(ctx, t, nil)
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(got), got))
+	got.Spec.Description = "pending"
+	require.NoError(t, k8sClient.Update(ctx, got))
+	env.fake.failNext(routeUpdateMCPServer, fakeFault{Status: http.StatusBadGateway})
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerStep(t, got, false, "CoderUnavailable")
+
+	require.NoError(t, env.dashboard(t).DeleteMCPServerConfig(ctx, env.orgID, id))
+	env.setOptIn(ctx, t, nil)
+	got, _ = env.reconcile(ctx, t, got)
+	require.Contains(t, requireMCPServerStep(t, got, true, "MCPServersNotAllowed"), "does not exist in Coder")
+	require.Equal(t, got.Generation, got.Status.AppliedGeneration)
+
+	env.setOptIn(ctx, t, &coderv1alpha1.MCPServersSpec{Organizations: []string{"coder"}})
+	mark := len(env.writeRoutes())
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerStep(t, got, true, "DeletedExternally")
+	require.Empty(t, env.writesSince(mark), "no create before a spec edit")
+	require.Equal(t, 1, env.posts())
+
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(got), got))
+	got.Spec.Description = "after the disable"
+	require.NoError(t, k8sClient.Update(ctx, got))
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerApplied(t, got)
+	require.Equal(t, 2, env.posts())
+}
