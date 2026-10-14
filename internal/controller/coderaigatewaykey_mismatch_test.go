@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -177,4 +178,38 @@ func TestCoderAIGatewayKeyAnswerMismatchWithFlappingList(t *testing.T) {
 			require.Len(t, env.fake.aiGatewayKeys(), tc.keys)
 		})
 	}
+}
+
+// A kill-switch re-arm issues a key behind the same gate: a mismatched
+// answer to the re-armed create blocks every later create in that
+// generation, also across a failed LIST and the settle window.
+func TestCoderAIGatewayKeyRearmKeepsAnswerMismatchGate(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+	got, _ := env.reconcile(ctx, t, env.createKey(ctx, t, "coder", testAIGatewaySecret))
+	requireAIGatewayKeyReady(t, got)
+	require.NoError(t, env.fake.client(t, 5*time.Second).DeleteAIGatewayKey(ctx, uuid.MustParse(got.Status.CurrentKey.ID)))
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyStep(t, got, true, "KeyDeletedExternally")
+
+	got.Spec.Rotation.Trigger = "re-arm"
+	require.NoError(t, k8sClient.Update(ctx, got))
+	got, _ = env.reconcile(ctx, t, got) // The re-arm clears the current key.
+	env.fake.failNext(routeCreateAIGatewayKey, answerMismatch())
+	got, _ = env.reconcile(ctx, t, got)
+	requireMismatchStalled(t, got)
+	require.Equal(t, got.Generation, got.Status.AnswerMismatchGeneration)
+	creates := env.fake.requestCount(routeCreateAIGatewayKey)
+
+	env.fake.failNext(routeAIGatewayKeys, fakeFault{Status: http.StatusBadGateway})
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyStep(t, got, false, "CoderUnavailable")
+	for _, step := range []time.Duration{0, 5 * time.Minute, 0} {
+		env.clock.Step(step)
+		got, _ = env.reconcile(ctx, t, got)
+		requireAIGatewayKeyStep(t, got, true, "CoderAnswerMismatch")
+	}
+	require.Equal(t, creates, env.fake.requestCount(routeCreateAIGatewayKey), "no create after the mismatch")
+	require.Empty(t, env.fake.aiGatewayKeys(), "the sweep deleted the mismatched key")
 }
