@@ -49,7 +49,9 @@ func (r *CoderAIProviderReconciler) createOrConfirm(
 		ready.Reason == aiProviderConfirmingRejectedCreate && ready.ObservedGeneration == provider.Generation
 	found, err := sdk.AIProvider(ctx, provider.Name)
 	switch {
-	case isCoderNotFound(err):
+	case isCoderResourceNotFound(err):
+		// Only Coder's own 404 proves that the name is free. Any other
+		// answer keeps the marker and waits (#338).
 		if provider.Status.CreateAttemptTime != nil {
 			if step := requireSiteOwner(ctx, sdk); step != nil {
 				return keepRejectedCreate(step, rejected), nil
@@ -192,7 +194,7 @@ func (r *CoderAIProviderReconciler) confirmRejectedCreate(
 	case err == nil:
 		// Ours (the create committed) or someone else's (NameConflict).
 		return recordAIProvider(ctx, provider, found)
-	case !isCoderNotFound(err):
+	case !isCoderResourceNotFound(err):
 		reason := "ConfirmingCreate"
 		if !aiProviderCreateRetryable(status) {
 			// Remember the rejection, so a later read that confirms absence

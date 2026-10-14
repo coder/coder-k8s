@@ -156,32 +156,33 @@ func (r *CoderAIGatewayKeyReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	before := key.Status.DeepCopy()
 
+	var step *aiGatewayKeyStep
 	if !key.DeletionTimestamp.IsZero() {
 		if !controllerutil.ContainsFinalizer(key, coderv1alpha1.CoderAIGatewayKeyCleanupFinalizer) {
 			return ctrl.Result{}, nil
 		}
-		if key.Status.NextSerial == 0 {
-			// No create request was ever sent, so no key of this object can
-			// exist in Coder (plan 3.5).
+		release, deleteStep, err := r.deleteStep(ctx, key)
+		if err != nil {
+			return ctrl.Result{}, err
+		} else if release {
 			return ctrl.Result{}, r.patchFinalizer(ctx, key, false)
 		}
-		// The deletion path (K9) is not in this version: keep the finalizer
-		// and delete nothing.
-		r.applyStep(key, aiGatewayKeyWait(0, "DeletePending",
-			"Keys of this object can exist in Coder. This controller version keeps the finalizer and deletes nothing."))
-		return ctrl.Result{}, r.writeStatus(ctx, key, before)
+		step = deleteStep
+	} else {
+		if err := r.patchFinalizer(ctx, key, true); err != nil {
+			return ctrl.Result{}, err
+		}
+		if key.Status.ObservedGeneration != key.Generation {
+			// A spec change re-arms the issue step after the failure cap.
+			key.Status.ConsecutiveIssueFailures = 0
+		}
+		var err error
+		if step, err = r.observe(ctx, key, before); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
-
-	if err := r.patchFinalizer(ctx, key, true); err != nil {
-		return ctrl.Result{}, err
-	}
-	if key.Status.ObservedGeneration != key.Generation {
-		// A spec change re-arms the issue step after the failure cap.
-		key.Status.ConsecutiveIssueFailures = 0
-	}
-	step, err := r.observe(ctx, key, before)
-	if err != nil {
-		return ctrl.Result{}, err
+	if step == nil {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: AI Gateway key %s/%s has no step", key.Namespace, key.Name)
 	}
 	r.applyStep(key, step)
 	if err := r.writeStatus(ctx, key, before); err != nil {

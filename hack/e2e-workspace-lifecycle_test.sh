@@ -54,8 +54,54 @@ tt_json() { # <phase> <reason> [conditions]: a CoderTemplateTest object for the 
   jq -n --arg n "${pos[2]}" --arg p "$1" --arg r "$2" --argjson c "${3:-[]}" \
     '{metadata: {name: $n}, status: {phase: $p, reason: $r, message: "stub", workspaceName: ("ktt-" + $n), workspaceID: ("ttws-" + $n), conditions: $c}}'
 }
+ai_set() { local f=$1 && shift && jq "$@" "$f" >"$f.tmp" && mv "$f.tmp" "$f"; } # <file> <jq args...>: edits a JSON file
+ai_json() { # <CR file> <reason>: the object with Ready and Stalled conditions of its generation
+  jq --arg r "$2" '.metadata.generation as $g | .status.conditions = [{type: "Ready", status: (if $r == "Applied" then "True" else "False" end),
+    reason: $r, message: "stub", observedGeneration: $g}, {type: "Stalled", status: (if $r == "Applied" or $r == "CoderUnavailable" then "False"
+    else "True" end), reason: $r, observedGeneration: $g}]' "$1"
+}
+ai_get() { # <name>: one reconcile of a fake CoderAIProvider controller against the fake Coder providers in $S/aip
+  local cr=$S/cr/$1.json p=$S/aip/$1.json sf v rv m r=Applied
+  [[ -f $cr ]] || err NotFound "coderaiproviders.coder.com \"$1\" not found"
+  sf=$S/secrets/$(jq -r .spec.apiKeySecretRef.name "$cr").json
+  if [[ -f $S/ns-deleted ]]; then ai_json "$cr" ControlPlaneGone; [[ $SCENARIO == ai-ns-stuck ]] || rm "$cr"; return; fi
+  if [[ ! -f $sf ]]; then r=CredentialRefused # only the driver's Secrets are in the store; the operator token is refused
+  elif [[ $(jq -r '.metadata.labels["coder.com/credential"] // ""' "$sf") != true ]]; then r=CredentialNotOptedIn
+  elif [[ $(jq -r .spec.baseURL "$cr") != "$(jq -r '.metadata.annotations["coder.com/credential-destinations"]' "$sf")"/* ]]; then
+    r=CredentialDestinationNotAllowed && [[ $SCENARIO != ai-wrong-reason ]] || r=CredentialMalformed
+  elif [[ -f $p && $(jq -r '.status.providerID // ""' "$cr") == "" ]]; then r=NameConflict
+    [[ $SCENARIO != ai-conflict-writes ]] || ai_set "$p" '.updated_at = "changed"'
+  elif [[ $SCENARIO == ai-never-ready ]]; then r=CoderUnavailable
+  elif [[ -f $p && ($(jq .enabled "$p") == false || -f $S/ai-killed) && $(jq .metadata.generation "$cr") == "$(jq .status.appliedGeneration "$cr")" ]]; then
+    r=DisabledExternally && [[ $SCENARIO != ai-kill-undone ]] || { ai_set "$p" '.enabled = true' && touch "$S/ai-killed"; }
+  else # create or sync: spec values, and a new key ID when the value differs from the sent one (ai-meta-resend: on any Secret change)
+    [[ -f $p ]] || jq -n --arg n "$1" '{id: ("aip-" + $n), name: $n, type: "openai-compat", api_keys: [], updated_at: "1"}' >"$p"
+    ai_set "$p" --slurpfile c "$cr" '. + {enabled: true, display_name: $c[0].spec.displayName, base_url: $c[0].spec.baseURL}'
+    v=$(jq -r '.data["api-key"]' "$sf" | base64 -d) rv=$(jq -r .metadata.resourceVersion "$sf")
+    if [[ $(cat "$S/aisent-$1" 2>/dev/null) != "$v" || ($SCENARIO == ai-meta-resend && $(jq -r .status.credential.secretResourceVersion "$cr") != "$rv") ]]; then
+      id=key-$RANDOM$RANDOM && [[ $SCENARIO != ai-key-id-unchanged || ! -f $S/aisent-$1 ]] || id=$(jq -r '.api_keys[0].id' "$p")
+      m=${v:0:4}...${v: -4} && [[ $SCENARIO != ai-mask-wrong ]] || m=${v:0:3}...${v: -4}
+      ai_set "$p" --arg id "$id" --arg m "$m" '.api_keys = [{id: $id, masked: $m}]' && printf '%s' "$v" >"$S/aisent-$1"
+    fi
+    ai_set "$cr" --slurpfile p "$p" --arg rv "$rv" --arg sc "$SCENARIO" '.status += {providerID: $p[0].id, appliedGeneration: .metadata.generation,
+      credential: ({keyID: $p[0].api_keys[0].id, secretResourceVersion: $rv} + (if $sc == "ai-cr-leak" then {mask: $p[0].api_keys[0].masked} else {} end))}'
+  fi
+  ai_json "$cr" "$r"
+}
+ai_watch() { local f; for f in "$S"/cr/*.json; do [[ $(jq -r .spec.apiKeySecretRef.name "$f") != "$1" ]] || ai_get "$(basename "$f" .json)" >/dev/null; done; }
 case "${pos[0]}:${pos[1]:-}" in
   get:pods) cat "$S/pods.json" ;;
+  get:coderaiprovider) ai_get "${pos[2]}" ;;
+  delete:coderaiprovider) # the controller deletes only the Coder provider that it created (ai-delete-kept: none)
+    for n in "${pos[@]:2}"; do
+      [[ $SCENARIO == ai-delete-kept || $(jq -r '.status.providerID // ""' "$S/cr/$n.json") != "aip-$n" ]] || rm "$S/aip/$n.json"
+      rm "$S/cr/$n.json"
+    done; echo deleted ;;
+  patch:coderaiprovider) ai_set "$S/cr/${pos[2]}.json" --argjson p "$patch" '. * $p | .metadata.generation += 1'; echo patched ;;
+  annotate:coderaiprovider) ai_get "${pos[2]}" >/dev/null; echo annotated ;;
+  annotate:secret) f=$S/secrets/${pos[2]}.json
+    ai_set "$f" --arg a "${pos[3]}" '.metadata.annotations[$a | split("=")[0]] = ($a | split("=")[1]) | .metadata.resourceVersion |= (tonumber + 1 | tostring)'
+    ai_watch "${pos[2]}"; cat "$f" ;;
   patch:codercontrolplane) # templateTests.ownerUserID, then spec.replicas=0 in the namespace phase
     if [[ $patch == *ownerUserID* ]]; then [[ $SCENARIO != owner-patch-fails ]] || err Invalid "bad ownerUserID"; touch "$S/owner"
     else touch "$S/replicas0"; fi; echo "codercontrolplane.coder.com/coder patched" ;;
@@ -113,7 +159,8 @@ case "${pos[0]}:${pos[1]:-}" in
     echo '{"status":{"operatorTokenSecretRef":{"name":"op-token","key":"token"}}}' ;;
   get:secret) printf '{"data":{"token":"%s"}}\n' "$(printf secret-token-value | base64)" ;;
   port-forward:*) echo $$ >"$S/pf.pid"; exec sleep 300 ;;
-  logs:*) echo "I1002 server started"; [[ $SCENARIO != log-leak ]] || echo "2026-10-02T10:00:00Z [info] [provisioner|Planning infrastructure] Terraform 1.14.0 ok" ;;
+  logs:*) echo "I1002 server started"; [[ $SCENARIO != ai-log-leak || ! -f $S/aisent-e2e-openai ]] || { cat "$S/aisent-e2e-openai"; echo; }
+    [[ $SCENARIO != log-leak ]] || echo "2026-10-02T10:00:00Z [info] [provisioner|Planning infrastructure] Terraform 1.14.0 ok" ;;
   get:)
     if [[ $raw == */codertemplatetests?watch=1* ]]; then # the e2e-ttl watch: passed (ttl-failed: failed), then deleted
       echo "I1003 round_trippers.go:553] GET https://127.0.0.1:6443$raw 200 OK in 2 milliseconds" >&2
@@ -149,6 +196,10 @@ case "${pos[0]}:${pos[1]:-}" in
     jq -n --arg av "$av" --argjson n "$n" '{items: [range(1; $n + 1) | ("tv-\(.)") as $id | {status: {id: $id, active: ($id == $av)}}]}' ;;
   create:)
     if [[ ${file##*/} == tt-*.json ]]; then echo 0 >"$S/tt-$(jq -r .metadata.name "$file")"; echo created; exit 0; fi
+    if [[ ${file##*/} == secret-*.json ]]; then # an AI provider key Secret; every key value is kept for the leak checks
+      jq -r '.data["api-key"] | @base64d' "$file" >>"$S/ai-keys.txt"
+      jq '.metadata.resourceVersion = "1"' "$file" >"$S/secrets/$(jq -r .metadata.name "$file").json"; echo created; exit 0
+    fi
     if [[ $raw == */codertemplates/*/promote* ]]; then # promote-* scenarios break the activation
       read -r id av n st <"$S/template"; v=$(jq -r .spec.versionID "$file")
       if [[ $av == "$v" ]]; then r=AlreadyActive; [[ $SCENARIO != promote-repeat-writes ]] || st=$((st + 1))
@@ -179,6 +230,9 @@ case "${pos[0]}:${pos[1]:-}" in
       read -r id av n st <"$S/template"
       [[ $SCENARIO != reapply-new-version ]] || echo "$id $av $((n + 1)) $st" >"$S/template"
       echo "codertemplate/coder.e2e-template configured"
+    elif [[ ${file##*/} == ai-*.json ]]; then # a CoderAIProvider: created at generation 1
+      f=$S/cr/$(jq -r .metadata.name "$file").json && [[ -f $f ]] || jq '.metadata.generation = 1 | .status = {}' "$file" >"$f"
+      echo "coderaiprovider configured"
     elif [[ $(jq -r .kind "$file") == CoderTemplate ]]; then # changed files: a new active version
       read -r id _ n st <"$S/template"; echo "$id tv-$((n + 1)) $((n + 1)) $((st + 1))" >"$S/template"
       echo "codertemplate/coder.e2e-template configured"
@@ -190,6 +244,11 @@ case "${pos[0]}:${pos[1]:-}" in
       echo "coderworkspace configured"
     fi ;;
   replace:)
+    if [[ ${file##*/} == secret-*.json ]]; then # a key rotation
+      f=$S/secrets/$(jq -r .metadata.name "$file").json && jq -r '.data["api-key"] | @base64d' "$file" >>"$S/ai-keys.txt"
+      jq --slurpfile o "$f" '.metadata.resourceVersion = ($o[0].metadata.resourceVersion | tonumber + 1 | tostring)' "$file" >"$f.tmp" && mv "$f.tmp" "$f"
+      ai_watch "$(jq -r .metadata.name "$f")"; echo replaced; exit 0
+    fi
     f=$(wsfile "$raw"); [[ -f $f ]] || err NotFound missing; cp -n "$file" "$S/first_update.json"
     [[ $SCENARIO == stale-update-accepted || $(jq -r .metadata.resourceVersion "$file") == "$(jq -r .metadata.resourceVersion "$f")" ]] ||
       err Conflict "rv mismatch"
@@ -251,6 +310,14 @@ case "$method $path" in
     a=connected/ready && case $SCENARIO in agent-start-error) a=connected/start_error ;; agent-never-ready) a=connecting/created ;; esac
     jq -n --arg u "$uid" --arg lb "$lb" --arg a "$a" '{id: $u, latest_build: {id: $lb,
       resources: [{agents: [{name: "main", status: ($a | split("/")[0]), lifecycle_state: ($a | split("/")[1])}]}]}}' ;;
+  "GET /api/v2/ai/providers") cat "$S"/aip/*.json 2>/dev/null | jq -s . ;;
+  "POST /api/v2/ai/providers")
+    f=$S/aip/$(jq -r .name <<<"$data").json && [[ ! -f $f ]] || { echo "curl: (22) The requested URL returned error: 409" >&2; exit 22; }
+    jq '. + {id: ("aip-" + .name), display_name: .name, api_keys: [], updated_at: "1"}' <<<"$data" >"$f" && cat "$f" ;;
+  "GET /api/v2/ai/providers/aip-"* | "PATCH /api/v2/ai/providers/aip-"*) # a provider by ID; PATCH bumps updated_at
+    f=$S/aip/${path#/api/v2/ai/providers/aip-}.json && [[ -f $f ]] || { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
+    [[ $method == GET ]] || { jq --argjson d "$data" '. + $d | .updated_at = "2"' "$f" >"$f.tmp" && mv "$f.tmp" "$f"; }
+    cat "$f" ;;
   "GET /api/v2/organizations") echo '[{"id":"org-2","is_default":false},{"id":"org-1","is_default":true}]' ;;
   "POST /api/v2/users")
     printf '%s' "$data" >"$S/tester-body.json"
@@ -301,7 +368,7 @@ run_scenario() {
   local name=$1 endpoint_ip=${ENDPOINT_IP:-10.244.0.5} start=$SECONDS
   shift
   T=$BASE/$name S=$BASE/$name/state
-  mkdir -p "$S/ws"
+  mkdir -p "$S/ws" "$S/secrets" "$S/cr" "$S/aip"
   : >"$S/calls.log" && : >"$S/events" && echo 0 >"$S/counter"
   jq -n '{items: [
     {metadata: {name: "coder-k8s-old", deletionTimestamp: "2026-09-23T00:00:00Z"}, spec: {containers: [{image: "ghcr.io/coder/coder-k8s:e2e"}]},
@@ -319,8 +386,8 @@ run_scenario() {
   SECS=$((SECONDS - start))
 }
 
-mutations() { grep -E '^kubectl .*((create|replace|delete) --raw|apply -f|create -f|patch |delete (namespace|pod|codertemplatetest) )|^curl .*-X (PATCH|POST|PUT)' "$S/calls.log" |
-  awk '/^kubectl/ {for (i = 2; i <= NF; i++) if ($i ~ /^(create|replace|delete|apply|patch)$/) {print "kubectl " $i; next}}
+mutations() { grep -E '^kubectl .*((create|replace|delete) --raw|apply -f|(create|replace) -f|patch |annotate |delete (namespace|pod|codertemplatetest|coderaiprovider) )|^curl .*-X (PATCH|POST|PUT|DELETE)' "$S/calls.log" |
+  awk '/^kubectl/ {for (i = 2; i <= NF; i++) if ($i ~ /^(create|replace|delete|apply|patch|annotate)$/) {print "kubectl " $i; next}}
     /^curl/ {for (i = 2; i <= NF; i++) if ($i == "-X") {print "curl " $(i + 1); next}}' | paste -sd, -; }
 VERSIONS="kubectl apply,kubectl apply,kubectl create,kubectl create,kubectl create" # template, second version, promote v1, repeat, dry-run v2
 APPLIES="$VERSIONS,kubectl apply,kubectl apply,kubectl apply"                       # then workspace, identical template and workspace re-apply
@@ -352,8 +419,13 @@ AGENT="$LIFECYCLE,curl POST,curl PUT,kubectl apply,kubectl create,kubectl delete
 TESTS="$AGENT,kubectl patch,kubectl create,kubectl create,kubectl create"
 # agent failure, bad parameter, restart (+ pod delete), mid-run (+ test delete), refused spec patch, TTL
 PHASED="$TESTS,kubectl create,kubectl create,kubectl create,kubectl delete,kubectl create,kubectl delete,kubectl patch,kubectl create"
-check "mutation order: lifecycle, tester, agent, owner, three pass tests, namespace test, Coder to zero, namespace delete" \
-  no_mutations_after "$PHASED,kubectl create,kubectl patch,kubectl delete"
+# AI providers: P1 Secret and provider; P2 rotation and annotation; P3 e2e-taken in Coder, Secret, four refused objects; their delete;
+# P4 disable in Coder, poke, spec edit; P6 delete. The namespace phase adds the provider e2e-ns-keep before Coder goes to zero.
+P1M="kubectl create,kubectl apply" && P2M="$P1M,kubectl replace,kubectl annotate"
+P3M="$P2M,curl POST,kubectl create,kubectl apply,kubectl apply,kubectl apply,kubectl apply" && P3D="$P3M,kubectl delete"
+AIP="$P3D,curl PATCH,kubectl annotate,kubectl patch,kubectl delete"
+check "mutation order: lifecycle, tester, agent, owner, tests, AI providers, namespace test and provider, Coder to zero, namespace delete" \
+  no_mutations_after "$PHASED,$AIP,kubectl create,kubectl apply,kubectl patch,kubectl delete"
 check "stale requests carry the genuine pre-rename token; rename changed it" eval 'grep -qx "rv_pre_rename=2" "$T/work/receipt.txt" &&
   grep -qx "rv_post_rename=2-renamed" "$T/work/receipt.txt" && jq -e ".metadata.resourceVersion == \"2\"" "$T/work/stale-update.json" >/dev/null'
 check "template applied with the long request timeout, then re-applied before any lifecycle mutation" eval '[[ $(grep -c -- "--request-timeout=600s apply -f config/e2e/codertemplate.yaml" "$S/calls.log") -eq 2 ]]'
@@ -368,9 +440,9 @@ check "background port-forward and watch stopped" bg_stopped
 check "every non-streaming kubectl request carries --request-timeout=30s" \
   eval '! grep "^kubectl" "$S/calls.log" | grep -v -e "watch=1" -e port-forward | grep -qvE -- "--request-timeout=[0-9]+s "'
 check "recreate only after the delete job succeeded" eval '[[ $(grep -n include_deleted "$S/calls.log" | head -1 | cut -d: -f1) -lt $(grep -n "create --raw .*ws-e2e-lifecycle-renamed.json" "$S/calls.log" | cut -d: -f1) ]]'
-check "receipt: source, run, version, identity, UIDs, 28 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
-  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 28 ]]'
-check "remaining phases: durations recorded; dry run, restart, mid-run, and TTL calls as planned" eval 'grep -Eqx "phase_seconds=agent-failure=[0-9]+s bad-parameter=[0-9]+s restart=[0-9]+s delete-mid-run=[0-9]+s immutability-and-dry-run=[0-9]+s ttl=[0-9]+s" "$T/work/receipt.txt" &&
+check "receipt: source, run, version, identity, UIDs, 33 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
+  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 33 ]]'
+check "remaining phases: durations recorded; dry run, restart, mid-run, and TTL calls as planned" eval 'grep -Eqx "phase_seconds=agent-failure=[0-9]+s bad-parameter=[0-9]+s restart=[0-9]+s delete-mid-run=[0-9]+s immutability-and-dry-run=[0-9]+s ttl=[0-9]+s ai-provider=[0-9]+s ai-rotation=[0-9]+s ai-refusals=[0-9]+s ai-kill-switch=[0-9]+s ai-delete=[0-9]+s" "$T/work/receipt.txt" &&
   grep -q "create --dry-run=server -f .*tt-e2e-dry-run.json" "$S/calls.log" && grep -q "FROM workspaces WHERE name = .ktt-d0d0d0d0d0d0d0d0d0d0d0d0d0d0." "$S/calls.log" &&
   grep -q "coder-system delete pod coder-k8s-new" "$S/calls.log" && grep -q "workspaces/ttws-e2e-midrun?include_deleted=true" "$S/calls.log" &&
   jq -e ".spec.ttlSecondsAfterFinished == 0" "$T/work/tt-e2e-ttl.json" >/dev/null && jq -e ".spec.parameters == [{name: \"fail\", value: \"notabool\"}]" "$T/work/tt-e2e-bad-param.json" >/dev/null'
@@ -398,6 +470,12 @@ check "agent workspace: tester-owned, from the agent template, ready time logged
   jq -e ".metadata.name == \"coder.e2e-tester.e2e-agent\" and .spec.templateName == \"e2e-agent\"" "$T/work/ws-e2e-agent.json" >/dev/null &&
   out_has "agent time-to-ready: " && out_has "agents: main=connected/ready" && grep -q "^agent_ready_seconds=[0-9]" "$T/work/receipt.txt" &&
   grep -q "workspaces/uid-4?include_deleted=true" "$S/calls.log"'
+check "AI provider keys: three, never printed or in argv, files removed" eval '[[ $(grep -c . "$S/ai-keys.txt") == 3 ]] &&
+  ! grep -qFf "$S/ai-keys.txt" "$T/out" "$S/calls.log" "$T/work/receipt.txt" && ! compgen -G "$T/work/ai-key-*" && ! compgen -G "$T/work/secret-*.json"'
+check "AI provider phases: each refusal reason seen; e2e-taken kept in Coder; e2e-openai deleted; e2e-ns-keep released" eval 'out_has "AI provider e2e-p3-unlabeled: False CredentialNotOptedIn" &&
+  out_has "AI provider e2e-p3-refused: False CredentialRefused" && out_has "AI provider e2e-p3-origin: False CredentialDestinationNotAllowed" &&
+  out_has "AI provider e2e-taken: False NameConflict" && out_has "AI provider e2e-openai: False DisabledExternally" && out_has "AI provider e2e-ns-keep: False ControlPlaneGone" &&
+  [[ -f $S/aip/e2e-taken.json && ! -f $S/aip/e2e-openai.json ]] && jq -e ".spec.apiKeySecretRef == {name: \"op-token\", key: \"token\"}" "$T/work/ai-e2e-p3-refused.json" >/dev/null'
 
 echo "TEST image-mismatch: serving image differs from built image"
 run_scenario image-mismatch SERVING_ID="$OTHER"; summary
@@ -587,9 +665,9 @@ tt-failed|template test e2e-pass-1 failed: Failed AgentStartError|$AGENT,kubectl
 ws-rows-2|expected exactly one workspaces row named ktt-e2e-pass-1 (deleted rows included), found 2|$TESTS
 coder-rolls|setting templateTests.ownerUserID rolled deploy/coder|$TESTS
 keys-after-fails|cannot count the api_keys rows of the tester after the tests|$PHASED
-coder-stays-up|timed out after 3s waiting for: deploy/coder without pods|$PHASED,kubectl create,kubectl patch
-ns-delete-stuck|timed out after 2s waiting for: test, control plane, and namespace coder deleted|$PHASED,kubectl create,kubectl patch,kubectl delete
-ns-stays-terminating|timed out after 2s waiting for: test, control plane, and namespace coder deleted|$PHASED,kubectl create,kubectl patch,kubectl delete
+coder-stays-up|timed out after 3s waiting for: deploy/coder without pods|$PHASED,$AIP,kubectl create,kubectl apply,kubectl patch
+ns-delete-stuck|timed out after 2s waiting for: test, provider, control plane, and namespace coder deleted|$PHASED,$AIP,kubectl create,kubectl apply,kubectl patch,kubectl delete
+ns-stays-terminating|timed out after 2s waiting for: test, provider, control plane, and namespace coder deleted|$PHASED,$AIP,kubectl create,kubectl apply,kubectl patch,kubectl delete
 fail-ignored|template test e2e-agent-fail ended Succeeded Succeeded deleted=True/Deleted, want Failed AgentStartError|$TESTS,kubectl create
 badparam-created|template test e2e-bad-param: expected 0 workspaces rows named ktt-e2e-bad-param (deleted rows included), found 1|$TESTS,kubectl create,kubectl create
 restart-failed|template test e2e-restart failed: Failed AgentStartError|$TESTS,kubectl create,kubectl create,kubectl create,kubectl delete
@@ -597,6 +675,25 @@ midrun-delete-failed|delete job of ttws-e2e-midrun ended in status failed|$TESTS
 immutable-accepted|a patch of spec.timeoutSeconds succeeded|$TESTS,kubectl create,kubectl create,kubectl create,kubectl delete,kubectl create,kubectl delete,kubectl patch
 dryrun-persists|the server dry run created template test e2e-dry-run|$TESTS,kubectl create,kubectl create,kubectl create,kubectl delete,kubectl create,kubectl delete,kubectl patch
 ttl-failed|template test e2e-ttl was removed before it passed|$PHASED
+CASES
+
+# name|expected message|mutations: each CoderAIProvider phase failure (plan 8.2) stops before the next mutation.
+while IFS='|' read -r name msg muts; do
+  echo "TEST $name (CoderAIProvider phases)"
+  run_scenario "$name" E2E_NAMESPACE_DELETE_TIMEOUT_SECONDS=2 </dev/null; summary
+  check "fails with '$msg'" eval 'failed_with "$msg" && no_mutations_after "$muts"'
+done <<CASES
+ai-never-ready|timed out after 3s waiting for: AI provider e2e-openai Ready|$PHASED,$P1M
+ai-mask-wrong|Coder provider aip-e2e-openai does not match the spec and the first key|$PHASED,$P1M
+ai-cr-leak|CoderAIProvider e2e-openai holds its key or the key mask|$PHASED,$P1M
+ai-key-id-unchanged|timed out after 3s waiting for: Coder to hold the second key of e2e-openai|$PHASED,$P1M,kubectl replace
+ai-meta-resend|a metadata-only Secret change sent a new key|$PHASED,$P2M
+ai-log-leak|the operator log holds an AI provider key (1 lines)|$PHASED,$P2M
+ai-wrong-reason|AI provider e2e-p3-origin stalled with False CredentialMalformed stalled=True, want Ready=False CredentialDestinationNotAllowed|$PHASED,$P3M
+ai-conflict-writes|a refused CoderAIProvider wrote to Coder|$PHASED,$P3M
+ai-kill-undone|the controller undid the disable of provider e2e-openai|$PHASED,$P3D,curl PATCH,kubectl annotate
+ai-delete-kept|provider e2e-openai (aip-e2e-openai) still exists in Coder after its object was deleted|$PHASED,$AIP
+ai-ns-stuck|timed out after 2s waiting for: test, provider, control plane, and namespace coder deleted|$PHASED,$AIP,kubectl create,kubectl apply,kubectl patch,kubectl delete
 CASES
 
 echo "TEST missing-built-id: BUILT_IMAGE_ID is not a sha256 ID"

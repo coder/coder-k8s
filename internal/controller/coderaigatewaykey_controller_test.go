@@ -374,23 +374,6 @@ func requireAIGatewayKeyReady(t *testing.T, key *coderv1alpha1.CoderAIGatewayKey
 	}
 }
 
-// An object that may have sent a create keeps its finalizer: this version
-// has no deletion path (K9), so it neither deletes nor forgets keys.
-func TestCoderAIGatewayKeyKeepsFinalizerAfterCreate(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
-	got, _ := env.reconcile(ctx, t, env.createKey(ctx, t, "coder", testAIGatewaySecret))
-	got.Status.NextSerial = 1
-	require.NoError(t, k8sClient.Status().Update(ctx, got))
-	require.NoError(t, k8sClient.Delete(ctx, got))
-	requests := env.fake.totalRequests()
-	kept, _ := env.reconcile(ctx, t, got)
-	require.Equal(t, []string{coderv1alpha1.CoderAIGatewayKeyCleanupFinalizer}, kept.Finalizers)
-	requireAIGatewayKeyStep(t, kept, false, "DeletePending")
-	require.Equal(t, requests, env.fake.totalRequests())
-}
-
 // The object that claimed a shared Secret keeps it. An object created later
 // in the same second with a lower name ranks older, but it must not stall
 // the claimant: it reports SecretNotOwned, and the claimant goes on. The

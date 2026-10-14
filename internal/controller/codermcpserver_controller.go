@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -52,6 +53,10 @@ const (
 type CoderMCPServerReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// sentCredentials maps types.UID -> credential field -> SHA-256 of the
+	// value that Coder holds. Memory only (plan 4.6 item 4).
+	sentCredentials sync.Map
 }
 
 // mcpServerStep is the outcome of one reconcile. A ready step reports that
@@ -230,7 +235,7 @@ func (r *CoderMCPServerReconciler) check(
 			*before = *server.Status.DeepCopy()
 		}
 		var recreate bool
-		if step, recreate, err = syncMCPServer(ctx, sdk, server, org.ID, values); err != nil || !recreate {
+		if step, recreate, err = r.syncMCPServer(ctx, sdk, server, org.ID, values); err != nil || !recreate {
 			break
 		}
 	}

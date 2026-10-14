@@ -141,6 +141,11 @@ func (r *CoderMCPServerReconciler) createMCPServer(
 				"The create answer does not match the request. The controller reads Coder instead of sending it again."), nil
 		}
 		server.Status.ConfigID, server.Status.CreateAttemptTime = created.ID.String(), nil
+		var sent []string
+		for _, c := range mcpServerCredentialRefs(server.Spec.Auth) {
+			sent = append(sent, c.field)
+		}
+		r.rememberSentCredentials(server, sent, values)
 		return nil, nil
 	case status == 0 && createHadNoEffect(err):
 		// A failed dial or TLS handshake never sent the request.
