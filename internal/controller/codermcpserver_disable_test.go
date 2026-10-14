@@ -3,6 +3,7 @@ package controller_test
 import (
 	"context"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/credentialsecret"
@@ -121,9 +123,16 @@ func TestCoderMCPServerConsentCheckUsesCoderState(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		prepare  func(context.Context, *testing.T, mcpServerEnv, *corev1.Secret, uuid.UUID)
+		edit     func(*coderv1alpha1.CoderMCPServerSpec) // nil moves the URL to an unlisted origin.
+		reason   string                                  // "" is CredentialDestinationNotAllowed.
 		disabled bool
 	}{
 		{name: "Coder keeps an allowed URL"},
+		{
+			// A PATCH whose answer was lost can have sent the new Secret.
+			name: "spec names another Secret", disabled: true, reason: credentialsecret.ReasonSecretNotFound,
+			edit: func(s *coderv1alpha1.CoderMCPServerSpec) { s.Auth.APIKey.SecretRef.Name = "other-mcp" },
+		},
 		{name: "Coder holds an unrecorded credential", disabled: true, prepare: func(ctx context.Context, t *testing.T, env mcpServerEnv, _ *corev1.Secret, id uuid.UUID) {
 			_, err := env.dashboard(t).UpdateMCPServerConfig(ctx, env.orgID, id, codersdk.UpdateMCPServerConfigRequest{CustomHeaders: &map[string]string{"X-Extra": "v"}})
 			require.NoError(t, err)
@@ -148,12 +157,18 @@ func TestCoderMCPServerConsentCheckUsesCoderState(t *testing.T) {
 			}
 			before := env.stored(t, got)
 
+			if tc.edit == nil {
+				tc.edit = func(s *coderv1alpha1.CoderMCPServerSpec) { s.URL = "https://other.example.com/mcp" }
+			}
+			if tc.reason == "" {
+				tc.reason = credentialsecret.ReasonDestinationNotAllowed
+			}
 			require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(got), got))
-			got.Spec.URL = "https://other.example.com/mcp"
+			tc.edit(&got.Spec)
 			require.NoError(t, k8sClient.Update(ctx, got))
 			mark := len(env.writeRoutes())
 			got, _ = env.reconcile(ctx, t, got)
-			message := requireMCPServerStep(t, got, true, credentialsecret.ReasonDestinationNotAllowed)
+			message := requireMCPServerStep(t, got, true, tc.reason)
 			if tc.disabled {
 				require.Contains(t, message, "The controller disabled MCP server config")
 				require.Len(t, env.writesSince(mark), 1)
@@ -165,4 +180,95 @@ func TestCoderMCPServerConsentCheckUsesCoderState(t *testing.T) {
 			require.Equal(t, before, env.stored(t, got))
 		})
 	}
+}
+
+// A disable while a newer generation is not applied yet also holds that
+// generation: restored consent does not apply it, and only a spec edit after
+// the disable enables the config.
+func TestCoderMCPServerDisableHoldsPendingGeneration(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	secret := env.keySecret(ctx, t, testMCPKey)
+	consented := secret.DeepCopy()
+	got, _ := env.applied(ctx, t, nil)
+	edit := func(description string) {
+		t.Helper()
+		require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(got), got))
+		got.Spec.Description = description
+		require.NoError(t, k8sClient.Update(ctx, got))
+	}
+	edit("pending")
+	env.fake.failNext(routeUpdateMCPServer, fakeFault{Status: http.StatusBadGateway})
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerStep(t, got, false, "CoderUnavailable")
+
+	require.NoError(t, k8sClient.Delete(ctx, secret))
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerStep(t, got, true, credentialsecret.ReasonSecretNotFound)
+	require.False(t, env.stored(t, got).view.Enabled)
+
+	consented.ResourceVersion, consented.UID = "", ""
+	createSecret(ctx, t, consented)
+	mark := len(env.writeRoutes())
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerStep(t, got, true, "DisabledExternally")
+	require.Empty(t, env.writesSince(mark))
+	require.Empty(t, env.stored(t, got).view.Description, "the pending generation is not applied")
+
+	edit("after the disable")
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerApplied(t, got)
+	require.True(t, env.stored(t, got).view.Enabled)
+}
+
+// The disable answer must be for the same config, as the GET before it.
+func TestCoderMCPServerDisableChecksTheAnswer(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	secret := env.keySecret(ctx, t, testMCPKey)
+	got, _ := env.applied(ctx, t, nil)
+	require.NoError(t, k8sClient.Delete(ctx, secret))
+	env.fake.failNext(routeUpdateMCPServer, rewriteUpdate(func(c *codersdk.MCPServerConfig) { c.Slug = "other" }))
+	got, result := env.reconcile(ctx, t, got)
+	requireMCPServerStep(t, got, false, "CoderAnswerMismatch")
+	require.Equal(t, 30*time.Second, result.RequeueAfter)
+}
+
+// All reads of one Secret in the consent check must see one Secret state, as
+// in the credential read. A change between them gives a retry and no write.
+func TestCoderMCPServerConsentCheckNeedsOneSecretState(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	oauth2MCPSecret(ctx, t, env)
+	got, _ := env.applied(ctx, t, func(s *coderv1alpha1.CoderMCPServerSpec) { useOAuth2(s, nil) })
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(got), got))
+	got.Spec.URL = "https://other.example.com/mcp"
+	require.NoError(t, k8sClient.Update(ctx, got))
+
+	// Read 1 is the failed credential read for the new URL. Reads 2 and 3 are
+	// the consent check for Coder's URL and authorize URL. Read 3 sees another
+	// resourceVersion, so the check stops there.
+	base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+	var gets atomic.Int32
+	env.r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if s, ok := obj.(*corev1.Secret); ok && key.Name == "tracker-oauth" && gets.Add(1) == 3 {
+				s.ResourceVersion += "0"
+			}
+			return nil
+		},
+	})
+	mark := len(env.writeRoutes())
+	got, result := env.reconcile(ctx, t, got)
+	require.Contains(t, requireMCPServerStep(t, got, false, credentialsecret.ReasonDestinationNotAllowed), "a Secret changed during the consent check")
+	require.Equal(t, 30*time.Second, result.RequeueAfter)
+	require.Equal(t, int32(3), gets.Load())
+	require.Empty(t, env.writesSince(mark))
 }

@@ -28,9 +28,9 @@ import (
 // a missing or malformed value. The Secret then no longer proves consent for
 // the credential that Coder uses.
 //
-// The disable is a kill switch like a dashboard disable: appliedGeneration
-// stays, so a later sync reports DisabledExternally and only a spec edit
-// enables the config again.
+// The disable is a kill switch like a dashboard disable: it sets
+// appliedGeneration, so a later sync reports DisabledExternally and only a
+// spec edit after the disable enables the config again.
 func (r *CoderMCPServerReconciler) disableMCPServerWithoutConsent(
 	ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, orgID uuid.UUID, failed *mcpServerStep,
 ) (*mcpServerStep, error) {
@@ -64,7 +64,10 @@ func (r *CoderMCPServerReconciler) disableMCPServerWithoutConsent(
 	// it disables the config.
 	ok := false
 	if found.AuthType != "user_oidc" {
-		if ok, err = r.mcpServerConsentHolds(ctx, server, found); err != nil {
+		ok, err = r.mcpServerConsentHolds(ctx, server, found)
+		if errors.Is(err, errMCPServerSecretChanged) {
+			return unchecked("a Secret changed during the consent check, so the controller reads it again"), nil
+		} else if err != nil {
 			return nil, err
 		}
 	}
@@ -77,22 +80,42 @@ func (r *CoderMCPServerReconciler) disableMCPServerWithoutConsent(
 	if err != nil {
 		return unchecked("the disable failed: %s", coderErrorSummary(err)), nil
 	}
-	if updated.ID != id || updated.Enabled {
+	if updated.ID != id || updated.OrganizationID != orgID || updated.Slug != server.Spec.Slug || updated.Enabled {
 		return mcpServerWait(mcpServerRetry, "CoderAnswerMismatch",
 			"Coder answered the disable of MCP server config %s with another or an enabled config. The controller disables it again.", id), nil
 	}
+	// The disable counts as an external disable of this generation, also of
+	// one that is not applied yet: the kill switch then holds until the next
+	// spec edit.
+	server.Status.AppliedGeneration = server.Generation
 	// The reason stays the credential reason, so it does not flap between
 	// this reconcile and the next one, which finds the config disabled.
 	return stalled("The controller disabled MCP server config %s in Coder: a credential Secret no longer proves consent for a credential that Coder uses. After the Secret is fixed, a spec edit enables the config.", id), nil
 }
 
+// errMCPServerSecretChanged reports that a Secret changed between two reads
+// of one consent check.
+var errMCPServerSecretChanged = errors.New("a Secret changed during the consent check")
+
 // mcpServerConsentHolds reports whether every credential that found holds
 // comes from a Secret in status.credentials that still passes the contract,
 // with the same UID and a value that Coder can store, for each URL of found
-// that receives it (plan 5.2).
-// Coder holds the value of that Secret, so the spec's current refs and URLs
-// do not matter here.
+// that receives it (plan 5.2). Coder holds the value of that Secret, so the
+// spec's current URLs do not matter here.
+//
+// The spec must still name the recorded Secrets: a PATCH whose answer was
+// lost after the commit can have sent a Secret of the spec that status does
+// not record yet. CoderAIProvider reads the spec's ref for the same reason.
 func (r *CoderMCPServerReconciler) mcpServerConsentHolds(ctx context.Context, server *coderv1alpha1.CoderMCPServer, found codersdk.MCPServerConfig) (bool, error) {
+	recorded := map[string]coderv1alpha1.CoderMCPServerCredentialStatus{}
+	for _, c := range server.Status.Credentials {
+		recorded[c.Field] = c
+	}
+	for _, c := range mcpServerCredentialRefs(server.Spec.Auth) {
+		if got, ok := recorded[c.field]; !ok || got.SecretName != c.ref.Name || got.SecretKey != c.ref.Key {
+			return false, nil
+		}
+	}
 	toURL := []string{found.URL}
 	toOAuth2 := []string{found.URL, found.OAuth2AuthURL, found.OAuth2TokenURL}
 	if found.OAuth2RevocationURL != "" {
@@ -108,16 +131,17 @@ func (r *CoderMCPServerReconciler) mcpServerConsentHolds(ctx context.Context, se
 		{found.HasCustomHeaders, func(f string) bool { return strings.HasPrefix(f, "header:") }, toURL, true},
 		{found.HasOAuth2Secret, func(f string) bool { return f == "oauth2ClientSecret" }, toOAuth2, false},
 	}
+	seen := map[string]credentialsecret.ChangeToken{}
 	for _, h := range held {
 		if !h.held {
 			continue
 		}
-		recorded := 0
+		matched := 0
 		for _, c := range server.Status.Credentials {
 			if !h.match(c.Field) {
 				continue
 			}
-			recorded++
+			matched++
 			for _, raw := range h.destinations {
 				destination, err := aiProviderBaseURL(raw)
 				if err != nil {
@@ -134,9 +158,15 @@ func (r *CoderMCPServerReconciler) mcpServerConsentHolds(ctx context.Context, se
 				if string(value.Token.SecretUID) != c.SecretUID || mcpServerValueProblem(value, h.headerValue) != "" {
 					return false, nil
 				}
+				// All reads of one Secret must see one Secret state, as in
+				// readMCPServerCredentials.
+				if first, ok := seen[c.SecretName]; ok && first.ResourceVersion != value.Token.ResourceVersion {
+					return false, errMCPServerSecretChanged
+				}
+				seen[c.SecretName] = value.Token
 			}
 		}
-		if recorded == 0 {
+		if matched == 0 {
 			// A credential without a recorded Secret has no proof of consent.
 			return false, nil
 		}
