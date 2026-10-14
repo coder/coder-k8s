@@ -83,7 +83,7 @@ The object has the conditions `Ready`, `Reconciling` and `Stalled`. A stalled ob
 
 ### The credential kill switch
 
-When the key Secret fails the credential contract for a provider that the operator created, the operator disables the provider in Coder at once. This covers every credential error: the Secret is deleted, loses its label or the destinations annotation, no longer lists the origin that Coder uses, is refused, has no such key, or holds a malformed value. The update holds only `enabled: false`. Coder keeps the old key, but no longer uses it.
+When the key Secret fails the credential contract for a provider that the operator created, the operator disables the provider in Coder at once. This covers every credential error: the Secret is deleted, loses its label or the destinations annotation, no longer lists the origin that Coder uses, is refused, has no such key, or holds a malformed value. The update holds only `enabled: false`. Coder keeps the old key, but no longer uses it. When a Coder call for the disable fails, including a 404 that Coder did not send (for example from a proxy), the operator retries every 30 seconds, and the condition message starts with `Coder can still send the key`.
 
 The object stalls with the credential reason. Repairing the Secret does not enable the provider again. To enable it, fix the Secret, then edit the spec (any change of `spec`, for example `displayName`). A short read error of the Secret, such as an API server timeout, is not a credential error: the operator retries and changes nothing.
 
