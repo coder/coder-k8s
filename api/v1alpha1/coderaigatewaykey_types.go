@@ -205,6 +205,12 @@ type CoderAIGatewayKeyStatus struct {
 	// the Secret no longer held the current key.
 	// +optional
 	LastDriftReissueTime *metav1.Time `json:"lastDriftReissueTime,omitempty"`
+	// KillSwitchGeneration is the generation in which the controller found
+	// the current key deleted in Coder. The controller creates no key until
+	// the generation changes. 0 means the kill switch is not active.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	KillSwitchGeneration int64 `json:"killSwitchGeneration,omitempty"`
 	// Conditions are Ready, Reconciling, and Stalled.
 	// +listType=map
 	// +listMapKey=type
