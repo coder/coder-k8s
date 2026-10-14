@@ -232,6 +232,9 @@ func TestPoolMemberCreateResults(t *testing.T) {
 		{name: "502 before commit", fault: fakeFault{Status: 502}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate", message: "Coder answered 502", confirmed: "ConfirmingCreate"},
 		{name: "504 after commit", fault: fakeFault{Status: 504, AfterCommit: true}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate", confirmed: "WaitingForBuild"},
 		{name: "connection reset", fault: fakeFault{Reset: true}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate", confirmed: "ConfirmingCreate"},
+		// A proxy can answer 408 or 499 after it forwarded the request.
+		{name: "408 after commit", fault: fakeFault{Status: 408, AfterCommit: true}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate", message: "Coder answered 408", confirmed: "WaitingForBuild"},
+		{name: "499 after commit", fault: fakeFault{Status: 499, AfterCommit: true}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate", message: "Coder answered 499", confirmed: "WaitingForBuild"},
 		{name: "201 proxy page after commit", fault: fakeFault{Status: 201, AfterCommit: true, HTML: "<html>proxy</html>"}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate", confirmed: "WaitingForBuild"},
 		{name: "wrong workspace in the answer", fault: fakeFault{Rewrite: func(a any) any {
 			ws := a.(codersdk.Workspace)

@@ -42,6 +42,10 @@ func TestTemplateTestCreateResults(t *testing.T) {
 		{name: "502 before commit", fault: &fakeFault{Status: 502}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "ConfirmingCreate", message: "Coder answered 502", confirmed: "ConfirmingCreate"},
 		{name: "504 after commit", fault: &fakeFault{Status: 504, AfterCommit: true}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "ConfirmingCreate", confirmed: "WaitingForBuild"},
 		{name: "connection reset", fault: &fakeFault{Reset: true}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "ConfirmingCreate", confirmed: "ConfirmingCreate"},
+		// Coder never answers 408 or 499 on create. A proxy can, after it
+		// forwarded the request, so both stay uncertain, never rejected.
+		{name: "408 after commit", fault: &fakeFault{Status: 408, AfterCommit: true}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "ConfirmingCreate", message: "Coder answered 408", confirmed: "WaitingForBuild"},
+		{name: "499 after commit", fault: &fakeFault{Status: 499, AfterCommit: true}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "ConfirmingCreate", message: "Coder answered 499", confirmed: "WaitingForBuild"},
 		// Coder answers create with 201. Since codersdk v2.37, a 201 without
 		// the workspace's JSON is a *codersdk.Error with status 201. Another
 		// 2xx always was one. Both stay uncertain, never rejected.
