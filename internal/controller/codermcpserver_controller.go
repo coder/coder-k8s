@@ -215,6 +215,10 @@ func (r *CoderMCPServerReconciler) check(
 	}
 	server.Status.OrganizationID = org.ID.String()
 	if step, err := mcpServerScopeGate(ctx, sdk, controlPlane, server.Spec, org.ID); step != nil || err != nil {
+		if step != nil && step.stalled && server.Status.ConfigID != "" {
+			// Fail closed when the opt-in goes (#336).
+			return r.disableMCPServerWithoutOptIn(ctx, sdk, server, org.ID, step)
+		}
 		return step, err
 	}
 	values, step, err := readMCPServerCredentials(ctx, r.Client, server)
