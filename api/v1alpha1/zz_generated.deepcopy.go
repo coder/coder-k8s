@@ -1700,6 +1700,17 @@ func (in *CoderWorkspacePoolStatus) DeepCopyInto(out *CoderWorkspacePoolStatus) 
 		*out = new(CoderWorkspacePoolFailure)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.FailureRunStart != nil {
+		in, out := &in.FailureRunStart, &out.FailureRunStart
+		*out = (*in).DeepCopy()
+	}
+	if in.RunFailures != nil {
+		in, out := &in.RunFailures, &out.RunFailures
+		*out = make([]CoderWorkspacePoolFailure, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]v1.Condition, len(*in))

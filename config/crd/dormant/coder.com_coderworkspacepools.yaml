@@ -306,10 +306,18 @@ spec:
                 x-kubernetes-list-type: map
               consecutiveFailures:
                 description: |-
-                  ConsecutiveFailures is the number of member failures in a row. A ready
-                  member resets it.
+                  ConsecutiveFailures is the number of member failures in a row: the
+                  length of RunFailures. A ready member, a spec change, and a new
+                  version reset it.
                 format: int32
                 type: integer
+              failureRunStart:
+                description: |-
+                  FailureRunStart is the start of the current run of failures: the
+                  latest of the last spec or version change and the newest ready time
+                  of a member. Failures at or before it do not count.
+                format: date-time
+                type: string
               lastFailure:
                 description: LastFailure is the newest member failure.
                 properties:
@@ -393,6 +401,34 @@ spec:
                     description: TemplateVersionName is the name of the selected version.
                     type: string
                 type: object
+              runFailures:
+                description: |-
+                  RunFailures are the member failures of the current run, oldest first,
+                  at most 5. The controller stores each one before it deletes the
+                  failed member, so it counts every failure once.
+                items:
+                  description: CoderWorkspacePoolFailure is the newest member failure
+                    of a pool.
+                  properties:
+                    member:
+                      description: Member is the name of the failed CoderWorkspacePoolMember.
+                      type: string
+                    message:
+                      description: |-
+                        Message explains Reason. It never holds Coder error details, build
+                        logs, parameter values, or tokens.
+                      type: string
+                    reason:
+                      description: Reason is the member's failure reason.
+                      type: string
+                    time:
+                      description: Time is when the controller recorded the failure.
+                      format: date-time
+                      type: string
+                  type: object
+                maxItems: 5
+                type: array
+                x-kubernetes-list-type: atomic
               selector:
                 description: |-
                   Selector is the label selector of the scale subresource, in string
