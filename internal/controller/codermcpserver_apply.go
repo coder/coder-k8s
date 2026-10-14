@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -305,11 +304,17 @@ func mcpServerMismatch(auth coderv1alpha1.CoderMCPServerAuth, want codersdk.Upda
 // rememberSentCredentials keeps a SHA-256 of each credential value that Coder
 // now holds, in process memory only (plan 4.6 item 4), so a metadata-only
 // Secret change sends nothing. After a restart the map is empty, so one
-// resend can happen.
+// resend can happen. It drops the hashes of fields that the spec's auth type
+// does not use: the PATCH cleared those credentials, so a later round trip
+// of the auth type must send them again.
 func (r *CoderMCPServerReconciler) rememberSentCredentials(server *coderv1alpha1.CoderMCPServer, sent []string, values map[string]credentialsecret.Value) {
 	sums := map[string][sha256.Size]byte{}
 	if old, ok := r.sentCredentials.Load(server.UID); ok {
-		maps.Copy(sums, old.(map[string][sha256.Size]byte))
+		for _, c := range mcpServerCredentialRefs(server.Spec.Auth) {
+			if sum, ok := old.(map[string][sha256.Size]byte)[c.field]; ok {
+				sums[c.field] = sum
+			}
+		}
 	}
 	for _, field := range sent {
 		sums[field] = sha256.Sum256([]byte(values[field].Reveal()))

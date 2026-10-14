@@ -332,3 +332,33 @@ func TestCoderMCPServerSyncSecretMetadataChange(t *testing.T) {
 	require.JSONEq(t, `{"api_key_value":"`+testMCPKey+`"}`, string(writes[0].body))
 	require.Equal(t, secret.ResourceVersion, got.Status.Credentials[0].SecretResourceVersion)
 }
+
+// A PATCH that clears a credential also drops its hash. Otherwise, after an
+// auth type round trip, the hash would claim that Coder holds the Secret's
+// value while Coder holds a key set in the dashboard.
+func TestCoderMCPServerSyncAuthRoundTripResends(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	got, id := env.applied(ctx, t, nil)
+	setAuth := func(auth coderv1alpha1.CoderMCPServerAuth) {
+		t.Helper()
+		require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(got), got))
+		got.Spec.Auth = auth
+		require.NoError(t, k8sClient.Update(ctx, got))
+	}
+	original := got.Spec.Auth
+	setAuth(coderv1alpha1.CoderMCPServerAuth{Type: "none"})
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerApplied(t, got)
+
+	_, err := env.dashboard(t).UpdateMCPServerConfig(ctx, env.orgID, id, codersdk.UpdateMCPServerConfigRequest{
+		AuthType: ptrTo("api_key"), APIKeyHeader: ptrTo("Authorization"), APIKeyValue: ptrTo("dashboard-key"),
+	})
+	require.NoError(t, err)
+	setAuth(original)
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerApplied(t, got)
+	require.Equal(t, testMCPKey, env.stored(t, got).apiKeyValue)
+}
