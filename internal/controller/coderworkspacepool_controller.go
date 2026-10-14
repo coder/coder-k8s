@@ -86,9 +86,9 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	}
 	switch {
-	case step != nil && step.failed:
-		return ctrl.Result{}, nil // A person must change an input.
 	case step != nil, pool.Spec.Version.Active != nil && *pool.Spec.Version.Active:
+		// A stall polls too: someone can fix the input in Coder, for example
+		// unarchive the version, which no Kubernetes event reports.
 		return ctrl.Result{RequeueAfter: poolResolvePoll}, nil
 	case !meta.IsStatusConditionTrue(pool.Status.Conditions, coderv1alpha1.CoderWorkspacePoolConditionReady):
 		return ctrl.Result{RequeueAfter: poolMemberPendingPoll}, nil

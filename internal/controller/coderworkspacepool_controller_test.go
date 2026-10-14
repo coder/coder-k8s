@@ -121,7 +121,7 @@ func TestPoolResolvesInputs(t *testing.T) {
 
 // TestPoolResolutionWaitsAndStalls: a refused or missing input stops new
 // members and keeps the resolved inputs. Inputs that only a person can fix
-// stall the pool.
+// stall the pool, which then reads Coder every minute.
 func TestPoolResolutionWaitsAndStalls(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -157,11 +157,8 @@ func TestPoolResolutionWaitsAndStalls(t *testing.T) {
 			pool := e.reconcilePool(t, 1)
 			requirePool(t, pool, tc.reason, false, tc.stalled)
 			require.Equal(t, before, *pool.Status.Resolved, "a refused input keeps the resolved inputs")
-			if tc.stalled {
-				require.Zero(t, e.lastStep.RequeueAfter)
-			} else {
-				require.Equal(t, time.Minute, e.lastStep.RequeueAfter)
-			}
+			// A stall polls too: someone can fix the input in Coder.
+			require.Equal(t, time.Minute, e.lastStep.RequeueAfter)
 		})
 	}
 }
