@@ -85,6 +85,7 @@ jobs:
               - 'internal/app/apiserverapp/**'
               - 'api/v1alpha1/**'
               - 'internal/controller/codertemplatetest*'
+              - 'internal/controller/coderaiprovider*'
               # Shared Coder access that CoderTemplateTest and later pool controllers call.
               - 'internal/controller/controlplane_access.go'
               - 'internal/controller/coder_access.go'
@@ -152,22 +153,6 @@ jobs:
           if [[ -n "${UNTRACKED_GENERATED}" ]]; then
             echo "assertion failed: generated installer artifacts must be tracked" >&2
             printf '%s\n' "${UNTRACKED_GENERATED}" >&2
-            exit 1
-          fi
-
-      - name: Verify the dormant CoderAIProvider CRD is not installed
-        # Remove this step when the CoderAIProvider controller ships (#154).
-        run: |
-          # grep exits 1 when nothing matches. Any other status (for example a missing file) fails the step.
-          status=0
-          # The third pattern matches the CRD path entry in config/default/kustomization.yaml.
-          grep -n -E '^[[:space:]]+kind: CoderAIProvider$|coderaiproviders\.coder\.com|coder\.com_coderaiproviders\.yaml' \
-            dist/install.yaml config/default/kustomization.yaml config/crd/bases/*.yaml || status=$?
-          if [[ "${status}" -eq 0 ]]; then
-            echo "assertion failed: the CoderAIProvider CRD must not ship before its controller" >&2
-            exit 1
-          elif [[ "${status}" -ne 1 ]]; then
-            echo "assertion failed: the CoderAIProvider CRD guard could not read the install manifests (grep exit ${status})" >&2
             exit 1
           fi
 

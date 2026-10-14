@@ -126,6 +126,14 @@ func SetupControllers(mgr manager.Manager) error {
 		return fmt.Errorf("unable to create template test controller: %w", err)
 	}
 
+	aiProviderReconciler := &controller.CoderAIProviderReconciler{
+		Client: client,
+		Scheme: managerScheme,
+	}
+	if err := aiProviderReconciler.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create AI provider controller: %w", err)
+	}
+
 	return nil
 }
 
