@@ -132,7 +132,7 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if tt.Name != req.Name || tt.Namespace != req.Namespace {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: fetched template test %s/%s does not match request %s", tt.Namespace, tt.Name, req.NamespacedName)
 	}
-	workspaceName, err := templateTestWorkspaceName(tt.UID)
+	workspaceName, err := uidWorkspaceName(templateTestWorkspacePrefix, tt.UID)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -378,15 +378,15 @@ func (r *CoderTemplateTestReconciler) releaseFinalizer(ctx context.Context, tt *
 	return nil
 }
 
-// templateTestWorkspaceName derives the Coder workspace name from the object
-// UID, so no other test can use it: "ktt-" and 28 hex characters (32 in all,
-// Coder's limit).
-func templateTestWorkspaceName(uid types.UID) (string, error) {
+// uidWorkspaceName derives the Coder workspace name from the object UID, so
+// no other object can use it: the 4-character prefix ("ktt-" for tests) and 28
+// hex characters (32 in all, Coder's limit).
+func uidWorkspaceName(prefix string, uid types.UID) (string, error) {
 	hex := strings.ReplaceAll(string(uid), "-", "")
 	if len(hex) < templateTestUIDHexLength || strings.Trim(hex, "0123456789abcdef") != "" {
 		return "", fmt.Errorf("assertion failed: object UID %q needs at least %d lowercase hex characters", uid, templateTestUIDHexLength)
 	}
-	return templateTestWorkspacePrefix + hex[:templateTestUIDHexLength], nil
+	return prefix + hex[:templateTestUIDHexLength], nil
 }
 
 func templateTestDeadlineExceeded(tt *coderv1alpha1.CoderTemplateTest, lastReason, lastMessage string) *templateTestStep {
