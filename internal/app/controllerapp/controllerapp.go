@@ -137,6 +137,17 @@ func SetupControllers(mgr manager.Manager) error {
 		return fmt.Errorf("unable to create AI provider controller: %w", err)
 	}
 
+	cleanupRecordReconciler := &controller.CleanupRecordReconciler{
+		Client:            client,
+		APIReader:         mgr.GetAPIReader(),
+		OperatorNamespace: aiProviderReconciler.OperatorNamespace,
+		Clock:             clock.RealClock{},
+		Recorder:          mgr.GetEventRecorder("coder-k8s-cleanup"),
+	}
+	if err := cleanupRecordReconciler.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create cleanup record controller: %w", err)
+	}
+
 	aiGatewayKeyReconciler := &controller.CoderAIGatewayKeyReconciler{
 		Client:    client,
 		APIReader: mgr.GetAPIReader(),
