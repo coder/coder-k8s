@@ -24,25 +24,18 @@ const (
 )
 
 // keepWarm runs the deadline steps of a ready member (plan 6.2
-// step 10 rule 5 and step 11 rule 1). An unclaimed workspace gets a new
+// step 10 rule 5 and step 11 rule 1) on workspace, which the caller just
+// read and proved to be this member's. An unclaimed workspace gets a new
 // deadline when its deadline is near. A bound workspace gets one extension at
-// bind, so the claimant has a full TTL, and then never another. Each
-// extension follows a fresh read that proves the workspace is this member's.
+// bind, so the claimant has a full TTL, and then never another.
 func (r *CoderWorkspacePoolMemberReconciler) keepWarm(
-	ctx context.Context, sdk *codersdk.Client, member *coderv1alpha1.CoderWorkspacePoolMember, before *coderv1alpha1.CoderWorkspacePoolMemberStatus, now time.Time,
+	ctx context.Context, sdk *codersdk.Client, member *coderv1alpha1.CoderWorkspacePoolMember, before *coderv1alpha1.CoderWorkspacePoolMemberStatus,
+	workspace codersdk.Workspace, now time.Time,
 ) (*coderStep, error) {
 	name, bound := member.Status.WorkspaceName, member.Spec.ClaimRef != nil
-	if bound && member.Status.BindExtended {
-		// The one extension at bind is done: Coder's own autostop applies.
-		return coderWait(member.Status.Reason, "%s", member.Status.Message), nil
-	}
 	reason := "WorkspaceReady" // A successful read replaces an earlier wait.
 	if bound {
 		reason = "Bound"
-	}
-	workspace, step, err := readOwnPoolMemberWorkspace(ctx, sdk, member)
-	if step != nil || err != nil {
-		return step, err
 	}
 	build := workspace.LatestBuild
 	deadline, target := build.Deadline, member.Status.BindExtendDeadline
