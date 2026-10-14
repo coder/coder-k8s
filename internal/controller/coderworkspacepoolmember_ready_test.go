@@ -69,7 +69,7 @@ func TestPoolMemberBecomesReady(t *testing.T) {
 	r := &controller.CoderWorkspacePoolMemberReconciler{Client: k8sClient, Scheme: scheme, Clock: &lateClock{times: []time.Time{deadline.Add(-time.Second), deadline}}}
 	result, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
 	require.NoError(t, err)
-	require.Zero(t, result.RequeueAfter, "a ready member waits for nothing yet")
+	require.Equal(t, time.Minute, result.RequeueAfter, "a ready member reads its workspace every minute")
 	member = e.reconcileMember(t, key, 0)
 	require.Equal(t, coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, member.Status.Phase, member.Status.Message)
 	require.Equal(t, "WorkspaceReady", member.Status.Reason)
@@ -77,11 +77,9 @@ func TestPoolMemberBecomesReady(t *testing.T) {
 	require.True(t, member.Status.ReadyTime.Time.Equal(deadline.Add(-time.Second)))
 	require.True(t, member.Status.ReadyLastUsedAt.Time.Equal(lastUsed.Truncate(time.Second)), "the baseline is last_used_at at ready")
 
-	// Past the deadline, a ready member stays ready, and it asks Coder nothing yet.
-	requests := e.fake.totalRequests()
+	// Past the deadline, a ready member stays ready.
 	e.clock.SetTime(member.CreationTimestamp.Add(time.Hour))
 	require.Equal(t, coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, e.reconcileMember(t, key, 2).Status.Phase)
-	require.Equal(t, requests, e.fake.totalRequests())
 }
 
 func TestPoolMemberReadinessFailures(t *testing.T) {

@@ -77,8 +77,6 @@ func (r *CoderWorkspacePoolMemberReconciler) Reconcile(ctx context.Context, req 
 	switch member.Status.Phase {
 	case coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed:
 		return ctrl.Result{}, nil // Final: the pool deletes failed members.
-	case coderv1alpha1.CoderWorkspacePoolMemberPhaseReady:
-		return ctrl.Result{}, nil // The watch rules (plan 6.2 step 10) come later.
 	}
 	if !controllerutil.ContainsFinalizer(member, coderv1alpha1.CoderWorkspacePoolMemberCleanupFinalizer) {
 		// No Coder call happens before the finalizer is stored.
@@ -94,11 +92,12 @@ func (r *CoderWorkspacePoolMemberReconciler) Reconcile(ctx context.Context, req 
 	deadline := member.CreationTimestamp.Add(time.Duration(member.Spec.ReadyTimeoutSeconds) * time.Second)
 	var step *coderStep
 	switch {
-	case !now.Before(deadline):
+	case member.Status.ReadyTime == nil && !now.Before(deadline):
+		// The deadline bounds the time until ready, not the life of the workspace.
 		step = poolMemberDeadlineExceeded(member, member.Status.Reason, member.Status.Message)
 	case poolMemberMayHaveWorkspace(member):
 		// A create request may exist: read Coder, never send it again.
-		step, err = r.readWorkspace(ctx, member, workspaceName, now)
+		step, err = r.readWorkspace(ctx, member, before, workspaceName, now)
 		if step, err = memberWaitOnWrongAnswer(ctx, step, err); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -130,10 +129,14 @@ func (r *CoderWorkspacePoolMemberReconciler) Reconcile(ctx context.Context, req 
 	if err := r.writeStatus(ctx, member, before); err != nil {
 		return ctrl.Result{}, err
 	}
-	if step.failed || member.Status.Phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseReady {
+	keepBackoff = step.rateLimited && !step.failed
+	switch {
+	case step.failed, member.Spec.ClaimRef != nil && member.Status.BindExtended:
+		// The watch rules of a bound member (plan 6.2 step 11 rule 3) come later.
 		return ctrl.Result{}, nil
+	case member.Status.Phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseReady:
+		return ctrl.Result{RequeueAfter: r.retryAfter(req.NamespacedName, member, step)}, nil
 	}
-	keepBackoff = step.rateLimited
 	return ctrl.Result{RequeueAfter: min(r.retryAfter(req.NamespacedName, member, step), deadline.Sub(now))}, nil
 }
 
@@ -493,11 +496,14 @@ func (r *CoderWorkspacePoolMemberReconciler) releaseFinalizer(ctx context.Contex
 }
 
 // retryAfter returns the requeue delay of a wait: the HTTP 429 backoff, the
-// build poll once a create request may exist, else the pending poll.
+// watch poll of a ready member, the build poll once a create request may
+// exist, else the pending poll.
 func (r *CoderWorkspacePoolMemberReconciler) retryAfter(key types.NamespacedName, member *coderv1alpha1.CoderWorkspacePoolMember, step *coderStep) time.Duration {
 	switch {
 	case step.rateLimited:
 		return r.rateLimited.next(key)
+	case member.Status.ReadyTime != nil:
+		return poolMemberWatchPoll
 	case poolMemberMayHaveWorkspace(member):
 		return coderBuildPoll
 	default:
