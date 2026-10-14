@@ -59,7 +59,12 @@ func (r *CoderAIProviderReconciler) deleteStep(ctx context.Context, provider *co
 		ctx, cancel = context.WithTimeout(ctx, aiProviderBoundedDeleteTimeout)
 		defer cancel()
 	}
-	if step, err = r.deleteInCoder(ctx, sdk, provider); err != nil {
+	if step, err = r.deleteInCoder(ctx, sdk, provider); err != nil && deleting {
+		// The attempt ended with an impossible answer. Log it, and still
+		// release: the one attempt is over.
+		log.FromContext(ctx).Error(err, "The one delete attempt while CoderControlPlane is being deleted got an impossible answer")
+		return r.releaseWithoutDelete(ctx, provider, "the one delete attempt while CoderControlPlane is being deleted failed: "+err.Error()), nil, nil
+	} else if err != nil {
 		return false, nil, err
 	}
 	if step != nil && deleting {

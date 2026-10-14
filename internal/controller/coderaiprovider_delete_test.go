@@ -178,9 +178,19 @@ func TestCoderAIProviderDeletePendingCreateNeedsSiteOwner(t *testing.T) {
 
 // A name lookup that answers this object's provider without an ID is
 // impossible. The reconcile fails fast, deletes nothing and keeps the
-// finalizer.
+// finalizer. While the control plane is being deleted, the one attempt is
+// over, so the finalizer goes.
 func TestCoderAIProviderDeletePendingCreateAnswerWithoutID(t *testing.T) {
 	t.Parallel()
+	for _, deleting := range []bool{false, true} {
+		t.Run(map[bool]string{false: "control plane ready", true: "control plane being deleted"}[deleting], func(t *testing.T) {
+			t.Parallel()
+			testAIProviderDeleteAnswerWithoutID(t, deleting)
+		})
+	}
+}
+
+func testAIProviderDeleteAnswerWithoutID(t *testing.T, deleting bool) {
 	ctx := context.Background()
 	env, _, provider := newAIProviderCreateEnv(ctx, t)
 	_, err := env.fake.client(t, 2*time.Second).CreateAIProvider(ctx, codersdk.CreateAIProviderRequest{
@@ -197,6 +207,13 @@ func TestCoderAIProviderDeletePendingCreateAnswerWithoutID(t *testing.T) {
 		p.ID = uuid.Nil
 		return p
 	}})
+	if deleting {
+		holdControlPlane(ctx, t, env.namespace)
+		got, _ := env.deleteAIProvider(ctx, t, provider)
+		require.Nil(t, got, "the finalizer went")
+		require.Zero(t, env.fake.requestCount(routeDeleteAIProvider))
+		return
+	}
 	require.NoError(t, k8sClient.Delete(ctx, provider))
 	_, err = env.r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(provider)})
 	require.ErrorContains(t, err, "assertion failed: Coder answered AI provider openai without an ID")
