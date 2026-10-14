@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
+
+	"github.com/coder/coder-k8s/internal/sameorigin"
 )
 
 const (
@@ -122,6 +124,9 @@ func NewSDKClient(cfg Config) (*codersdk.Client, error) {
 	client := codersdk.New(&coderURL, codersdk.WithHTTPClient(&http.Client{
 		Transport: transport,
 		Timeout:   requestTimeout,
+		// net/http copies Coder-Session-Token to every redirect target, so refuse
+		// redirects that leave the Coder origin.
+		CheckRedirect: sameorigin.RedirectPolicy(&coderURL),
 	}))
 	if client == nil {
 		return nil, fmt.Errorf("assertion failed: coder SDK client is nil after successful construction")

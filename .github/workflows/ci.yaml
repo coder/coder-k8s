@@ -91,6 +91,8 @@ jobs:
               - 'internal/controller/coder_workspace_steps.go'
               # The URL that the aggregated API server and the controllers use for Coder API calls.
               - 'internal/controlplaneurl/**'
+              # The redirect policy of every Coder client that sends the operator token.
+              - 'internal/sameorigin/**'
               - 'internal/app/controllerapp/**'
               - 'config/e2e/**'
               - 'deploy/**'
