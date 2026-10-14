@@ -1,9 +1,11 @@
 package controller
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/coder/coder/v2/codersdk"
@@ -13,133 +15,236 @@ import (
 	"github.com/coder/coder-k8s/internal/credentialsecret"
 )
 
-// applyMCPServer sets the spec on the config that this object created (plan
-// 4.5 create steps 5 and 6). It reads the config, removes the ACL entries
-// that spec.access does not list, sends one PATCH with every spec field and
-// every credential of the auth type, and only then adds the missing groups.
-// So while the PATCH changes or enables the config, the ACL holds only groups
-// that both the old and the new access list allow (plan S20), and a failed
-// PATCH leaves the ACL narrower, never broader. Every PATCH sets url, so it
-// always carries the credentials (plan 4.6 item 5). It returns a ready step
-// and sets status.appliedGeneration on success.
-func applyMCPServer(
+// syncMCPServer reads the config that this object created and makes it match
+// the spec (plan 4.5 create steps 5 and 6, 4.7). It runs on every reconcile,
+// so a dashboard edit is set back at the latest on the next resync.
+//
+// One sparse PATCH sends every field that differs. A PATCH that sets a URL or
+// the auth type also carries every credential of the auth type (plan 4.6 item
+// 5), and a credential also goes when its Secret changed or Coder lost it.
+// Credentials of the other auth types are cleared. The ACL entries that
+// spec.access does not list go before the PATCH and the missing groups after
+// it, so the ACL never holds a group that neither generation allows (plan
+// S20).
+//
+// A dashboard delete after a full apply of this generation is a kill switch:
+// the controller reports it and writes nothing until the spec changes (plan
+// 4.7 item 2). The other kill switches come in the next change. recreate is
+// true when the config is gone before a full apply of this generation: the
+// caller then creates it again, if the slug is free.
+func syncMCPServer(
 	ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, orgID uuid.UUID, values map[string]credentialsecret.Value,
-) (*mcpServerStep, error) {
+) (step *mcpServerStep, recreate bool, err error) {
 	id, err := uuid.Parse(server.Status.ConfigID)
 	if err != nil || id == uuid.Nil {
-		return nil, fmt.Errorf("assertion failed: MCP server %s/%s has status.configID %q, which is not a UUID", server.Namespace, server.Name, server.Status.ConfigID)
+		return nil, false, fmt.Errorf("assertion failed: MCP server %s/%s has status.configID %q, which is not a UUID", server.Namespace, server.Name, server.Status.ConfigID)
 	}
-	current, err := sdk.MCPServerConfigByID(ctx, orgID, id)
+	applied := server.Status.AppliedGeneration == server.Generation
+	found, err := sdk.MCPServerConfigByID(ctx, orgID, id)
 	switch {
+	case isCoderNotFound(err) && applied:
+		return mcpServerStalled(mcpServerResync, "DeletedExternally",
+			"MCP server config %s was deleted in Coder. The controller does not create it again until the spec changes.", id), false, nil
 	case isCoderNotFound(err):
-		// Re-creating it after a spec change comes with the update path.
-		return mcpServerStalled(0, "DeletedExternally", "MCP server config %s no longer exists in Coder. This controller version does not create it again.", id), nil
+		server.Status.ConfigID, server.Status.Credentials = "", nil
+		return nil, true, nil
 	case err != nil:
-		return mcpServerWait(mcpServerRetry, "CoderUnavailable", "get MCP server config %s: %s", id, coderErrorSummary(err)), nil
+		return mcpServerWait(mcpServerRetry, "CoderUnavailable", "get MCP server config %s: %s", id, coderErrorSummary(err)), false, nil
 	}
-	if current.ID != id || current.OrganizationID != orgID || current.Slug != server.Spec.Slug {
+	if found.ID != id || found.OrganizationID != orgID || found.Slug != server.Spec.Slug {
 		return mcpServerStalled(mcpServerResync, "CoderAnswerMismatch",
-			"assertion failed: Coder answered MCP server config %s with slug %s in organization %s when asked for %s", current.ID, current.Slug, current.OrganizationID, id), nil
+			"assertion failed: Coder answered MCP server config %s with slug %s in organization %s when asked for %s", found.ID, found.Slug, found.OrganizationID, id), false, nil
 	}
-	if step, err := narrowMCPServerACL(ctx, sdk, orgID, id, server.Spec.Access); step != nil || err != nil {
-		return step, err
-	}
-	req, err := mcpServerUpdateRequest(server, values)
+
+	full, err := mcpServerUpdateRequest(server, values)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	updated, err := sdk.UpdateMCPServerConfig(ctx, orgID, id, req)
-	switch status := coderStatus(err); {
-	case status == http.StatusBadRequest:
-		return mcpServerStalled(0, "CoderRejected", "Coder rejected the update: %s", coderErrorSummary(err)), nil
-	case err != nil:
-		// The PATCH sets absolute values, so sending it again is safe. This
-		// includes a 404: a proxy can put one in place of a committed answer,
-		// so the GET of the next reconcile decides whether the config is gone.
-		return mcpServerWait(mcpServerRetry, "CoderUnavailable", "update MCP server config %s: %s", id, coderErrorSummary(err)), nil
-	}
-	if field := mcpServerUpdateMismatch(id, current.AuthType, req, updated); field != "" {
-		return mcpServerStalled(mcpServerResync, "CoderAnswerMismatch", "assertion failed: Coder answered the update of MCP server config %s with another %s", id, field), nil
+	if req := mcpServerSparseRequest(server, full, found, values); req != (codersdk.UpdateMCPServerConfigRequest{}) {
+		if step, err := narrowMCPServerACL(ctx, sdk, orgID, id, server.Spec.Access); step != nil || err != nil {
+			return step, false, err
+		}
+		updated, err := sdk.UpdateMCPServerConfig(ctx, orgID, id, req)
+		switch status := coderStatus(err); {
+		case status == http.StatusBadRequest:
+			return mcpServerStalled(0, "CoderRejected", "Coder rejected the update: %s", coderErrorSummary(err)), false, nil
+		case err != nil:
+			// The PATCH sets absolute values, so sending it again is safe. This
+			// includes a 404: a proxy can put one in place of a committed answer,
+			// so the GET of the next reconcile decides whether the config is gone.
+			return mcpServerWait(mcpServerRetry, "CoderUnavailable", "update MCP server config %s: %s", id, coderErrorSummary(err)), false, nil
+		}
+		if field := mcpServerMismatch(server.Spec.Auth, full, updated); field != "" || updated.ID != id {
+			return mcpServerStalled(mcpServerResync, "CoderAnswerMismatch", "assertion failed: Coder answered the update of MCP server config %s with another %s", id, cmp.Or(field, "ID")), false, nil
+		}
+	} else if field := mcpServerMismatch(server.Spec.Auth, full, found); field != "" {
+		return nil, false, fmt.Errorf("assertion failed: MCP server %s/%s differs in %s, but the sync request is empty", server.Namespace, server.Name, field)
 	}
 	if step, err := syncMCPServerACL(ctx, sdk, orgID, id, server.Spec.Access); step != nil || err != nil {
-		return step, err
+		return step, false, err
 	}
 	server.Status.Credentials = mcpServerCredentialStatus(server.Spec.Auth, values)
 	server.Status.AppliedGeneration = server.Generation
-	return mcpServerReady(server), nil
+	return mcpServerReady(server), false, nil
 }
 
-// mcpServerUpdateMismatch returns the first field of the update answer that
-// differs from the request, or "". Coder returns every field the request
-// sets, except the credential values, for which it returns a has_* flag. A
-// changed auth type makes Coder clear the credentials of the other types
-// (plan F9), so their flags must then be false.
-func mcpServerUpdateMismatch(id uuid.UUID, oldAuthType string, req codersdk.UpdateMCPServerConfigRequest, got codersdk.MCPServerConfig) string {
-	if got.ID != id {
-		return "ID"
+// mcpServerCredentialSet says which credential fields an auth type uses.
+type mcpServerCredentialSet struct{ apiKey, headers, secret bool }
+
+func mcpServerActiveCredentials(auth coderv1alpha1.CoderMCPServerAuth) mcpServerCredentialSet {
+	return mcpServerCredentialSet{apiKey: auth.Type == "api_key", headers: auth.Type == "custom_headers", secret: auth.Type == "oauth2"}
+}
+
+// mcpServerSparseRequest drops every field of full that found already holds.
+// It keeps a credential when a URL or the auth type changes, when its change
+// token changed, or when Coder lost it. It clears credentials of the other
+// auth types that Coder holds (#314).
+func mcpServerSparseRequest(
+	server *coderv1alpha1.CoderMCPServer, full codersdk.UpdateMCPServerConfigRequest, found codersdk.MCPServerConfig, values map[string]credentialsecret.Value,
+) codersdk.UpdateMCPServerConfigRequest {
+	req := full
+	authChanged := found.AuthType != *full.AuthType
+	for _, f := range mcpServerStringFields(&req, found) {
+		if *f.want != nil && (!authChanged || !f.auth) && mcpServerSameString(f.name, **f.want, f.got) {
+			*f.want = nil
+		}
 	}
-	strs := []struct {
-		name string
-		want *string
-		got  string
-	}{
-		{"display_name", req.DisplayName, got.DisplayName},
-		{"description", req.Description, got.Description},
-		{"icon_url", req.IconURL, got.IconURL},
-		{"transport", req.Transport, got.Transport},
-		{"url", req.URL, got.URL},
-		{"auth_type", req.AuthType, got.AuthType},
-		{"availability", req.Availability, got.Availability},
-		{"api_key_header", req.APIKeyHeader, got.APIKeyHeader},
-		{"oauth2_client_id", req.OAuth2ClientID, got.OAuth2ClientID},
-		{"oauth2_auth_url", req.OAuth2AuthURL, got.OAuth2AuthURL},
-		{"oauth2_token_url", req.OAuth2TokenURL, got.OAuth2TokenURL},
-		{"oauth2_revocation_url", req.OAuth2RevocationURL, got.OAuth2RevocationURL},
-		{"oauth2_scopes", req.OAuth2Scopes, got.OAuth2Scopes},
+	for _, f := range mcpServerBoolFields(&req, found) {
+		if *f.want != nil && **f.want == f.got {
+			*f.want = nil
+		}
 	}
-	for _, f := range strs {
-		if f.want != nil && *f.want != f.got {
+	destinationChanged := req.URL != nil || req.AuthType != nil || req.OAuth2AuthURL != nil || req.OAuth2TokenURL != nil || req.OAuth2RevocationURL != nil
+	recorded := map[string]coderv1alpha1.CoderMCPServerCredentialStatus{}
+	for _, c := range server.Status.Credentials {
+		recorded[c.Field] = c
+	}
+	needs := func(field string, held bool) bool {
+		if destinationChanged || !held {
+			return true
+		}
+		token := values[field].Token
+		c, ok := recorded[field]
+		return !ok || c.SecretName != token.SecretName || c.SecretKey != token.SecretKey || c.SecretUID != string(token.SecretUID) || c.SecretResourceVersion != token.ResourceVersion
+	}
+	var sent []string
+	for _, c := range mcpServerCredentialRefs(server.Spec.Auth) {
+		held := map[string]bool{"apiKey": found.HasAPIKey, "oauth2ClientSecret": found.HasOAuth2Secret}[c.field] || strings.HasPrefix(c.field, "header:") && found.HasCustomHeaders
+		if needs(c.field, held) {
+			sent = append(sent, c.field)
+		}
+	}
+	active := mcpServerActiveCredentials(server.Spec.Auth)
+	sends := func(prefix string) bool {
+		return slices.ContainsFunc(sent, func(f string) bool { return strings.HasPrefix(f, prefix) })
+	}
+	// Custom headers are one Coder field, so they all go together.
+	if !active.headers || !sends("header:") {
+		req.CustomHeaders = nil
+	}
+	if !active.apiKey || !sends("apiKey") {
+		req.APIKeyValue = nil
+	}
+	if !active.secret || !sends("oauth2ClientSecret") {
+		req.OAuth2ClientSecret = nil
+	}
+	// Coder keeps other types' credentials while the auth type stays.
+	empty, none := "", map[string]string{}
+	if !active.apiKey && found.HasAPIKey {
+		req.APIKeyValue = &empty
+	}
+	if !active.headers && found.HasCustomHeaders {
+		req.CustomHeaders = &none
+	}
+	if !active.secret && found.HasOAuth2Secret {
+		req.OAuth2ClientSecret = &empty
+	}
+	return req
+}
+
+type mcpServerStringField struct {
+	name string
+	want **string
+	got  string
+	auth bool
+}
+
+func mcpServerStringFields(req *codersdk.UpdateMCPServerConfigRequest, got codersdk.MCPServerConfig) []mcpServerStringField {
+	return []mcpServerStringField{
+		{"display_name", &req.DisplayName, got.DisplayName, false},
+		{"description", &req.Description, got.Description, false},
+		{"icon_url", &req.IconURL, got.IconURL, false},
+		{"transport", &req.Transport, got.Transport, false},
+		{"url", &req.URL, got.URL, false},
+		{"availability", &req.Availability, got.Availability, false},
+		{"auth_type", &req.AuthType, got.AuthType, true},
+		{"api_key_header", &req.APIKeyHeader, got.APIKeyHeader, true},
+		{"oauth2_client_id", &req.OAuth2ClientID, got.OAuth2ClientID, true},
+		{"oauth2_auth_url", &req.OAuth2AuthURL, got.OAuth2AuthURL, true},
+		{"oauth2_token_url", &req.OAuth2TokenURL, got.OAuth2TokenURL, true},
+		{"oauth2_revocation_url", &req.OAuth2RevocationURL, got.OAuth2RevocationURL, true},
+		{"oauth2_scopes", &req.OAuth2Scopes, got.OAuth2Scopes, true},
+	}
+}
+
+type mcpServerBoolField struct {
+	name string
+	want **bool
+	got  bool
+}
+
+func mcpServerBoolFields(req *codersdk.UpdateMCPServerConfigRequest, got codersdk.MCPServerConfig) []mcpServerBoolField {
+	return []mcpServerBoolField{
+		{"enabled", &req.Enabled, got.Enabled},
+		{"model_intent", &req.ModelIntent, got.ModelIntent},
+		{"allow_in_plan_mode", &req.AllowInPlanMode, got.AllowInPlanMode},
+		{"forward_coder_headers", &req.ForwardCoderHeaders, got.ForwardCoderHeaders},
+	}
+}
+
+// mcpServerSameString compares one string field. Scopes are a set of tokens
+// separated by spaces (plan 4.7 item 5).
+func mcpServerSameString(name, want, got string) bool {
+	if name != "oauth2_scopes" {
+		return want == got
+	}
+	a, b := strings.Fields(want), strings.Fields(got)
+	slices.Sort(a)
+	slices.Sort(b)
+	return slices.Equal(slices.Compact(a), slices.Compact(b))
+}
+
+// mcpServerMismatch returns the first field in which got differs from want,
+// or "". It checks every field that want sets and, on every apply, that Coder
+// holds exactly the credentials of the auth type (#314).
+func mcpServerMismatch(auth coderv1alpha1.CoderMCPServerAuth, want codersdk.UpdateMCPServerConfigRequest, got codersdk.MCPServerConfig) string {
+	for _, f := range mcpServerStringFields(&want, got) {
+		if *f.want != nil && !mcpServerSameString(f.name, **f.want, f.got) {
 			return f.name
 		}
 	}
-	bools := []struct {
-		name string
-		want *bool
-		got  bool
-	}{
-		{"enabled", req.Enabled, got.Enabled},
-		{"model_intent", req.ModelIntent, got.ModelIntent},
-		{"allow_in_plan_mode", req.AllowInPlanMode, got.AllowInPlanMode},
-		{"forward_coder_headers", req.ForwardCoderHeaders, got.ForwardCoderHeaders},
-	}
-	for _, f := range bools {
-		if f.want != nil && *f.want != f.got {
+	for _, f := range mcpServerBoolFields(&want, got) {
+		if *f.want != nil && **f.want != f.got {
 			return f.name
 		}
 	}
+	if want.AuthType == nil {
+		// An auth-only check without the auth type cannot happen.
+		return ""
+	}
+	active := mcpServerActiveCredentials(auth)
 	switch {
-	case req.APIKeyValue != nil && !got.HasAPIKey:
+	case active.apiKey != got.HasAPIKey:
 		return "has_api_key"
-	case req.CustomHeaders != nil && !got.HasCustomHeaders:
+	case active.headers != got.HasCustomHeaders:
 		return "has_custom_headers"
-	case req.OAuth2ClientSecret != nil && !got.HasOAuth2Secret:
+	case active.secret != got.HasOAuth2Secret:
 		return "has_oauth2_secret"
-	}
-	if req.AuthType != nil && *req.AuthType != oldAuthType {
-		switch {
-		case req.APIKeyValue == nil && got.HasAPIKey:
-			return "has_api_key"
-		case req.CustomHeaders == nil && got.HasCustomHeaders:
-			return "has_custom_headers"
-		case req.OAuth2ClientSecret == nil && got.HasOAuth2Secret:
-			return "has_oauth2_secret"
-		}
 	}
 	return ""
 }
 
-// mcpServerReady reports a config that matched the spec when this generation
-// was applied. This version reads Coder only to apply a new generation.
+// mcpServerReady reports a config that matches the spec.
 func mcpServerReady(server *coderv1alpha1.CoderMCPServer) *mcpServerStep {
 	return &mcpServerStep{
 		ready: true, reason: "Applied", requeue: mcpServerResync,

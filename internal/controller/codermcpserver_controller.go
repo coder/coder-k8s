@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -48,8 +47,8 @@ const (
 
 // CoderMCPServerReconciler reconciles CoderMCPServer objects (#155). It is not
 // registered yet. It checks the control plane, the organization and its
-// opt-in, and the credential Secrets, and it reports a slug that a config of
-// someone else holds. It writes nothing to Coder.
+// opt-in, and the credential Secrets, reports a slug that a config of
+// someone else holds, creates the config, and syncs it on every reconcile.
 type CoderMCPServerReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -217,29 +216,29 @@ func (r *CoderMCPServerReconciler) check(
 	if step != nil || err != nil {
 		return step, err
 	}
-	if server.Status.ConfigID == "" {
-		if step, err = r.createOrRecord(ctx, sdk, server, org.ID, values, before); err != nil {
-			return nil, err
-		}
-		if step == nil {
+	// A config that is gone before a full apply is created again once.
+	for range 2 {
+		if server.Status.ConfigID == "" {
+			if step, err = r.createOrRecord(ctx, sdk, server, org.ID, values, before); err != nil || step != nil {
+				break
+			}
 			// Store the ID before anything replaces the nonce: after that,
 			// only the stored ID proves that this object created the config.
-			if err := r.writeStatus(ctx, server, before); err != nil {
-				return nil, err
+			if err = r.writeStatus(ctx, server, before); err != nil {
+				break
 			}
 			*before = *server.Status.DeepCopy()
 		}
-	}
-	switch {
-	case step != nil:
-	case server.Status.AppliedGeneration == server.Generation &&
-		slices.Equal(server.Status.Credentials, mcpServerCredentialStatus(server.Spec.Auth, values)):
-		// A Secret change moves its change token without a new generation.
-		step = mcpServerReady(server)
-	default:
-		if step, err = applyMCPServer(ctx, sdk, server, org.ID, values); err != nil {
-			return nil, err
+		var recreate bool
+		if step, recreate, err = syncMCPServer(ctx, sdk, server, org.ID, values); err != nil || !recreate {
+			break
 		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if step == nil {
+		return nil, fmt.Errorf("assertion failed: MCP server %s/%s was created again twice in one reconcile", server.Namespace, server.Name)
 	}
 	// Coder messages can echo the request, so scrub the credentials from them.
 	all := make([]credentialsecret.Value, 0, len(values))
