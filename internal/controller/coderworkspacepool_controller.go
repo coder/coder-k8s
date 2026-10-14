@@ -146,6 +146,9 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if err := r.trimToOwnerCap(ctx, pool, maxWorkspaces, all.Items); err != nil {
 			return ctrl.Result{}, err
 		}
+		if claims, err = r.refreshWaitingClaims(ctx, claims, all.Items); err != nil {
+			return ctrl.Result{}, err
+		}
 		if err := r.bindClaims(ctx, pool, claims, all.Items, &counts, ownerName); err != nil {
 			return ctrl.Result{}, err
 		}

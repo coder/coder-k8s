@@ -59,6 +59,33 @@ func poolClaimEverBound(claim *coderv1alpha1.CoderWorkspaceClaim) bool {
 		claim.Status.Phase == coderv1alpha1.CoderWorkspaceClaimPhaseLost
 }
 
+// refreshWaitingClaims reads each claim that waits by the (cached) list
+// again without the cache, so a claim whose Bound or Lost status the cache
+// has not shown yet neither binds a second member nor counts as demand. A
+// claim that is gone, or whose name a new claim took, leaves the list.
+func (r *CoderWorkspacePoolReconciler) refreshWaitingClaims(
+	ctx context.Context, claims []coderv1alpha1.CoderWorkspaceClaim, all []coderv1alpha1.CoderWorkspacePoolMember,
+) ([]coderv1alpha1.CoderWorkspaceClaim, error) {
+	kept := claims[:0]
+	for _, claim := range claims {
+		if !claim.DeletionTimestamp.IsZero() || poolClaimEverBound(&claim) || poolClaimHolder(&claim, all) != nil {
+			kept = append(kept, claim)
+			continue
+		}
+		fresh := &coderv1alpha1.CoderWorkspaceClaim{}
+		if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(&claim), fresh); apierrors.IsNotFound(err) {
+			continue
+		} else if err != nil {
+			return nil, fmt.Errorf("get workspace claim %s/%s: %w", claim.Namespace, claim.Name, err)
+		}
+		if fresh.UID != claim.UID {
+			continue // A new claim with the same name, maybe of another pool.
+		}
+		kept = append(kept, *fresh)
+	}
+	return kept, nil
+}
+
 // bindClaims binds the pool's waiting claims, oldest first, to its ready
 // unclaimed members (plan 6.3 step 5): current before outdated, then the
 // oldest ready time. Ready means what the counts use: phase Ready,
@@ -67,11 +94,10 @@ func poolClaimEverBound(claim *coderv1alpha1.CoderWorkspaceClaim) bool {
 // listed resourceVersion, so a member that changed after the list (for
 // example, someone used it) answers 409 and stays. A conflict ends the
 // reconcile. The bound members change in all, so the later steps see them
-// bound. Right before each bind, the pool reads the claim again without
-// the cache, so a claim whose Bound or Lost status the cache has not shown
-// yet never binds a second member, and it stores ownerName in the claim
-// status, so the name survives a crash between the bind and the status.
-// It also sets the pool label again, in case it drifted.
+// bound. The claims come from refreshWaitingClaims. Before each bind, the
+// pool stores ownerName in the claim status, so the name survives a crash
+// between the bind and the status. It also sets the pool label again, in
+// case it drifted.
 func (r *CoderWorkspacePoolReconciler) bindClaims(
 	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, claims []coderv1alpha1.CoderWorkspaceClaim,
 	all []coderv1alpha1.CoderWorkspacePoolMember, counts *poolMemberCounts, ownerName string,
@@ -109,23 +135,12 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 		if !claim.DeletionTimestamp.IsZero() || poolClaimEverBound(claim) || poolClaimHolder(claim, all) != nil {
 			continue
 		}
-		fresh := &coderv1alpha1.CoderWorkspaceClaim{}
-		if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(claim), fresh); apierrors.IsNotFound(err) {
-			continue
-		} else if err != nil {
-			return fmt.Errorf("get workspace claim %s/%s: %w", claim.Namespace, claim.Name, err)
-		}
-		if fresh.UID != claim.UID || !fresh.DeletionTimestamp.IsZero() || poolClaimEverBound(fresh) {
-			*claim = *fresh
-			continue
-		}
-		if fresh.Status.OwnerName != ownerName {
-			fresh.Status.OwnerName = ownerName
-			if err := r.Status().Update(ctx, fresh); err != nil {
+		if claim.Status.OwnerName != ownerName {
+			claim.Status.OwnerName = ownerName
+			if err := r.Status().Update(ctx, claim); err != nil {
 				return fmt.Errorf("update status of workspace claim %s/%s: %w", claim.Namespace, claim.Name, err)
 			}
 		}
-		*claim = *fresh
 		m := free[0]
 		current := poolMemberInputMismatch(m, pool) == ""
 		bound := m.DeepCopy()
@@ -172,6 +187,17 @@ func (r *CoderWorkspacePoolReconciler) writeClaimStatuses(
 		st := &claim.Status
 		ready, lost, reason, message := false, false, "WaitingForReadyWorkspace", fmt.Sprintf("CoderWorkspacePool %s has no ready workspace for this claim yet.", pool.Name)
 		m := poolClaimHolder(claim, all)
+		if m == nil && poolClaimEverBound(claim) {
+			// Lost is final, so check the holder on an uncached list first:
+			// another reconcile can have bound a member after this one's list.
+			fresh := &coderv1alpha1.CoderWorkspacePoolMemberList{}
+			if err := r.APIReader.List(ctx, fresh, client.InNamespace(claim.Namespace)); err != nil {
+				return fmt.Errorf("list pool members in namespace %s: %w", claim.Namespace, err)
+			}
+			if h := poolClaimHolder(claim, fresh.Items); h != nil {
+				m = h.DeepCopy()
+			}
+		}
 		switch {
 		case m == nil && poolClaimEverBound(claim):
 			st.Phase, lost = coderv1alpha1.CoderWorkspaceClaimPhaseLost, true

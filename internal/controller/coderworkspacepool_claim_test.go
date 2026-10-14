@@ -338,3 +338,65 @@ func TestPoolNeverRebindsClaim(t *testing.T) {
 	require.Equal(t, "MemberDeleted", claim.Status.Reason)
 	require.True(t, meta.IsStatusConditionTrue(claim.Status.Conditions, coderv1alpha1.CoderWorkspaceClaimConditionStalled))
 }
+
+// fixedClaims answers claim lists with a saved copy, as a cache that still
+// holds a claim that is gone.
+type fixedClaims struct {
+	client.Client
+	items []coderv1alpha1.CoderWorkspaceClaim
+}
+
+func (c fixedClaims) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if claims, ok := list.(*coderv1alpha1.CoderWorkspaceClaimList); ok {
+		claims.Items = append([]coderv1alpha1.CoderWorkspaceClaim(nil), c.items...)
+		return nil
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+// TestPoolSkipsReplacedClaim: the cache still holds a deleted claim, and a
+// new claim of another pool took its name. The pool neither binds the new
+// claim nor writes its status.
+func TestPoolSkipsReplacedClaim(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	member := e.createMember(t, nil)
+	e.setMemberStatus(t, member, readyWithWorkspace("kwp-ready"))
+	key := e.createClaim(t, "build-1")
+	old := e.claim(t, key)
+	require.NoError(t, k8sClient.Delete(e.ctx, old))
+	other := &coderv1alpha1.CoderWorkspaceClaim{}
+	other.Name, other.Namespace, other.Spec.PoolName = key.Name, key.Namespace, "other"
+	require.NoError(t, k8sClient.Create(e.ctx, other))
+
+	r := &controller.CoderWorkspacePoolReconciler{Client: fixedClaims{k8sClient, []coderv1alpha1.CoderWorkspaceClaim{*old}}, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}})
+	require.NoError(t, err)
+	require.Nil(t, e.reconcileMember(t, member, 0).Spec.ClaimRef)
+	require.Empty(t, e.claim(t, key).Status.Phase, "the other pool's claim has no status from this pool")
+}
+
+// TestPoolClaimNotLostOnOverlap: another reconcile binds the claim after
+// this reconcile listed members. This reconcile sees the claim Bound
+// without a holder in its own list, checks the holder again without the
+// cache, and keeps the claim Bound instead of marking it Lost.
+func TestPoolClaimNotLostOnOverlap(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	member := e.createMember(t, nil)
+	e.setMemberStatus(t, member, readyWithWorkspace("kwp-ready"))
+	claimKey := e.createClaim(t, "build-1")
+	key := types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}
+	inner := &controller.CoderWorkspacePoolReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	overlap := afterMemberList{Reader: k8sClient, done: new(false), hook: func() {
+		_, err := inner.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+		require.NoError(t, err)
+	}}
+	r := &controller.CoderWorkspacePoolReconciler{Client: staleClaims{k8sClient}, APIReader: overlap, Scheme: scheme, Clock: e.clock}
+	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+	if err != nil {
+		require.True(t, apierrors.IsConflict(err), "only a conflict may end the overlapping reconcile: %v", err)
+	}
+	e.requireBound(t, member, claimKey)
+	requireClaim(t, e.claim(t, claimKey), coderv1alpha1.CoderWorkspaceClaimPhaseBound, "WorkspaceReady", true)
+}
