@@ -218,6 +218,10 @@ func (r *CoderMCPServerReconciler) check(
 		return step, err
 	}
 	values, step, err := readMCPServerCredentials(ctx, r.Client, server)
+	if step != nil && step.stalled && server.Status.ConfigID != "" {
+		// Fail closed when consent goes (plan G8).
+		step, err = r.disableMCPServerWithoutConsent(ctx, sdk, server, org.ID, step)
+	}
 	if step != nil || err != nil {
 		return step, err
 	}
