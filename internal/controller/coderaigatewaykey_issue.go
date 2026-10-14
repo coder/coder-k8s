@@ -105,9 +105,22 @@ func (r *CoderAIGatewayKeyReconciler) issueKey(
 		return aiGatewayKeyIssueFailed(key, step.message), nil
 	}
 
-	now = metav1.NewTime(r.Clock.Now())
-	key.Status.CurrentKey = &coderv1alpha1.CoderAIGatewayKeyCurrent{Serial: serial, ID: created.ID.String(), Name: name, IssuedAt: now}
 	key.Status.PendingKey = nil
+	step = setAIGatewayKeyCurrent(key, serial, created.ID, name, r.Clock.Now())
+	r.applyStep(key, step)
+	if err := r.writeStatus(attemptCtx, key, before); err != nil {
+		return nil, err
+	}
+	*before = *key.Status.DeepCopy()
+	return step, nil
+}
+
+// setAIGatewayKeyCurrent records the key that the Secret now holds as the
+// current key, as a successful issue or recovery 4.4 does, and returns the
+// Ready step.
+func setAIGatewayKeyCurrent(key *coderv1alpha1.CoderAIGatewayKey, serial int64, id uuid.UUID, name string, at time.Time) *aiGatewayKeyStep {
+	now := metav1.NewTime(at)
+	key.Status.CurrentKey = &coderv1alpha1.CoderAIGatewayKeyCurrent{Serial: serial, ID: id.String(), Name: name, IssuedAt: now}
 	key.Status.ConsecutiveIssueFailures = 0
 	key.Status.LastHandledTrigger = key.Spec.Rotation.Trigger
 	key.Status.AppliedGeneration = key.Generation
@@ -115,14 +128,12 @@ func (r *CoderAIGatewayKeyReconciler) issueKey(
 	if interval := ptr.Deref(key.Spec.Rotation.IntervalSeconds, 0); interval > 0 {
 		key.Status.NextRotationTime = &metav1.Time{Time: now.Add(time.Duration(interval) * time.Second)}
 	}
-	step = &aiGatewayKeyStep{ready: true, reason: "Ready", requeue: aiGatewayKeyResync, message: fmt.Sprintf(
-		"Secret %q holds key %s, and Coder lists it.", key.Spec.SecretName, name)}
-	r.applyStep(key, step)
-	if err := r.writeStatus(attemptCtx, key, before); err != nil {
-		return nil, err
-	}
-	*before = *key.Status.DeepCopy()
-	return step, nil
+	return aiGatewayKeyReadyStep(key)
+}
+
+func aiGatewayKeyReadyStep(key *coderv1alpha1.CoderAIGatewayKey) *aiGatewayKeyStep {
+	return &aiGatewayKeyStep{ready: true, reason: "Ready", requeue: aiGatewayKeyResync, message: fmt.Sprintf(
+		"Secret %q holds key %s, and Coder lists it.", key.Spec.SecretName, key.Status.CurrentKey.Name)}
 }
 
 // aiGatewayKeyIssueBlocked returns the stall that keeps the issue step from
