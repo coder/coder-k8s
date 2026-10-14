@@ -374,6 +374,46 @@ func requireAIGatewayKeyReady(t *testing.T, key *coderv1alpha1.CoderAIGatewayKey
 	}
 }
 
+// The allowKeys gate on a live object (decision D2): without the block or
+// with false, the controller creates no key (NotAllowed, zero Coder calls).
+// True issues a key. False again stops new keys and rotations, and the
+// current key stays in the Secret and in Coder.
+func TestCoderAIGatewayKeyAllowKeysGate(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newAIGatewayKeyEnv(ctx, t, nil)
+	got, _ := env.reconcile(ctx, t, env.createKey(ctx, t, "coder", testAIGatewaySecret))
+	requireAIGatewayKeyStep(t, got, true, "NotAllowed")
+	setAllowKeys := func(allow bool) {
+		cp := &coderv1alpha1.CoderControlPlane{}
+		require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: env.namespace, Name: "coder"}, cp))
+		cp.Spec.AIGateway = &coderv1alpha1.AIGatewaySpec{AllowKeys: allow}
+		require.NoError(t, k8sClient.Update(ctx, cp))
+	}
+	setAllowKeys(false)
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyStep(t, got, true, "NotAllowed")
+	require.Zero(t, env.fake.totalRequests())
+	requireNoOutputSecret(ctx, t, env.namespace, testAIGatewaySecret)
+
+	setAllowKeys(true)
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyReady(t, got)
+	current := got.Status.CurrentKey
+
+	setAllowKeys(false)
+	got.Spec.Rotation.Trigger = "rotate-1"
+	require.NoError(t, k8sClient.Update(ctx, got))
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyStep(t, got, true, "NotAllowed")
+	require.Equal(t, current.ID, got.Status.CurrentKey.ID, "no rotation")
+	require.Equal(t, 1, env.fake.requestCount(routeCreateAIGatewayKey))
+	require.Len(t, env.fake.aiGatewayKeys(), 1, "the current key stays in Coder")
+	secret := &corev1.Secret{}
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: env.namespace, Name: testAIGatewaySecret}, secret))
+	require.Equal(t, env.fake.aiGatewayKeys()[0].plaintext, string(secret.Data[coderv1alpha1.CoderAIGatewayKeySecretDataKey]), "the Secret keeps the key")
+}
+
 // The object that claimed a shared Secret keeps it. An object created later
 // in the same second with a lower name ranks older, but it must not stall
 // the claimant: it reports SecretNotOwned, and the claimant goes on. The

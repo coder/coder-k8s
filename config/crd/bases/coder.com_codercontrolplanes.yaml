@@ -954,8 +954,7 @@ spec:
               aiGateway:
                 description: |-
                   AIGateway configures CoderAIGatewayKey objects that use this control
-                  plane. It has no effect yet: the CoderAIGatewayKey controller is not
-                  shipped.
+                  plane.
                 properties:
                   allowKeys:
                     description: |-
@@ -967,9 +966,6 @@ spec:
                       controller creates no key. Setting it back to false stops new keys and
                       rotations. The current key of each CoderAIGatewayKey stays until that
                       object is deleted.
-
-                      This field has no effect yet: the CoderAIGatewayKey controller is not
-                      shipped.
                     type: boolean
                 type: object
               certs:
