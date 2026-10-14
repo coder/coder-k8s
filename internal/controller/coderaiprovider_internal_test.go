@@ -74,6 +74,8 @@ func TestAIProviderSeededNames(t *testing.T) {
 			name: "flags", args: []string{"--ai-gateway-openai-key=sk-1", "-AIBRIDGE-BEDROCK-REGION", "us-east-1"},
 			want: map[string]string{"openai": "spec.extraArgs passes --ai-gateway-openai-key", "anthropic": "spec.extraArgs passes --aibridge-bedrock-region"},
 		},
+		{name: "flag values", args: []string{"--oauth2-github-client-id", "ai-gateway-openai-key"}, want: map[string]string{}},
+		{name: "argument reference", args: []string{"--log-human", "$(SEED_FLAG)"}, want: map[string]string{}, blocker: "spec.extraArgs[1] holds a $(VAR) reference"},
 		{name: "other settings", env: []corev1.EnvVar{{Name: "CODER_AI_GATEWAY_PROVIDERS", Value: "openai"}}, args: []string{"--ai-gateway-openai-base-url=https://llm.example.com"}, want: map[string]string{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

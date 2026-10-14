@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"fmt"
 	"strings"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
@@ -59,8 +60,16 @@ func aiProviderSeededNames(controlPlane *coderv1alpha1.CoderControlPlane) (names
 			}
 		}
 	}
-	// Only the flag name goes into a message: an argument can hold a key.
-	for _, arg := range controlPlane.Spec.ExtraArgs {
+	// Only the flag name goes into a message: an argument can hold a key. An
+	// argument without a leading dash is a value, not a flag. The kubelet
+	// expands $(VAR) in arguments, so such an argument can be any flag.
+	for i, arg := range controlPlane.Spec.ExtraArgs {
+		if strings.Contains(arg, "$(") && blocker == "" {
+			blocker = fmt.Sprintf("spec.extraArgs[%d] holds a $(VAR) reference", i)
+		}
+		if !strings.HasPrefix(arg, "-") {
+			continue
+		}
 		flag, _, _ := strings.Cut(strings.ToLower(strings.TrimLeft(arg, "-")), "=")
 		if seeded, ok := aiProviderLegacyFlags[flag]; ok {
 			names[seeded] = "spec.extraArgs passes --" + flag
@@ -89,7 +98,7 @@ func aiProviderReservedName(provider *coderv1alpha1.CoderAIProvider, controlPlan
 	}
 	if blocker != "" {
 		return aiProviderStalled(0, "NameReservedByEnv",
-			"CoderControlPlane %s %s, an indexed AI provider setting that can seed any provider name. The controller creates no provider while it is set.",
+			"CoderControlPlane %s %s, which can seed any AI provider name. The controller creates no provider while it is set.",
 			controlPlane.Name, blocker)
 	}
 	return nil
