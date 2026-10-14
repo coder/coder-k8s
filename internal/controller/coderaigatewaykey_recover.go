@@ -199,8 +199,10 @@ func (r *CoderAIGatewayKeyReconciler) sweepOrphan(
 ) *aiGatewayKeyStep {
 	orphan := decision.key
 	step := func(s *aiGatewayKeyStep) *aiGatewayKeyStep {
+		// The Secret stays valid. A stall stays reported with it, because a
+		// person must act on the orphan.
 		if decision.healthy {
-			s.ready, s.inProgress, s.stalled = true, true, false // The Secret stays valid.
+			s.ready, s.inProgress = true, !s.stalled
 		}
 		return s
 	}

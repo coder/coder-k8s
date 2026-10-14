@@ -90,7 +90,7 @@ type CoderAIGatewayKeyReconciler struct {
 type aiGatewayKeyStep struct {
 	ready       bool
 	inProgress  bool // With ready: Reconciling=True too, for work that keeps the Secret valid.
-	stalled     bool
+	stalled     bool // With ready: Stalled=True too, for a failure beside a valid Secret that a person must fix.
 	reason      string
 	message     string
 	requeue     time.Duration
@@ -473,6 +473,8 @@ func (r *CoderAIGatewayKeyReconciler) patchFinalizer(ctx context.Context, key *c
 func (r *CoderAIGatewayKeyReconciler) applyStep(key *coderv1alpha1.CoderAIGatewayKey, step *aiGatewayKeyStep) {
 	ready, reconciling, stalled := metav1.ConditionFalse, metav1.ConditionTrue, metav1.ConditionFalse
 	switch {
+	case step.ready && step.stalled:
+		ready, reconciling, stalled = metav1.ConditionTrue, metav1.ConditionFalse, metav1.ConditionTrue
 	case step.ready && step.inProgress:
 		ready = metav1.ConditionTrue
 	case step.ready:

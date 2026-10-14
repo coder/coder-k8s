@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -166,4 +167,27 @@ func TestCoderAIGatewayKeyUndeletableOrphan(t *testing.T) {
 	require.Equal(t, 3, env.fake.requestCount(routeDeleteAIGatewayKey))
 	require.Empty(t, env.fake.aiGatewayKeys())
 	require.Equal(t, 1, env.fake.requestCount(routeCreateAIGatewayKey))
+}
+
+// A DELETE that Coder refuses with 403 while the Secret holds the current
+// key reports both facts: the key works (Ready=True), and a person must act
+// on the orphan (Stalled=True).
+func TestCoderAIGatewayKeyUndeletableOrphanWhileReady(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+	got, orphan := readyWithOrphan(ctx, t, &env)
+	env.fake.failNext(routeDeleteAIGatewayKey, fakeFault{Status: http.StatusForbidden})
+	got, _ = env.reconcile(ctx, t, got)
+	for conditionType, status := range map[string]metav1.ConditionStatus{"Ready": metav1.ConditionTrue, "Reconciling": metav1.ConditionFalse, "Stalled": metav1.ConditionTrue} {
+		condition := meta.FindStatusCondition(got.Status.Conditions, conditionType)
+		require.Equal(t, status, condition.Status, conditionType)
+		require.Equal(t, "CoderRejected", condition.Reason, conditionType)
+		require.Contains(t, condition.Message, "cannot delete orphan key "+orphan.name)
+	}
+	got, _ = env.reconcile(ctx, t, got)
+	stalled := meta.FindStatusCondition(got.Status.Conditions, "Stalled")
+	require.Equal(t, metav1.ConditionFalse, stalled.Status, "the next DELETE succeeds")
+	require.Equal(t, "DeletingOrphans", stalled.Reason)
+	require.Len(t, env.fake.aiGatewayKeys(), 1)
 }
