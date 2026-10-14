@@ -74,11 +74,19 @@ func (r *CoderAIProviderReconciler) deleteStep(ctx context.Context, provider *co
 		// While the control plane holds for this object, Coder keeps running:
 		// use the normal path, which retries, instead of the bounded pass
 		// (#353, item q).
-		holds, err := controlPlaneHolds(ctx, r.Client, controlPlane, time.Now())
+		now := time.Now()
+		holds, err := controlPlaneHolds(ctx, r.Client, controlPlane, now)
 		if err != nil {
 			return false, nil, err
 		}
 		deleting = !holds
+		if holds {
+			defer func() {
+				if step != nil {
+					step.requeue = controlPlaneHoldRequeue(controlPlane, now, step.requeue)
+				}
+			}()
+		}
 	}
 	sdk, _, wait, err := controlPlaneCoderClientFor(ctx, r.Client, ref.Namespace, ref.Name, !controlPlane.DeletionTimestamp.IsZero())
 	switch {
@@ -165,7 +173,7 @@ func (r *CoderAIProviderReconciler) deleteInCoder(ctx context.Context, sdk *code
 // releaseWithoutDelete logs what can stay in Coder, because nothing can
 // delete it any more, and returns true (ControlPlaneGone).
 func (r *CoderAIProviderReconciler) releaseWithoutDelete(ctx context.Context, provider *coderv1alpha1.CoderAIProvider, why string) bool {
-	releasedWithoutDelete.WithLabelValues("CoderAIProvider").Inc()
+	countReleasedWithoutDelete(provider.UID, "CoderAIProvider")
 	log.FromContext(ctx).Info("Releasing the finalizer without a delete in Coder: the provider can stay in the Coder database",
 		"reason", "ControlPlaneGone", "why", why, "provider", provider.Name, "providerID", provider.Status.ProviderID,
 		"createPending", provider.Status.CreateAttemptTime != nil)

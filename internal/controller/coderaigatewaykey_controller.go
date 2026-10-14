@@ -167,7 +167,11 @@ func (r *CoderAIGatewayKeyReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		if err != nil {
 			return ctrl.Result{}, err
 		} else if release {
-			return ctrl.Result{}, r.patchFinalizer(ctx, key, false)
+			if err := r.patchFinalizer(ctx, key, false); err != nil {
+				return ctrl.Result{}, err
+			}
+			releasedWithoutDeleteDone(key.UID)
+			return ctrl.Result{}, nil
 		}
 		step = deleteStep
 	} else {

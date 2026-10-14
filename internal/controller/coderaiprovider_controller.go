@@ -161,7 +161,11 @@ func (r *CoderAIProviderReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 		if release {
 			r.sentKeys.Delete(provider.UID)
-			return ctrl.Result{}, r.patchFinalizer(ctx, provider, false)
+			if err := r.patchFinalizer(ctx, provider, false); err != nil {
+				return ctrl.Result{}, err
+			}
+			releasedWithoutDeleteDone(provider.UID)
+			return ctrl.Result{}, nil
 		}
 		applyAIProviderStep(provider, step)
 		return ctrl.Result{RequeueAfter: step.requeue}, r.writeStatus(ctx, provider, before)

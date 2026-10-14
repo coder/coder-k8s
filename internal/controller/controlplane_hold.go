@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -27,27 +29,60 @@ import (
 // goes, and they release with ControlPlaneGone.
 const controlPlaneDependentHold = 10 * time.Minute
 
+// controlPlaneDependentGrace is how long a control plane stays after its
+// hold ends while dependents remain, so each of them sees the hold end and
+// runs its bounded pass while Coder still runs. Dependents requeue before the
+// hold ends (controlPlaneHoldRequeue), so they need only a short time.
+const controlPlaneDependentGrace = 30 * time.Second
+
 // controlPlaneDependentPoll is the requeue of a control plane that waits for
 // its dependents. A dependent's removal also requeues it at once.
 const controlPlaneDependentPoll = 10 * time.Second
 
 // releasedWithoutDelete counts finalizers that went while their keys or
 // providers can stay in Coder (#353), by kind. Today the release log line is
-// the only other signal.
+// the only other signal. countReleasedWithoutDelete records a release, and
+// releasedWithoutDeleteDone counts it once the finalizer is gone, so a
+// failed finalizer patch and its retry count once.
 var releasedWithoutDelete = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "coder_k8s_cleanup_released_without_delete_total",
 	Help: "Finalizers released without deleting the object's resources in Coder, because Coder was not reachable.",
 }, []string{"kind"})
 
+var pendingReleases sync.Map // types.UID -> kind label
+
 func init() {
 	metrics.Registry.MustRegister(releasedWithoutDelete)
 }
 
+func countReleasedWithoutDelete(uid types.UID, kind string) { pendingReleases.Store(uid, kind) }
+
+// releasedWithoutDeleteDone counts the release of uid, if one was recorded,
+// after its finalizer patch succeeded.
+func releasedWithoutDeleteDone(uid types.UID) {
+	if kind, ok := pendingReleases.LoadAndDelete(uid); ok {
+		releasedWithoutDelete.WithLabelValues(kind.(string)).Inc()
+	}
+}
+
+// controlPlaneHoldEnd is when the hold of a control plane that is being
+// deleted ends.
+func controlPlaneHoldEnd(controlPlane *coderv1alpha1.CoderControlPlane) time.Time {
+	return controlPlane.DeletionTimestamp.Add(controlPlaneDependentHold)
+}
+
+// controlPlaneHoldRequeue caps a dependent's requeue under the hold, so it
+// looks again right after the hold ends, inside the grace period.
+func controlPlaneHoldRequeue(controlPlane *coderv1alpha1.CoderControlPlane, now time.Time, requeue time.Duration) time.Duration {
+	return min(requeue, max(controlPlaneHoldEnd(controlPlane).Sub(now)+time.Second, time.Second))
+}
+
 // controlPlaneHolds reports whether controlPlane, which is being deleted,
 // waits for its dependents at now: it still has its finalizer, the hold time
-// has not passed, and its namespace is not being deleted. A namespace
-// deletion removes Coder's pods at once, so no hold can keep Coder
-// reachable then, and a hold would only delay the namespace.
+// has not passed, it is not deleted in the foreground, and its namespace is
+// not being deleted. A namespace deletion removes Coder's pods at once, and a
+// foreground deletion removes the Coder Deployment (blockOwnerDeletion)
+// before the control plane, so no hold can keep Coder reachable then.
 func controlPlaneHolds(ctx context.Context, reader client.Reader, controlPlane *coderv1alpha1.CoderControlPlane, now time.Time) (bool, error) {
 	if reader == nil || controlPlane == nil {
 		return false, errors.New("assertion failed: the control plane hold check needs a reader and a control plane")
@@ -55,7 +90,8 @@ func controlPlaneHolds(ctx context.Context, reader client.Reader, controlPlane *
 	if controlPlane.DeletionTimestamp.IsZero() {
 		return false, errors.New("assertion failed: the control plane hold applies only while the control plane is being deleted")
 	}
-	if !controllerutil.ContainsFinalizer(controlPlane, workspaceRBACFinalizer) || !now.Before(controlPlane.DeletionTimestamp.Add(controlPlaneDependentHold)) {
+	if !controllerutil.ContainsFinalizer(controlPlane, workspaceRBACFinalizer) || controllerutil.ContainsFinalizer(controlPlane, metav1.FinalizerDeleteDependents) ||
+		!now.Before(controlPlaneHoldEnd(controlPlane)) {
 		return false, nil
 	}
 	namespace := &corev1.Namespace{}

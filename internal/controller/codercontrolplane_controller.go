@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -219,6 +220,16 @@ type CoderControlPlaneReconciler struct {
 	OperatorAccessProvisioner coderbootstrap.OperatorAccessProvisioner
 	LicenseUploader           LicenseUploader
 	EntitlementsInspector     EntitlementsInspector
+	// Clock is optional (nil: the real clock). Tests set it to move the
+	// dependent hold of a deleted control plane.
+	Clock clock.PassiveClock
+}
+
+func (r *CoderControlPlaneReconciler) now() time.Time {
+	if r.Clock == nil {
+		return time.Now()
+	}
+	return r.Clock.Now()
 }
 
 // +kubebuilder:rbac:groups=coder.com,resources=codercontrolplanes,verbs=get;list;watch;create;update;patch;delete
@@ -607,8 +618,9 @@ func (r *CoderControlPlaneReconciler) finalizeWorkspaceRBAC(
 	}
 	// The finalizer keeps the Coder Deployment (owned by this object)
 	// running while AI Gateway keys and AI providers that use it still
-	// delete their resources in Coder (#353).
-	if holds, err := controlPlaneHolds(ctx, r.Client, coderControlPlane, time.Now()); err != nil {
+	// delete their resources in Coder (#353). The grace period after the hold
+	// lets each of them run its bounded pass before Coder goes.
+	if holds, err := controlPlaneHolds(ctx, r.Client, coderControlPlane, r.now().Add(-controlPlaneDependentGrace)); err != nil {
 		return ctrl.Result{}, err
 	} else if holds {
 		dependents, err := controlPlaneDependents(ctx, r.Client, coderControlPlane)

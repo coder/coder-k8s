@@ -10,9 +10,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	clocktesting "k8s.io/utils/clock/testing"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
@@ -163,17 +166,91 @@ func TestCoderAIProviderDeleteUnderControlPlaneHold(t *testing.T) {
 	require.Equal(t, 2, env.fake.requestCount(routeDeleteAIProvider))
 }
 
-// #353: a release without a delete in Coder counts in
-// coder_k8s_cleanup_released_without_delete_total.
+// #353: a release without a delete in Coder counts once in
+// coder_k8s_cleanup_released_without_delete_total, also when the finalizer
+// patch fails and the release runs again. Not parallel: other tests release
+// keys too.
 func TestReleasedWithoutDeleteMetric(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
 	got := rotatedKey(ctx, t, &env)
 	before := releasedWithoutDelete(t, "CoderAIGatewayKey")
 	require.NoError(t, k8sClient.Delete(ctx, &coderv1alpha1.CoderControlPlane{ObjectMeta: metav1.ObjectMeta{Namespace: env.namespace, Name: "coder"}}))
 	require.NoError(t, k8sClient.Delete(ctx, got))
+	base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+	failed := false
+	env.client = interceptor.NewClient(base, interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if _, ok := obj.(*coderv1alpha1.CoderAIGatewayKey); ok && !failed {
+				failed = true
+				return apierrors.NewConflict(schema.GroupResource{Resource: "coderaigatewaykeys"}, obj.GetName(), nil)
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	_, _, err = env.reconcileErr(ctx, t, got)
+	require.Error(t, err, "the finalizer patch fails once")
+	require.Equal(t, before, releasedWithoutDelete(t, "CoderAIGatewayKey"), "no count before the finalizer is gone")
 	gone, _ := env.reconcile(ctx, t, got)
 	require.Nil(t, gone)
-	require.Greater(t, releasedWithoutDelete(t, "CoderAIGatewayKey"), before)
+	require.Equal(t, before+1, releasedWithoutDelete(t, "CoderAIGatewayKey"))
+}
+
+// #353: a foreground deletion removes the Coder Deployment before the
+// control plane, so the control plane does not hold for its dependents.
+func TestControlPlaneForegroundDeletionDoesNotHold(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+	env.createKey(ctx, t, "coder", testAIGatewaySecret)
+	key := client.ObjectKey{Namespace: env.namespace, Name: "coder"}
+	controlPlane := &coderv1alpha1.CoderControlPlane{}
+	require.NoError(t, k8sClient.Get(ctx, key, controlPlane))
+	controlPlane.Finalizers = append(controlPlane.Finalizers, workspaceRBACFinalizer)
+	require.NoError(t, k8sClient.Update(ctx, controlPlane))
+	require.NoError(t, k8sClient.Delete(ctx, controlPlane, client.PropagationPolicy(metav1.DeletePropagationForeground)))
+	t.Cleanup(func() {
+		if k8sClient.Get(context.Background(), key, controlPlane) == nil {
+			controlPlane.Finalizers = nil
+			_ = k8sClient.Update(context.Background(), controlPlane)
+		}
+	})
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+	require.NoError(t, k8sClient.Get(ctx, key, controlPlane))
+	require.NotContains(t, controlPlane.Finalizers, workspaceRBACFinalizer, "no hold under foreground deletion")
+}
+
+// #353: when the hold ends, the control plane stays for a short grace period
+// while dependents remain, and a dependent under the hold requeues before the
+// hold ends, so it runs its bounded pass while Coder still runs.
+func TestControlPlaneHoldEnd(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+	got := rotatedKey(ctx, t, &env)
+	deleteFinalizedControlPlane(ctx, t, env.namespace, "coder")
+	controlPlane := &coderv1alpha1.CoderControlPlane{}
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: env.namespace, Name: "coder"}, controlPlane))
+	end := controlPlane.DeletionTimestamp.Add(10 * time.Minute)
+
+	controlPlane.Status.OperatorAccessReady = false
+	require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
+	require.NoError(t, k8sClient.Delete(ctx, got))
+	env.clock.SetTime(end.Add(-30 * time.Second))
+	got, result := env.reconcile(ctx, t, got)
+	requireAIGatewayKeyStep(t, got, false, "OperatorAccessNotReady")
+	require.Equal(t, 31*time.Second, result.RequeueAfter, "the dependent looks again right after the hold ends")
+
+	ccpClock := clocktesting.NewFakeClock(end.Add(10 * time.Second))
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, Clock: ccpClock}
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(controlPlane)})
+	require.NoError(t, err)
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(controlPlane), controlPlane), "the control plane stays in the grace period")
+	ccpClock.SetTime(end.Add(31 * time.Second))
+	_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(controlPlane)})
+	require.NoError(t, err)
+	require.True(t, apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(controlPlane), controlPlane)), "after the grace period it goes")
 }

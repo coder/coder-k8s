@@ -46,11 +46,19 @@ func (r *CoderAIGatewayKeyReconciler) deleteStep(ctx context.Context, key *coder
 		// While the control plane holds for this object, Coder keeps running:
 		// use the normal path, which retries, instead of the bounded pass
 		// (#353, item q).
-		holds, err := controlPlaneHolds(ctx, r.Client, controlPlane, r.Clock.Now())
+		now := r.Clock.Now()
+		holds, err := controlPlaneHolds(ctx, r.Client, controlPlane, now)
 		if err != nil {
 			return false, nil, err
 		}
 		deleting = !holds
+		if holds {
+			defer func() {
+				if step != nil {
+					step.requeue = controlPlaneHoldRequeue(controlPlane, now, step.requeue)
+				}
+			}()
+		}
 	}
 	sdk, _, wait, err := controlPlaneCoderClientFor(ctx, r.Client, ref.Namespace, ref.Name, !controlPlane.DeletionTimestamp.IsZero())
 	switch {
@@ -156,7 +164,7 @@ func (r *CoderAIGatewayKeyReconciler) releaseWithoutDelete(ctx context.Context, 
 	for _, retiring := range key.Status.RetiringKeys {
 		ids = append(ids, retiring.ID)
 	}
-	releasedWithoutDelete.WithLabelValues("CoderAIGatewayKey").Inc()
+	countReleasedWithoutDelete(key.UID, "CoderAIGatewayKey")
 	log.FromContext(ctx).Info("Releasing the finalizer without deleting the keys in Coder: the keys can stay in Coder",
 		"reason", "ControlPlaneGone", "why", why, "keyIDs", ids, "listedKeyIDs", left, "nextSerial", key.Status.NextSerial)
 	return true
