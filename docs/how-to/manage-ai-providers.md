@@ -116,7 +116,7 @@ These limits remain:
 
 ## Delete a provider
 
-Deleting the object deletes the provider in Coder. With only an unconfirmed create, the operator reads Coder first and deletes only a provider that this object created.
+Deleting the object deletes the provider in Coder. With only an unconfirmed create, the operator reads Coder first and deletes only a provider that this object created. A create request can still commit for a short time, so within 2 minutes of that request the operator reads again before it trusts that the provider is absent.
 
 - When Coder is unreachable, or the control plane has no operator access, the finalizer `coder.com/ai-provider-cleanup` stays and the operator retries every 60 seconds.
 - When the control plane is gone, nothing can delete the provider. The finalizer goes at once, and the operator logs the provider ID. Delete the provider in the Coder dashboard.
