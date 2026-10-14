@@ -3092,12 +3092,6 @@ func (s *mockCoderServerState) handleGetTemplate(w http.ResponseWriter, template
 		writeCoderError(w, http.StatusInternalServerError, "injected template read failure")
 		return
 	}
-	if s.promoteFault != nil && s.promoteFault.rereadDelay > 0 {
-		delay := s.promoteFault.rereadDelay
-		s.mu.Unlock()
-		time.Sleep(delay)
-		s.mu.Lock()
-	}
 
 	writeJSON(w, http.StatusOK, template)
 }
@@ -3110,7 +3104,6 @@ type promoteFault struct {
 	hang          chan struct{} // if set: close it when the PATCH arrives, and answer only after the client gave up
 	status        int           // answer with this status; 0 drops the connection without an answer
 	failReread    bool          // GET /api/v2/templates/{id} answers 500
-	rereadDelay   time.Duration // GET /api/v2/templates/{id} answers after this delay
 }
 
 // answerWithPromoteFault applies s.promoteFault. The caller holds s.mu and releases it when this
