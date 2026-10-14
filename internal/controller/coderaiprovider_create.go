@@ -33,9 +33,11 @@ func aiProviderNonce(provider *coderv1alpha1.CoderAIProvider) string {
 // createOrConfirm handles a provider without a Coder ID. Without a create
 // marker it looks up the name and creates the provider when the name is free.
 // With a marker, a create can be in flight or committed, so it reads Coder
-// first and never sends the create again before that read.
+// first and never sends the create again before that read. A non-nil
+// reserved step (NameReservedByEnv) replaces a new create request.
 func (r *CoderAIProviderReconciler) createOrConfirm(
 	ctx context.Context, sdk *codersdk.Client, provider *coderv1alpha1.CoderAIProvider, key credentialsecret.Value, before *coderv1alpha1.CoderAIProviderStatus,
+	reserved *aiProviderStep,
 ) (*aiProviderStep, error) {
 	if stalled := meta.FindStatusCondition(provider.Status.Conditions, coderv1alpha1.CoderAIProviderConditionStalled); provider.Status.CreateAttemptTime == nil &&
 		stalled != nil && stalled.Reason == "CoderRejected" && stalled.ObservedGeneration == provider.Generation {
@@ -58,6 +60,12 @@ func (r *CoderAIProviderReconciler) createOrConfirm(
 				provider.Status.CreateAttemptTime, provider.Status.Credential = nil, nil
 				return aiProviderStalled(0, "CoderRejected", "Coder rejected the create request of provider %s, and a read confirmed that nothing was created.", provider.Name), nil
 			}
+		}
+		if reserved != nil {
+			// A read by a site owner confirmed that nothing of this object
+			// exists, so the marker goes.
+			provider.Status.CreateAttemptTime, provider.Status.Credential = nil, nil
+			return reserved, nil
 		}
 		return r.createAIProvider(ctx, sdk, provider, key, before)
 	case err != nil:
