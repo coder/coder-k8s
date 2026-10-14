@@ -334,12 +334,13 @@ func TestAIGatewayKeyRetireState(t *testing.T) {
 		if tc.notListedYet {
 			own = own[:1]
 		}
-		got := aiGatewayKeyRetireState(key, own, now)
+		got := aiGatewayKeyRetireState(key, own, uuid.Nil, now)
 		require.Equal(t, tc.wantDue, got.due != nil, name)
 		require.Equal(t, tc.wantReason, got.reason, name)
 		require.Equal(t, tc.wantNext, got.next, name)
 		if tc.wantDue {
 			require.Equal(t, retiring.ID, got.due.ID, name)
+			require.Nil(t, aiGatewayKeyRetireState(key, own, retiring.ID, now).due, name+": a held key is never due")
 		}
 	}
 

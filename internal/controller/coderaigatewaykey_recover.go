@@ -166,9 +166,9 @@ func aiGatewayKeyOrphan(key *coderv1alpha1.CoderAIGatewayKey, prefix string, own
 		if status.LastCreateAttemptTime != nil {
 			start = status.LastCreateAttemptTime.Time
 		}
-		return aiGatewayKeyDecision{key: k, serial: serial, settleAt: start.Add(aiGatewayKeySettleWindow), retirement: aiGatewayKeyRetireState(key, own, now)}
+		return aiGatewayKeyDecision{key: k, serial: serial, settleAt: start.Add(aiGatewayKeySettleWindow), retirement: aiGatewayKeyRetireState(key, own, holds, now)}
 	}
-	return aiGatewayKeyDecision{retirement: aiGatewayKeyRetireState(key, own, now)}
+	return aiGatewayKeyDecision{retirement: aiGatewayKeyRetireState(key, own, holds, now)}
 }
 
 // aiGatewayKeyRearmed reports that the kill switch fired in an older

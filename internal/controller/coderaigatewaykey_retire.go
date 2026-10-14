@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
+	"github.com/google/uuid"
 	"k8s.io/utils/ptr"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
@@ -44,11 +45,13 @@ type aiGatewayKeyRetirement struct {
 }
 
 // aiGatewayKeyRetireState applies plan 4.6 conditions 1 and 2 to every
-// listed retiring key. Condition 3, the I1 live read, runs right before the
-// DELETE. The grace period and the consumer wait come from the current
+// listed retiring key. A key that the Secret holds (holds) is never due: in
+// delete-only mode a replaced Secret can hold one, and nothing changes until
+// the Secret does, which its watch reports. Condition 3, the I1 live read,
+// still runs right before the DELETE. The grace period and the consumer wait come from the current
 // spec, so a change applies at once. The API keeps the grace period at 600 s
 // or more.
-func aiGatewayKeyRetireState(key *coderv1alpha1.CoderAIGatewayKey, own []codersdk.AIGatewayKey, now time.Time) aiGatewayKeyRetirement {
+func aiGatewayKeyRetireState(key *coderv1alpha1.CoderAIGatewayKey, own []codersdk.AIGatewayKey, holds uuid.UUID, now time.Time) aiGatewayKeyRetirement {
 	grace := time.Duration(ptr.Deref(key.Spec.Rotation.GracePeriodSeconds, aiGatewayKeyDefaultGraceSeconds)) * time.Second
 	wait := time.Duration(ptr.Deref(key.Spec.Rotation.ConsumerWaitSeconds, aiGatewayKeyDefaultConsumerWaitSeconds)) * time.Second
 	var currentBeat *time.Time
@@ -68,8 +71,8 @@ func aiGatewayKeyRetireState(key *coderv1alpha1.CoderAIGatewayKey, own []codersd
 	}
 	for _, r := range key.Status.RetiringKeys {
 		i := slices.IndexFunc(own, func(k codersdk.AIGatewayKey) bool { return k.ID.String() == r.ID })
-		if i < 0 {
-			continue // Gone in Coder. The observe step drops it from status.
+		if i < 0 || (holds != uuid.Nil && own[i].ID == holds) {
+			continue // Gone in Coder (the observe step drops it), or held.
 		}
 		graceEnd := r.ReplacedAt.Add(grace)
 		if now.Before(graceEnd) {

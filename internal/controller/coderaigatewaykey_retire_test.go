@@ -123,7 +123,8 @@ func TestCoderAIGatewayKeyRetireWaitsForConsumers(t *testing.T) {
 }
 
 // Plan R9 in delete-only mode: the Secret holds the retiring key, so the
-// retire step never deletes it, also long after its grace period.
+// retire step never deletes it, also long after its grace period, and the
+// stall keeps its resync instead of retrying every second.
 func TestCoderAIGatewayKeyRetireKeepsHeldKey(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -135,10 +136,14 @@ func TestCoderAIGatewayKeyRetireKeepsHeldKey(t *testing.T) {
 	require.NoError(t, k8sClient.Update(ctx, cp))
 	setOutputSecretData(ctx, t, env.namespace, map[string][]byte{"key": []byte(old.plaintext)})
 	env.clock.Step(48 * time.Hour)
-	got, _ = env.reconcile(ctx, t, got)
-	message := requireAIGatewayKeyStep(t, got, true, "NotAllowed")
-	require.Contains(t, message, "now holds key "+old.name)
+	for range 2 {
+		var result ctrl.Result
+		got, result = env.reconcile(ctx, t, got)
+		requireAIGatewayKeyStep(t, got, true, "NotAllowed")
+		require.Equal(t, 10*time.Minute, result.RequeueAfter)
+	}
 	require.Zero(t, env.fake.requestCount(routeDeleteAIGatewayKey))
+	require.Equal(t, []string{old.id.String()}, retiringIDs(got))
 }
 
 // A lost final status write after a drift re-issue: recovery 4.4 counts the
