@@ -70,6 +70,17 @@ func TestPoolMemberKeepsUnclaimedWorkspaceWarm(t *testing.T) {
 	require.Equal(t, e.clock.Now().Add(time.Hour).UTC(), e.deadline(t, workspaceID).Time.UTC())
 	requireReady(t, e.reconcileMember(t, key, 2), "")
 	require.Equal(t, 1, e.fake.requestCount(routeExtendWorkspace), "the new deadline is an hour away")
+	// After slow reads, lastExtendTime is the clock reading the new
+	// deadline counts from.
+	late := started.Add(time.Hour + 41*time.Minute)
+	e.clock.SetTime(late)
+	r := &controller.CoderWorkspacePoolMemberReconciler{Client: k8sClient, Scheme: scheme, Clock: &lateClock{times: []time.Time{started.Add(time.Hour + 40*time.Minute), late}}}
+	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+	member = e.reconcileMember(t, key, 0)
+	requireReady(t, member, "extended the deadline")
+	require.True(t, member.Status.LastExtendTime.Time.Equal(late))
+	require.True(t, e.deadline(t, workspaceID).Time.Equal(late.Add(time.Hour)))
 
 	// The template's max deadline bounds the extension, then ends it: the
 	// member never sends a request that Coder must refuse.

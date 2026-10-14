@@ -71,7 +71,8 @@ func (r *CoderWorkspacePoolMemberReconciler) keepWarm(
 	// The reads can take a while, so the new deadline counts from a fresh
 	// clock reading.
 	extendTo := func() (time.Time, bool) {
-		return poolMemberExtendTo(r.Clock.Now(), time.Duration(template.DefaultTTLMillis)*time.Millisecond, build.MaxDeadline)
+		now = r.Clock.Now() // lastExtendTime is this reading.
+		return poolMemberExtendTo(now, time.Duration(template.DefaultTTLMillis)*time.Millisecond, build.MaxDeadline)
 	}
 	to, ok := extendTo()
 	switch {
