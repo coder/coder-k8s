@@ -75,7 +75,7 @@ func (r *CoderWorkspacePoolMemberReconciler) keepWarm(
 	}
 	to, ok := extendTo()
 	switch {
-	case bound && target == nil && !deadline.Time.Before(to):
+	case bound && !deadline.Time.Before(to):
 		// The workspace already has a full TTL: an extension would shorten it.
 		member.Status.BindExtended = true
 		return coderWait(reason, "Workspace %s is bound to claim %s. Its deadline %s needs no extension.",

@@ -170,12 +170,25 @@ func TestPoolMemberExtendsOnceAtBind(t *testing.T) {
 	require.True(t, member.Status.BindExtendDeadline.Time.Equal(started.Add(30*time.Minute)))
 	require.True(t, e.deadline(t, workspaceID).Time.Equal(late.Add(30*time.Minute)))
 
+	// A max deadline too near for any extension ends the bind extension
+	// without a request that Coder must refuse.
+	e.clock.SetTime(started)
+	e.fake.setTemplateSchedule(e.tplID, time.Hour, 70*time.Minute)
+	key, _ = e.readyMember(t)
+	e.clock.SetTime(started.Add(50 * time.Minute))
+	bind(t, key)
+	extends := e.fake.requestCount(routeExtendWorkspace)
+	member = e.reconcileMember(t, key, 1)
+	requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "Bound", "allows no extension")
+	require.True(t, member.Status.BindExtended)
+	require.Equal(t, extends, e.fake.requestCount(routeExtendWorkspace))
+
 	// Without a deadline, the bind needs no extension.
 	e.fake.setTemplateSchedule(e.tplID, 0, 0)
 	e.clock.SetTime(time.Now().Truncate(time.Second))
 	key, _ = e.readyMember(t)
 	bind(t, key)
-	extends := e.fake.requestCount(routeExtendWorkspace)
+	extends = e.fake.requestCount(routeExtendWorkspace)
 	member = e.reconcileMember(t, key, 1)
 	requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "Bound", "no autostop deadline")
 	require.True(t, member.Status.BindExtended)
