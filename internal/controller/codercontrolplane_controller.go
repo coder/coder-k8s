@@ -29,9 +29,11 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -602,6 +604,22 @@ func (r *CoderControlPlaneReconciler) finalizeWorkspaceRBAC(
 	}
 	if !controllerutil.ContainsFinalizer(coderControlPlane, workspaceRBACFinalizer) {
 		return ctrl.Result{}, nil
+	}
+	// The finalizer keeps the Coder Deployment (owned by this object)
+	// running while AI Gateway keys and AI providers that use it still
+	// delete their resources in Coder (#353).
+	if holds, err := controlPlaneHolds(ctx, r.Client, coderControlPlane, time.Now()); err != nil {
+		return ctrl.Result{}, err
+	} else if holds {
+		dependents, err := controlPlaneDependents(ctx, r.Client, coderControlPlane)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if len(dependents) > 0 {
+			log.FromContext(ctx).Info("Waiting for the objects that use this control plane to delete their resources in Coder",
+				"dependents", dependents, "until", coderControlPlane.DeletionTimestamp.Add(controlPlaneDependentHold).UTC())
+			return ctrl.Result{RequeueAfter: controlPlaneDependentPoll}, nil
+		}
 	}
 
 	if err := r.cleanupManagedWorkspaceRBAC(ctx, coderControlPlane, nil, nil); err != nil {
@@ -3269,7 +3287,12 @@ func (r *CoderControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(r.reconcileRequestsForEnvFromConfigMap),
-		)
+		).
+		// A control plane that is being deleted waits for these (#353).
+		Watches(&coderv1alpha1.CoderAIGatewayKey{}, handler.EnqueueRequestsFromMapFunc(requestForDependentControlPlane),
+			ctrlbuilder.WithPredicates(dependentRemoved)).
+		Watches(&coderv1alpha1.CoderAIProvider{}, handler.EnqueueRequestsFromMapFunc(requestForDependentControlPlane),
+			ctrlbuilder.WithPredicates(dependentRemoved))
 
 	// Gateway API is optional; only watch HTTPRoutes when the CRD is installed.
 	httpRouteGVK := schema.GroupVersionKind{Group: gatewayv1.GroupVersion.Group, Version: gatewayv1.GroupVersion.Version, Kind: "HTTPRoute"}

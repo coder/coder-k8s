@@ -1,0 +1,179 @@
+package controller_test
+
+import (
+	"context"
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
+
+	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/controller"
+)
+
+const workspaceRBACFinalizer = "coder.com/workspace-rbac-cleanup"
+
+// deleteFinalizedControlPlane gives the control plane its own finalizer, as
+// its reconciler does, and deletes it, so it stays Terminating.
+func deleteFinalizedControlPlane(ctx context.Context, t *testing.T, namespace, name string) {
+	t.Helper()
+	key := client.ObjectKey{Namespace: namespace, Name: name}
+	controlPlane := &coderv1alpha1.CoderControlPlane{}
+	require.NoError(t, k8sClient.Get(ctx, key, controlPlane))
+	controlPlane.Finalizers = append(controlPlane.Finalizers, workspaceRBACFinalizer)
+	require.NoError(t, k8sClient.Update(ctx, controlPlane))
+	require.NoError(t, k8sClient.Delete(ctx, controlPlane))
+	t.Cleanup(func() {
+		if k8sClient.Get(context.Background(), key, controlPlane) == nil {
+			controlPlane.Finalizers = nil
+			_ = k8sClient.Update(context.Background(), controlPlane)
+		}
+	})
+}
+
+func releasedWithoutDelete(t *testing.T, kind string) float64 {
+	t.Helper()
+	families, err := metrics.Registry.Gather()
+	require.NoError(t, err)
+	for _, f := range families {
+		if f.GetName() != "coder_k8s_cleanup_released_without_delete_total" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "kind" && l.GetValue() == kind {
+					return m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// #353: a control plane that is being deleted keeps its finalizer, and so its
+// Coder Deployment, while a CoderAIGatewayKey or CoderAIProvider uses it. A
+// dependent of another control plane does not hold it. A namespace deletion
+// does not wait: it removes Coder's pods anyway.
+func TestControlPlaneWaitsForDependents(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	reconcileGone := func(t *testing.T, namespace string) (ctrl.Result, bool) {
+		t.Helper()
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: namespace, Name: "coder"}})
+		require.NoError(t, err)
+		err = k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: "coder"}, &coderv1alpha1.CoderControlPlane{})
+		return result, apierrors.IsNotFound(err)
+	}
+	t.Run("dependents", func(t *testing.T) {
+		t.Parallel()
+		env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+		key := env.createKey(ctx, t, "coder", testAIGatewaySecret)
+		other := env.createNamedKey(ctx, t, "other", "another-control-plane", "other-secret")
+		provider := &coderv1alpha1.CoderAIProvider{
+			ObjectMeta: metav1.ObjectMeta{Name: "openai", Namespace: env.namespace},
+			Spec: coderv1alpha1.CoderAIProviderSpec{
+				ControlPlaneRef: coderv1alpha1.CoderControlPlaneReference{Name: "coder"}, Type: "openai", BaseURL: "https://api.openai.com/v1",
+				APIKeySecretRef: coderv1alpha1.SecretKeySelector{Name: "openai-key", Key: "api-key"},
+			},
+		}
+		require.NoError(t, k8sClient.Create(ctx, provider))
+		deleteFinalizedControlPlane(ctx, t, env.namespace, "coder")
+
+		result, gone := reconcileGone(t, env.namespace)
+		require.False(t, gone, "the control plane waits for its key and provider")
+		require.Equal(t, 10*time.Second, result.RequeueAfter)
+		require.NoError(t, k8sClient.Delete(ctx, key))
+		_, gone = reconcileGone(t, env.namespace)
+		require.False(t, gone, "the control plane waits for its provider")
+		require.NoError(t, k8sClient.Delete(ctx, provider))
+		_, gone = reconcileGone(t, env.namespace)
+		require.True(t, gone, "a key of another control plane does not hold this one")
+		require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(other), other))
+	})
+	t.Run("namespace deletion", func(t *testing.T) {
+		t.Parallel()
+		env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+		env.createKey(ctx, t, "coder", testAIGatewaySecret)
+		deleteFinalizedControlPlane(ctx, t, env.namespace, "coder")
+		require.NoError(t, k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: env.namespace}}))
+		_, gone := reconcileGone(t, env.namespace)
+		require.True(t, gone, "a namespace deletion does not wait")
+	})
+}
+
+// #353: while the control plane holds for it, a deleted key takes the normal
+// path: it waits for the settle window, then deletes every key, instead of
+// one bounded pass. A control plane without operator access makes it wait
+// and retry (item q), not release.
+func TestCoderAIGatewayKeyDeleteUnderControlPlaneHold(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+	got := rotatedKey(ctx, t, &env)
+	deleteFinalizedControlPlane(ctx, t, env.namespace, "coder")
+	require.NoError(t, k8sClient.Delete(ctx, got))
+
+	got, result := env.reconcile(ctx, t, got)
+	requireAIGatewayKeyStep(t, got, false, "DeletingKeys")
+	require.Equal(t, 5*time.Minute, result.RequeueAfter, "the settle window, not the bounded pass")
+	require.Len(t, env.fake.aiGatewayKeys(), 2)
+
+	controlPlane := &coderv1alpha1.CoderControlPlane{}
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: env.namespace, Name: "coder"}, controlPlane))
+	controlPlane.Status.OperatorAccessReady = false
+	require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
+	env.clock.Step(5 * time.Minute)
+	got, result = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyStep(t, got, false, "OperatorAccessNotReady")
+	require.Equal(t, time.Minute, result.RequeueAfter)
+	require.Len(t, env.fake.aiGatewayKeys(), 2, "no release without a delete")
+
+	controlPlane.Status.OperatorAccessReady = true
+	require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
+	gone, _ := env.reconcile(ctx, t, got)
+	require.Nil(t, gone)
+	require.Empty(t, env.fake.aiGatewayKeys())
+}
+
+// #353: while the control plane holds for it, a failed provider delete
+// retries instead of releasing after one attempt.
+func TestCoderAIProviderDeleteUnderControlPlaneHold(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newReadyAIProvider(ctx, t)
+	deleteFinalizedControlPlane(ctx, t, env.namespace, "coder")
+	env.fake.failNext(routeDeleteAIProvider, fakeFault{Status: http.StatusBadGateway})
+	got, result := env.deleteAIProvider(ctx, t, provider)
+	require.NotNil(t, got, "a failed delete keeps the finalizer while the control plane waits")
+	requireAIProviderStep(t, got, false, "CoderUnavailable")
+	require.Equal(t, 60*time.Second, result.RequeueAfter)
+	got, _ = env.reconcileDeleting(ctx, t, got)
+	require.Nil(t, got)
+	_, found := env.fake.aiProvider("openai")
+	require.False(t, found)
+	require.Equal(t, 2, env.fake.requestCount(routeDeleteAIProvider))
+}
+
+// #353: a release without a delete in Coder counts in
+// coder_k8s_cleanup_released_without_delete_total.
+func TestReleasedWithoutDeleteMetric(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+	got := rotatedKey(ctx, t, &env)
+	before := releasedWithoutDelete(t, "CoderAIGatewayKey")
+	require.NoError(t, k8sClient.Delete(ctx, &coderv1alpha1.CoderControlPlane{ObjectMeta: metav1.ObjectMeta{Namespace: env.namespace, Name: "coder"}}))
+	require.NoError(t, k8sClient.Delete(ctx, got))
+	gone, _ := env.reconcile(ctx, t, got)
+	require.Nil(t, gone)
+	require.Greater(t, releasedWithoutDelete(t, "CoderAIGatewayKey"), before)
+}

@@ -91,6 +91,7 @@ jobs:
               - 'internal/controller/reserved_secret_names.go'
               # Shared Coder access that CoderTemplateTest and later pool controllers call.
               - 'internal/controller/controlplane_access.go'
+              - 'internal/controller/controlplane_hold.go'
               - 'internal/controller/coder_access.go'
               - 'internal/controller/coder_workspace_steps.go'
               # The URL that the aggregated API server and the controllers use for Coder API calls.
