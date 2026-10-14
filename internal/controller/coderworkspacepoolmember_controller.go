@@ -257,6 +257,12 @@ func poolMemberInputMismatch(member *coderv1alpha1.CoderWorkspacePoolMember, poo
 	for _, p := range spec.Parameters {
 		params = append(params, codersdk.WorkspaceBuildParameter{Name: p.Name, Value: p.Value})
 	}
+	// The pool's spec can change before it resolves again, so the member
+	// also compares with the pool's current parameters.
+	poolParams := make([]codersdk.WorkspaceBuildParameter, 0, len(pool.Spec.Parameters))
+	for _, p := range pool.Spec.Parameters {
+		poolParams = append(poolParams, codersdk.WorkspaceBuildParameter{Name: p.Name, Value: p.Value})
+	}
 	for _, c := range []struct{ field, got, want string }{
 		{"spec.controlPlaneRef", spec.ControlPlaneRef.Name, pool.Spec.ControlPlaneRef.Name},
 		{"spec.ownerID", spec.OwnerID, pool.Spec.OwnerUserID},
@@ -267,6 +273,7 @@ func poolMemberInputMismatch(member *coderv1alpha1.CoderWorkspacePoolMember, poo
 		{"spec.presetID", spec.PresetID, resolved.PresetID},
 		{"spec.parametersHash", spec.ParametersHash, resolved.ParametersHash},
 		{"spec.parameters", workspacePoolParametersHash(params), spec.ParametersHash},
+		{"spec.parameters", workspacePoolParametersHash(poolParams), spec.ParametersHash},
 		{"label " + coderv1alpha1.CoderWorkspacePoolSelectorLabel, member.Labels[coderv1alpha1.CoderWorkspacePoolSelectorLabel], string(pool.UID)},
 	} {
 		if c.got != c.want {
@@ -348,6 +355,15 @@ func (r *CoderWorkspacePoolMemberReconciler) createWorkspace(
 	status := coderStatus(err)
 	switch {
 	case err == nil:
+		// Without a requested preset, Coder can pick one that matches the
+		// parameters, so only a requested preset must come back.
+		answeredPreset := spec.PresetID
+		if spec.PresetID != "" {
+			answeredPreset = ""
+			if id := workspace.LatestBuild.TemplateVersionPresetID; id != nil {
+				answeredPreset = id.String()
+			}
+		}
 		if workspace.ID == uuid.Nil || workspace.LatestBuild.ID == uuid.Nil {
 			return nil, &coderAnswerError{msg: "assertion failed: Coder answered start build without a workspace or build ID"}
 		}
@@ -357,6 +373,7 @@ func (r *CoderWorkspacePoolMemberReconciler) createWorkspace(
 			coderAnswerFor("start build transition", string(codersdk.WorkspaceTransitionStart), string(workspace.LatestBuild.Transition)),
 			coderAnswerFor("workspace owner", spec.OwnerID, workspace.OwnerID.String()),
 			coderAnswerFor("start build version", spec.TemplateVersionID, workspace.LatestBuild.TemplateVersionID.String()),
+			coderAnswerFor("start build preset", spec.PresetID, answeredPreset),
 		); err != nil {
 			return nil, err // The marker stays: only reads decide now.
 		}
