@@ -96,8 +96,8 @@ func TestPoolResolvesInputs(t *testing.T) {
 	require.Equal(t, coderv1alpha1.CoderWorkspacePoolResolved{
 		OrganizationID: e.orgID.String(), TemplateID: e.tplID.String(), TemplateVersionID: e.v1.String(), TemplateVersionName: "v1",
 		PresetID: presetID.String(), OwnerID: e.tester.String(),
-		ParametersHash: parametersHash(coderv1alpha1.CoderWorkspacePoolMemberParameter{Name: "region", Value: "eu"}),
-		ResolvedTime:   resolved.ResolvedTime,
+		ParametersHash:      parametersHash(coderv1alpha1.CoderWorkspacePoolMemberParameter{Name: "region", Value: "eu"}),
+		ReadyTimeoutSeconds: 900, ResolvedTime: resolved.ResolvedTime,
 	}, *resolved)
 	require.True(t, resolved.ResolvedTime.Time.Equal(e.clock.Now()))
 	// The same inputs keep the time.
