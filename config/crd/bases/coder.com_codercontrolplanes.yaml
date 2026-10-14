@@ -1399,15 +1399,17 @@ spec:
               mcpServers:
                 description: |-
                   MCPServers configures CoderMCPServer objects that use this control
-                  plane. It has no effect yet: the CoderMCPServer controller is not
-                  shipped.
+                  plane. Removing it disables in Coder each server config that a
+                  CoderMCPServer created through this control plane. It has no effect
+                  yet: the CoderMCPServer controller is not shipped.
                 properties:
                   allowForceOn:
                     description: |-
                       AllowForceOn lets CoderMCPServer objects use availability: force_on,
                       which adds a server to every new chat of each user who can read it,
                       without that user's choice. When false (the default), such objects
-                      send no MCP request.
+                      create and change nothing, and a server config that one of them
+                      created is disabled in Coder, as for a removed organization.
 
                       This field has no effect yet: the CoderMCPServer controller is not
                       shipped.
@@ -1419,8 +1421,11 @@ spec:
                       control plane's operator token. This delegates Coder organization-admin
                       power over MCP servers in these organizations to everyone who can
                       create CoderMCPServer objects here. A CoderMCPServer for an
-                      organization outside this list sends no MCP request. Removing an
-                      organization stops further changes to its servers. Deleting a
+                      organization outside this list creates and changes nothing. Removing
+                      an organization disables in Coder each server config that a
+                      CoderMCPServer created there, with one request that holds only
+                      enabled: false, and then changes nothing else. After the organization
+                      is listed again, a spec edit enables the server. Deleting a
                       CoderMCPServer still deletes the config it created.
 
                       This field has no effect yet: the CoderMCPServer controller is not

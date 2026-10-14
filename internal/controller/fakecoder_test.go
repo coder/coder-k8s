@@ -115,7 +115,11 @@ func newFakeCoder(t *testing.T) *fakeCoder {
 		return found(f.userByIdent(r.PathValue("user")))
 	})
 	f.route(mux, "GET /api/v2/organizations/{org}", routeOrganization, func(r *http.Request) (int, any) {
-		return found(f.orgByIdent(r.PathValue("org")))
+		org, ok := f.orgByIdent(r.PathValue("org"))
+		if !ok { // coderd/httpmw/organizationparam.go:94 answers httpapi.ResourceNotFound.
+			return http.StatusNotFound, fakeResourceNotFound
+		}
+		return http.StatusOK, org
 	})
 	f.route(mux, "GET /api/v2/organizations/{org}/members/{user}", routeOrgMember, f.getOrgMember)
 	f.route(mux, "GET /api/v2/organizations/{org}/templates/{name}", routeTemplateByName, func(r *http.Request) (int, any) {
