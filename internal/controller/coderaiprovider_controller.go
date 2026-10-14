@@ -155,13 +155,18 @@ func (r *CoderAIProviderReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if !controllerutil.ContainsFinalizer(provider, coderv1alpha1.CoderAIProviderCleanupFinalizer) {
 			return ctrl.Result{}, nil
 		}
+		forgetReleasedWithoutDelete(provider.UID)
 		release, step, err := r.deleteStep(ctx, provider)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		if release {
 			r.sentKeys.Delete(provider.UID)
-			return ctrl.Result{}, r.patchFinalizer(ctx, provider, false)
+			if err := r.patchFinalizer(ctx, provider, false); err != nil {
+				return ctrl.Result{}, err
+			}
+			releasedWithoutDeleteDone(provider.UID)
+			return ctrl.Result{}, nil
 		}
 		applyAIProviderStep(provider, step)
 		return ctrl.Result{RequeueAfter: step.requeue}, r.writeStatus(ctx, provider, before)

@@ -122,9 +122,10 @@ Deleting the object deletes the provider in Coder. With only an unconfirmed crea
 
 - When Coder is unreachable, or the control plane has no operator access, the finalizer `coder.com/ai-provider-cleanup` stays and the operator retries every 60 seconds. See [Stuck finalizer](#stuck-finalizer).
 - When the control plane is gone, nothing can delete the provider. The finalizer goes at once, and the operator logs the provider ID. Delete the provider in the Coder dashboard.
-- While the control plane is being deleted and its operator access still works, the operator sends one delete with a 10-second limit, then removes the finalizer. Without working access, the finalizer goes without a delete. Either way a namespace deletion finishes. When the delete did not succeed, the operator logs the provider ID: delete the provider in the Coder dashboard.
+- When you delete the control plane while `CoderAIProvider` or `CoderAIGatewayKey` objects that use it are being deleted, the control plane waits for them for up to 10 minutes, plus 30 seconds and 10 seconds per object of one kind (at most 5 minutes) for a last bounded attempt. It keeps its finalizer, so Coder keeps running, and the delete above runs with its retries. The operator removes the workspace RBAC of the control plane before it waits, so Coder loses its Kubernetes access at once. An object that you do not delete holds the control plane for only 30 seconds, so delete the objects together with the control plane. A foreground deletion (`kubectl delete --cascade=foreground`) does not wait.
+- When the control plane does not wait (its namespace is being deleted, it is deleted in the foreground, or the 10 minutes have passed) and its operator access still works, the operator sends one delete with a 10-second limit, then removes the finalizer. Without working access, the finalizer goes without a delete. Either way a namespace deletion finishes. When the delete did not succeed, the operator logs the provider ID: delete the provider in the Coder dashboard. The metric `coder_k8s_cleanup_released_without_delete_total` (label `kind`) counts these releases.
 
-Delete `CoderAIProvider` objects before their control plane. Coder deletes a provider even while chat models use it. Those models stop working.
+Delete `CoderAIProvider` objects before their namespace: a namespace deletion removes Coder's pods at once, so the control plane cannot wait for them. Coder deletes a provider even while chat models use it. Those models stop working.
 
 ### Stuck finalizer
 
