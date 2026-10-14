@@ -446,7 +446,8 @@ func TestPoolMemberDiscovery(t *testing.T) {
 	require.Zero(t, pool.Status.ConsecutiveFailures)
 	require.Nil(t, e.reconcileMember(t, outdated, 0))
 
-	// The longest pool name: the member prefix stays within the limit.
+	// The longest pool name: the API server cuts the generated name to 63
+	// characters, so the members still get valid names.
 	long := strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 61)
 	require.Len(t, long, 253)
 	other := &coderv1alpha1.CoderWorkspacePool{ObjectMeta: metav1.ObjectMeta{Name: long, Namespace: e.ns}, Spec: *e.pool.Spec.DeepCopy()}

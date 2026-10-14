@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
@@ -285,14 +284,6 @@ func (r *CoderWorkspacePoolReconciler) createMembers(
 	return nil, 0, nil
 }
 
-// poolMemberGenerateName is the member name prefix: the pool name, cut so
-// that the API server's generated name stays a DNS subdomain. It keeps at
-// most 57 characters (the server keeps 58 of the prefix and adds 5) and
-// never ends in a dot or a dash before its own dash.
-func poolMemberGenerateName(poolName string) string {
-	return strings.TrimRight(poolName[:min(len(poolName), 57)], ".-") + "-"
-}
-
 // createMember creates one member that pins the pool's resolved inputs.
 func (r *CoderWorkspacePoolReconciler) createMember(ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool) error {
 	resolved := pool.Status.Resolved
@@ -302,7 +293,7 @@ func (r *CoderWorkspacePoolReconciler) createMember(ctx context.Context, pool *c
 	}
 	member := &coderv1alpha1.CoderWorkspacePoolMember{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: poolMemberGenerateName(pool.Name), Namespace: pool.Namespace,
+			GenerateName: pool.Name + "-", Namespace: pool.Namespace,
 			Labels: map[string]string{coderv1alpha1.CoderWorkspacePoolSelectorLabel: string(pool.UID)},
 		},
 		Spec: coderv1alpha1.CoderWorkspacePoolMemberSpec{
