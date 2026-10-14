@@ -1,0 +1,33 @@
+# Opt-in admission policy (plan #155 D11 A): only the operator ServiceAccount
+# can write the status of CoderMCPServer objects. status.configID tells the
+# controller which Coder config an object owns, so a subject that writes the
+# status can point an object at a config that it did not create.
+# config/default does not apply this file. Apply it with
+# `kubectl apply -f config/admission/`. If the operator runs as another
+# ServiceAccount, change the user name in the expression first.
+# docs/how-to/manage-mcp-servers.md describes the policy.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: coder-k8s-status-operator-only
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["coder.com"]
+        apiVersions: ["*"]
+        # A status PATCH reaches admission as UPDATE.
+        operations: ["UPDATE"]
+        resources: ["codermcpservers/status"]
+  validations:
+    - expression: "request.userInfo.username == 'system:serviceaccount:coder-system:coder-k8s'"
+      message: "Only the coder-k8s operator ServiceAccount can write the status of CoderMCPServer objects."
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: coder-k8s-status-operator-only
+spec:
+  policyName: coder-k8s-status-operator-only
+  validationActions: [Deny]
