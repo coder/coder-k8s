@@ -55,7 +55,7 @@ kubectl -n coder wait --for=condition=Ready coderaiprovider/openai --timeout=2m
 
 The operator never takes over a provider that it did not create. When Coder already has a provider with the name, the object stalls with `NameConflict` and the operator sends no write. Choose another name, or delete that provider in Coder.
 
-To rotate the key, change the Secret value. The operator sends the new key with one update. A change of only the Secret's labels or annotations sends nothing. Coder's audit log records the masked key on every key write.
+To rotate the key, change the Secret value. The operator sends the new key with one update. A change of only the Secret's labels or annotations sends no key, as long as the Secret keeps its consent for the origin: removing the label or the origin is the [credential kill switch](#the-credential-kill-switch). The operator remembers the sent key in memory only, so after an operator restart the first change of the Secret sends the key once more. Coder's audit log records the masked key on every key write.
 
 ## 3. Read the result
 
@@ -120,7 +120,7 @@ Deleting the object deletes the provider in Coder. With only an unconfirmed crea
 
 - When Coder is unreachable, or the control plane has no operator access, the finalizer `coder.com/ai-provider-cleanup` stays and the operator retries every 60 seconds.
 - When the control plane is gone, nothing can delete the provider. The finalizer goes at once, and the operator logs the provider ID. Delete the provider in the Coder dashboard.
-- While the control plane is being deleted, the operator sends one delete with a 10-second limit, then removes the finalizer. So a namespace deletion finishes.
+- While the control plane is being deleted and its operator access still works, the operator sends one delete with a 10-second limit, then removes the finalizer. Without working access, the finalizer goes without a delete. Either way a namespace deletion finishes. When the delete did not succeed, the operator logs the provider ID: delete the provider in the Coder dashboard.
 
 Delete `CoderAIProvider` objects before their control plane. Coder deletes a provider even while chat models use it. Those models stop working.
 
