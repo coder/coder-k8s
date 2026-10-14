@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -421,9 +422,10 @@ func TestCoderAIProviderSyncAnswers(t *testing.T) {
 		t.Parallel()
 		ctx := context.Background()
 		env, _, provider := newAIProviderCreateEnv(ctx, t)
-		// The name lookup passes. The read by ID after the create answers 404.
+		// The name lookup passes. The read by ID after the create answers
+		// Coder's own 404.
 		env.fake.failNext(routeAIProvider, fakeFault{Rewrite: func(answer any) any { return answer }})
-		env.fake.failNext(routeAIProvider, fakeFault{Status: http.StatusNotFound})
+		env.fake.failNext(routeAIProvider, fakeFault{Status: http.StatusNotFound, Message: coderResourceNotFound})
 		got, _ := env.reconcile(ctx, t, provider)
 		requireAIProviderStep(t, got, false, "Pending")
 		require.Empty(t, got.Status.ProviderID)
@@ -559,6 +561,76 @@ func TestCoderAIProviderAnswerMismatchIsLogged(t *testing.T) {
 			require.NoError(t, err)
 			require.Contains(t, logs.String(), "Coder answered something other than the controller asked for")
 			require.Contains(t, logs.String(), "assertion failed: Coder answered AI provider")
+		})
+	}
+}
+
+// coderResourceNotFound is the message of Coder's own 404
+// (coderd/httpapi/httpapi.go:149 in v2.37.3).
+const coderResourceNotFound = "Resource not found or you do not have access to this resource"
+
+// notCoder404s are 404 answers that Coder itself did not send: an HTML page
+// of a proxy, and Coder's answer for an unknown route (a wrong base URL).
+var notCoder404s = map[string]fakeFault{
+	"HTML page":       {Status: http.StatusNotFound, HTML: "<html>404 Not Found</html>"},
+	"route not found": {Status: http.StatusNotFound, Message: "Route not found."},
+}
+
+// #327: in sync, a 404 that Coder did not send keeps ownership. It waits
+// with CoderUnavailable and changes nothing, both for an applied provider
+// (no DeletedExternally) and after a spec edit (no cleared provider ID, no
+// create).
+func TestCoderAIProviderSyncNotCoder404(t *testing.T) {
+	t.Parallel()
+	for name, fault := range notCoder404s {
+		for _, edited := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/edited=%v", name, edited), func(t *testing.T) {
+				t.Parallel()
+				ctx := context.Background()
+				env, _, provider := newReadyAIProvider(ctx, t)
+				if edited {
+					provider = editSpec(ctx, t, provider, func(s *coderv1alpha1.CoderAIProviderSpec) { s.DisplayName = "OpenAI v2" })
+				}
+				before := provider.Status.DeepCopy()
+				writes := env.writes()
+				env.fake.failNext(routeAIProvider, fault)
+				got, result := env.reconcile(ctx, t, provider)
+				requireAIProviderStep(t, got, false, "CoderUnavailable")
+				require.Equal(t, 30*time.Second, result.RequeueAfter)
+				require.Equal(t, before.ProviderID, got.Status.ProviderID, "ownership is kept")
+				require.Equal(t, before.Credential, got.Status.Credential)
+				require.Equal(t, writes, env.writes(), "no Coder write")
+
+				got, _ = env.reconcile(ctx, t, got)
+				requireAIProviderReady(t, got)
+				require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider), "the only create is the first one")
+			})
+		}
+	}
+}
+
+// #327: the read that follows a 404 update also needs Coder's own 404
+// before the provider counts as gone.
+func TestCoderAIProviderSyncUpdate404NotCoderRead(t *testing.T) {
+	t.Parallel()
+	for name, fault := range notCoder404s {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			env, _, provider := newReadyAIProvider(ctx, t)
+			provider = editSpec(ctx, t, provider, func(s *coderv1alpha1.CoderAIProviderSpec) { s.DisplayName = "OpenAI v2" })
+			providerID := provider.Status.ProviderID
+			env.fake.failNext(routeUpdateAIProvider, fakeFault{Status: http.StatusNotFound, Message: coderResourceNotFound})
+			env.fake.failNext(routeAIProvider, fakeFault{Rewrite: func(answer any) any { return answer }}) // The sync read passes.
+			env.fake.failNext(routeAIProvider, fault)
+			got, _ := env.reconcile(ctx, t, provider)
+			require.Contains(t, requireAIProviderStep(t, got, false, "CoderUnavailable"), "after a 404 update")
+			require.Equal(t, providerID, got.Status.ProviderID, "ownership is kept")
+			require.NotNil(t, got.Status.Credential)
+
+			got, _ = env.reconcile(ctx, t, got)
+			requireAIProviderReady(t, got)
+			require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider))
 		})
 	}
 }

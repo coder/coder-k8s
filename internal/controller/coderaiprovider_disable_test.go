@@ -370,3 +370,31 @@ func TestCoderAIProviderTransientSecretError(t *testing.T) {
 		})
 	}
 }
+
+// #327: a 404 that Coder did not send, on the read before the disable, does
+// not prove that nothing uses the key. The object waits and says that Coder
+// can still send the key, and the next reconcile disables the provider.
+func TestCoderAIProviderDisableNotCoder404(t *testing.T) {
+	t.Parallel()
+	for name, fault := range notCoder404s {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			env, secret, provider := newReadyAIProvider(ctx, t)
+			editSecret(ctx, t, secret, func(s *corev1.Secret) { delete(s.Labels, credentialsecret.LabelKey) })
+			writes := env.writes()
+			env.fake.failNext(routeAIProvider, fault)
+			got, result := env.reconcile(ctx, t, provider)
+			require.Contains(t, requireAIProviderStep(t, got, false, credentialsecret.ReasonNotOptedIn), "Coder can still send the key")
+			require.Equal(t, 30*time.Second, result.RequeueAfter)
+			require.Equal(t, writes, env.writes())
+			stored, _ := env.fake.aiProvider("openai")
+			require.True(t, stored.enabled)
+
+			got, _ = env.reconcile(ctx, t, got)
+			require.Contains(t, requireAIProviderStep(t, got, true, credentialsecret.ReasonNotOptedIn), "The controller disabled provider openai in Coder")
+			stored, _ = env.fake.aiProvider("openai")
+			require.False(t, stored.enabled)
+		})
+	}
+}
