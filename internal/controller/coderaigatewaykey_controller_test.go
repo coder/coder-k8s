@@ -557,10 +557,16 @@ func TestCoderAIGatewayKeyWatches(t *testing.T) {
 	require.NoError(t, k8sClient.Update(ctx, cp))
 	requireReason("Ready")
 
-	// Deleting the output Secret requeues the object at once. The drift
-	// re-issue arrives in K7, so it reports that it waits.
+	// Deleting the output Secret requeues the object at once (a Ready
+	// object otherwise waits 10 minutes), and the drift re-issue writes a
+	// new key.
 	secret := &corev1.Secret{}
 	require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: env.namespace, Name: testAIGatewaySecret}, secret))
 	require.NoError(t, k8sClient.Delete(ctx, secret))
-	requireReason("IssuingKey")
+	require.Eventually(t, func() bool {
+		got := &coderv1alpha1.CoderAIGatewayKey{}
+		require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(key), got))
+		return got.Status.CurrentKey != nil && got.Status.CurrentKey.Serial == 1
+	}, 30*time.Second, 100*time.Millisecond, "re-issued key")
+	requireReason("Ready")
 }

@@ -201,6 +201,9 @@ func newSDKLicenseClient(coderURL, sessionToken string) (*codersdk.Client, error
 	// net/http copies Coder-Session-Token to every redirect target, so refuse
 	// redirects that leave the control plane origin.
 	sdkClient.HTTPClient.CheckRedirect = sameorigin.RedirectPolicy(parsedURL)
+	// This client dials no websocket. codersdk websocket dials keep only the
+	// Transport and skip CheckRedirect, so before adding one, also wrap the
+	// Transport with sameorigin.RoundTripper (#299).
 
 	return sdkClient, nil
 }
