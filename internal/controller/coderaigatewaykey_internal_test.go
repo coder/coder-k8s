@@ -78,12 +78,13 @@ func TestNextAIGatewayKeyAction(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	recent, settled := &metav1.Time{Time: now.Add(-time.Minute)}, &metav1.Time{Time: now.Add(-aiGatewayKeySettleWindow)}
 	for name, tc := range map[string]struct {
-		status   coderv1alpha1.CoderAIGatewayKeyStatus
-		own      []codersdk.AIGatewayKey
-		holds    uuid.UUID
-		want     aiGatewayKeyAction
-		key      uuid.UUID // The adopted or swept key.
-		settleAt *metav1.Time
+		status     coderv1alpha1.CoderAIGatewayKeyStatus
+		generation int64
+		own        []codersdk.AIGatewayKey
+		holds      uuid.UUID
+		want       aiGatewayKeyAction
+		key        uuid.UUID // The adopted or swept key.
+		settleAt   *metav1.Time
 	}{
 		"new object": {want: aiGatewayKeyIssue},
 		// Keys with serials this object never sent are not its keys (I6).
@@ -130,12 +131,43 @@ func TestNextAIGatewayKeyAction(t *testing.T) {
 			},
 			own: own, holds: current.ID, want: aiGatewayKeyReady,
 		},
-		"steady state":         {status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus}, own: own, holds: current.ID, want: aiGatewayKeyReady},
-		"current key deleted":  {status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus}, own: own[1:], holds: uuid.Nil, want: aiGatewayKeyKillSwitch},
+		"steady state":        {status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus}, own: own, holds: current.ID, want: aiGatewayKeyReady},
+		"current key deleted": {status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus}, own: own[1:], holds: uuid.Nil, want: aiGatewayKeyKillSwitch},
+		// D6: only a spec change after the kill switch fired re-arms it. A
+		// spec change before it fired re-arms nothing.
+		"kill switch, same generation": {
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus, KillSwitchGeneration: 1},
+			own:    own[1:], generation: 1, want: aiGatewayKeyKillSwitch,
+		},
+		"kill switch, spec changed": {
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus, KillSwitchGeneration: 1},
+			own:    own[1:], generation: 2, want: aiGatewayKeyRearm,
+		},
+		"kill switch not fired, spec changed": {
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus},
+			own:    own[1:], generation: 2, want: aiGatewayKeyKillSwitch,
+		},
+		// A settled orphan never comes before the kill switch or a re-issue.
+		// The kill switch sweeps it in delete-only mode.
+		"kill switch with a settled orphan": {
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 3, CurrentKey: currentStatus, LastCreateAttemptTime: settled},
+			own:    own[1:], want: aiGatewayKeyKillSwitch, key: other.ID, settleAt: &metav1.Time{Time: now},
+		},
+		"re-issue with a settled orphan": {
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 3, CurrentKey: currentStatus, LastCreateAttemptTime: settled},
+			own:    own, want: aiGatewayKeyReissue, key: other.ID, settleAt: &metav1.Time{Time: now},
+		},
+		// Carry-forward from #292: a lost lastCreateAttemptTime settles from now.
+		"orphan without a create time": {
+			status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 3},
+			own:    own, want: aiGatewayKeySettle, key: current.ID, settleAt: &metav1.Time{Time: now.Add(aiGatewayKeySettleWindow)},
+		},
 		"secret emptied":       {status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus}, own: own, holds: uuid.Nil, want: aiGatewayKeyReissue},
 		"secret holds another": {status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus}, own: own, holds: other.ID, want: aiGatewayKeyReissue},
 	} {
-		got := nextAIGatewayKeyAction(&tc.status, prefix, tc.own, tc.holds, now)
+		key := &coderv1alpha1.CoderAIGatewayKey{Status: tc.status}
+		key.Generation = tc.generation
+		got := nextAIGatewayKeyAction(key, prefix, tc.own, tc.holds, now)
 		require.Equal(t, tc.want, got.action, name)
 		if tc.key != uuid.Nil {
 			require.Equal(t, tc.key, got.key.ID, name)
@@ -168,14 +200,14 @@ func TestAIGatewayKeyListFailure(t *testing.T) {
 		"rate limited":    {status: http.StatusTooManyRequests, message: "Rate limit.", reason: "CoderUnavailable", rateLimited: true},
 		"server error":    {status: http.StatusBadGateway, message: "Bad gateway.", reason: "CoderUnavailable"},
 	} {
-		step := aiGatewayKeyListFailure(codersdk.NewError(tc.status, codersdk.Response{Message: tc.message, Detail: "detail-must-not-leak"}))
+		step := aiGatewayKeyCoderFailure("list AI Gateway keys", codersdk.NewError(tc.status, codersdk.Response{Message: tc.message, Detail: "detail-must-not-leak"}))
 		require.Equal(t, tc.reason, step.reason, name)
 		require.Equal(t, tc.stalled, step.stalled, name)
 		require.Equal(t, tc.rateLimited, step.rateLimited, name)
 		require.NotContains(t, step.message, "detail-must-not-leak", name)
 		require.Contains(t, step.message, tc.message, name)
 	}
-	step := aiGatewayKeyListFailure(errors.New("dial tcp: connection refused"))
+	step := aiGatewayKeyCoderFailure("list AI Gateway keys", errors.New("dial tcp: connection refused"))
 	require.Equal(t, "CoderUnavailable", step.reason)
 	require.False(t, step.stalled)
 }
