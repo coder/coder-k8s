@@ -68,7 +68,7 @@ func (r *CoderAIProviderReconciler) disableWithoutConsent(
 	// waiting), another Secret, or an unparsable Coder origin.
 	cred := provider.Status.Credential
 	if coderURL, parseErr := aiProviderBaseURL(found.BaseURL); parseErr == nil && cred != nil {
-		value, readErr := credentialsecret.Read(ctx, r.Client, provider.Namespace, provider.Spec.APIKeySecretRef, coderURL)
+		value, readErr := r.readKey(ctx, provider, coderURL)
 		if readErr == nil && string(value.Token.SecretUID) == cred.SecretUID {
 			return stalled("Coder still sends the key of provider %s to an origin that the Secret allows.", provider.Name), nil
 		}

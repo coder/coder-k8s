@@ -260,3 +260,31 @@ func TestCoderAIProviderNoDisableWithoutProviderID(t *testing.T) {
 	require.Zero(t, result.RequeueAfter)
 	require.Zero(t, env.fake.totalRequests())
 }
+
+// #277: a key that is not valid UTF-8 would reach Coder as another value, so
+// it is a malformed credential: no create, and a provider that the
+// controller created is disabled (the second read refuses it too).
+func TestCoderAIProviderKeyNotUTF8(t *testing.T) {
+	t.Parallel()
+	invalid := testAIProviderKey + "\xff"
+	t.Run("before the create", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		env := newAIProviderEnv(ctx, t, true)
+		createSecret(ctx, t, env.keySecret(consentedObjectMeta("", "", testAIProviderOrigin), invalid))
+		got, _ := env.reconcile(ctx, t, env.createProvider(ctx, t, nil))
+		require.Contains(t, requireAIProviderStep(t, got, true, credentialsecret.ReasonMalformed), "is not valid UTF-8")
+		require.Zero(t, env.fake.totalRequests())
+	})
+	t.Run("after the create", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		env, secret, provider := newReadyAIProvider(ctx, t)
+		setSecretValue(ctx, t, secret, invalid)
+		got, _ := env.reconcile(ctx, t, provider)
+		require.Contains(t, requireAIProviderStep(t, got, true, credentialsecret.ReasonMalformed), "The controller disabled provider openai in Coder")
+		stored, _ := env.fake.aiProvider("openai")
+		require.False(t, stored.enabled)
+		require.Equal(t, testAIProviderKey, stored.keys[0].plaintext)
+	})
+}
