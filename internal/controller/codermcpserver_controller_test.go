@@ -341,6 +341,19 @@ func TestCoderMCPServerControlPlaneAndOptIn(t *testing.T) {
 		}
 	}
 
+	// The gate compares resolved IDs, not names: a listed name that Coder
+	// resolves to the object's organization ID allows the object.
+	env.fake.addOrganization("alias")
+	env.setOptIn(ctx, t, &coderv1alpha1.MCPServersSpec{Organizations: []string{"alias"}})
+	env.fake.failNext(routeOrganization, fakeFault{Rewrite: func(answer any) any { return answer }}) // The object's own organization.
+	env.fake.failNext(routeOrganization, fakeFault{Rewrite: func(answer any) any {
+		org := answer.(codersdk.Organization)
+		org.ID = env.orgID
+		return org
+	}})
+	got, _ = env.reconcile(ctx, t, server)
+	requireMCPServerStep(t, got, false, "Applied")
+
 	// A failed lookup of a listed name is a wait, not a refusal.
 	env.setOptIn(ctx, t, &coderv1alpha1.MCPServersSpec{Organizations: []string{"other", "coder"}})
 	env.fake.failNext(routeOrganization, fakeFault{Rewrite: func(answer any) any { return answer }}) // The object's own organization.
@@ -543,15 +556,17 @@ func TestCoderMCPServerFinalizer(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(got), got)))
 
-	// A config with a Coder ID keeps its finalizer: this version deletes nothing.
-	kept := env.create(ctx, t, nil)
-	kept, _ = env.reconcile(ctx, t, kept)
-	kept.Status.ConfigID = "5d0c6c2e-3a4d-4c55-9d2f-3f1b1f0c9a11"
-	require.NoError(t, k8sClient.Status().Update(ctx, kept))
-	require.NoError(t, k8sClient.Delete(ctx, kept))
-	kept, _ = env.reconcile(ctx, t, kept)
-	require.Equal(t, []string{coderv1alpha1.CoderMCPServerCleanupFinalizer}, kept.Finalizers)
-	requireMCPServerStep(t, kept, false, "DeletePending")
+	// A config with a Coder ID whose control plane is gone: nothing can
+	// delete it any more, so the finalizer goes without a Coder request
+	// (plan 4.10 item 5).
+	gone := env.create(ctx, t, nil)
+	gone, _ = env.reconcile(ctx, t, gone)
+	gone.Status.ConfigID, gone.Status.OrganizationID = "5d0c6c2e-3a4d-4c55-9d2f-3f1b1f0c9a11", env.orgID.String()
+	require.NoError(t, k8sClient.Status().Update(ctx, gone))
+	require.NoError(t, k8sClient.Delete(ctx, gone))
+	_, err = env.r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(gone)})
+	require.NoError(t, err)
+	require.True(t, apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(gone), gone)))
 	require.Zero(t, env.fake.totalRequests())
 }
 

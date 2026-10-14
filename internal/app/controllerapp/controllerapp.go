@@ -129,9 +129,23 @@ func SetupControllers(mgr manager.Manager) error {
 	aiProviderReconciler := &controller.CoderAIProviderReconciler{
 		Client: client,
 		Scheme: managerScheme,
+		// The operator's own namespace holds the cleanup records (#353).
+		OperatorNamespace: detectOperatorNamespace(),
+		APIReader:         mgr.GetAPIReader(),
 	}
 	if err := aiProviderReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create AI provider controller: %w", err)
+	}
+
+	cleanupRecordReconciler := &controller.CleanupRecordReconciler{
+		Client:            client,
+		APIReader:         mgr.GetAPIReader(),
+		OperatorNamespace: aiProviderReconciler.OperatorNamespace,
+		Clock:             clock.RealClock{},
+		Recorder:          mgr.GetEventRecorder("coder-k8s-cleanup"),
+	}
+	if err := cleanupRecordReconciler.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create cleanup record controller: %w", err)
 	}
 
 	aiGatewayKeyReconciler := &controller.CoderAIGatewayKeyReconciler{
@@ -142,6 +156,14 @@ func SetupControllers(mgr manager.Manager) error {
 	}
 	if err := aiGatewayKeyReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create AI Gateway key controller: %w", err)
+	}
+
+	mcpServerReconciler := &controller.CoderMCPServerReconciler{
+		Client: client,
+		Scheme: managerScheme,
+	}
+	if err := mcpServerReconciler.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create MCP server controller: %w", err)
 	}
 
 	return nil
@@ -201,6 +223,26 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("problem running manager: %w", err)
 	}
 	return nil
+}
+
+// defaultOperatorNamespace is the namespace of the installed operator, where
+// the Role for the cleanup records lives (config/rbac).
+const defaultOperatorNamespace = "coder-system"
+
+// detectOperatorNamespace returns the namespace that holds the cleanup
+// records: POD_NAMESPACE, else the in-cluster namespace file, else
+// coder-system, which the shipped Role names. Only that fallback differs
+// from detectLeaderElectionNamespace.
+func detectOperatorNamespace() string {
+	if ns := strings.TrimSpace(os.Getenv("POD_NAMESPACE")); ns != "" {
+		return ns
+	}
+	if data, err := os.ReadFile(inClusterNamespacePath); err == nil {
+		if ns := strings.TrimSpace(string(data)); ns != "" {
+			return ns
+		}
+	}
+	return defaultOperatorNamespace
 }
 
 // detectLeaderElectionNamespace returns the namespace to use for leader-election

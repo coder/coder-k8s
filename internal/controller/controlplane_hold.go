@@ -22,9 +22,10 @@ import (
 )
 
 // controlPlaneDependentHold is how long a CoderControlPlane that is being
-// deleted waits for the CoderAIGatewayKey and CoderAIProvider objects that
-// use it (#353). Its Coder Deployment keeps running while it waits, so they
-// can delete their keys and providers in Coder. It covers the 5-minute
+// deleted waits for the CoderAIGatewayKey, CoderAIProvider and CoderMCPServer
+// objects that use it (#353, #382). Its Coder Deployment keeps running while
+// it waits, so they can delete their keys, providers and MCP server configs
+// in Coder. It covers the 5-minute
 // settle window of a key deletion plus retries. After it, the control plane
 // goes, and they release with ControlPlaneGone.
 const controlPlaneDependentHold = 10 * time.Minute
@@ -93,7 +94,7 @@ func controlPlaneHoldEnd(controlPlane *coderv1alpha1.CoderControlPlane) time.Tim
 // controlPlaneDependentGraceFor is the grace period after the hold when
 // perKind dependents of one kind remain (controlPlaneDependentGrace).
 func controlPlaneDependentGraceFor(perKind int) time.Duration {
-	return min(controlPlaneDependentGrace+time.Duration(perKind)*max(aiGatewayKeyBoundedDeleteTimeout, aiProviderBoundedDeleteTimeout), controlPlaneDependentGraceMax)
+	return min(controlPlaneDependentGrace+time.Duration(perKind)*max(aiGatewayKeyBoundedDeleteTimeout, aiProviderBoundedDeleteTimeout, mcpServerBoundedDeleteTimeout), controlPlaneDependentGraceMax)
 }
 
 // controlPlaneHoldRequeue caps a dependent's requeue under the hold, so it
@@ -126,8 +127,8 @@ func controlPlaneHolds(ctx context.Context, reader client.Reader, controlPlane *
 	return namespace.DeletionTimestamp.IsZero() && namespace.Status.Phase != corev1.NamespaceTerminating, nil
 }
 
-// controlPlaneDependents returns the CoderAIGatewayKey and CoderAIProvider
-// objects in controlPlane's namespace that reference it and hold it at now,
+// controlPlaneDependents returns the CoderAIGatewayKey, CoderAIProvider and
+// CoderMCPServer objects in controlPlane's namespace that reference it and hold it at now,
 // as kind/name, and the larger count of one kind. A dependent holds it while
 // it is being deleted and still has its cleanup finalizer (another finalizer
 // does not hold it), and a live one only for controlPlaneLiveDependentWait
@@ -163,7 +164,17 @@ func controlPlaneDependents(ctx context.Context, reader client.Reader, controlPl
 			dependents = append(dependents, "CoderAIProvider/"+p.Name)
 		}
 	}
-	return dependents, max(keyCount, len(dependents)-keyCount), nil
+	providerCount := len(dependents) - keyCount
+	servers := &coderv1alpha1.CoderMCPServerList{}
+	if err := reader.List(ctx, servers, client.InNamespace(controlPlane.Namespace)); err != nil {
+		return nil, 0, fmt.Errorf("list MCP servers of namespace %s: %w", controlPlane.Namespace, err)
+	}
+	for i := range servers.Items {
+		if m := &servers.Items[i]; m.Spec.ControlPlaneRef.Name == controlPlane.Name && holds(m, coderv1alpha1.CoderMCPServerCleanupFinalizer) {
+			dependents = append(dependents, "CoderMCPServer/"+m.Name)
+		}
+	}
+	return dependents, max(keyCount, providerCount, len(dependents)-keyCount-providerCount), nil
 }
 
 // dependentRemoved passes only the removal of a dependent object, the event
@@ -175,14 +186,16 @@ var dependentRemoved = predicate.Funcs{
 	GenericFunc: func(event.GenericEvent) bool { return false },
 }
 
-// requestForDependentControlPlane maps a CoderAIGatewayKey or CoderAIProvider
-// to the control plane that it references.
+// requestForDependentControlPlane maps a CoderAIGatewayKey, CoderAIProvider or
+// CoderMCPServer to the control plane that it references.
 func requestForDependentControlPlane(_ context.Context, obj client.Object) []reconcile.Request {
 	var name string
 	switch o := obj.(type) {
 	case *coderv1alpha1.CoderAIGatewayKey:
 		name = o.Spec.ControlPlaneRef.Name
 	case *coderv1alpha1.CoderAIProvider:
+		name = o.Spec.ControlPlaneRef.Name
+	case *coderv1alpha1.CoderMCPServer:
 		name = o.Spec.ControlPlaneRef.Name
 	}
 	if name == "" {

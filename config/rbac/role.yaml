@@ -86,6 +86,7 @@ rules:
   resources:
   - coderaigatewaykeys
   - coderaiproviders
+  - codermcpservers
   verbs:
   - get
   - list
@@ -97,6 +98,7 @@ rules:
   - coderaigatewaykeys/finalizers
   - coderaiproviders/finalizers
   - codercontrolplanes/finalizers
+  - codermcpservers/finalizers
   - coderprovisioners/finalizers
   - codertemplatetests/finalizers
   - coderworkspaceproxies/finalizers
@@ -107,6 +109,7 @@ rules:
   resources:
   - coderaigatewaykeys/status
   - coderaiproviders/status
+  - codermcpservers/status
   verbs:
   - get
   - update
@@ -138,12 +141,6 @@ rules:
 - apiGroups:
   - coder.com
   resources:
-  - codermcpservers
-  verbs:
-  - list
-- apiGroups:
-  - coder.com
-  resources:
   - codertemplatetests
   verbs:
   - delete
@@ -164,6 +161,13 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
 - apiGroups:
   - gateway.networking.k8s.io
   resources:
@@ -199,5 +203,23 @@ rules:
   - get
   - list
   - patch
+  - update
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: manager-role
+  namespace: coder-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - create
+  - delete
+  - get
+  - list
   - update
   - watch

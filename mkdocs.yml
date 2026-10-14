@@ -45,6 +45,7 @@ nav:
       - Test a template version: how-to/test-templates.md
       - Manage AI providers: how-to/manage-ai-providers.md
       - Manage AI Gateway keys: how-to/manage-ai-gateway-keys.md
+      - Manage MCP servers: how-to/manage-mcp-servers.md
       - Gate template promotion with GitOps: how-to/gitops.md
       - Run the MCP server: how-to/mcp-server.md
       - Troubleshooting: how-to/troubleshooting.md
@@ -55,6 +56,7 @@ nav:
           - CoderAIGatewayKey: reference/api/coderaigatewaykey.md
           - CoderAIProvider: reference/api/coderaiprovider.md
           - CoderControlPlane: reference/api/codercontrolplane.md
+          - CoderMCPServer: reference/api/codermcpserver.md
           - CoderProvisioner: reference/api/coderprovisioner.md
           - CoderTemplateTest: reference/api/codertemplatetest.md
           - CoderWorkspaceProxy: reference/api/coderworkspaceproxy.md
