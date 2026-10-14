@@ -85,8 +85,8 @@ func aiProviderStalled(requeue time.Duration, reason, format string, args ...any
 // SetupWithManager wires the reconciler into controller-runtime. A change of
 // the referenced control plane or of the key Secret requeues the provider.
 func (r *CoderAIProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if mgr == nil || r.Client == nil || r.Scheme == nil {
-		return fmt.Errorf("assertion failed: AI provider reconciler needs a manager, a client, and a scheme")
+	if mgr == nil || r.Client == nil || r.Scheme == nil || r.OperatorNamespace == "" || r.APIReader == nil {
+		return fmt.Errorf("assertion failed: AI provider reconciler needs a manager, a client, a scheme, the operator namespace and an API reader")
 	}
 	indexes := map[string]func(*coderv1alpha1.CoderAIProvider) string{
 		aiProviderControlPlaneRefIndex:  func(p *coderv1alpha1.CoderAIProvider) string { return p.Spec.ControlPlaneRef.Name },
@@ -202,10 +202,12 @@ func (r *CoderAIProviderReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 // check validates the base URL, reads the key through the credential Secret
 // contract, gets Coder access, and then creates or applies the provider. The
 // checks before Coder access send nothing to Coder, except the disable of a
-// provider whose key Secret fails the credential contract (#267, #290).
+// provider whose key Secret fails the credential contract (#267, #290), and
+// the deployment ID read of a record backfill.
 func (r *CoderAIProviderReconciler) check(
 	ctx context.Context, provider *coderv1alpha1.CoderAIProvider, before *coderv1alpha1.CoderAIProviderStatus,
 ) (*aiProviderStep, error) {
+	r.backfillAIProviderRecord(ctx, provider)
 	baseURL, err := aiProviderBaseURL(provider.Spec.BaseURL)
 	if err != nil {
 		// A fixed message: the parse error repeats the URL, which can hold
