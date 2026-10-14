@@ -263,11 +263,13 @@ func (r *CoderMCPServerReconciler) check(
 }
 
 // resolveMCPServerOrganization looks up a Coder organization by name. Coder
-// compares names without case.
+// compares names without case. Only Coder's own 404 proves that the
+// organization does not exist: another 404 (a proxy page, "Route not
+// found.") waits like any failed read (#358).
 func resolveMCPServerOrganization(ctx context.Context, sdk *codersdk.Client, name string) (codersdk.Organization, *mcpServerStep, error) {
 	org, err := sdk.OrganizationByName(ctx, name)
 	switch {
-	case isCoderNotFound(err):
+	case isCoderResourceNotFound(err):
 		return org, mcpServerWait(mcpServerResync, "OrganizationNotFound", "Coder organization %s does not exist.", name), nil
 	case err != nil:
 		return org, mcpServerWait(mcpServerRetry, "CoderUnavailable", "get organization %s: %s", name, coderErrorSummary(err)), nil
@@ -290,7 +292,7 @@ func mcpServerScopeGate(
 ) (*mcpServerStep, error) {
 	optIn := controlPlane.Spec.MCPServers
 	if optIn == nil {
-		return mcpServerStalled(0, "MCPServersNotAllowed", "CoderControlPlane %s does not set spec.mcpServers.", controlPlane.Name), nil
+		return mcpServerStalled(mcpServerResync, "MCPServersNotAllowed", "CoderControlPlane %s does not set spec.mcpServers.", controlPlane.Name), nil
 	}
 	allowed := false
 	for _, name := range optIn.Organizations {
@@ -314,7 +316,9 @@ func mcpServerScopeGate(
 		}
 	}
 	if !allowed {
-		return mcpServerStalled(0, "MCPServersNotAllowed",
+		// A listed name can resolve later, when it is created or renamed in
+		// Coder, and no Kubernetes event follows (#358).
+		return mcpServerStalled(mcpServerResync, "MCPServersNotAllowed",
 			"CoderControlPlane %s does not list Coder organization %s in spec.mcpServers.organizations.", controlPlane.Name, spec.Organization), nil
 	}
 	if spec.Availability == "force_on" && !optIn.AllowForceOn {

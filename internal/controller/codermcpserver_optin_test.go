@@ -114,7 +114,43 @@ func TestCoderMCPServerOptInWithdrawnWithoutConfig(t *testing.T) {
 	env := newMCPServerEnv(ctx, t, true)
 	env.keySecret(ctx, t, testMCPKey)
 	env.setOptIn(ctx, t, nil)
-	got, _ := env.reconcile(ctx, t, env.create(ctx, t, nil))
+	got, result := env.reconcile(ctx, t, env.create(ctx, t, nil))
 	requireMCPServerStep(t, got, true, "MCPServersNotAllowed")
+	require.Equal(t, 10*time.Minute, result.RequeueAfter, "a timed resync (#358)")
 	require.Zero(t, env.mcpRequests())
+}
+
+// #358: only Coder's own 404 proves that an organization does not exist. A
+// proxy page or "Route not found." on the lookup of spec.organization, or of
+// a listed name, waits with CoderUnavailable instead of OrganizationNotFound
+// or MCPServersNotAllowed. An unlisted organization resyncs on a timer,
+// because a listed name can resolve later without a Kubernetes event.
+func TestCoderMCPServerOrganizationNotCoder404(t *testing.T) {
+	t.Parallel()
+	for name, fault := range notCoder404s {
+		for _, lookup := range []string{"own", "listed"} {
+			t.Run(name+"/"+lookup, func(t *testing.T) {
+				t.Parallel()
+				ctx := context.Background()
+				env := newMCPServerEnv(ctx, t, true)
+				env.keySecret(ctx, t, testMCPKey)
+				env.fake.addOrganization("alias")
+				env.setOptIn(ctx, t, &coderv1alpha1.MCPServersSpec{Organizations: []string{"alias"}})
+				server := env.create(ctx, t, nil)
+				if lookup == "listed" {
+					// The object's own organization resolves first.
+					env.fake.failNext(routeOrganization, fakeFault{Rewrite: func(answer any) any { return answer }})
+				}
+				env.fake.failNext(routeOrganization, fault)
+				got, result := env.reconcile(ctx, t, server)
+				requireMCPServerStep(t, got, false, "CoderUnavailable")
+				require.Equal(t, 30*time.Second, result.RequeueAfter)
+				require.Zero(t, env.mcpRequests())
+
+				got, result = env.reconcile(ctx, t, got)
+				requireMCPServerStep(t, got, true, "MCPServersNotAllowed")
+				require.Equal(t, 10*time.Minute, result.RequeueAfter)
+			})
+		}
+	}
 }
