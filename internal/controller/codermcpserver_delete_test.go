@@ -218,6 +218,44 @@ func TestCoderMCPServerDeleteWhileControlPlaneDeletes(t *testing.T) {
 	}
 }
 
+// #382 (#353): a control plane that is being deleted waits for a
+// CoderMCPServer that is being deleted, so Coder keeps running. Under that
+// hold the object takes the normal delete path: a failed DELETE keeps the
+// finalizer and retries, instead of one bounded attempt and a release. Then
+// the control plane goes.
+func TestCoderMCPServerDeleteUnderControlPlaneHold(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	got, _ := env.applied(ctx, t, nil)
+	deleteFinalizedControlPlane(ctx, t, env.namespace, "coder")
+	require.NoError(t, k8sClient.Delete(ctx, got))
+
+	controlPlaneGone := func() bool {
+		t.Helper()
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKey{Namespace: env.namespace, Name: "coder"}})
+		require.NoError(t, err)
+		err = k8sClient.Get(ctx, client.ObjectKey{Namespace: env.namespace, Name: "coder"}, &coderv1alpha1.CoderControlPlane{})
+		return apierrors.IsNotFound(err)
+	}
+	require.False(t, controlPlaneGone(), "the control plane waits for the MCP server")
+
+	env.fake.failNext(routeDeleteMCPServer, fakeFault{Status: http.StatusBadGateway})
+	kept, result := env.reconcileDeleting(ctx, t, got)
+	require.NotNil(t, kept, "a failed delete keeps the finalizer while the control plane waits")
+	requireMCPServerStep(t, kept, false, "CoderUnavailable")
+	require.Equal(t, 60*time.Second, result.RequeueAfter)
+	require.False(t, controlPlaneGone(), "the control plane still waits")
+
+	gone, _ := env.reconcileDeleting(ctx, t, kept)
+	require.Nil(t, gone)
+	require.Empty(t, env.fake.mcpServers(), "the retry deleted the config")
+	require.Equal(t, 2, env.fake.requestCount(routeDeleteMCPServer))
+	require.True(t, controlPlaneGone(), "the control plane goes after the MCP server")
+}
+
 // From the #329 final assessment: a released object's entry in the
 // reconciler's credential hash map goes, so the map does not grow without
 // bound.

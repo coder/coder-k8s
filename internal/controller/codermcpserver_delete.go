@@ -49,7 +49,33 @@ func (r *CoderMCPServerReconciler) deleteStep(ctx context.Context, server *coder
 		return false, nil, err
 	}
 	deleting := !controlPlane.DeletionTimestamp.IsZero()
-	sdk, _, wait, err := controlPlaneCoderClientFor(ctx, r.Client, ref.Namespace, ref.Name, deleting)
+	if deleting {
+		// While the control plane holds for this object, Coder keeps running:
+		// use the normal path, which retries, instead of the bounded pass
+		// (#382, #353).
+		now := time.Now()
+		holds, err := controlPlaneHolds(ctx, r.Client, controlPlane, now)
+		if err != nil {
+			return false, nil, err
+		}
+		deleting = !holds
+		if holds {
+			// A pass under the hold ends at the hold end, however slowly
+			// Coder answers. The bounded pass after it then still fits in
+			// the control plane's grace period.
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithDeadline(ctx, controlPlaneHoldEnd(controlPlane))
+			defer cancel()
+			defer func() {
+				if step != nil {
+					// From the time the pass ended: a pass that ran until the
+					// deadline retries right after the hold end.
+					step.requeue = controlPlaneHoldRequeue(controlPlane, time.Now(), step.requeue)
+				}
+			}()
+		}
+	}
+	sdk, _, wait, err := controlPlaneCoderClientFor(ctx, r.Client, ref.Namespace, ref.Name, !controlPlane.DeletionTimestamp.IsZero())
 	switch {
 	case err != nil && deleting:
 		// One attempt only, also when the access setup fails.
