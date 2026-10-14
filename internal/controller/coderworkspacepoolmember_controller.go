@@ -40,16 +40,19 @@ const (
 // rules, and cleanup follow before activation.
 type CoderWorkspacePoolMemberReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
-	Clock  clock.PassiveClock
+	// APIReader reads the pool and the control plane's consent without the
+	// cache right before the create request.
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
+	Clock     clock.PassiveClock
 
 	rateLimited coderBackoff // Keyed by types.NamespacedName.
 }
 
 // Reconcile runs the first step of the member that applies, then returns.
 func (r *CoderWorkspacePoolMemberReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	if r.Client == nil || r.Scheme == nil || r.Clock == nil {
-		return ctrl.Result{}, errors.New("assertion failed: pool member reconciler needs a client, a scheme, and a clock")
+	if r.Client == nil || r.APIReader == nil || r.Scheme == nil || r.Clock == nil {
+		return ctrl.Result{}, errors.New("assertion failed: pool member reconciler needs a client, an API reader, a scheme, and a clock")
 	}
 	// Only a wait after HTTP 429 keeps the backoff count.
 	keepBackoff := false
@@ -180,8 +183,10 @@ func (r *CoderWorkspacePoolMemberReconciler) checkCreate(
 	if owner == nil || owner.APIVersion != coderv1alpha1.GroupVersion.String() || owner.Kind != "CoderWorkspacePool" || owner.Name != spec.PoolName {
 		return nil, coderFail("NotOwned", "CoderWorkspacePool %s does not control this member, so it creates no workspace.", spec.PoolName), nil
 	}
+	// Uncached: the pool's status.resolved and the consent below decide a
+	// create that hands the owner's token to a template.
 	pool := &coderv1alpha1.CoderWorkspacePool{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: member.Namespace, Name: spec.PoolName}, pool); apierrors.IsNotFound(err) {
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: member.Namespace, Name: spec.PoolName}, pool); apierrors.IsNotFound(err) {
 		return nil, coderWait("PoolNotFound", "CoderWorkspacePool %s does not exist.", spec.PoolName), nil
 	} else if err != nil {
 		return nil, nil, fmt.Errorf("get coderworkspacepool %s/%s: %w", member.Namespace, spec.PoolName, err)
@@ -203,7 +208,16 @@ func (r *CoderWorkspacePoolMemberReconciler) checkCreate(
 		}
 		return nil, nil, err
 	}
-	if step := workspacePoolConsent(controlPlane, spec.OwnerID, pool.Spec.Template); step != nil {
+	fresh := &coderv1alpha1.CoderControlPlane{}
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: member.Namespace, Name: controlPlane.Name}, fresh); err != nil {
+		return nil, nil, fmt.Errorf("get CoderControlPlane %s/%s: %w", member.Namespace, controlPlane.Name, err)
+	}
+	if !fresh.DeletionTimestamp.IsZero() {
+		// The cleanup releases members of a deleting control plane without a
+		// Coder call, so a workspace created now would be left behind.
+		return nil, coderWait("ControlPlaneDeleting", "CoderControlPlane %s is being deleted.", fresh.Name), nil
+	}
+	if step := workspacePoolConsent(fresh, spec.OwnerID, pool.Spec.Template); step != nil {
 		return nil, step, nil
 	}
 	ownerUser, step, err := checkCoderWorkspaceOwner(ctx, sdk, uuid.MustParse(spec.OwnerID))
@@ -314,10 +328,24 @@ func workspacePoolParametersHash(params []codersdk.WorkspaceBuildParameter) stri
 // spec.workspacePools: the owner is listed, with the template. A refusal is
 // a wait, because the admin can still add them.
 func workspacePoolConsent(controlPlane *coderv1alpha1.CoderControlPlane, ownerID, template string) *coderStep {
-	var owners []coderv1alpha1.WorkspacePoolOwner
-	if controlPlane.Spec.WorkspacePools != nil {
-		owners = controlPlane.Spec.WorkspacePools.Owners
+	owner := workspacePoolOwner(controlPlane, ownerID)
+	if owner == nil {
+		return coderWait("OwnerNotAllowed", "CoderControlPlane %s does not list Coder user %s in spec.workspacePools.owners.", controlPlane.Name, ownerID)
 	}
+	// Coder matches organization and template names without case.
+	if !slices.ContainsFunc(owner.Templates, func(t string) bool { return strings.EqualFold(t, template) }) {
+		return coderWait("TemplateNotAllowed", "CoderControlPlane %s does not allow template %q for Coder user %s.", controlPlane.Name, template, ownerID)
+	}
+	return nil
+}
+
+// workspacePoolOwner returns the control plane's spec.workspacePools entry
+// for ownerID, or nil.
+func workspacePoolOwner(controlPlane *coderv1alpha1.CoderControlPlane, ownerID string) *coderv1alpha1.WorkspacePoolOwner {
+	if controlPlane.Spec.WorkspacePools == nil {
+		return nil
+	}
+	owners := controlPlane.Spec.WorkspacePools.Owners
 	// Both CRDs require lower-case UUIDs. Comparing parsed UUIDs keeps the
 	// match right even if one of the patterns changes.
 	want, err := uuid.Parse(ownerID)
@@ -326,13 +354,9 @@ func workspacePoolConsent(controlPlane *coderv1alpha1.CoderControlPlane, ownerID
 		return err == nil && gotErr == nil && got == want
 	})
 	if i < 0 {
-		return coderWait("OwnerNotAllowed", "CoderControlPlane %s does not list Coder user %s in spec.workspacePools.owners.", controlPlane.Name, ownerID)
+		return nil
 	}
-	// Coder matches organization and template names without case.
-	if !slices.ContainsFunc(owners[i].Templates, func(t string) bool { return strings.EqualFold(t, template) }) {
-		return coderWait("TemplateNotAllowed", "CoderControlPlane %s does not allow template %q for Coder user %s.", controlPlane.Name, template, ownerID)
-	}
-	return nil
+	return &owners[i]
 }
 
 // createWorkspace writes the create marker, then sends the only create

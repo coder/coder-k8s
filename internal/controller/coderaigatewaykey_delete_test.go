@@ -111,6 +111,14 @@ func TestCoderAIGatewayKeyDeleteRetries(t *testing.T) {
 			heal:    func(*fakeCoder) {},
 			stalled: true, reason: "CoderRejected", requeue: 10 * time.Minute,
 		},
+		// Coder's 404 for a route it does not have: a person must fix it.
+		"route not found": {
+			fail: func(f *fakeCoder) {
+				f.failNext(routeDeleteAIGatewayKey, fakeFault{Status: http.StatusNotFound, Message: "Route not found."})
+			},
+			heal:    func(*fakeCoder) {},
+			stalled: true, reason: "NotSupported", requeue: 10 * time.Minute,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

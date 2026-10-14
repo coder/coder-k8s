@@ -74,7 +74,7 @@ func TestPoolMemberKeepsUnclaimedWorkspaceWarm(t *testing.T) {
 	// deadline counts from.
 	late := started.Add(time.Hour + 41*time.Minute)
 	e.clock.SetTime(late)
-	r := &controller.CoderWorkspacePoolMemberReconciler{Client: k8sClient, Scheme: scheme, Clock: &lateClock{times: []time.Time{started.Add(time.Hour + 40*time.Minute), late}}}
+	r := &controller.CoderWorkspacePoolMemberReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Clock: &lateClock{times: []time.Time{started.Add(time.Hour + 40*time.Minute), late}}}
 	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
 	require.NoError(t, err)
 	member = e.reconcileMember(t, key, 0)
@@ -173,7 +173,7 @@ func TestPoolMemberExtendsOnceAtBind(t *testing.T) {
 	bind(t, key)
 	late := started.Add(90 * time.Second)
 	e.clock.SetTime(late) // The fake checks the 29-minute rule against this time.
-	r := &controller.CoderWorkspacePoolMemberReconciler{Client: k8sClient, Scheme: scheme, Clock: &lateClock{times: []time.Time{started, started, late}}}
+	r := &controller.CoderWorkspacePoolMemberReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Clock: &lateClock{times: []time.Time{started, started, late}}}
 	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
 	require.NoError(t, err)
 	member = e.reconcileMember(t, key, 0)
@@ -259,7 +259,7 @@ func TestPoolMemberBindExtensionConfirmed(t *testing.T) {
 	failWrite := func(t *testing.T, key types.NamespacedName, c failStatusWriteClient) {
 		t.Helper()
 		c.Client = k8sClient
-		r := &controller.CoderWorkspacePoolMemberReconciler{Client: c, Scheme: scheme, Clock: e.clock}
+		r := &controller.CoderWorkspacePoolMemberReconciler{Client: c, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
 		_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
 		require.True(t, apierrors.IsConflict(err), "the failed write ends the reconcile: %v", err)
 	}

@@ -89,8 +89,11 @@ jobs:
               - 'internal/controller/coderaigatewaykey*'
               - 'internal/controller/owned_secret.go'
               - 'internal/controller/reserved_secret_names.go'
+              - 'internal/controller/credential_checks.go'
+              - 'internal/credentialsecret/**'
               # Shared Coder access that CoderTemplateTest and later pool controllers call.
               - 'internal/controller/controlplane_access.go'
+              - 'internal/controller/controlplane_hold.go'
               - 'internal/controller/coder_access.go'
               - 'internal/controller/coder_workspace_steps.go'
               # The URL that the aggregated API server and the controllers use for Coder API calls.
@@ -139,6 +142,15 @@ jobs:
 
       - name: Verify vendor is up to date
         run: |
+          # Only the download is retried (#369): a proxy error there is not a vendor diff.
+          for attempt in 1 2 3; do
+            go mod download && break
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::go mod download failed 3 times" >&2
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
           go mod tidy
           go mod vendor
           git diff --exit-code -- go.mod go.sum vendor/
@@ -276,6 +288,15 @@ jobs:
 
       - name: Verify vendor is up to date
         run: |
+          # Only the download is retried (#369): a proxy error there is not a vendor diff.
+          for attempt in 1 2 3; do
+            go mod download && break
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::go mod download failed 3 times" >&2
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
           go mod tidy
           go mod vendor
           git diff --exit-code -- go.mod go.sum vendor/
@@ -358,6 +379,42 @@ jobs:
         uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
         with:
           cluster_name: e2e
+
+      # Each template import and workspace build runs terraform init, which downloaded coder/coder from
+      # GitHub releases and the registry; their 500s failed the template tests (#369). The provider is
+      # mirrored once here, with retries, by the Terraform of the pinned Coder image (the registry
+      # signature is checked now), and the Coder pod installs it only from that mirror (config/e2e/terraformrc).
+      - name: Mirror the Terraform coder provider into the Kind node
+        if: env.E2E_FULL == 'true'
+        run: |
+          set -euo pipefail
+          version=$(awk '/source *= *"coder\/coder"/ {found = 1; next} found && /version *=/ {gsub(/[^0-9.]/, ""); print; exit}' \
+            config/e2e/codertemplate-agent.yaml)
+          if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::cannot read the coder/coder version from config/e2e/codertemplate-agent.yaml: '$version'" >&2
+            exit 1
+          fi
+          dir="$RUNNER_TEMP/tf-provider-mirror"
+          rm -rf "$dir" && mkdir -p "$dir/fetch" "$dir/out/mirror"
+          printf 'terraform {\n  required_providers {\n    coder = {\n      source  = "coder/coder"\n      version = "%s"\n    }\n  }\n}\n' \
+            "$version" >"$dir/fetch/main.tf"
+          for attempt in 1 2 3; do
+            docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$dir:/w" -w /w/fetch --entrypoint terraform \
+              "$CODER_E2E_IMAGE" providers mirror -platform=linux_amd64 /w/out/mirror && break
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::terraform providers mirror failed 3 times for coder/coder v$version" >&2
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
+          test -s "$dir/out/mirror/registry.terraform.io/coder/coder/terraform-provider-coder_${version}_linux_amd64.zip"
+          cp config/e2e/terraformrc "$dir/out/terraformrc"
+          chmod -R a+rX "$dir/out"
+          docker exec e2e-control-plane mkdir -p /var/lib/coder-e2e
+          docker cp "$dir/out" e2e-control-plane:/var/lib/coder-e2e/terraform
+          docker exec e2e-control-plane find /var/lib/coder-e2e/terraform -type f
+          # The lifecycle driver checks the agent build log for this install from the mirror.
+          echo "E2E_EXPECT_TF_MIRROR_PROVIDER=coder/coder v$version" >>"$GITHUB_ENV"
 
       - name: Build binary
         if: env.E2E_FULL == 'true'
@@ -477,12 +534,16 @@ jobs:
         run: |
           kubectl apply -f examples/cloudnativepg/00-namespace.yaml -f examples/cloudnativepg/cnpg-cluster.yaml
           # E2E backend fixture: pin the Coder image, allow the out-of-band rename used by the lifecycle driver,
-          # and replace the example's localhost access URL with the Service URL so workspace agents reach Coder.
+          # replace the example's localhost access URL with the Service URL so workspace agents reach Coder,
+          # and mount the Terraform provider mirror of the Kind node (#369).
           kubectl create --dry-run=client -o json -f examples/cloudnativepg/codercontrolplane.yaml |
             jq -e --arg image "$CODER_E2E_IMAGE" '.spec.image = $image
               | if [.spec.extraEnv[] | select(.name == "CODER_ACCESS_URL")] | length == 1 then . else error("expected one CODER_ACCESS_URL") end
               | .spec.extraEnv |= map(if .name == "CODER_ACCESS_URL" then .value = "http://coder.coder.svc.cluster.local" else . end)
-              | .spec.extraEnv += [{name: "CODER_ALLOW_WORKSPACE_RENAMES", value: "true"}]' |
+              | .spec.extraEnv += [{name: "CODER_ALLOW_WORKSPACE_RENAMES", value: "true"},
+                  {name: "TF_CLI_CONFIG_FILE", value: "/opt/coder-e2e/terraform/terraformrc"}]
+              | .spec.volumes += [{name: "tf-provider-mirror", hostPath: {path: "/var/lib/coder-e2e/terraform", type: "Directory"}}]
+              | .spec.volumeMounts += [{name: "tf-provider-mirror", mountPath: "/opt/coder-e2e/terraform", readOnly: true}]' |
             kubectl apply -f -
 
       - name: Wait for PostgreSQL

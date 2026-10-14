@@ -139,7 +139,11 @@ The finalizer stays while Coder cannot confirm the deletion:
 
 When the control plane is gone, nothing can delete the keys. The finalizer goes at once. The operator logs `Releasing the finalizer without deleting the keys in Coder` with reason `ControlPlaneGone` and the key IDs: delete those keys with `coder ai-gateway keys delete`.
 
-While the control plane is being deleted and its operator access still works, the operator runs one pass of at most 10 seconds without the settle window, then removes the finalizer whatever the answer. A key create that was still in flight at that moment can commit later, and its key stays in Coder. When the pass fails, the log lists the IDs that it did not delete.
+When you delete the control plane while `CoderAIGatewayKey` or `CoderAIProvider` objects that use it are being deleted, the control plane waits for them for up to 10 minutes: it keeps its finalizer, so Coder keeps running, and the objects delete their keys and providers as usual, with retries. The operator log shows `Waiting for the objects that use this control plane` with their names. The operator removes the workspace RBAC of the control plane before it waits, so Coder loses its Kubernetes access at once. An object that you do not delete holds the control plane for only 30 seconds, so delete the objects together with the control plane (or within 30 seconds). After 10 minutes, the objects that remain get 30 more seconds plus 10 seconds per object of one kind (at most 5 minutes) for their bounded pass below, and then the control plane goes anyway. A foreground deletion (`kubectl delete --cascade=foreground`) does not wait, because Kubernetes then deletes the Coder Deployment first.
+
+When the control plane does not wait (its namespace is being deleted, it is deleted in the foreground, or the 10 minutes have passed) and its operator access still works, the operator runs one pass of at most 10 seconds without the settle window, then removes the finalizer whatever the answer. A key create that was still in flight at that moment can commit later, and its key stays in Coder. When the pass fails, the log lists the IDs that it did not delete.
+
+Each release without a delete counts in the controller metric `coder_k8s_cleanup_released_without_delete_total` (label `kind`), next to the log line.
 
 !!! warning "Delete the keys before the namespace"
     When you delete the namespace, Kubernetes deletes the control plane and the `CoderAIGatewayKey` objects at the same time. The control plane is usually gone before the operator handles the objects, so the finalizers go without a delete, and the keys stay valid in Coder. The namespace deletion finishes, and the operator logs the key IDs with reason `ControlPlaneGone`.
@@ -157,7 +161,7 @@ If the namespace is already gone, delete the logged keys with `coder ai-gateway 
 A deletion that keeps failing never ends by itself. Leave it in one of these ways:
 
 1. **Fix Coder or the operator user.** Restore Coder access, the Premium license or the AI Gateway, the operator user's site-owner role, or the proxy that answers `404`. The next retry deletes the keys and releases the object.
-2. **Delete the control plane.** The operator then runs its one bounded pass and releases the object. Do this only when you remove that Coder deployment anyway.
+2. **Delete the control plane.** The control plane first waits up to 10 minutes for its objects, then the operator runs its one bounded pass and releases the object. Do this only when you remove that Coder deployment anyway.
 3. **Remove the finalizer by hand, then delete the keys in Coder.**
 
    Note the key names from `status.currentKey` and `status.retiringKeys`, and the object's UID (`kubectl -n coder get coderaigatewaykey gateway -o jsonpath='{.metadata.uid}'`). Find the index of the finalizer:
