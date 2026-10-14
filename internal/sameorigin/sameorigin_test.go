@@ -1,4 +1,4 @@
-package coderbootstrap
+package sameorigin_test
 
 import (
 	"net/http"
@@ -6,9 +6,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/coder/coder-k8s/internal/sameorigin"
 )
 
-func TestSameOriginRedirectPolicy(t *testing.T) {
+func TestRedirectPolicy(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -39,12 +41,22 @@ func TestSameOriginRedirectPolicy(t *testing.T) {
 			target, err := url.Parse(tt.target)
 			require.NoError(t, err)
 
-			err = sameOriginRedirectPolicy(origin)(&http.Request{URL: target}, []*http.Request{{URL: origin}})
+			err = sameorigin.RedirectPolicy(origin)(&http.Request{URL: target}, []*http.Request{{URL: origin}})
 			if tt.allowed {
 				require.NoError(t, err)
 			} else {
-				require.ErrorContains(t, err, "refusing redirect to a different origin")
+				require.ErrorIs(t, err, sameorigin.ErrCrossOrigin)
 			}
 		})
 	}
+}
+
+func TestRedirectPolicyStopsAfterMaxRedirects(t *testing.T) {
+	t.Parallel()
+
+	origin, err := url.Parse("https://coder.example.com")
+	require.NoError(t, err)
+	via := make([]*http.Request, sameorigin.MaxRedirects)
+	err = sameorigin.RedirectPolicy(origin)(&http.Request{URL: origin}, via)
+	require.ErrorContains(t, err, "stopped after 10 redirects")
 }

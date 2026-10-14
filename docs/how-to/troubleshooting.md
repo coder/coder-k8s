@@ -55,6 +55,10 @@ kubectl get codercontrolplane <name> -n <namespace> -o yaml
 kubectl get deploy,svc -n <namespace>
 ```
 
+## Operator calls fail with `refusing redirect to a different origin`
+
+Coder answered an operator call with a redirect to another origin. The operator does not follow such redirects, so that the operator token stays on the control plane origin. The usual cause is `CODER_REDIRECT_TO_ACCESS_URL=true` in `spec.extraEnv` of the `CoderControlPlane`. Remove it, and redirect browsers from HTTP to HTTPS in your Ingress, Gateway or load balancer instead. See [Redirects to another origin](deploy-controller.md#redirects-to-another-origin).
+
 ## APIService is `False` / `Unavailable`
 
 ```bash

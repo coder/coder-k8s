@@ -39,6 +39,7 @@ import (
 	"github.com/coder/coder-k8s/internal/coderbootstrap"
 	"github.com/coder/coder-k8s/internal/controlplaneurl"
 	"github.com/coder/coder-k8s/internal/credentialsecret"
+	"github.com/coder/coder-k8s/internal/sameorigin"
 )
 
 const (
@@ -197,6 +198,9 @@ func newSDKLicenseClient(coderURL, sessionToken string) (*codersdk.Client, error
 	// connection pool across parallel test servers.
 	sdkClient.HTTPClient.Transport = defaultTransport.Clone()
 	sdkClient.HTTPClient.Timeout = licenseUploadRequestTimeout
+	// net/http copies Coder-Session-Token to every redirect target, so refuse
+	// redirects that leave the control plane origin.
+	sdkClient.HTTPClient.CheckRedirect = sameorigin.RedirectPolicy(parsedURL)
 
 	return sdkClient, nil
 }
