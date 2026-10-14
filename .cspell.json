@@ -2,6 +2,7 @@
   "version": "0.2",
   "language": "en",
   "words": [
+    "buildinfo",
     "allapp",
     "automount",
     "prebuild",
@@ -51,6 +52,8 @@
     "stakater",
     "coderaigatewaykey",
     "coderaigatewaykeys",
+    "codermcpserver",
+    "codermcpservers",
     "coderaiprovider",
     "coderaiproviders",
     "codertemplatetest",

@@ -28,6 +28,7 @@ const fakeCoderToken = "operator-session-token"
 // Route names for fakeCoder.failNext and fakeCoder.requestCount.
 const (
 	routeUser            = "user"
+	routeBuildInfo       = "buildInfo"
 	routeOrganization    = "organization"
 	routeOrgMember       = "organizationMember"
 	routeTemplateByName  = "templateByName"
@@ -84,15 +85,17 @@ type fakeCoder struct {
 	mu         sync.Mutex
 	now        func() time.Time
 	operatorID uuid.UUID
-	users      map[uuid.UUID]codersdk.User
-	orgs       map[uuid.UUID]codersdk.Organization
-	orgRoles   map[uuid.UUID]map[uuid.UUID][]codersdk.SlimRole // Organization -> user -> roles.
-	templates  map[uuid.UUID]codersdk.Template
-	versions   map[uuid.UUID]codersdk.TemplateVersion
-	workspaces map[uuid.UUID]*fakeWorkspace
-	pool       fakePoolState // Workspace pool routes, see fakecoder_pool_test.go.
-	faults     map[string][]fakeFault
-	requests   map[string]int // Route -> requests received.
+	// deploymentID is the deployment ID that /api/v2/buildinfo answers.
+	deploymentID string
+	users        map[uuid.UUID]codersdk.User
+	orgs         map[uuid.UUID]codersdk.Organization
+	orgRoles     map[uuid.UUID]map[uuid.UUID][]codersdk.SlimRole // Organization -> user -> roles.
+	templates    map[uuid.UUID]codersdk.Template
+	versions     map[uuid.UUID]codersdk.TemplateVersion
+	workspaces   map[uuid.UUID]*fakeWorkspace
+	pool         fakePoolState // Workspace pool routes, see fakecoder_pool_test.go.
+	faults       map[string][]fakeFault
+	requests     map[string]int // Route -> requests received.
 
 	aiProviders map[uuid.UUID]*fakeAIProvider // See fakecoder_ai_test.go.
 	aiGateway   fakeAIGatewayState            // AI Gateway key routes, see fakecoder_aigateway_test.go.
@@ -109,8 +112,12 @@ func newFakeCoder(t *testing.T) *fakeCoder {
 		faults: map[string][]fakeFault{}, requests: map[string]int{}, aiProviders: map[uuid.UUID]*fakeAIProvider{},
 	}
 	f.operatorID = f.addUser("operator", codersdk.LoginTypePassword, codersdk.RoleOwner)
+	f.deploymentID = uuid.NewString()
 
 	mux := http.NewServeMux()
+	f.route(mux, "GET /api/v2/buildinfo", routeBuildInfo, func(*http.Request) (int, any) {
+		return http.StatusOK, codersdk.BuildInfoResponse{Version: "v2.37.3", DeploymentID: f.deploymentID}
+	})
 	f.route(mux, "GET /api/v2/users/{user}", routeUser, func(r *http.Request) (int, any) {
 		return found(f.userByIdent(r.PathValue("user")))
 	})

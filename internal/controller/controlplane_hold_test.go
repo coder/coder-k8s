@@ -353,6 +353,7 @@ func TestReleasedWithoutDeleteMetricRecovered(t *testing.T) {
 // control plane revokes the managed workspace RBAC before it waits.
 func TestControlPlaneHoldRevokesWorkspaceRBAC(t *testing.T) {
 	t.Parallel()
+	ensureGatewaySchemeRegistered(t) // The RBAC cleanup also reads HTTPRoutes.
 	ctx := context.Background()
 	namespace := createTestNamespace(ctx, t, "hold-rbac")
 	workspaceNamespace := createTestNamespace(ctx, t, "hold-rbac-ws")

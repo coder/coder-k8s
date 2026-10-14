@@ -127,8 +127,7 @@ type CoderControlPlaneSpec struct {
 
 	// MCPServers configures CoderMCPServer objects that use this control
 	// plane. Removing it disables in Coder each server config that a
-	// CoderMCPServer created through this control plane. It has no effect
-	// yet: the CoderMCPServer controller is not shipped.
+	// CoderMCPServer created through this control plane.
 	// +optional
 	MCPServers *MCPServersSpec `json:"mcpServers,omitempty"`
 
