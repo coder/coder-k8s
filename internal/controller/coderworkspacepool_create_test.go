@@ -172,7 +172,7 @@ func TestPoolOwnerCapUncached(t *testing.T) {
 	cp.Spec.WorkspacePools.Owners[0].MaxWorkspaces, cp.Spec.WorkspacePools.Owners[0].Templates = new(int32(10)), []string{"default.other"}
 	require.NoError(t, k8sClient.Update(e.ctx, cp))
 	reconcileStale(t, func(o *coderv1alpha1.WorkspacePoolOwner) { o.Templates = []string{"default.docker"} })
-	require.Len(t, e.poolMembers(t, e.pool.Name), 1, "no member after consent is withdrawn")
+	require.Empty(t, e.poolMembers(t, e.pool.Name), "no create after consent is withdrawn, and the unclaimed member is deleted")
 	require.Equal(t, "TemplateNotAllowed", e.reconcilePool(t, 0).Status.Reason)
 }
 
@@ -205,11 +205,13 @@ func TestPoolMemberDiscovery(t *testing.T) {
 	e.reconcilePool(t, 1)
 	members := e.poolMembers(t, e.pool.Name)
 	require.Len(t, members, 1)
+	e.setMemberStatus(t, memberKey(members[0]), readyStatus)
 	member := e.reconcileMember(t, memberKey(members[0]), 0)
 	member.Labels = nil
 	require.NoError(t, k8sClient.Update(e.ctx, member))
 	// The member no longer matches the pool's inputs, so the pool counts it
-	// as outdated and builds one current member, but never more.
+	// as outdated, keeps it while it is ready, and builds one current
+	// member, but never more.
 	pool := e.reconcilePool(t, 3)
 	require.Equal(t, int32(2), pool.Status.Replicas, "the controlled member still counts")
 	require.Equal(t, int32(1), pool.Status.UpdatedReplicas)
