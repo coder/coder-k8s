@@ -61,6 +61,14 @@ func (e *poolMemberEnv) allowOwner(t *testing.T, ownerID string, templates ...st
 	require.NoError(t, k8sClient.Update(e.ctx, cp))
 }
 
+// setPresetName sets the pool's spec.presetName.
+func (e *poolMemberEnv) setPresetName(t *testing.T, name string) {
+	t.Helper()
+	require.NoError(t, k8sClient.Get(e.ctx, types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}, e.pool))
+	e.pool.Spec.PresetName = name
+	require.NoError(t, k8sClient.Update(e.ctx, e.pool))
+}
+
 // resolve writes the pool's status.resolved: v1 without parameters, then edit.
 func (e *poolMemberEnv) resolve(t *testing.T, edit func(*coderv1alpha1.CoderWorkspacePoolResolved)) {
 	t.Helper()
@@ -161,6 +169,7 @@ func TestPoolMemberCreatesWorkspace(t *testing.T) {
 	region := coderv1alpha1.CoderWorkspacePoolMemberParameter{Name: "region", Value: "eu-west-1"}
 	size := coderv1alpha1.CoderWorkspacePoolMemberParameter{Name: "size", Value: ""}
 	preset := e.fake.addPreset(e.v1, "small")
+	e.setPresetName(t, "small")
 	e.resolve(t, func(r *coderv1alpha1.CoderWorkspacePoolResolved) {
 		r.PresetID, r.ParametersHash = preset.String(), parametersHash(size, region)
 	})
@@ -273,6 +282,24 @@ func TestPoolMemberMarkerConflictSendsNoRequest(t *testing.T) {
 	require.Nil(t, e.reconcileMember(t, key, 0).Status.CreateAttemptTime)
 }
 
+// TestPoolMemberClearsMarkerAfterRepeatedNoEffect: two create results
+// without effect in a row each clear the stored marker, so the member
+// retries instead of waiting for a workspace that does not exist.
+func TestPoolMemberClearsMarkerAfterRepeatedNoEffect(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	key := e.createMember(t, nil)
+	e.reconcileMember(t, key, 1) // Finalizer.
+	for range 2 {
+		e.fake.failNext(routeCreateWorkspace, fakeFault{Status: 429})
+		member := e.reconcileMember(t, key, 1)
+		requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhasePending, "CreateRetrying", "Coder answered 429")
+		require.Nil(t, member.Status.CreateAttemptTime, "the stored marker is cleared")
+	}
+	requireMember(t, e.reconcileMember(t, key, 1), coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, "WaitingForBuild", "")
+	require.Equal(t, 3, e.fake.requestCount(routeCreateWorkspace))
+}
+
 func TestPoolMemberOwnershipGate(t *testing.T) {
 	t.Parallel()
 	e := newPoolMemberEnv(t)
@@ -352,12 +379,15 @@ func TestPoolMemberRefusesOtherInputs(t *testing.T) {
 	v2 := e.fake.addVersion(e.tplID, "v2", codersdk.ProvisionerJobSucceeded)
 	otherTpl := e.fake.addTemplate(e.orgID, "other")
 	otherVersion := e.fake.addVersion(otherTpl, "v1", codersdk.ProvisionerJobSucceeded)
+	e.fake.addPreset(e.v1, "small")
+	large := e.fake.addPreset(e.v1, "large")
 	type member = coderv1alpha1.CoderWorkspacePoolMember
 	for _, tc := range []struct {
-		name    string
-		edit    func(*member)
-		resolve func(*coderv1alpha1.CoderWorkspacePoolResolved)
-		message string
+		name       string
+		presetName string
+		edit       func(*member)
+		resolve    func(*coderv1alpha1.CoderWorkspacePoolResolved)
+		message    string
 	}{
 		{name: "other version", edit: func(m *member) { m.Spec.TemplateVersionID = v2.String() }, message: "spec.templateVersionID"},
 		{name: "parameters without their hash", edit: func(m *member) {
@@ -369,7 +399,19 @@ func TestPoolMemberRefusesOtherInputs(t *testing.T) {
 		{name: "pool status names another template", resolve: func(r *coderv1alpha1.CoderWorkspacePoolResolved) {
 			r.TemplateID, r.TemplateVersionID = otherTpl.String(), otherVersion.String()
 		}, message: "is not the pinned template"},
+		// The same for the version and the preset: the member resolves the
+		// pool's selectors again.
+		{name: "pool status names another version", resolve: func(r *coderv1alpha1.CoderWorkspacePoolResolved) {
+			r.TemplateVersionID = v2.String()
+		}, message: "The pool selects version " + e.v1.String()},
+		{name: "pool status names another preset", presetName: "small", resolve: func(r *coderv1alpha1.CoderWorkspacePoolResolved) {
+			r.PresetID = large.String()
+		}, message: `Preset "small" is `},
+		{name: "pool status names a preset that the pool does not select", resolve: func(r *coderv1alpha1.CoderWorkspacePoolResolved) {
+			r.PresetID = large.String()
+		}, message: "selects no preset"},
 	} {
+		e.setPresetName(t, tc.presetName)
 		e.resolve(t, tc.resolve)
 		key := e.createMember(t, tc.edit)
 		requireMemberFailed(t, e.reconcileMember(t, key, 2), "InputsMismatch", tc.message, metav1.ConditionTrue)
@@ -380,9 +422,10 @@ func TestPoolMemberRefusesOtherInputs(t *testing.T) {
 	require.NoError(t, k8sClient.Status().Update(e.ctx, e.pool))
 	requireMemberFailed(t, e.reconcileMember(t, key, 2), "InputsMismatch", "status.resolved", metav1.ConditionTrue)
 
+	e.setPresetName(t, "missing")
 	e.resolve(t, func(r *coderv1alpha1.CoderWorkspacePoolResolved) { r.PresetID = uuid.NewString() })
 	key = e.createMember(t, nil)
-	requireMember(t, e.reconcileMember(t, key, 2), coderv1alpha1.CoderWorkspacePoolMemberPhasePending, "PresetNotFound", "has no preset")
+	requireMember(t, e.reconcileMember(t, key, 2), coderv1alpha1.CoderWorkspacePoolMemberPhasePending, "PresetNotFound", `has no preset "missing"`)
 	require.Zero(t, e.fake.requestCount(routeCreateWorkspace))
 }
 

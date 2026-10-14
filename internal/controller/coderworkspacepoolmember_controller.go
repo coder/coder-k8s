@@ -205,20 +205,32 @@ func (r *CoderWorkspacePoolMemberReconciler) checkCreate(
 	if template.ID.String() != spec.TemplateID || template.OrganizationID.String() != spec.OrganizationID {
 		return nil, coderFail("InputsMismatch", "Coder template %q is not the pinned template %s.", pool.Spec.Template, spec.TemplateID), nil
 	}
-	version, step, err := readCoderTemplateVersion(ctx, sdk, pool.Spec.Template, template, spec.TemplateVersionID, "")
+	// The same for the version and the preset: the member resolves the
+	// pool's selectors again and builds only what they select now.
+	version, step, err := readCoderTemplateVersion(ctx, sdk, pool.Spec.Template, template, pool.Spec.Version.ID, pool.Spec.Version.Name)
 	if step != nil || err != nil {
 		return nil, step, err
+	}
+	if version.ID.String() != spec.TemplateVersionID {
+		return nil, coderFail("InputsMismatch", "The pool selects version %s, not the pinned version %s.", version.ID, spec.TemplateVersionID), nil
 	}
 	if step := checkCoderTemplateVersionUsable(version); step != nil {
 		return nil, step, nil
 	}
-	if spec.PresetID != "" {
+	switch {
+	case pool.Spec.PresetName == "" && spec.PresetID != "":
+		return nil, coderFail("InputsMismatch", "The pool selects no preset, but the member pins preset %s.", spec.PresetID), nil
+	case pool.Spec.PresetName != "":
 		presets, err := sdk.TemplateVersionPresets(ctx, version.ID)
 		if err != nil {
 			return nil, coderStepUnavailable("get presets", err), nil
 		}
-		if !slices.ContainsFunc(presets, func(p codersdk.Preset) bool { return p.ID.String() == spec.PresetID }) {
-			return nil, coderWait("PresetNotFound", "Version %s has no preset %s.", version.Name, spec.PresetID), nil
+		i := slices.IndexFunc(presets, func(p codersdk.Preset) bool { return p.Name == pool.Spec.PresetName })
+		if i < 0 {
+			return nil, coderWait("PresetNotFound", "Version %s has no preset %q.", version.Name, pool.Spec.PresetName), nil
+		}
+		if presets[i].ID.String() != spec.PresetID {
+			return nil, coderFail("InputsMismatch", "Preset %q is %s, not the pinned preset %q.", pool.Spec.PresetName, presets[i].ID, spec.PresetID), nil
 		}
 	}
 	member.Status.WorkspaceName = workspaceName
@@ -307,6 +319,10 @@ func (r *CoderWorkspacePoolMemberReconciler) createWorkspace(
 	if err := r.writeStatus(ctx, member, before); err != nil {
 		return nil, err
 	}
+	// The stored status now holds the marker. Compare later writes with it,
+	// so clearing the marker is always written, even when the status then
+	// equals the status before the marker.
+	*before = *member.Status.DeepCopy()
 	// The marker write can take a while. No request was sent yet, so a
 	// member past its deadline clears the marker and fails without a workspace.
 	if !r.Clock.Now().Before(deadline) {
