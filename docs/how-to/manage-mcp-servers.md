@@ -137,7 +137,7 @@ When a group in `access.groups` does not exist, the sync fails closed:
 1. It removes every entry that `access.groups` no longer names, also user entries.
 2. It adds nothing. Access never widens while a group is missing.
 3. If the same spec generation disables the server (`enabled: false`), it sends one update that holds only `enabled: false`.
-4. It leaves the rest of the generation unapplied. The object stalls with `GroupNotFound` and checks again every 10 minutes. The API server refuses a name that is not a valid Coder group name. If such a name reaches the operator anyway, the object stalls with `GroupNotFound` and is not checked again until the spec changes: fix the name.
+4. It leaves the rest of the generation unapplied. The object stalls with `GroupNotFound`. When the name is valid but no such group exists yet, the operator checks again every 10 minutes. The API server refuses a name that is not a valid Coder group name. If such a name reaches the operator anyway, the operator does not check again until the spec changes: fix the name.
 5. Once the missing groups exist, the sync adds them and applies the rest of the generation.
 
 A new server stays disabled in Coder while one of its groups is missing.
