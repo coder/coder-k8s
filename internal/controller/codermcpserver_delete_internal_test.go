@@ -61,6 +61,7 @@ func TestMCPServerDeleteUnderHoldEndsAtHoldEnd(t *testing.T) {
 	require.False(t, release, "a pass under the hold never releases without a delete")
 	require.NotNil(t, step)
 	require.Equal(t, "CoderUnavailable", step.reason)
-	// The requeue is the time to the hold end plus 1 s (controlPlaneHoldRequeue).
-	require.LessOrEqual(t, step.requeue, 6*time.Second, "the next pass runs right after the hold end")
+	// The requeue counts from the end of the pass: the time left to the hold
+	// end, which is about 0 here, plus 1 s (controlPlaneHoldRequeue).
+	require.LessOrEqual(t, step.requeue, 2*time.Second, "the next pass runs right after the hold end")
 }

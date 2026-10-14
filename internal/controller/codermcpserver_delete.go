@@ -68,7 +68,9 @@ func (r *CoderMCPServerReconciler) deleteStep(ctx context.Context, server *coder
 			defer cancel()
 			defer func() {
 				if step != nil {
-					step.requeue = controlPlaneHoldRequeue(controlPlane, now, step.requeue)
+					// From the time the pass ended: a pass that ran until the
+					// deadline retries right after the hold end.
+					step.requeue = controlPlaneHoldRequeue(controlPlane, time.Now(), step.requeue)
 				}
 			}()
 		}
