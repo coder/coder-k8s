@@ -240,7 +240,7 @@ func TestCoderMCPServerSyncKillSwitches(t *testing.T) {
 func TestCoderMCPServerSyncUserOIDC(t *testing.T) {
 	t.Parallel()
 	authFields := []string{
-		"auth_type", "api_key_header", "api_key_value", "custom_headers", "oauth2_client_id", "oauth2_client_secret",
+		"url", "auth_type", "api_key_header", "api_key_value", "custom_headers", "oauth2_client_id", "oauth2_client_secret",
 		"oauth2_auth_url", "oauth2_token_url", "oauth2_revocation_url", "oauth2_scopes",
 	}
 	for _, tc := range []struct {
@@ -248,10 +248,12 @@ func TestCoderMCPServerSyncUserOIDC(t *testing.T) {
 		spec     func(*coderv1alpha1.CoderMCPServerSpec)
 		secrets  func(context.Context, *testing.T, mcpServerEnv)
 		disabled bool
+		movedURL bool // The dashboard also moves url to another origin.
 	}{
 		{name: "none", spec: func(s *coderv1alpha1.CoderMCPServerSpec) { s.Auth = coderv1alpha1.CoderMCPServerAuth{Type: "none"} }},
 		{name: "api key"},
 		{name: "api key, also disabled", disabled: true},
+		{name: "api key, also disabled and moved", disabled: true, movedURL: true},
 		{name: "custom headers", secrets: headerMCPSecret, spec: func(s *coderv1alpha1.CoderMCPServerSpec) { useCustomHeaders(s, "X-Api-Key") }},
 		{name: "oauth2", secrets: oauth2MCPSecret, spec: func(s *coderv1alpha1.CoderMCPServerSpec) {
 			useOAuth2(s, func(o *coderv1alpha1.CoderMCPServerOAuth2Auth) { o.Scopes = []string{"read"} })
@@ -272,6 +274,9 @@ func TestCoderMCPServerSyncUserOIDC(t *testing.T) {
 			if tc.disabled {
 				edit.Enabled, want.view.Enabled = ptrTo(false), false
 			}
+			if tc.movedURL {
+				edit.URL = ptrTo("https://evil.example.net/mcp")
+			}
 			_, err := env.dashboard(t).UpdateMCPServerConfig(ctx, env.orgID, id, edit)
 			require.NoError(t, err)
 			mark := len(env.writeRoutes())
@@ -285,6 +290,9 @@ func TestCoderMCPServerSyncUserOIDC(t *testing.T) {
 				require.Contains(t, authFields, field, "the PATCH carries only auth fields")
 			}
 			require.JSONEq(t, `"`+got.Spec.Auth.Type+`"`, string(body["auth_type"]))
+			if tc.movedURL {
+				require.JSONEq(t, `"`+got.Spec.URL+`"`, string(body["url"]), "the credential goes only with the allowed url")
+			}
 			require.Equal(t, want, env.stored(t, got))
 			if tc.disabled {
 				require.Contains(t, requireMCPServerStep(t, got, true, "DisabledExternally"), "set the auth type back from user_oidc")
@@ -333,34 +341,48 @@ func TestCoderMCPServerSyncSecretMetadataChange(t *testing.T) {
 	require.Equal(t, secret.ResourceVersion, got.Status.Credentials[0].SecretResourceVersion)
 }
 
-// A PATCH that clears a credential also drops its hash. Otherwise, after an
-// auth type round trip, the hash would claim that Coder holds the Secret's
-// value while Coder holds a key set in the dashboard.
+// A change of the auth type clears the old credential in Coder, so its
+// hash goes too, also when the answer of that PATCH was lost. Otherwise,
+// after an auth type round trip, the hash would claim that Coder holds the
+// Secret's value while Coder holds a key set in the dashboard.
 func TestCoderMCPServerSyncAuthRoundTripResends(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	env := newMCPServerEnv(ctx, t, true)
-	env.keySecret(ctx, t, testMCPKey)
-	got, id := env.applied(ctx, t, nil)
-	setAuth := func(auth coderv1alpha1.CoderMCPServerAuth) {
-		t.Helper()
-		require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(got), got))
-		got.Spec.Auth = auth
-		require.NoError(t, k8sClient.Update(ctx, got))
-	}
-	original := got.Spec.Auth
-	setAuth(coderv1alpha1.CoderMCPServerAuth{Type: "none"})
-	got, _ = env.reconcile(ctx, t, got)
-	requireMCPServerApplied(t, got)
+	for _, tc := range []struct {
+		name string
+		lost bool // The PATCH to none commits, but its answer is lost.
+	}{{name: "answer received"}, {name: "answer lost", lost: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			env := newMCPServerEnv(ctx, t, true)
+			env.keySecret(ctx, t, testMCPKey)
+			got, id := env.applied(ctx, t, nil)
+			setAuth := func(auth coderv1alpha1.CoderMCPServerAuth) {
+				t.Helper()
+				require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(got), got))
+				got.Spec.Auth = auth
+				require.NoError(t, k8sClient.Update(ctx, got))
+			}
+			original := got.Spec.Auth
+			setAuth(coderv1alpha1.CoderMCPServerAuth{Type: "none"})
+			if tc.lost {
+				env.fake.failNext(routeUpdateMCPServer, fakeFault{Status: http.StatusBadGateway, AfterCommit: true})
+				got, _ = env.reconcile(ctx, t, got)
+				requireMCPServerStep(t, got, false, "CoderUnavailable")
+			}
+			got, _ = env.reconcile(ctx, t, got)
+			requireMCPServerApplied(t, got)
 
-	_, err := env.dashboard(t).UpdateMCPServerConfig(ctx, env.orgID, id, codersdk.UpdateMCPServerConfigRequest{
-		AuthType: ptrTo("api_key"), APIKeyHeader: ptrTo("Authorization"), APIKeyValue: ptrTo("dashboard-key"),
-	})
-	require.NoError(t, err)
-	setAuth(original)
-	got, _ = env.reconcile(ctx, t, got)
-	requireMCPServerApplied(t, got)
-	require.Equal(t, testMCPKey, env.stored(t, got).apiKeyValue)
+			_, err := env.dashboard(t).UpdateMCPServerConfig(ctx, env.orgID, id, codersdk.UpdateMCPServerConfigRequest{
+				AuthType: ptrTo("api_key"), APIKeyHeader: ptrTo("Authorization"), APIKeyValue: ptrTo("dashboard-key"),
+			})
+			require.NoError(t, err)
+			setAuth(original)
+			got, _ = env.reconcile(ctx, t, got)
+			requireMCPServerApplied(t, got)
+			require.Equal(t, testMCPKey, env.stored(t, got).apiKeyValue)
+		})
+	}
 }
 
 // A credential PATCH can commit in Coder while its answer is lost. The
