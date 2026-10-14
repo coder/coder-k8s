@@ -85,7 +85,7 @@ func TestPoolMemberWatchRules(t *testing.T) {
 	t.Parallel()
 	e := newPoolMemberEnv(t)
 	started := e.clock.Now()
-	key, workspaceID := e.readyMember(t)
+	key, _ := e.readyMember(t)
 	buildID := uuid.MustParse(e.reconcileMember(t, key, 0).Status.StartBuildID)
 	ready := agent("main", codersdk.WorkspaceAgentConnected, codersdk.WorkspaceAgentLifecycleReady)
 	lost := agent("main", codersdk.WorkspaceAgentDisconnected, codersdk.WorkspaceAgentLifecycleReady)
@@ -115,7 +115,7 @@ func TestPoolMemberWatchRules(t *testing.T) {
 
 	// Dormancy fails the member.
 	e.clock.SetTime(started)
-	key, workspaceID = e.readyMember(t)
+	key, workspaceID := e.readyMember(t)
 	dormant := started.Add(time.Minute)
 	e.fake.setDormant(workspaceID, &dormant, nil)
 	requireMemberFailed(t, e.reconcileMember(t, key, 1), "Dormant", "is dormant", metav1.ConditionFalse)
