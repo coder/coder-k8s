@@ -37,12 +37,15 @@ var (
 	// CODER_..._PROVIDER_<N>_* configures an indexed provider, whose name
 	// any of its variables can set. These have no flags.
 	aiProviderIndexedEnvPrefixes = []string{"CODER_AI_GATEWAY_PROVIDER_", "CODER_AIBRIDGE_PROVIDER_"}
-	// A config file can set the YAML keys bedrock_base_url, bedrock_region,
-	// bedrock_model and bedrock_small_fast_model, and each one seeds
-	// anthropic (codersdk/deployment.go:1968-2026, :4493-4568 and
-	// coderd/ai_providers_migrate.go:321-357). Keys and indexed providers
-	// have no YAML keys (cli/server.go:994), so a config file seeds no other
-	// name. The file is not read: the check fails closed (#154).
+	// A config file can set the YAML keys bedrock_base_url and
+	// bedrock_region, and either one seeds anthropic
+	// (codersdk/deployment.go:1968-1986, :4493-4514,
+	// codersdk/aiproviders_bedrock.go:82-96 and
+	// coderd/ai_providers_migrate.go:321-357). bedrock_model and
+	// bedrock_small_fast_model alone seed nothing. Keys and indexed
+	// providers have no YAML keys (cli/server.go:994), so a config file
+	// seeds no other name. The file is not read: the check fails closed
+	// (#154).
 	aiProviderConfigFileEnv  = "CODER_CONFIG_PATH"
 	aiProviderConfigFileFlag = "config"
 )

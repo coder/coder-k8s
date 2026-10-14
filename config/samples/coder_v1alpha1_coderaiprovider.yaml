@@ -1,0 +1,25 @@
+# Manages one AI provider in Coder. The object name is the Coder provider
+# name. See docs/how-to/manage-ai-providers.md.
+#
+# Prerequisites:
+# - CoderControlPlane codercontrolplane-sample with status.operatorAccessReady
+#   true.
+# - Secret openai-api-key in the same namespace, with the label
+#   coder.com/credential=true and the annotation
+#   coder.com/credential-destinations=https://api.openai.com.
+apiVersion: coder.com/v1alpha1
+kind: CoderAIProvider
+metadata:
+  name: openai
+  namespace: coder
+spec:
+  controlPlaneRef:
+    name: codercontrolplane-sample
+  # Immutable: Coder cannot change the type after create.
+  type: openai
+  baseURL: https://api.openai.com/v1
+  displayName: OpenAI
+  enabled: true
+  apiKeySecretRef:
+    name: openai-api-key
+    key: api-key

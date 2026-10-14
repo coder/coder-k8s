@@ -34,6 +34,9 @@ func (r *CoderAIProviderReconciler) syncAIProvider(
 	if cred == nil {
 		return nil, false, fmt.Errorf("assertion failed: AI provider %s/%s has a provider ID without a credential", provider.Namespace, provider.Name)
 	}
+	if err := checkAIProviderID(provider); err != nil {
+		return nil, false, err
+	}
 	applied := provider.Status.AppliedGeneration == provider.Generation
 	found, err := sdk.AIProvider(ctx, provider.Status.ProviderID)
 	switch {

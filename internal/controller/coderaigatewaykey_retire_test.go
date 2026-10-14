@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -173,4 +174,35 @@ func TestCoderAIGatewayKeyRecoveredReissueCountsAsDrift(t *testing.T) {
 	got, _ = env.reconcile(ctx, t, got)
 	requireAIGatewayKeyStep(t, got, true, "SecretConflict")
 	require.Equal(t, 2, env.fake.requestCount(routeCreateAIGatewayKey))
+}
+
+// Plan 4.7 with a short LIST answer: an answer that does not list the current
+// key proves nothing about the retiring keys, so they stay retiring. When
+// the full answer lists them again, the sweep does not take them for
+// orphans: the retire step deletes them after the grace period.
+func TestCoderAIGatewayKeyShortListKeepsRetiring(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+	got, _ := env.reconcile(ctx, t, env.createKey(ctx, t, "coder", testAIGatewaySecret))
+	got.Spec.Rotation.Trigger = "rotate-1"
+	require.NoError(t, k8sClient.Update(ctx, got))
+	got, _ = env.reconcile(ctx, t, got)
+	retiring := retiringIDs(got)
+	require.Len(t, retiring, 1)
+
+	env.fake.failNext(routeAIGatewayKeys, fakeFault{Rewrite: func(any) any { return []codersdk.AIGatewayKey{} }})
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIGatewayKeyStep(t, got, true, "KeyDeletedExternally")
+	require.Equal(t, retiring, retiringIDs(got), "a short answer keeps the retiring key")
+
+	env.clock.Step(5 * time.Minute)
+	got, _ = env.reconcile(ctx, t, got)
+	requireReadyWhile(t, got, "WaitingForGracePeriod")
+	require.Equal(t, retiring, retiringIDs(got))
+	require.Zero(t, env.fake.requestCount(routeDeleteAIGatewayKey), "the sweep does not delete a retiring key")
+	env.clock.Step(time.Hour)
+	got, _ = env.reconcile(ctx, t, got)
+	require.Empty(t, got.Status.RetiringKeys)
+	require.Equal(t, 1, env.fake.requestCount(routeDeleteAIGatewayKey))
 }

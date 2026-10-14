@@ -33,6 +33,9 @@ func (r *CoderAIProviderReconciler) disableWithoutConsent(
 	if provider.Status.ProviderID == "" || credErr == nil {
 		return nil, fmt.Errorf("assertion failed: AI provider %s/%s needs a provider ID and a credential failure to be disabled", provider.Namespace, provider.Name)
 	}
+	if err := checkAIProviderID(provider); err != nil {
+		return nil, err
+	}
 	// Status messages are cut at 256 characters, so the new fact goes first.
 	// No Kubernetes event follows a dashboard enable, so the stall resyncs.
 	stalled := func(format string, args ...any) *aiProviderStep {

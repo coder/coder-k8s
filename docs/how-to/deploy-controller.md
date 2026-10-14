@@ -1,6 +1,6 @@
 # Deploy the controller
 
-Run `coder-k8s` as an operator only (`--app=controller`). The operator reconciles `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy`, and `CoderTemplateTest` resources.
+Run `coder-k8s` as an operator only (`--app=controller`). The operator reconciles `CoderControlPlane`, `CoderProvisioner`, `CoderWorkspaceProxy`, `CoderTemplateTest`, and `CoderAIProvider` resources.
 
 Run the commands from a clone of this repository.
 

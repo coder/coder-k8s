@@ -85,10 +85,35 @@ rules:
   - coder.com
   resources:
   - coderaigatewaykeys
-  - coderaiproviders
   - codermcpservers
   verbs:
   - list
+- apiGroups:
+  - coder.com
+  resources:
+  - coderaiproviders
+  verbs:
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - coder.com
+  resources:
+  - coderaiproviders/finalizers
+  - codercontrolplanes/finalizers
+  - coderprovisioners/finalizers
+  - codertemplatetests/finalizers
+  - coderworkspaceproxies/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - coder.com
+  resources:
+  - coderaiproviders/status
+  verbs:
+  - get
+  - update
 - apiGroups:
   - coder.com
   resources:
@@ -103,15 +128,6 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - coder.com
-  resources:
-  - codercontrolplanes/finalizers
-  - coderprovisioners/finalizers
-  - codertemplatetests/finalizers
-  - coderworkspaceproxies/finalizers
-  verbs:
-  - update
 - apiGroups:
   - coder.com
   resources:
