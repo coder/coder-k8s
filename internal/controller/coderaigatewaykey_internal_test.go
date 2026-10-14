@@ -1,10 +1,13 @@
 package controller
 
 import (
+	"context"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
@@ -114,4 +117,52 @@ func TestAIGatewayKeyListFailure(t *testing.T) {
 	step := aiGatewayKeyListFailure(errors.New("dial tcp: connection refused"))
 	require.Equal(t, "CoderUnavailable", step.reason)
 	require.False(t, step.stalled)
+}
+
+// Plan 4.3 outcome classes of a failed create, with Coder's details left out.
+func TestAIGatewayKeyCreateFailure(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		err         error
+		reason      string
+		stalled     bool
+		rateLimited bool
+		failures    int32
+	}{
+		"rate limited":   {err: codersdk.NewError(http.StatusTooManyRequests, codersdk.Response{Message: "Rate limit."}), reason: "CoderUnavailable", rateLimited: true},
+		"token rejected": {err: codersdk.NewError(http.StatusUnauthorized, codersdk.Response{Message: "Unauthorized."}), reason: "CoderUnavailable"},
+		"dial":           {err: &net.OpError{Op: "dial", Err: errors.New("connection refused")}, reason: "CoderUnavailable"},
+		"no license":     {err: codersdk.NewError(http.StatusForbidden, codersdk.Response{Message: "AI Gateway is a Premium feature. Contact sales!"}), reason: "LicenseRequired", stalled: true},
+		"forbidden":      {err: codersdk.NewError(http.StatusForbidden, codersdk.Response{Message: "Forbidden."}), reason: "CoderRejected", stalled: true},
+		"route missing":  {err: codersdk.NewError(http.StatusNotFound, codersdk.Response{Message: "Route not found."}), reason: "NotSupported", stalled: true},
+		"duplicate name": {err: codersdk.NewError(http.StatusBadRequest, codersdk.Response{Message: "Key name must be unique."}), reason: "IssuingKey"},
+		"invalid name":   {err: codersdk.NewError(http.StatusBadRequest, codersdk.Response{Message: "Invalid key name."}), reason: "CoderRejected", stalled: true},
+		"406":            {err: codersdk.NewError(http.StatusNotAcceptable, codersdk.Response{Message: "Not acceptable."}), reason: "IssuingKey", failures: 1},
+		"server error":   {err: codersdk.NewError(http.StatusBadGateway, codersdk.Response{Message: "Bad gateway."}), reason: "IssuingKey", failures: 1},
+		"non-201 2xx":    {err: codersdk.NewError(http.StatusOK, codersdk.Response{Message: "unexpected status code 200"}), reason: "IssuingKey", failures: 1},
+		"timeout":        {err: context.DeadlineExceeded, reason: "IssuingKey", failures: 1},
+	} {
+		key := &coderv1alpha1.CoderAIGatewayKey{}
+		if sdkErr := (*codersdk.Error)(nil); errors.As(tc.err, &sdkErr) {
+			sdkErr.Detail = "detail-must-not-leak"
+		}
+		step := aiGatewayKeyCreateFailure(key, "ck8s-x-0", tc.err)
+		require.Equal(t, tc.reason, step.reason, name)
+		require.Equal(t, tc.stalled, step.stalled, name)
+		require.Equal(t, tc.rateLimited, step.rateLimited, name)
+		require.Equal(t, tc.failures, key.Status.ConsecutiveIssueFailures, name)
+		require.NotContains(t, step.message, "detail-must-not-leak", name)
+	}
+
+	// Uncertain answers back off from 30 s, doubling to 10 minutes, and the
+	// tenth stalls.
+	key := &coderv1alpha1.CoderAIGatewayKey{}
+	var backoffs []time.Duration
+	for range 9 {
+		backoffs = append(backoffs, aiGatewayKeyIssueFailed(key, "x").requeue)
+	}
+	require.Equal(t, []time.Duration{
+		30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 10 * time.Minute, 10 * time.Minute, 10 * time.Minute, 10 * time.Minute,
+	}, backoffs)
+	require.True(t, aiGatewayKeyIssueFailed(key, "x").stalled)
 }

@@ -174,7 +174,11 @@ func (r *CoderAIGatewayKeyReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if err := r.patchFinalizer(ctx, key, true); err != nil {
 		return ctrl.Result{}, err
 	}
-	step, err := r.observe(ctx, key)
+	if key.Status.ObservedGeneration != key.Generation {
+		// A spec change re-arms the issue step after the failure cap.
+		key.Status.ConsecutiveIssueFailures = 0
+	}
+	step, err := r.observe(ctx, key, before)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -192,7 +196,9 @@ func (r *CoderAIGatewayKeyReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 // observe runs the reads of plan 4.2 in order and returns the first step
 // that applies. Every check before the LIST sends nothing to Coder.
-func (r *CoderAIGatewayKeyReconciler) observe(ctx context.Context, key *coderv1alpha1.CoderAIGatewayKey) (*aiGatewayKeyStep, error) {
+func (r *CoderAIGatewayKeyReconciler) observe(
+	ctx context.Context, key *coderv1alpha1.CoderAIGatewayKey, before *coderv1alpha1.CoderAIGatewayKeyStatus,
+) (*aiGatewayKeyStep, error) {
 	sdk, controlPlane, wait, err := controlPlaneCoderClient(ctx, r.Client, key.Namespace, key.Spec.ControlPlaneRef.Name)
 	if err != nil {
 		return nil, err
@@ -234,7 +240,7 @@ func (r *CoderAIGatewayKeyReconciler) observe(ctx context.Context, key *coderv1a
 		return &aiGatewayKeyStep{ready: true, reason: "Ready", requeue: aiGatewayKeyResync, message: fmt.Sprintf(
 			"Secret %q holds key %s, and Coder lists it.", key.Spec.SecretName, key.Status.CurrentKey.Name)}, nil
 	case aiGatewayKeyIssue:
-		return r.prepareSecret(ctx, key, prefix)
+		return r.issueKey(ctx, sdk, key, before, prefix)
 	case aiGatewayKeyKillSwitch:
 		return aiGatewayKeyStalled(reasonKeyDeletedExternal,
 			"Coder no longer lists the current key %s. Someone deleted it outside the operator, so the operator creates no new key.", key.Status.CurrentKey.Name), nil
@@ -246,17 +252,20 @@ func (r *CoderAIGatewayKeyReconciler) observe(ctx context.Context, key *coderv1a
 
 // prepareSecret runs the first two parts of the issue step (plan 4.3): the
 // output Secret exists and this object controls it, and the API server
-// accepts a write of a key into it, before any key exists.
-func (r *CoderAIGatewayKeyReconciler) prepareSecret(ctx context.Context, key *coderv1alpha1.CoderAIGatewayKey, prefix string) (*aiGatewayKeyStep, error) {
+// accepts a write of a key into it, before any key exists. It returns the
+// Secret's labels, or a step when the issue step cannot go on.
+func (r *CoderAIGatewayKeyReconciler) prepareSecret(
+	ctx context.Context, key *coderv1alpha1.CoderAIGatewayKey, prefix string,
+) (map[string]string, *aiGatewayKeyStep, error) {
 	labels := map[string]string{
 		"app.kubernetes.io/name":     aiGatewayKeyAppName,
 		"app.kubernetes.io/instance": workspaceProxyInstanceLabelValue(key.Name),
 	}
 	secret, err := claimOwnedSecret(ctx, r.Client, r.APIReader, r.Scheme, key, aiGatewayKeyKind, key.Spec.SecretName, labels)
 	if credErr := (*credentialsecret.Error)(nil); errors.As(err, &credErr) {
-		return aiGatewayKeyStalled(credErr.Reason, "%s", credErr.Message), nil
+		return nil, aiGatewayKeyStalled(credErr.Reason, "%s", credErr.Message), nil
 	} else if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// The dry run sends what the real write will send, with a placeholder
 	// in place of the key, so an admission webhook, a policy or a quota that
@@ -269,10 +278,10 @@ func (r *CoderAIGatewayKeyReconciler) prepareSecret(ctx context.Context, key *co
 	_, err = writeOwnedSecret(ctx, r.Client, key, aiGatewayKeyKind, secret,
 		map[string][]byte{coderv1alpha1.CoderAIGatewayKeySecretDataKey: aiGatewayKeyPlaceholder}, labels, annotations, client.DryRunAll)
 	if err != nil {
-		return aiGatewayKeyWriteFailure(key.Spec.SecretName, err)
+		step, err := aiGatewayKeyWriteFailure(key.Spec.SecretName, err)
+		return nil, step, err
 	}
-	return aiGatewayKeyWait(aiGatewayKeyResync, reasonIssuingKey,
-		"Secret %q is claimed, and a test write passed. This controller version creates no key yet.", key.Spec.SecretName), nil
+	return labels, nil, nil
 }
 
 // aiGatewayKeyWriteFailure maps a failed write of the output Secret. The

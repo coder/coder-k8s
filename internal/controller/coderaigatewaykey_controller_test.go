@@ -3,7 +3,9 @@ package controller_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/controller"
+	"github.com/coder/coder-k8s/internal/credentialsecret/credentialsecrettest"
 )
 
 const testAIGatewaySecret = "coder-ai-gateway-key"
@@ -34,11 +37,16 @@ type aiGatewayKeyEnv struct {
 	namespace string
 	fake      *fakeCoder
 	client    client.Client // The reconciler's client. Tests can wrap it.
+	clock     *clocktesting.FakeClock
 }
 
 func newAIGatewayKeyEnv(ctx context.Context, t *testing.T, allowKeys *bool) aiGatewayKeyEnv {
 	t.Helper()
-	env := aiGatewayKeyEnv{namespace: createTestNamespace(ctx, t, "aigk"), fake: newFakeCoder(t), client: k8sClient}
+	// Status times have second precision, so the fake clock starts on a second.
+	env := aiGatewayKeyEnv{
+		namespace: createTestNamespace(ctx, t, "aigk"), fake: newFakeCoder(t), client: k8sClient,
+		clock: clocktesting.NewFakeClock(time.Now().Truncate(time.Second)),
+	}
 	cp := createTestControlPlane(ctx, t, env.namespace, "coder", env.fake.server.URL)
 	if allowKeys != nil {
 		require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(cp), cp))
@@ -75,18 +83,42 @@ func (env aiGatewayKeyEnv) createNamedKey(ctx context.Context, t *testing.T, nam
 // returns the stored object (nil once it is gone).
 func (env aiGatewayKeyEnv) reconcile(ctx context.Context, t *testing.T, key *coderv1alpha1.CoderAIGatewayKey) (*coderv1alpha1.CoderAIGatewayKey, ctrl.Result) {
 	t.Helper()
-	r := &controller.CoderAIGatewayKeyReconciler{
-		Client: env.client, APIReader: env.client, Scheme: scheme, Clock: clocktesting.NewFakePassiveClock(time.Now()),
-	}
-	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(key)})
-	require.NoError(t, err)
-	got := &coderv1alpha1.CoderAIGatewayKey{}
-	err = k8sClient.Get(ctx, client.ObjectKeyFromObject(key), got)
-	if apierrors.IsNotFound(err) {
-		return nil, result
-	}
+	got, result, err := env.reconcileErr(ctx, t, key)
 	require.NoError(t, err)
 	return got, result
+}
+
+// reconcileErr runs one reconcile and returns its error. It checks that no
+// key that the fake Coder holds appears in the status, the output Secret's
+// metadata, the logs or the error (plan S3).
+func (env aiGatewayKeyEnv) reconcileErr(ctx context.Context, t *testing.T, key *coderv1alpha1.CoderAIGatewayKey) (*coderv1alpha1.CoderAIGatewayKey, ctrl.Result, error) {
+	t.Helper()
+	r := &controller.CoderAIGatewayKeyReconciler{Client: env.client, APIReader: env.client, Scheme: scheme, Clock: env.clock}
+	logCtx, logs := capturingContext(ctx)
+	result, reconcileErr := r.Reconcile(logCtx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(key)})
+	got := &coderv1alpha1.CoderAIGatewayKey{}
+	err := k8sClient.Get(ctx, client.ObjectKeyFromObject(key), got)
+	if apierrors.IsNotFound(err) {
+		got = nil
+	} else {
+		require.NoError(t, err)
+	}
+	haystacks := map[string]any{"logs": logs.String(), "error": fmt.Sprint(reconcileErr)}
+	if got != nil {
+		haystacks["status"] = got.Status
+		secret := &corev1.Secret{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: got.Namespace, Name: got.Spec.SecretName}, secret); err == nil {
+			haystacks["secret metadata"] = secret.ObjectMeta
+		}
+	}
+	var plaintexts []string
+	for _, k := range env.fake.aiGatewayKeys() {
+		plaintexts = append(plaintexts, k.plaintext)
+	}
+	if len(plaintexts) > 0 {
+		credentialsecrettest.RequireNoLeak(t, plaintexts, haystacks)
+	}
+	return got, result, reconcileErr
 }
 
 // requireAIGatewayKeyStep checks the kstatus conditions of a wait or a stall
@@ -266,34 +298,47 @@ func TestCoderAIGatewayKeySecretNameReserved(t *testing.T) {
 	}
 }
 
-// The first steps of a usable object: one LIST, then the Secret is claimed
-// empty, with the owner reference and labels, before any key exists. A
-// second reconcile changes nothing. Deletion of an object that never sent a
-// create releases the finalizer with zero Coder calls.
-func TestCoderAIGatewayKeyClaimsSecret(t *testing.T) {
+// The issue step of a usable object (plan 4.3): one LIST, a dry run, the
+// marker, one POST, the key written into the claimed Secret, and the key
+// recorded in status. A second reconcile sends one LIST and no write (plan
+// S9).
+func TestCoderAIGatewayKeyIssuesFirstKey(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
 	key := env.createKey(ctx, t, "coder", testAIGatewaySecret)
 	got, _ := env.reconcile(ctx, t, key)
-	requireAIGatewayKeyStep(t, got, false, "IssuingKey")
+	requireAIGatewayKeyReady(t, got)
 	require.Equal(t, 1, env.fake.requestCount(routeAIGatewayKeys))
-	require.Zero(t, env.fake.requestCount(routeCreateAIGatewayKey))
+	require.Equal(t, 1, env.fake.requestCount(routeCreateAIGatewayKey))
+
+	keys := env.fake.aiGatewayKeys()
+	require.Len(t, keys, 1)
+	name := "ck8s-" + strings.ReplaceAll(string(got.UID), "-", "") + "-0"
+	require.Equal(t, name, keys[0].name)
+	require.Equal(t, int64(1), got.Status.NextSerial)
+	require.Equal(t, got.Generation, got.Status.AppliedGeneration)
+	require.Nil(t, got.Status.PendingKey)
+	require.Equal(t, &coderv1alpha1.CoderAIGatewayKeyCurrent{
+		Serial: 0, ID: keys[0].id.String(), Name: name, IssuedAt: metav1.NewTime(env.clock.Now()),
+	}, got.Status.CurrentKey)
+	require.Equal(t, env.clock.Now(), got.Status.LastCreateAttemptTime.Time)
+	require.Equal(t, env.clock.Now().Add(30*24*time.Hour), got.Status.NextRotationTime.Time)
 
 	secret := &corev1.Secret{}
 	require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: env.namespace, Name: testAIGatewaySecret}, secret))
 	require.Equal(t, corev1.SecretTypeOpaque, secret.Type)
-	require.Empty(t, secret.Data)
+	require.Equal(t, map[string][]byte{"key": []byte(keys[0].plaintext)}, secret.Data)
 	require.Equal(t, map[string]string{
 		"app.kubernetes.io/managed-by": "coder-k8s", "app.kubernetes.io/name": "coder-ai-gateway-key", "app.kubernetes.io/instance": "gateway",
 	}, secret.Labels)
+	require.Equal(t, map[string]string{"coder.com/ai-gateway-key-id": keys[0].id.String(), "coder.com/ai-gateway-key-name": name}, secret.Annotations)
 	require.Len(t, secret.OwnerReferences, 1)
 	require.Equal(t, got.UID, secret.OwnerReferences[0].UID)
 	require.True(t, *secret.OwnerReferences[0].Controller)
 
-	// A reconcile with no change sends no write: no status update and no
-	// finalizer patch.
-	writes, dryRuns := 0, 0
+	// A reconcile with no change sends no write and no dry run.
+	writes := 0
 	base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
 	require.NoError(t, err)
 	counting := env
@@ -303,11 +348,7 @@ func TestCoderAIGatewayKeyClaimsSecret(t *testing.T) {
 			return c.Patch(ctx, obj, patch, opts...)
 		},
 		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-			if isDryRunUpdate(opts) {
-				dryRuns++
-			} else {
-				writes++
-			}
+			writes++
 			return c.Update(ctx, obj, opts...)
 		},
 		SubResourceUpdate: func(ctx context.Context, c client.Client, subResource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
@@ -316,18 +357,21 @@ func TestCoderAIGatewayKeyClaimsSecret(t *testing.T) {
 		},
 	})
 	again, _ := counting.reconcile(ctx, t, got)
+	requireAIGatewayKeyReady(t, again)
 	require.Zero(t, writes)
-	require.Equal(t, 1, dryRuns, "the issue step tests the key write with a dry run")
 	require.Equal(t, got.ResourceVersion, again.ResourceVersion)
-	after := &corev1.Secret{}
-	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(secret), after))
-	require.Equal(t, secret.ResourceVersion, after.ResourceVersion)
-	require.Equal(t, 2, env.fake.totalRequests())
+	require.Equal(t, 2, env.fake.requestCount(routeAIGatewayKeys))
+	require.Equal(t, 3, env.fake.totalRequests())
+}
 
-	require.NoError(t, k8sClient.Delete(ctx, again))
-	gone, _ := env.reconcile(ctx, t, again)
-	require.Nil(t, gone)
-	require.Equal(t, 2, env.fake.totalRequests(), "deletion of an object that never sent a create calls Coder zero times")
+func requireAIGatewayKeyReady(t *testing.T, key *coderv1alpha1.CoderAIGatewayKey) {
+	t.Helper()
+	for conditionType, status := range map[string]metav1.ConditionStatus{"Ready": metav1.ConditionTrue, "Reconciling": metav1.ConditionFalse, "Stalled": metav1.ConditionFalse} {
+		condition := meta.FindStatusCondition(key.Status.Conditions, conditionType)
+		require.NotNil(t, condition, conditionType)
+		require.Equal(t, status, condition.Status, conditionType)
+		require.Equal(t, "Ready", condition.Reason, conditionType)
+	}
 }
 
 // An object that may have sent a create keeps its finalizer: this version
@@ -373,11 +417,11 @@ func TestCoderAIGatewayKeyClaimantKeepsSharedSecret(t *testing.T) {
 		},
 	})
 	claimant, _ := env.reconcile(ctx, t, first)
-	requireAIGatewayKeyStep(t, claimant, false, "IssuingKey")
+	requireAIGatewayKeyReady(t, claimant)
 	later, _ := env.reconcile(ctx, t, env.createNamedKey(ctx, t, "a-gateway", "coder", testAIGatewaySecret))
 	requireAIGatewayKeyStep(t, later, true, "SecretNotOwned")
 	claimant, _ = env.reconcile(ctx, t, claimant)
-	requireAIGatewayKeyStep(t, claimant, false, "IssuingKey")
+	requireAIGatewayKeyReady(t, claimant)
 }
 
 // Plan 5.1: a Secret create that the API server rejects as Invalid stalls
@@ -417,8 +461,9 @@ func TestCoderAIGatewayKeyDryRunRejected(t *testing.T) {
 	ctx := context.Background()
 	gr := schema.GroupResource{Resource: "secrets"}
 	for name, rejection := range map[string]error{
-		"invalid":   apierrors.NewInvalid(schema.GroupKind{Kind: "Secret"}, testAIGatewaySecret, field.ErrorList{field.Forbidden(field.NewPath("data"), "server-text-must-not-leak")}),
-		"forbidden": apierrors.NewForbidden(gr, testAIGatewaySecret, errors.New("server-text-must-not-leak")),
+		"invalid":     apierrors.NewInvalid(schema.GroupKind{Kind: "Secret"}, testAIGatewaySecret, field.ErrorList{field.Forbidden(field.NewPath("data"), "server-text-must-not-leak")}),
+		"forbidden":   apierrors.NewForbidden(gr, testAIGatewaySecret, errors.New("server-text-must-not-leak")),
+		"bad request": apierrors.NewBadRequest("server-text-must-not-leak"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -484,7 +529,7 @@ func TestCoderAIGatewayKeyWatches(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, (&controller.CoderAIGatewayKeyReconciler{
-		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Clock: clocktesting.NewFakePassiveClock(time.Now()),
+		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Clock: env.clock,
 	}).SetupWithManager(mgr))
 	mgrCtx, cancel := context.WithCancel(ctx)
 	mgrDone := make(chan error, 1)
@@ -510,15 +555,12 @@ func TestCoderAIGatewayKeyWatches(t *testing.T) {
 	require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: env.namespace, Name: "coder"}, cp))
 	cp.Spec.AIGateway.AllowKeys = true
 	require.NoError(t, k8sClient.Update(ctx, cp))
-	requireReason("IssuingKey")
+	requireReason("Ready")
 
-	// Deleting the claimed Secret requeues the object, which claims it again.
+	// Deleting the output Secret requeues the object at once. The drift
+	// re-issue arrives in K7, so it reports that it waits.
 	secret := &corev1.Secret{}
 	require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: env.namespace, Name: testAIGatewaySecret}, secret))
 	require.NoError(t, k8sClient.Delete(ctx, secret))
-	require.Eventually(t, func() bool {
-		again := &corev1.Secret{}
-		err := k8sClient.Get(ctx, client.ObjectKeyFromObject(secret), again)
-		return err == nil && again.UID != secret.UID
-	}, 30*time.Second, 100*time.Millisecond)
+	requireReason("IssuingKey")
 }
