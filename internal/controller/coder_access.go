@@ -109,6 +109,12 @@ func checkCoderWorkspaceOwner(ctx context.Context, sdk *codersdk.Client, ownerID
 	refuse := func(format string, args ...any) *coderStep {
 		return coderWait("OwnerNotEligible", "Coder user %s: %s", ownerID, fmt.Sprintf(format, args...))
 	}
+	// Coder's prebuild reconciler can count, delete, or hand out the
+	// workspaces of its system user (coderd/database/queries/prebuilds.sql).
+	if ownerID == uuid.MustParse(codersdk.PrebuildsSystemUserID) {
+		var user codersdk.User
+		return user, refuse("the Coder prebuilds system user cannot own workspaces that the operator creates."), nil
+	}
 	user, err := sdk.User(ctx, ownerID.String())
 	if isCoderNotFound(err) {
 		return user, refuse("the user does not exist."), nil
@@ -121,7 +127,7 @@ func checkCoderWorkspaceOwner(ctx context.Context, sdk *codersdk.Client, ownerID
 	// Coder refuses a dormant owner's agents (401), so their workspaces could
 	// only time out. Coder creates users through the API as dormant.
 	if user.Status != codersdk.UserStatusActive {
-		return user, refuse("status %q is not allowed. Only active users can own test workspaces: activate the user in Coder.", user.Status), nil
+		return user, refuse("status %q is not allowed. Only active users can own workspaces that the operator creates: activate the user in Coder.", user.Status), nil
 	}
 	// Headless users created before service accounts still have login type none.
 	if !user.IsServiceAccount && user.LoginType != codersdk.LoginTypePassword && user.LoginType != codersdk.LoginTypeNone { //nolint:staticcheck // See above.
