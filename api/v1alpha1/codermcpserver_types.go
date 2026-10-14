@@ -258,7 +258,10 @@ type CoderMCPServerOAuth2Auth struct {
 type CoderMCPServerAccess struct {
 	// Groups are Coder group names in the server's organization. Everyone is
 	// the group of all organization members. An empty list leaves the server
-	// to organization admins. Coder reserves the names new and create.
+	// to organization admins. Coder reserves the names new and create. While a
+	// listed group does not exist, the controller removes the access of every
+	// group that this list does not name, adds none, disables the server if
+	// the spec disables it, and waits with GroupNotFound for the rest.
 	// +kubebuilder:validation:MaxItems=64
 	// +kubebuilder:validation:XValidation:rule="self.all(g, g != 'new' && g != 'create')",message="access.groups must not hold new or create"
 	// +kubebuilder:validation:items:MinLength=1

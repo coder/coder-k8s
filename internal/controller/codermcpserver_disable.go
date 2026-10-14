@@ -118,7 +118,20 @@ func readMCPServerToDisable(
 // before the PATCH: Coder can commit the PATCH while its answer or the next
 // status write is lost, and a pending generation must not enable the config
 // once consent or the opt-in comes back. A failed status write sends no
-// PATCH.
+// PATCH. Whether the config is disabled comes from Coder's answer, not from
+// appliedGeneration, so a reconcile after a stop between the status write
+// and the PATCH still sends the PATCH while consent or the opt-in stays
+// withdrawn.
+//
+// Known limit (#365): if the process stops between the status write and the
+// PATCH, and consent or the opt-in comes back before the next reconcile, the
+// sync applies the current spec without a later spec edit. Coder never
+// disabled the config in that window, and the sync checks every credential
+// first, so no credential goes to an origin without consent. The same holds
+// when the PATCH fails without a commit and consent or the opt-in comes back
+// while the config is still enabled: the generation counts as applied, but
+// the sync compares Coder with the spec on every reconcile, so it still
+// sends a spec edit made before the disable.
 func (r *CoderMCPServerReconciler) sendMCPServerDisable(
 	ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, before *coderv1alpha1.CoderMCPServerStatus,
 	orgID, id uuid.UUID, reason string, unchecked func(format string, args ...any) *mcpServerStep,

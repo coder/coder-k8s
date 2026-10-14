@@ -166,7 +166,9 @@ func TestCoderMCPServerApplyAccess(t *testing.T) {
 }
 
 // A group that does not resolve keeps the new config disabled with the nonce,
-// and sends no PATCH. Once the group exists, the next reconcile applies.
+// and sends no config PATCH. The ACL fails closed (#313): the default
+// Everyone entry goes, and nothing is added. Once the group exists, the next
+// reconcile applies.
 func TestCoderMCPServerApplyGroupNotFound(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -179,7 +181,9 @@ func TestCoderMCPServerApplyGroupNotFound(t *testing.T) {
 	stored := env.requireCreated(t, got)
 	require.False(t, stored.view.Enabled)
 	require.Equal(t, "coder-k8s:"+string(got.UID), stored.view.DisplayName)
-	require.Zero(t, env.fake.requestCount(routeUpdateMCPServer)+env.fake.requestCount(routeUpdateMCPServerACL))
+	require.Zero(t, env.fake.requestCount(routeUpdateMCPServer))
+	groups, _ := env.fake.mcpACL(stored.view.ID)
+	require.Empty(t, groups, "only the remove-only ACL write: Everyone goes")
 	require.Zero(t, got.Status.AppliedGeneration)
 
 	env.fake.addGroup(env.orgID, "data", "")
@@ -383,6 +387,70 @@ func TestCoderMCPServerApplyAuthTypeChange(t *testing.T) {
 			}
 			require.Contains(t, requireMCPServerStep(t, got, true, "CoderAnswerMismatch"), "has_api_key")
 			require.NotEqual(t, got.Generation, got.Status.AppliedGeneration)
+		})
+	}
+}
+
+// #313: a new generation names a group that does not exist yet. The ACL
+// fails closed: entries that the new access.groups does not list go, and
+// nothing is added. When the same generation disables the server, one PATCH
+// with only enabled false disables it now. The rest of the generation
+// follows once the group exists.
+func TestCoderMCPServerApplyMissingGroupFailsClosed(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		disable bool
+	}{{name: "access only"}, {name: "also disabled", disable: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			env := newMCPServerEnv(ctx, t, true)
+			env.keySecret(ctx, t, testMCPKey)
+			data := env.fake.addGroup(env.orgID, "data", "")
+			got, result := env.reconcile(ctx, t, env.create(ctx, t, func(s *coderv1alpha1.CoderMCPServerSpec) {
+				s.Access = &coderv1alpha1.CoderMCPServerAccess{Groups: []string{"Everyone", "data"}}
+			}))
+			requireMCPServerApplied(t, got)
+			id := env.requireCreated(t, got).view.ID
+
+			require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(got), got))
+			got.Spec.Access.Groups = []string{"data", "ops"}
+			got.Spec.Description = "new"
+			if tc.disable {
+				got.Spec.Enabled = ptrTo(false)
+			}
+			require.NoError(t, k8sClient.Update(ctx, got))
+			mark := len(env.writeRoutes())
+			got, result = env.reconcile(ctx, t, got)
+			requireMCPServerStep(t, got, true, "GroupNotFound")
+			require.Equal(t, 10*time.Minute, result.RequeueAfter)
+			require.NotEqual(t, got.Generation, got.Status.AppliedGeneration)
+			groups, _ := env.fake.mcpACL(id)
+			require.Equal(t, []uuid.UUID{data}, groups, "Everyone goes, ops is not added")
+			writes := env.writesSince(mark)
+			stored := env.requireCreated(t, got)
+			require.Empty(t, stored.view.Description, "the rest of the generation waits")
+			if tc.disable {
+				require.Len(t, writes, 2)
+				require.Equal(t, routeUpdateMCPServerACL, writes[0].route)
+				require.Equal(t, routeUpdateMCPServer, writes[1].route)
+				require.JSONEq(t, `{"enabled":false}`, string(writes[1].body))
+				require.False(t, stored.view.Enabled)
+			} else {
+				require.Len(t, writes, 1)
+				require.Equal(t, routeUpdateMCPServerACL, writes[0].route)
+				require.True(t, stored.view.Enabled)
+			}
+
+			ops := env.fake.addGroup(env.orgID, "ops", "")
+			got, _ = env.reconcile(ctx, t, got)
+			requireMCPServerApplied(t, got)
+			groups, _ = env.fake.mcpACL(id)
+			require.ElementsMatch(t, []uuid.UUID{data, ops}, groups)
+			stored = env.requireCreated(t, got)
+			require.Equal(t, "new", stored.view.Description)
+			require.Equal(t, !tc.disable, stored.view.Enabled)
 		})
 	}
 }
