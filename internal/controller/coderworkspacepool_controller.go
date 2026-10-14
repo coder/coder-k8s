@@ -163,13 +163,16 @@ func (r *CoderWorkspacePoolReconciler) deleteFailedMembers(
 	var failed []*coderv1alpha1.CoderWorkspacePoolMember
 	for i := range members {
 		m := &members[i]
-		if owner := metav1.GetControllerOf(m); owner == nil || owner.UID != pool.UID || m.Spec.ClaimRef != nil {
-			continue // Only the pool's own unclaimed members take part.
-		}
-		if m.Status.ReadyTime != nil && m.Status.ReadyTime.After(runStart) {
+		owner := metav1.GetControllerOf(m)
+		controlled := owner != nil && owner.UID == pool.UID
+		// A bound member of the pool (its claim controls it, the pool label
+		// stays) became ready too, so its ready time ends a run as well.
+		bound := m.Spec.ClaimRef != nil && m.Labels[coderv1alpha1.CoderWorkspacePoolSelectorLabel] == string(pool.UID)
+		if (controlled || bound) && m.Status.ReadyTime != nil && m.Status.ReadyTime.After(runStart) {
 			runStart = m.Status.ReadyTime.Time
 		}
-		if m.DeletionTimestamp.IsZero() && m.Status.Phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed {
+		// Only the pool's own unclaimed members fail into the run.
+		if controlled && m.Spec.ClaimRef == nil && m.DeletionTimestamp.IsZero() && m.Status.Phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed {
 			failed = append(failed, m)
 		}
 	}

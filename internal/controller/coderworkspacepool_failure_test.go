@@ -138,6 +138,19 @@ func TestPoolFailureRunOrder(t *testing.T) {
 	requirePool(t, pool, "FailureBackoff", false, false)
 	require.Len(t, e.poolMembers(t, e.pool.Name), 2, "both failed members are deleted, and the backoff stops a create")
 
+	// A member that became ready and was bound before the pool saw it ends
+	// the run too: its claim controls it, and the pool label stays.
+	e.clock.SetTime(start.Add(2 * time.Minute))
+	e.setMemberStatus(t, e.createMember(t, nil), e.failedStatus("BuildFailed"))
+	require.Equal(t, int32(2), e.reconcilePool(t, 1).Status.ConsecutiveFailures)
+	boundKey := e.createMember(t, func(m *coderv1alpha1.CoderWorkspacePoolMember) {
+		m.OwnerReferences = []metav1.OwnerReference{{APIVersion: coderv1alpha1.GroupVersion.String(), Kind: "CoderWorkspaceClaim", Name: "build-1", UID: "5f0c3c4e-0000-4000-8000-0000000000c1", Controller: new(true)}}
+		m.Spec.ClaimRef = &coderv1alpha1.CoderWorkspaceClaimReference{Name: "build-1", UID: "5f0c3c4e-0000-4000-8000-0000000000c1"}
+	})
+	e.setMemberStatus(t, boundKey, e.readyAt(start.Add(2*time.Minute+time.Second)))
+	e.clock.SetTime(start.Add(150 * time.Second))
+	require.Zero(t, e.reconcilePool(t, 1).Status.ConsecutiveFailures, "the bound member's ready time ended the run")
+
 	// A failure in the same second as a success does not count.
 	e.clock.SetTime(start.Add(3 * time.Minute))
 	e.setMemberStatus(t, e.createMember(t, nil), e.readyAt(e.clock.Now()))
