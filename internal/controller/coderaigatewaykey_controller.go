@@ -255,6 +255,7 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 		stamp := metav1.NewTime(now)
 		key.Status.LastCreateAttemptTime = &stamp
 	}
+	setAIGatewayKeyNextRotation(key) // An interval change applies at once (plan 3.4).
 	if current := key.Status.CurrentKey; current != nil && aiGatewayKeyListed(own, current.ID) {
 		// Coder lists the current key, so no kill switch holds. A stale
 		// generation would re-arm a later kill switch at once.
@@ -291,12 +292,15 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 		return aiGatewayKeyWait(max(decision.settleAt.Sub(now), time.Second), reasonDeletingOrphans,
 			"Key %s of this object is an orphan. The operator creates no key until it deletes the orphan at %s, when no write of the last create attempt can still land.",
 			decision.key.Name, decision.settleAt.UTC().Format(time.RFC3339)), nil
-	case aiGatewayKeyIssue, aiGatewayKeyReissue:
+	case aiGatewayKeyIssue, aiGatewayKeyReissue, aiGatewayKeyRotate:
 		serial := key.Status.NextSerial
-		step, err := r.issueKey(ctx, sdk, key, before, prefix, decision.action == aiGatewayKeyReissue)
+		step, err := r.issueKey(ctx, sdk, key, before, prefix, decision.action)
 		if err == nil && step.stalled && key.Status.NextSerial == serial {
 			// The issue step stopped before the create, so the stall sweeps.
 			step = r.deleteOnly(ctx, sdk, key, decision, step, now)
+		}
+		if err == nil && !step.ready && decision.action == aiGatewayKeyRotate {
+			step = aiGatewayKeyKeepReady(key, step, true) // The Secret still holds the current key.
 		}
 		return step, err
 	case aiGatewayKeyKillSwitch:
@@ -319,10 +323,13 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 		return r.retireKey(ctx, sdk, key, decision), nil
 	case aiGatewayKeyReady:
 		step := aiGatewayKeyReadyStep(key)
-		if waiting := decision.retirement; waiting.reason != "" {
+		if _, blocked := aiGatewayKeyRotationDue(key, now); blocked != nil {
+			step = blocked
+		} else if waiting := decision.retirement; waiting.reason != "" {
 			// A replaced key waits: Ready stays True (plan 3.3).
 			step.inProgress, step.reason, step.message = true, waiting.reason, waiting.message
 		}
+		step.requeue = aiGatewayKeyResyncAfter(key, now)
 		for _, at := range []time.Time{decision.settleAt, decision.retirement.next} {
 			if !at.IsZero() {
 				// Come back to sweep the orphan or to retire the key.

@@ -49,6 +49,7 @@ const (
 	aiGatewayKeyKillSwitch aiGatewayKeyAction = "KillSwitch" // Someone deleted the current key in Coder (4.7).
 	aiGatewayKeyRearm      aiGatewayKeyAction = "Rearm"      // The spec changed after the kill switch: forget the deleted key.
 	aiGatewayKeyReissue    aiGatewayKeyAction = "Reissue"    // The Secret lost the current key (D7).
+	aiGatewayKeyRotate     aiGatewayKeyAction = "Rotate"     // A scheduled or requested rotation (3.4).
 	aiGatewayKeyConflict   aiGatewayKeyAction = "Conflict"   // The Secret lost the key again too soon (D7).
 )
 
@@ -78,7 +79,7 @@ func (d aiGatewayKeyDecision) settled(now time.Time) bool {
 // that the Secret holds (uuid.Nil for none). The rows run in this order:
 // recovery, then the first issue behind the create gate, then the kill
 // switch, the drift re-issue behind the create gate, and the steady state
-// with its retire step and sweep. The sweep never comes before the kill
+// with its retire step, sweep and rotation. The sweep never comes before the kill
 // switch. Every create waits behind the create gate, so at most one visible
 // orphan exists at a time. A stall still retires keys and sweeps
 // (delete-only mode, plan 4.8), and the observe step does that.
@@ -138,7 +139,13 @@ func nextAIGatewayKeyAction(
 	case decision.settled(now):
 		decision.action = aiGatewayKeySweep
 	default:
-		decision.action = aiGatewayKeyReady
+		// A rotation waits behind the create gate too: the Ready row requeues
+		// at the end of the settle window.
+		if due, _ := aiGatewayKeyRotationDue(key, now); due && decision.settleAt.IsZero() {
+			decision.action = aiGatewayKeyRotate
+		} else {
+			decision.action = aiGatewayKeyReady
+		}
 	}
 	return decision
 }
