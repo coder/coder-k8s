@@ -38,6 +38,13 @@ func newControlPlaneWait(reason, format string, args ...any) *controlPlaneWait {
 // its operator token, and returns a Coder client with that token. When the
 // control plane cannot serve Coder calls yet, it returns a wait and no client.
 func controlPlaneCoderClient(ctx context.Context, reader client.Reader, namespace, name string) (*codersdk.Client, *coderv1alpha1.CoderControlPlane, *controlPlaneWait, error) {
+	return controlPlaneCoderClientFor(ctx, reader, namespace, name, false)
+}
+
+// controlPlaneCoderClientFor is controlPlaneCoderClient. With allowDeleting
+// it also returns a client for a control plane that is being deleted, while
+// its operator access still works. Only cleanups use that (plan D12).
+func controlPlaneCoderClientFor(ctx context.Context, reader client.Reader, namespace, name string, allowDeleting bool) (*codersdk.Client, *coderv1alpha1.CoderControlPlane, *controlPlaneWait, error) {
 	if reader == nil {
 		return nil, nil, nil, errors.New("assertion failed: control plane access needs a Kubernetes reader")
 	}
@@ -52,7 +59,7 @@ func controlPlaneCoderClient(ctx context.Context, reader client.Reader, namespac
 		return nil, nil, nil, fmt.Errorf("get codercontrolplane %s: %w", key, err)
 	}
 	switch {
-	case !controlPlane.DeletionTimestamp.IsZero():
+	case !controlPlane.DeletionTimestamp.IsZero() && !allowDeleting:
 		return nil, nil, newControlPlaneWait("ControlPlaneNotReady", "CoderControlPlane %s is being deleted.", key.Name), nil
 	case controlPlane.Status.URL == "":
 		return nil, nil, newControlPlaneWait("ControlPlaneNotReady", "CoderControlPlane %s has no status.url yet.", key.Name), nil

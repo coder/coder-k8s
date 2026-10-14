@@ -333,15 +333,16 @@ func TestCoderAIProviderFinalizer(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(got), got)))
 
-	// A provider with a Coder ID keeps its finalizer: this version deletes nothing.
-	kept := env.createProvider(ctx, t, nil)
-	kept, _ = env.reconcile(ctx, t, kept)
-	kept.Status.ProviderID = "5d0c6c2e-3a4d-4c55-9d2f-3f1b1f0c9a11"
-	require.NoError(t, k8sClient.Status().Update(ctx, kept))
-	require.NoError(t, k8sClient.Delete(ctx, kept))
-	kept, _ = env.reconcile(ctx, t, kept)
-	require.Equal(t, []string{coderv1alpha1.CoderAIProviderCleanupFinalizer}, kept.Finalizers)
-	requireAIProviderStep(t, kept, false, "DeletePending")
+	// A provider with a Coder ID whose control plane does not exist: nothing
+	// can delete it, so the finalizer goes without a Coder request.
+	gone := env.createProvider(ctx, t, nil)
+	gone, _ = env.reconcile(ctx, t, gone)
+	gone.Status.ProviderID = "5d0c6c2e-3a4d-4c55-9d2f-3f1b1f0c9a11"
+	require.NoError(t, k8sClient.Status().Update(ctx, gone))
+	require.NoError(t, k8sClient.Delete(ctx, gone))
+	_, err = env.r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(gone)})
+	require.NoError(t, err)
+	require.True(t, apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(gone), gone)))
 	require.Zero(t, env.fake.totalRequests())
 }
 
