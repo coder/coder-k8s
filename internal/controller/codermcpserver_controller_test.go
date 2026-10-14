@@ -122,12 +122,17 @@ func (env mcpServerEnv) mcpRequests() int {
 	return env.fake.totalRequests() - env.fake.requestCount(routeOrganization)
 }
 
-// requireMCPServerStep checks the kstatus conditions of a wait or a stall and
-// returns the message.
+// requireMCPServerStep checks the kstatus conditions of a wait, a stall, or
+// the ready reason Applied, and returns the message.
 func requireMCPServerStep(t *testing.T, server *coderv1alpha1.CoderMCPServer, stalled bool, reason string) string {
 	t.Helper()
 	want := map[string]metav1.ConditionStatus{"Ready": metav1.ConditionFalse, "Reconciling": metav1.ConditionTrue, "Stalled": metav1.ConditionFalse}
-	if stalled {
+	switch {
+	case reason == "Applied":
+		require.False(t, stalled)
+		want["Ready"], want["Reconciling"] = metav1.ConditionTrue, metav1.ConditionFalse
+		require.Equal(t, server.Generation, server.Status.AppliedGeneration)
+	case stalled:
 		want["Reconciling"], want["Stalled"] = metav1.ConditionFalse, metav1.ConditionTrue
 	}
 	for conditionType, status := range want {
@@ -251,10 +256,11 @@ func TestCoderMCPServerCredentialChecks(t *testing.T) {
 			}
 			got, result := env.reconcile(ctx, t, env.create(ctx, t, tc.spec))
 			if tc.reason == "" {
-				require.Contains(t, requireMCPServerStep(t, got, false, "Pending"), "exists in Coder, disabled.")
+				requireMCPServerStep(t, got, false, "Applied")
 				require.Equal(t, 1, env.fake.requestCount(routeMCPServers), "usable credentials reach the slug lookup")
 				require.Equal(t, 1, env.fake.requestCount(routeCreateMCPServer))
-				require.Equal(t, 2, env.mcpRequests())
+				require.Equal(t, 1, env.fake.requestCount(routeUpdateMCPServer))
+				require.Equal(t, 4, env.mcpRequests(), "list, create, get and update")
 				require.Equal(t, 10*time.Minute, result.RequeueAfter)
 				return
 			}
@@ -322,15 +328,15 @@ func TestCoderMCPServerControlPlaneAndOptIn(t *testing.T) {
 	}{
 		{optIn: nil, reason: "MCPServersNotAllowed", lookups: 1},
 		{optIn: &coderv1alpha1.MCPServersSpec{Organizations: []string{"other", "missing"}}, reason: "MCPServersNotAllowed", lookups: 3},
-		{optIn: &coderv1alpha1.MCPServersSpec{Organizations: []string{"CODER"}}, reason: "Pending", lookups: 1},
-		{optIn: &coderv1alpha1.MCPServersSpec{Organizations: []string{"other", "coder"}}, reason: "Pending", lookups: 2},
+		{optIn: &coderv1alpha1.MCPServersSpec{Organizations: []string{"CODER"}}, reason: "Applied", lookups: 1},
+		{optIn: &coderv1alpha1.MCPServersSpec{Organizations: []string{"other", "coder"}}, reason: "Applied", lookups: 2},
 	} {
 		env.setOptIn(ctx, t, tc.optIn)
 		orgLookups, mcp := env.fake.requestCount(routeOrganization), env.mcpRequests()
 		got, _ = env.reconcile(ctx, t, server)
-		requireMCPServerStep(t, got, tc.reason != "Pending", tc.reason)
+		requireMCPServerStep(t, got, tc.reason != "Applied", tc.reason)
 		require.Equal(t, tc.lookups, env.fake.requestCount(routeOrganization)-orgLookups, tc.reason)
-		if tc.reason != "Pending" {
+		if tc.reason != "Applied" {
 			require.Equal(t, mcp, env.mcpRequests(), "only organization lookups happen")
 		}
 	}
@@ -352,7 +358,7 @@ func TestCoderMCPServerControlPlaneAndOptIn(t *testing.T) {
 	require.Equal(t, mcp, env.mcpRequests())
 	env.setOptIn(ctx, t, &coderv1alpha1.MCPServersSpec{Organizations: []string{"coder"}, AllowForceOn: true})
 	got, _ = env.reconcile(ctx, t, server)
-	requireMCPServerStep(t, got, false, "Pending")
+	requireMCPServerStep(t, got, false, "Applied")
 }
 
 // The organization ID is pinned at the first resolution. A later resolution
@@ -371,7 +377,7 @@ func TestCoderMCPServerOrganizationPinning(t *testing.T) {
 
 	first := env.fake.addOrganization("data")
 	got, _ = env.reconcile(ctx, t, server)
-	requireMCPServerStep(t, got, false, "Pending")
+	requireMCPServerStep(t, got, false, "Applied")
 	require.Equal(t, first.String(), got.Status.OrganizationID)
 
 	// The organization is deleted and another one takes its name.
@@ -504,7 +510,7 @@ func TestCoderMCPServerSecretChangesDuringReconcile(t *testing.T) {
 	require.Zero(t, env.mcpRequests())
 
 	got, _ = env.reconcile(ctx, t, server)
-	requireMCPServerStep(t, got, false, "Pending")
+	requireMCPServerStep(t, got, false, "Applied")
 }
 
 // Plan S15: access with no groups and enabled false survive the finalizer
@@ -579,7 +585,7 @@ func TestCoderMCPServerWatches(t *testing.T) {
 			return condition != nil && condition.Reason == reason
 		}, 30*time.Second, 100*time.Millisecond, reason)
 	}
-	requireReason("Pending")
+	requireReason("Applied")
 
 	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(tenant), tenant))
 	tenant.Labels = nil
@@ -587,19 +593,19 @@ func TestCoderMCPServerWatches(t *testing.T) {
 	requireReason(credentialsecret.ReasonNotOptedIn)
 	tenant.Labels = map[string]string{credentialsecret.LabelKey: credentialsecret.LabelValue}
 	require.NoError(t, k8sClient.Update(ctx, tenant))
-	requireReason("Pending")
+	requireReason("Applied")
 
 	env.setOptIn(ctx, t, nil)
 	requireReason("MCPServersNotAllowed")
 	env.setOptIn(ctx, t, &coderv1alpha1.MCPServersSpec{Organizations: []string{"coder"}})
-	requireReason("Pending")
+	requireReason("Applied")
 
 	// Another control plane that uses a credential Secret for its own access
 	// makes it unusable. Deleting that control plane makes it usable again.
 	other := createControlPlaneUsing(ctx, t, env.namespace, "license", tenant.Name)
 	requireReason(credentialsecret.ReasonRefused)
 	require.NoError(t, k8sClient.Delete(ctx, &coderv1alpha1.CoderControlPlane{ObjectMeta: metav1.ObjectMeta{Name: other, Namespace: env.namespace}}))
-	requireReason("Pending")
+	requireReason("Applied")
 
 	require.NoError(t, k8sClient.Delete(ctx, key))
 	requireReason(credentialsecret.ReasonSecretNotFound)

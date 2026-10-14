@@ -133,9 +133,12 @@ type CoderMCPServerSpec struct {
 	// Auth is how Coder authenticates to the server.
 	Auth CoderMCPServerAuth `json:"auth"`
 	// Access, when set, makes the controller own the server's access list in
-	// Coder: exactly the listed groups can read the server. When omitted, the
-	// controller leaves the access list alone, and Coder's default lets every
-	// organization member read the server.
+	// Coder: exactly the listed groups can read the server. Every sync
+	// therefore also removes each user entry, for example a user that an admin
+	// added in the Coder dashboard. Coder does not show the entry of a deleted
+	// group, so the sync cannot remove it, but it grants nothing.
+	// When omitted, the controller leaves the access list alone, and Coder's
+	// default lets every organization member read the server.
 	// +optional
 	Access *CoderMCPServerAccess `json:"access,omitempty"`
 }
