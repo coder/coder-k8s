@@ -135,10 +135,8 @@ func (r *CoderWorkspacePoolMemberReconciler) Reconcile(ctx context.Context, req 
 	}
 	keepBackoff = step.rateLimited && !step.failed
 	switch {
-	case step.failed, member.Spec.ClaimRef != nil && member.Status.BindExtended,
-		meta.IsStatusConditionTrue(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed):
-		// The watch rules of a bound member (plan 6.2 step 11 rule 3) come
-		// with claims. A used member waits for a person to delete it.
+	case step.failed, meta.IsStatusConditionTrue(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed):
+		// A used member waits for a person to delete it.
 		return ctrl.Result{}, nil
 	case member.Status.Phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseReady:
 		return ctrl.Result{RequeueAfter: r.retryAfter(req.NamespacedName, member, step)}, nil

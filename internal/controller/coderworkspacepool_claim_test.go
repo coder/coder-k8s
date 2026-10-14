@@ -97,7 +97,7 @@ func TestPoolBindsOldestClaimFirst(t *testing.T) {
 	requireClaim(t, e.claim(t, newer), coderv1alpha1.CoderWorkspaceClaimPhasePending, "WaitingForReadyWorkspace", false)
 	require.Equal(t, int32(1), pool.Status.BoundReplicas)
 	require.Zero(t, pool.Status.ReadyReplicas, "a bound member is not ready to claim")
-	require.Len(t, e.poolMembers(t, e.pool.Name), 2, "the pool replaces the bound member")
+	require.Len(t, e.poolMembers(t, e.pool.Name), 3, "the pool replaces the bound member and adds one for the waiting claim")
 }
 
 // TestPoolBindsCurrentBeforeOutdated: a claim takes a current member before

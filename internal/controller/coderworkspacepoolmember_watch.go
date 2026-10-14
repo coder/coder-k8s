@@ -31,15 +31,22 @@ func (r *CoderWorkspacePoolMemberReconciler) watchReady(
 	ctx context.Context, sdk *codersdk.Client, member *coderv1alpha1.CoderWorkspacePoolMember, before *coderv1alpha1.CoderWorkspacePoolMemberStatus, now time.Time,
 ) (*coderStep, error) {
 	bound := member.Spec.ClaimRef != nil
-	if (bound && member.Status.BindExtended) || meta.IsStatusConditionTrue(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed) {
-		// The one extension at bind is done, or someone used the workspace
-		// without a claim: Coder's own autostop applies, and the controller
-		// never fails a used member.
+	if meta.IsStatusConditionTrue(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed) {
+		// Someone used the workspace without a claim: Coder's own autostop
+		// applies, and the controller never fails a used member.
 		return coderWait(member.Status.Reason, "%s", member.Status.Message), nil
 	}
+	// A bound member only watches for the end (step 11 rule 3): the read
+	// answers 410 once someone deleted the workspace, which sets
+	// WorkspaceDeleted=True, and the claim becomes Lost.
 	workspace, operatorID, step, err := readPoolMemberWorkspace(ctx, sdk, member)
 	if step != nil || err != nil {
 		return step, err
+	}
+	if bound && member.Status.BindExtended {
+		// The one extension at bind is done. Builds by the claimant, a stop
+		// included, are normal and change nothing.
+		return coderWait(member.Status.Reason, "%s", member.Status.Message), nil
 	}
 	name := member.Status.WorkspaceName
 	if !bound {
