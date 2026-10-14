@@ -104,17 +104,22 @@ func TestPoolClaimLostWhenWorkspaceDeleted(t *testing.T) {
 	require.Equal(t, coderv1alpha1.CoderWorkspaceClaimPhaseLost, claim.Status.Phase)
 	require.Equal(t, "WorkspaceDeleted", claim.Status.Reason)
 
-	// The failed member goes, and a ready member appears: the Lost claim
-	// never binds again.
+	// The failed member goes, and the cache still shows the claim without
+	// its Lost status: a Lost claim is no demand, so no member is created
+	// for it.
 	e.deleteMember(t, member)
 	require.Nil(t, e.reconcileMember(t, member, 2), "the workspace is already deleted")
+	stale := &controller.CoderWorkspacePoolReconciler{Client: staleClaims{k8sClient}, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	_, err := stale.Reconcile(e.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}})
+	require.NoError(t, err)
+	require.Empty(t, e.poolMembers(t, e.pool.Name), "no member for a Lost claim")
+
+	// A ready member appears: the Lost claim never binds again.
 	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(1)) })
 	spare := e.createMember(t, nil)
 	e.setMemberStatus(t, spare, readyWithWorkspace("kwp-spare"))
-	// The cache still shows the claim without its Lost status: the pool
-	// reads the claim again without the cache before a bind.
-	stale := &controller.CoderWorkspacePoolReconciler{Client: staleClaims{k8sClient}, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
-	_, err := stale.Reconcile(e.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}})
+	// Again on the stale cache, now with a ready member to bind.
+	_, err = stale.Reconcile(e.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}})
 	require.NoError(t, err)
 	require.Nil(t, e.reconcileMember(t, spare, 0).Spec.ClaimRef)
 	e.reconcilePool(t, 1)
