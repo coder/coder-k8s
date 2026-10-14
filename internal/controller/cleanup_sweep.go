@@ -168,7 +168,7 @@ func (r *CleanupRecordReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: wait}, nil
 	}
 
-	sdk, controlPlane, unknown, err := r.matchingControlPlane(ctx, record.DeploymentID)
+	sdk, controlPlane, unknown, err := r.matchingControlPlane(ctx, record)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -180,8 +180,8 @@ func (r *CleanupRecordReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if sdk == nil {
 		r.setUnmatched(record.UID, record.Kind, true)
 		r.Recorder.Eventf(configMap, nil, corev1.EventTypeWarning, "NoMatchingDeployment", "Sweep",
-			"No ready CoderControlPlane reaches Coder deployment %s, which holds the provider of deleted %s %s/%s. Delete the provider in Coder by hand, then delete this ConfigMap.",
-			record.DeploymentID, record.Kind, record.Namespace, record.Name)
+			"No ready CoderControlPlane in namespace %s reaches Coder deployment %s, which holds the provider of deleted %s %s/%s. Delete the provider in Coder by hand, then delete this ConfigMap.",
+			record.Namespace, record.DeploymentID, record.Kind, record.Namespace, record.Name)
 		return ctrl.Result{RequeueAfter: cleanupUnmatchedRecheck}, nil
 	}
 	r.setUnmatched(record.UID, record.Kind, false)
@@ -204,13 +204,21 @@ func (r *CleanupRecordReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return ctrl.Result{}, nil
 }
 
-// matchingControlPlane returns a Coder client of a ready control plane whose
-// current deployment ID is deploymentID, or nil when there is none (#353
-// invariant 4). The ID comes from Coder now, never from the record or a URL.
-// unknown reports a ready control plane whose deployment ID read failed.
-func (r *CleanupRecordReconciler) matchingControlPlane(ctx context.Context, deploymentID string) (*codersdk.Client, *coderv1alpha1.CoderControlPlane, bool, error) {
+// matchingControlPlane returns a Coder client of a ready control plane in
+// the record's namespace whose current deployment ID is the record's, or nil
+// when there is none (#353 invariant 4). The ID comes from Coder now, never
+// from the record or a URL. unknown reports a ready control plane whose
+// deployment ID read failed.
+//
+// Only the record's own namespace counts: Coder reports its deployment ID
+// itself, so a control plane that someone else runs could claim any ID. The
+// records of a namespace, and the control planes that sweep them, are then
+// under the control of the same people, and a sweep can only delete what
+// their own operator access could delete.
+func (r *CleanupRecordReconciler) matchingControlPlane(ctx context.Context, record *cleanupRecord) (*codersdk.Client, *coderv1alpha1.CoderControlPlane, bool, error) {
+	deploymentID := record.DeploymentID
 	controlPlanes := &coderv1alpha1.CoderControlPlaneList{}
-	if err := r.List(ctx, controlPlanes); err != nil {
+	if err := r.List(ctx, controlPlanes, client.InNamespace(record.Namespace)); err != nil {
 		return nil, nil, false, fmt.Errorf("list control planes: %w", err)
 	}
 	unknown := false

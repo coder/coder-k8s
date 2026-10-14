@@ -48,15 +48,8 @@ func newSweeper(t *testing.T, env aiProviderEnv, provider *coderv1alpha1.CoderAI
 	t.Helper()
 	base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
 	require.NoError(t, err)
-	// Other tests run their own control planes: the sweeper of this test
-	// lists only the control planes of its namespace.
-	scoped := interceptor.NewClient(base, interceptor.Funcs{
-		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			return c.List(ctx, list, append(opts, client.InNamespace(env.namespace))...)
-		},
-	})
 	s := sweepEnv{aiProviderEnv: env, provider: provider, clock: clocktesting.NewFakeClock(time.Now()), recorder: events.NewFakeRecorder(10)}
-	s.sweeper = &controller.CleanupRecordReconciler{Client: scoped, APIReader: k8sClient, OperatorNamespace: env.namespace, Clock: s.clock, Recorder: s.recorder}
+	s.sweeper = &controller.CleanupRecordReconciler{Client: base, APIReader: k8sClient, OperatorNamespace: env.namespace, Clock: s.clock, Recorder: s.recorder}
 	return s
 }
 
@@ -210,6 +203,17 @@ func TestCleanupSweepAIProviderCases(t *testing.T) {
 		require.Empty(t, s.recorder.Events, "no NoMatchingDeployment Event for an unknown deployment")
 		require.Zero(t, s.sweep(ctx, t).RequeueAfter)
 		require.Nil(t, cleanupRecord(ctx, t, s.namespace, s.provider.UID))
+	})
+	t.Run("control plane in another namespace", func(t *testing.T) {
+		t.Parallel()
+		s := newSweepEnv(ctx, t)
+		// Another namespace runs a control plane that answers the record's
+		// deployment ID, as a spoofing Coder could.
+		createTestControlPlane(ctx, t, createTestNamespace(ctx, t, "aip-other"), "coder", s.fake.server.URL)
+		s.clock.Step(6 * time.Minute)
+		require.Equal(t, 10*time.Minute, s.sweep(ctx, t).RequeueAfter)
+		require.Zero(t, s.fake.requestCount(routeDeleteAIProvider), "only a control plane in the object's namespace sweeps")
+		require.NotNil(t, cleanupRecord(ctx, t, s.namespace, s.provider.UID))
 	})
 	t.Run("stale cache of the token Secret", func(t *testing.T) {
 		t.Parallel()
