@@ -137,7 +137,7 @@ When a group in `access.groups` does not exist, the sync fails closed:
 1. It removes every entry that `access.groups` no longer names, also user entries.
 2. It adds nothing. Access never widens while a group is missing.
 3. If the same spec generation disables the server (`enabled: false`), it sends one update that holds only `enabled: false`.
-4. It leaves the rest of the generation unapplied. The object stalls with `GroupNotFound` and checks again every 10 minutes.
+4. It leaves the rest of the generation unapplied. The object stalls with `GroupNotFound` and checks again every 10 minutes. The API server refuses a name that is not a valid Coder group name. If such a name reaches the operator anyway, the object stalls with `GroupNotFound` and is not checked again until the spec changes: fix the name.
 5. Once the missing groups exist, the sync adds them and applies the rest of the generation.
 
 A new server stays disabled in Coder while one of its groups is missing.
@@ -207,7 +207,8 @@ Deleting the object deletes the config in Coder. Coder removes the server from e
 - The operator deletes only a config that this object created. With only an unconfirmed create, it reads Coder first. It deletes a config that carries this object's temporary display name, and it never touches another config with the slug. A create can still commit for a short time, so within 2 minutes of the create request the operator reads again before it trusts that the config is absent.
 - When Coder is unreachable, or the control plane has no operator access, the finalizer stays and the operator retries every 60 seconds. The operator trusts only Coder's own 404 as proof that the config is gone. A 404 from a proxy keeps the finalizer.
 - When the control plane is gone, nothing can delete the config. The finalizer goes at once. The operator logs the slug and the config ID with the reason `ControlPlaneGone`. Delete the config in the Coder dashboard.
-- While the control plane is being deleted, the operator sends one delete with a 10-second limit, then removes the finalizer, also when that delete fails. So a namespace deletion finishes, but it can leave the config in Coder.
+- When you delete the control plane while `CoderMCPServer` objects that use it are being deleted, the control plane waits for them for up to 10 minutes, plus a grace period for a last bounded attempt. It keeps its finalizer, so Coder keeps running, and the delete above runs with its retries. An object that you do not delete holds the control plane for only 30 seconds, so delete the objects together with the control plane. A foreground deletion (`kubectl delete --cascade=foreground`) does not wait.
+- When the control plane does not wait (its namespace is being deleted, it is deleted in the foreground, or the 10 minutes have passed), the operator sends one delete with a 10-second limit, then removes the finalizer, also when that delete fails. So a namespace deletion finishes, but it can leave the config in Coder.
 - A withdrawn opt-in never blocks a delete.
 
 Delete `CoderMCPServer` objects before their control plane and before their namespace.

@@ -623,8 +623,8 @@ func (r *CoderControlPlaneReconciler) finalizeWorkspaceRBAC(
 		return ctrl.Result{}, err
 	}
 	// The finalizer keeps the Coder Deployment (owned by this object)
-	// running while AI Gateway keys and AI providers that use it still
-	// delete their resources in Coder (#353). The grace period after the hold
+	// running while AI Gateway keys, AI providers and MCP servers that use
+	// it still delete their resources in Coder (#353, #382). The grace period after the hold
 	// lets each of them run its bounded pass before Coder goes.
 	now := r.now()
 	dependents, perKind, err := controlPlaneDependents(ctx, r.Client, coderControlPlane, now)
@@ -3309,6 +3309,8 @@ func (r *CoderControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&coderv1alpha1.CoderAIGatewayKey{}, handler.EnqueueRequestsFromMapFunc(requestForDependentControlPlane),
 			ctrlbuilder.WithPredicates(dependentRemoved)).
 		Watches(&coderv1alpha1.CoderAIProvider{}, handler.EnqueueRequestsFromMapFunc(requestForDependentControlPlane),
+			ctrlbuilder.WithPredicates(dependentRemoved)).
+		Watches(&coderv1alpha1.CoderMCPServer{}, handler.EnqueueRequestsFromMapFunc(requestForDependentControlPlane),
 			ctrlbuilder.WithPredicates(dependentRemoved))
 
 	// Gateway API is optional; only watch HTTPRoutes when the CRD is installed.
