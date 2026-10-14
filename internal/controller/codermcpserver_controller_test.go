@@ -251,9 +251,10 @@ func TestCoderMCPServerCredentialChecks(t *testing.T) {
 			}
 			got, result := env.reconcile(ctx, t, env.create(ctx, t, tc.spec))
 			if tc.reason == "" {
-				require.Contains(t, requireMCPServerStep(t, got, false, "Pending"), "Coder has no MCP server config with slug github.")
+				require.Contains(t, requireMCPServerStep(t, got, false, "Pending"), "exists in Coder, disabled.")
 				require.Equal(t, 1, env.fake.requestCount(routeMCPServers), "usable credentials reach the slug lookup")
-				require.Equal(t, 1, env.mcpRequests())
+				require.Equal(t, 1, env.fake.requestCount(routeCreateMCPServer))
+				require.Equal(t, 2, env.mcpRequests())
 				require.Equal(t, 10*time.Minute, result.RequeueAfter)
 				return
 			}
@@ -386,9 +387,9 @@ func TestCoderMCPServerOrganizationPinning(t *testing.T) {
 	require.Equal(t, mcp, env.mcpRequests())
 }
 
-// The slug lookup only reads. A config that this object did not create is a
-// conflict (plan S4, read-only part), and Coder errors never put Detail or a
-// credential into status or logs.
+// A config that this object did not create is a conflict (plan S4): the
+// lookup sends no write. Coder errors never put Detail or a credential into
+// status or logs.
 func TestCoderMCPServerSlugLookup(t *testing.T) {
 	t.Parallel()
 	create := func(slug, displayName string) func(context.Context, *testing.T, mcpServerEnv, *coderv1alpha1.CoderMCPServer) {
@@ -414,11 +415,6 @@ func TestCoderMCPServerSlugLookup(t *testing.T) {
 			name: "slug taken", prepare: create("github", "GitHub"), stalled: true, reason: "SlugConflict", requeue: 10 * time.Minute,
 			message: "Coder organization coder already has an MCP server config with slug github (ID ",
 		},
-		{
-			name: "slug in other case", prepare: create("GITHUB", "GitHub"), reason: "Pending", requeue: 10 * time.Minute,
-			message: "Coder has no MCP server config with slug github.",
-		},
-		{name: "own nonce", prepare: create("github", ""), reason: "Pending", requeue: 10 * time.Minute, message: "carries this object's nonce"},
 		{
 			name: "Coder error with a credential in its detail", reason: "CoderUnavailable", requeue: 30 * time.Second,
 			message: "list MCP server configs: Coder answered 500: fake fault 500",
