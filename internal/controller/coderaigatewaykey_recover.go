@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
@@ -49,6 +50,7 @@ const (
 	aiGatewayKeyKillSwitch aiGatewayKeyAction = "KillSwitch" // Someone deleted the current key in Coder (4.7).
 	aiGatewayKeyRearm      aiGatewayKeyAction = "Rearm"      // The spec changed after the kill switch: forget the deleted key.
 	aiGatewayKeyReissue    aiGatewayKeyAction = "Reissue"    // The Secret lost the current key (D7).
+	aiGatewayKeyRotate     aiGatewayKeyAction = "Rotate"     // A scheduled or requested rotation (3.4).
 	aiGatewayKeyConflict   aiGatewayKeyAction = "Conflict"   // The Secret lost the key again too soon (D7).
 )
 
@@ -78,7 +80,7 @@ func (d aiGatewayKeyDecision) settled(now time.Time) bool {
 // that the Secret holds (uuid.Nil for none). The rows run in this order:
 // recovery, then the first issue behind the create gate, then the kill
 // switch, the drift re-issue behind the create gate, and the steady state
-// with its retire step and sweep. The sweep never comes before the kill
+// with its retire step, sweep and rotation. The sweep never comes before the kill
 // switch. Every create waits behind the create gate, so at most one visible
 // orphan exists at a time. A stall still retires keys and sweeps
 // (delete-only mode, plan 4.8), and the observe step does that.
@@ -138,7 +140,13 @@ func nextAIGatewayKeyAction(
 	case decision.settled(now):
 		decision.action = aiGatewayKeySweep
 	default:
-		decision.action = aiGatewayKeyReady
+		// A rotation waits behind the create gate too: the Ready row requeues
+		// at the end of the settle window.
+		if due, _ := aiGatewayKeyRotationDue(key, now); due && decision.settleAt.IsZero() {
+			decision.action = aiGatewayKeyRotate
+		} else {
+			decision.action = aiGatewayKeyReady
+		}
 	}
 	return decision
 }
@@ -215,9 +223,11 @@ func aiGatewayKeyRetiring(status *coderv1alpha1.CoderAIGatewayKeyStatus, id uuid
 // grace period only grows). The previous current key, when Coder still
 // lists it, retires from now. No key is created. This is safe because the
 // Secret proves that the controller held the plaintext.
-func adoptAIGatewayKey(key *coderv1alpha1.CoderAIGatewayKey, own []codersdk.AIGatewayKey, decision aiGatewayKeyDecision, now time.Time) *aiGatewayKeyStep {
+func adoptAIGatewayKey(key *coderv1alpha1.CoderAIGatewayKey, own []codersdk.AIGatewayKey, decision aiGatewayKeyDecision, now time.Time) (*aiGatewayKeyStep, error) {
 	if previous := key.Status.CurrentKey; previous != nil && aiGatewayKeyListed(own, previous.ID) {
-		retireAIGatewayKey(key, now)
+		if err := retireAIGatewayKey(key, now); err != nil {
+			return nil, err
+		}
 		// Status does not record whether the lost attempt was a drift
 		// re-issue, so the recovery counts it as one (fail closed): another
 		// loss of the Secret inside the grace period gives SecretConflict,
@@ -233,16 +243,25 @@ func adoptAIGatewayKey(key *coderv1alpha1.CoderAIGatewayKey, own []codersdk.AIGa
 	// counts the current trigger as handled or the generation as applied: a
 	// newer trigger still starts its rotation. At worst one extra rotation
 	// runs, which is safe, while a consumed trigger would not be.
-	return setAIGatewayKeyCurrent(key, decision.serial, decision.key.ID, decision.key.Name, now, false)
+	return setAIGatewayKeyCurrent(key, decision.serial, decision.key.ID, decision.key.Name, now, false), nil
 }
 
 // retireAIGatewayKey moves the current key to retiringKeys, with its grace
-// period counting from now.
-func retireAIGatewayKey(key *coderv1alpha1.CoderAIGatewayKey, now time.Time) {
+// period counting from now. Every create first checks that the list has room
+// (a drift re-issue below 3 entries, a requested rotation below 2, a
+// scheduled rotation at 0), so recovery 4.4 of that create also fits. A full
+// list here is a broken rule: the API's limit of 3 would refuse the status
+// write.
+func retireAIGatewayKey(key *coderv1alpha1.CoderAIGatewayKey, now time.Time) error {
 	previous := key.Status.CurrentKey
+	if n := len(key.Status.RetiringKeys); n >= aiGatewayKeyMaxRetiring {
+		return fmt.Errorf("assertion failed: AI Gateway key %s/%s already has %d retiring keys, so it cannot retire key %s",
+			key.Namespace, key.Name, n, previous.Name)
+	}
 	key.Status.RetiringKeys = append(key.Status.RetiringKeys, coderv1alpha1.CoderAIGatewayKeyRetiring{
 		Serial: previous.Serial, ID: previous.ID, Name: previous.Name, ReplacedAt: metav1.NewTime(now),
 	})
+	return nil
 }
 
 // sweepOrphan deletes one orphan (plan 4.5). One DELETE per reconcile,
@@ -292,8 +311,9 @@ func aiGatewayKeyKeepReady(key *coderv1alpha1.CoderAIGatewayKey, step *aiGateway
 		return step
 	}
 	step.ready, step.inProgress = true, !step.stalled
-	if step.stalled {
-		step.message = fmt.Sprintf("The key in Secret %q still works. %s", key.Spec.SecretName, step.message)
+	// A stall read back from its condition already has the note.
+	if note := fmt.Sprintf("The key in Secret %q still works. ", key.Spec.SecretName); step.stalled && !strings.HasPrefix(step.message, note) {
+		step.message = note + step.message
 	}
 	return step
 }

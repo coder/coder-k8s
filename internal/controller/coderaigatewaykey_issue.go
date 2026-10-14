@@ -15,7 +15,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/credentialsecret"
@@ -53,10 +52,12 @@ const (
 // write the marker, create the key, check the answer, write the key into the
 // Secret, and record it in status. The key exists only in memory between the
 // create answer and the Secret write, so these steps run in one reconcile.
-// A replaced current key retires from the Secret write. drift reports a
-// re-issue because the Secret lost the current key (decision D7).
+// A replaced current key retires from the Secret write. action is Issue,
+// Reissue (the Secret lost the current key, decision D7) or Rotate. A
+// rotation keeps Ready=True, because the Secret stays valid all the time.
 func (r *CoderAIGatewayKeyReconciler) issueKey(
-	ctx context.Context, sdk *codersdk.Client, key *coderv1alpha1.CoderAIGatewayKey, before *coderv1alpha1.CoderAIGatewayKeyStatus, prefix string, drift bool,
+	ctx context.Context, sdk *codersdk.Client, key *coderv1alpha1.CoderAIGatewayKey, before *coderv1alpha1.CoderAIGatewayKeyStatus, prefix string,
+	action aiGatewayKeyAction,
 ) (*aiGatewayKeyStep, error) {
 	if key.Status.CurrentKey != nil && len(key.Status.RetiringKeys) >= aiGatewayKeyMaxRetiring {
 		return nil, fmt.Errorf("assertion failed: AI Gateway key %s/%s has no room to retire its current key", key.Namespace, key.Name)
@@ -82,7 +83,7 @@ func (r *CoderAIGatewayKeyReconciler) issueKey(
 	key.Status.PendingKey = &coderv1alpha1.CoderAIGatewayKeyPending{Serial: serial, Name: name, CreateAttemptTime: now}
 	key.Status.NextSerial = serial + 1
 	key.Status.LastCreateAttemptTime = &now
-	r.applyStep(key, aiGatewayKeyWait(0, reasonIssuingKey, "Creating key %s.", name))
+	r.applyStep(key, aiGatewayKeyKeepReady(key, aiGatewayKeyWait(0, reasonIssuingKey, "Creating key %s.", name), action == aiGatewayKeyRotate))
 	if err := r.writeStatus(ctx, key, before); err != nil {
 		return nil, err
 	}
@@ -118,9 +119,11 @@ func (r *CoderAIGatewayKeyReconciler) issueKey(
 	key.Status.PendingKey = nil
 	written := r.Clock.Now()
 	if key.Status.CurrentKey != nil {
-		retireAIGatewayKey(key, written)
+		if err := retireAIGatewayKey(key, written); err != nil {
+			return nil, err // The marker stays, and the Secret holds the new key.
+		}
 	}
-	if drift {
+	if action == aiGatewayKeyReissue {
 		key.Status.LastDriftReissueTime = &metav1.Time{Time: written}
 	}
 	step = setAIGatewayKeyCurrent(key, serial, created.ID, name, written, true)
@@ -146,10 +149,7 @@ func setAIGatewayKeyCurrent(key *coderv1alpha1.CoderAIGatewayKey, serial int64, 
 		key.Status.LastHandledTrigger = key.Spec.Rotation.Trigger
 		key.Status.AppliedGeneration = key.Generation
 	}
-	key.Status.NextRotationTime = nil
-	if interval := ptr.Deref(key.Spec.Rotation.IntervalSeconds, 0); interval > 0 {
-		key.Status.NextRotationTime = &metav1.Time{Time: now.Add(time.Duration(interval) * time.Second)}
-	}
+	setAIGatewayKeyNextRotation(key)
 	return aiGatewayKeyReadyStep(key)
 }
 
