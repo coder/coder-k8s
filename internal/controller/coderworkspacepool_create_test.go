@@ -399,6 +399,7 @@ func TestPoolPublishesResolvedBeforeCreating(t *testing.T) {
 	e.pool = pool // createMember pins the stored resolved inputs.
 	failedKey := e.createMember(t, nil)
 	e.setMemberStatus(t, failedKey, e.failedStatus("BuildFailed"))
+	e.clock.SetTime(e.clock.Now().Add(time.Hour)) // The backoff is over: only the gate stops a create.
 	pool = e.reconcilePool(t, 0)
 	pool.Status.Resolved = nil
 	require.NoError(t, k8sClient.Status().Update(e.ctx, pool))
@@ -407,6 +408,7 @@ func TestPoolPublishesResolvedBeforeCreating(t *testing.T) {
 	require.Empty(t, e.poolMembers(t, e.pool.Name), "the failure write does not count as publishing")
 	pool.Status.ConsecutiveFailures, pool.Status.LastFailure = 0, nil
 	require.NoError(t, k8sClient.Status().Update(e.ctx, pool))
+	e.clock.SetTime(e.clock.Now().Add(-time.Hour)) // Back within the members' ready timeout.
 	e.reconcilePool(t, 1)
 	members := e.poolMembers(t, e.pool.Name)
 	require.Len(t, members, 1)
