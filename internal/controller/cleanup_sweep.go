@@ -196,7 +196,7 @@ func (r *CleanupRecordReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: cleanupRetry}, nil
 	}
 	// Coder confirmed the delete in the matching deployment (invariant 7).
-	if err := deleteCleanupRecord(ctx, r.Client, r.OperatorNamespace, record.UID); err != nil {
+	if err := deleteCleanupRecord(ctx, r.Client, r.APIReader, r.OperatorNamespace, record.UID); err != nil {
 		return ctrl.Result{}, err
 	}
 	cleanupRecordsSwept.WithLabelValues(record.Kind).Inc()
