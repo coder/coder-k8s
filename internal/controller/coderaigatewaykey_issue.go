@@ -100,8 +100,10 @@ func (r *CoderAIGatewayKeyReconciler) issueKey(
 	}
 	if mismatch := aiGatewayKeyAnswerMismatch(name, created, plaintext); mismatch != "" {
 		// The controller deletes nothing here. A key with this object's name
-		// pattern is an orphan for the sweep.
+		// pattern is an orphan for the sweep. Status keeps the gate, so no
+		// later condition write drops it.
 		key.Status.PendingKey = nil
+		key.Status.AnswerMismatchGeneration = key.Generation
 		return aiGatewayKeyStalled(reasonCoderAnswerMismatch,
 			"Coder answered the create of key %s with key ID %s, but %s. The operator creates no key until the spec changes.", name, created.ID, mismatch), nil
 	}
@@ -166,11 +168,17 @@ func aiGatewayKeyIssueBlocked(key *coderv1alpha1.CoderAIGatewayKey) *aiGatewayKe
 		return aiGatewayKeyStalled(reasonIssueFailing,
 			"%d key issues in a row had an uncertain Coder answer or a failed Secret write. The operator creates no key until the spec changes.", n)
 	}
+	if key.Status.AnswerMismatchGeneration != key.Generation {
+		return nil
+	}
+	// The condition keeps the details (key name and ID) until an early
+	// failure replaces it.
 	stalled := meta.FindStatusCondition(key.Status.Conditions, coderv1alpha1.CoderAIGatewayKeyConditionStalled)
 	if stalled != nil && stalled.Status == metav1.ConditionTrue && stalled.Reason == reasonCoderAnswerMismatch && stalled.ObservedGeneration == key.Generation {
 		return aiGatewayKeyStalled(stalled.Reason, "%s", stalled.Message)
 	}
-	return nil
+	return aiGatewayKeyStalled(reasonCoderAnswerMismatch,
+		"Coder answered a create in this generation with a key that did not match the request. The operator creates no key until the spec changes.")
 }
 
 // aiGatewayKeyAnswerMismatch checks a 201 answer against the request (the

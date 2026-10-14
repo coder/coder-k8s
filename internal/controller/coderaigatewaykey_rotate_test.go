@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder/v2/codersdk"
@@ -32,7 +34,21 @@ func TestCoderAIGatewayKeyRequestedRotation(t *testing.T) {
 	got, _ = env.reconcile(ctx, t, got)
 	requireReadyWhile(t, got, "CoderUnavailable")
 	require.Equal(t, first.ID, got.Status.CurrentKey.ID)
+	// The status that the marker write stored, read while Coder answers.
+	marker := make(chan metav1.Condition, 1)
+	name := client.ObjectKeyFromObject(got)
+	env.fake.failNext(routeCreateAIGatewayKey, fakeFault{Rewrite: func(a any) any {
+		stored := &coderv1alpha1.CoderAIGatewayKey{}
+		if err := k8sClient.Get(ctx, name, stored); err == nil && stored.Status.PendingKey != nil {
+			marker <- *meta.FindStatusCondition(stored.Status.Conditions, "Ready")
+		}
+		return a
+	}})
 	got, _ = env.reconcile(ctx, t, got)
+	require.Len(t, marker, 1, "the create ran after the marker write")
+	ready := <-marker
+	require.Equal(t, metav1.ConditionTrue, ready.Status, "the marker write keeps Ready=True")
+	require.Equal(t, "IssuingKey", ready.Reason)
 	requireAIGatewayKeyReady(t, got)
 	require.Equal(t, "rotate-1", got.Status.LastHandledTrigger)
 	require.Equal(t, []string{first.ID}, retiringIDs(got))
@@ -193,6 +209,88 @@ func TestCoderAIGatewayKeyAnswerMismatchDuringRotation(t *testing.T) {
 			got, _ = env.reconcile(ctx, t, got)
 			require.Equal(t, int64(2), got.Status.CurrentKey.Serial, "the spec change re-arms the rotation")
 			require.Equal(t, 3, env.fake.requestCount(routeCreateAIGatewayKey))
+		})
+	}
+}
+
+// A due rotation keeps an issue stall that blocks its create: the failure
+// cap during a scheduled rotation, and CoderAnswerMismatch while retiring
+// keys block a requested rotation. Ready=True and Stalled=True hold while the
+// retire step frees the slots, and no create runs.
+func TestCoderAIGatewayKeyRotationKeepsIssueStall(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	t.Run("failure cap", func(t *testing.T) {
+		t.Parallel()
+		env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+		key := env.createKey(ctx, t, "coder", testAIGatewaySecret)
+		key.Spec.Rotation.IntervalSeconds = ptrTo(int32(86400))
+		require.NoError(t, k8sClient.Update(ctx, key))
+		got, _ := env.reconcile(ctx, t, key)
+		requireAIGatewayKeyReady(t, got)
+		editStatus(ctx, t, got, func(s *coderv1alpha1.CoderAIGatewayKeyStatus) { s.ConsecutiveIssueFailures = 10 })
+		for _, step := range []time.Duration{24 * time.Hour, 0, 5 * time.Minute} {
+			env.clock.Step(step)
+			got, _ = env.reconcile(ctx, t, got)
+			requireReadyStalled(t, got, "IssueFailing")
+		}
+		require.Equal(t, 1, env.fake.requestCount(routeCreateAIGatewayKey))
+	})
+	t.Run("answer mismatch while keys retire", func(t *testing.T) {
+		t.Parallel()
+		env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+		got, _ := env.reconcile(ctx, t, env.createKey(ctx, t, "coder", testAIGatewaySecret))
+		for _, trigger := range []string{"r1", "r2", "r3"} {
+			got.Spec.Rotation.Trigger = trigger
+			require.NoError(t, k8sClient.Update(ctx, got))
+			got, _ = env.reconcile(ctx, t, got)
+		}
+		requireReadyWhile(t, got, "RotationBlocked")
+		editStatus(ctx, t, got, func(s *coderv1alpha1.CoderAIGatewayKeyStatus) { s.AnswerMismatchGeneration = got.Generation })
+		got, _ = env.reconcile(ctx, t, got)
+		requireReadyStalled(t, got, "CoderAnswerMismatch")
+		env.clock.Step(time.Hour)
+		for range 3 { // Two retire steps, then the rotation would run.
+			got, _ = env.reconcile(ctx, t, got)
+			requireReadyStalled(t, got, "CoderAnswerMismatch")
+		}
+		require.Empty(t, got.Status.RetiringKeys)
+		require.Equal(t, 3, env.fake.requestCount(routeCreateAIGatewayKey))
+		require.Equal(t, 2, env.fake.requestCount(routeDeleteAIGatewayKey))
+	})
+}
+
+// A rotation whose Secret write finds the Secret deleted or replaced reports
+// Ready=False at once: the Secret no longer holds the current key.
+func TestCoderAIGatewayKeyRotationSecretChanged(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for name, replace := range map[string]bool{"deleted": false, "replaced": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+			got, _ := env.reconcile(ctx, t, env.createKey(ctx, t, "coder", testAIGatewaySecret))
+			requireAIGatewayKeyReady(t, got)
+			got.Spec.Rotation.Trigger = "rotate-1"
+			require.NoError(t, k8sClient.Update(ctx, got))
+			env.fake.failNext(routeCreateAIGatewayKey, fakeFault{Rewrite: func(a any) any {
+				secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: env.namespace, Name: testAIGatewaySecret}}
+				if err := k8sClient.Delete(ctx, secret); err != nil {
+					t.Error(err)
+				}
+				if replace {
+					foreign := &corev1.Secret{ObjectMeta: secret.ObjectMeta, Data: map[string][]byte{"key": []byte("someone-else")}}
+					if err := k8sClient.Create(ctx, foreign); err != nil {
+						t.Error(err)
+					}
+				}
+				return a
+			}})
+			got, _ = env.reconcile(ctx, t, got)
+			ready := meta.FindStatusCondition(got.Status.Conditions, "Ready")
+			require.Equal(t, metav1.ConditionFalse, ready.Status, ready.Message)
+			require.NotContains(t, ready.Message, "still works")
+			require.Equal(t, 2, env.fake.requestCount(routeCreateAIGatewayKey))
 		})
 	}
 }

@@ -211,6 +211,12 @@ type CoderAIGatewayKeyStatus struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	KillSwitchGeneration int64 `json:"killSwitchGeneration,omitempty"`
+	// AnswerMismatchGeneration is the generation in which Coder answered a
+	// create with a key that did not match the request. The controller
+	// creates no key until the generation changes. 0 means no mismatch.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	AnswerMismatchGeneration int64 `json:"answerMismatchGeneration,omitempty"`
 	// Conditions are Ready, Reconciling, and Stalled.
 	// +listType=map
 	// +listMapKey=type

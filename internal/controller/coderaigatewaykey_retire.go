@@ -71,8 +71,8 @@ func aiGatewayKeyRetireState(key *coderv1alpha1.CoderAIGatewayKey, own []codersd
 	}
 	for _, r := range key.Status.RetiringKeys {
 		i := slices.IndexFunc(own, func(k codersdk.AIGatewayKey) bool { return k.ID.String() == r.ID })
-		if i < 0 || (holds != uuid.Nil && own[i].ID == holds) {
-			continue // Gone in Coder (the observe step drops it), or held.
+		if i < 0 || (holds != uuid.Nil && own[i].ID == holds) || (key.Status.CurrentKey != nil && r.ID == key.Status.CurrentKey.ID) {
+			continue // Gone in Coder (the observe step drops it), held, or current.
 		}
 		graceEnd := r.ReplacedAt.Add(grace)
 		if now.Before(graceEnd) {

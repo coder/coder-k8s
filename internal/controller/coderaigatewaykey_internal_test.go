@@ -415,8 +415,12 @@ func TestAIGatewayKeyRotationBlocked(t *testing.T) {
 	require.True(t, blocked.ready && blocked.inProgress && !blocked.stalled)
 	require.Equal(t, reasonRotationBlocked, blocked.reason)
 	require.Contains(t, blocked.message, "ck8s-x-0")
-	require.LessOrEqual(t, aiGatewayKeyResyncAfter(key, now), aiGatewayKeyResync)
-	require.Greater(t, aiGatewayKeyResyncAfter(key, now), aiGatewayKeyResync*9/10)
+	require.Equal(t, aiGatewayKeyResync, aiGatewayKeyResyncAfter(key, now, 0))
+	require.Equal(t, 9*time.Minute+time.Second, aiGatewayKeyResyncAfter(key, now, 59*time.Second))
+	for range 100 {
+		jitter := aiGatewayKeyJitter()
+		require.True(t, jitter >= 0 && jitter < aiGatewayKeyResync/10, "jitter %s", jitter)
+	}
 
 	// An overdue scheduled rotation while a key retires is blocked too, and
 	// its past due time does not make the resync a one-second poll.
@@ -426,9 +430,9 @@ func TestAIGatewayKeyRotationBlocked(t *testing.T) {
 	due, blocked = aiGatewayKeyRotationDue(key, now)
 	require.False(t, due)
 	require.NotNil(t, blocked)
-	require.Greater(t, aiGatewayKeyResyncAfter(key, now), aiGatewayKeyResync*9/10)
+	require.Equal(t, 9*time.Minute, aiGatewayKeyResyncAfter(key, now, time.Minute))
 	key.Status.CurrentKey.IssuedAt = metav1.NewTime(now.Add(-24*time.Hour + time.Minute))
-	require.Equal(t, time.Minute, aiGatewayKeyResyncAfter(key, now), "a future rotation still bounds the resync")
+	require.Equal(t, time.Minute, aiGatewayKeyResyncAfter(key, now, 0), "a future rotation still bounds the resync")
 }
 
 // retiringKeys never passes the API limit of 3: a fourth retirement, from

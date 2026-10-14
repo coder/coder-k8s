@@ -244,8 +244,13 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 	}
 	own := ownAIGatewayKeys(prefix, listed)
 	// A retiring key that Coder no longer lists is gone: deleted by a
-	// retire step whose answer was lost, or by someone else (plan 4.7).
-	dropAIGatewayKeyRetiring(key, func(r coderv1alpha1.CoderAIGatewayKeyRetiring) bool { return !aiGatewayKeyListed(own, r.ID) })
+	// retire step whose answer was lost, or by someone else (plan 4.7). Only
+	// an answer that lists the current key proves it: a key dropped by a
+	// short answer and listed again later is an orphan, and the sweep would
+	// delete it without its grace period.
+	if current := key.Status.CurrentKey; current != nil && aiGatewayKeyListed(own, current.ID) {
+		dropAIGatewayKeyRetiring(key, func(r coderv1alpha1.CoderAIGatewayKeyRetiring) bool { return !aiGatewayKeyListed(own, r.ID) })
+	}
 
 	now := r.Clock.Now()
 	if key.Status.LastCreateAttemptTime == nil && key.Status.NextSerial > 0 {
@@ -308,7 +313,11 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 			step = r.deleteOnly(ctx, sdk, key, decision, step, now)
 		}
 		if err == nil && !step.ready && decision.action == aiGatewayKeyRotate {
-			step = aiGatewayKeyKeepReady(key, step, true) // The Secret still holds the current key.
+			// Ready stays True only while the Secret still holds the current
+			// key: the rotation's write can find it deleted or replaced.
+			secret, readErr := getOwnedSecret(ctx, r.APIReader, key, aiGatewayKeyKind, key.Spec.SecretName)
+			holds := readErr == nil && aiGatewayKeySecretHolds(secret, own).String() == key.Status.CurrentKey.ID
+			step = aiGatewayKeyKeepReady(key, step, holds)
 		}
 		return step, err
 	case aiGatewayKeyKillSwitch:
@@ -337,7 +346,7 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 			// A replaced key waits: Ready stays True (plan 3.3).
 			step.inProgress, step.reason, step.message = true, waiting.reason, waiting.message
 		}
-		step.requeue = aiGatewayKeyResyncAfter(key, now)
+		step.requeue = aiGatewayKeyResyncAfter(key, now, aiGatewayKeyJitter())
 		for _, at := range []time.Time{decision.settleAt, decision.retirement.next} {
 			if !at.IsZero() {
 				// Come back to sweep the orphan or to retire the key.
