@@ -100,11 +100,7 @@ func TestCoderAIGatewayKeyStallsKeepSweeping(t *testing.T) {
 			s.ConsecutiveIssueFailures = 10
 		})},
 		"answer mismatch": {reason: "CoderAnswerMismatch", deletes: 1, mutate: withStatus(func(s *coderv1alpha1.CoderAIGatewayKeyStatus, key *coderv1alpha1.CoderAIGatewayKey) {
-			for i := range s.Conditions {
-				if s.Conditions[i].Type == "Stalled" {
-					s.Conditions[i].Status, s.Conditions[i].Reason, s.Conditions[i].ObservedGeneration = metav1.ConditionTrue, "CoderAnswerMismatch", key.Generation
-				}
-			}
+			s.AnswerMismatchGeneration = key.Generation
 		})},
 		// The re-issue waits behind the create gate, so the sweep runs before
 		// the dry run.

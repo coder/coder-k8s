@@ -43,6 +43,7 @@ nav:
       - Configure credential Secrets for proxies and provisioners: how-to/workspace-proxy-credentials.md
       - Start, stop, and read logs of workspaces: how-to/start-stop-workspaces.md
       - Test a template version: how-to/test-templates.md
+      - Manage AI providers: how-to/manage-ai-providers.md
       - Gate template promotion with GitOps: how-to/gitops.md
       - Run the MCP server: how-to/mcp-server.md
       - Troubleshooting: how-to/troubleshooting.md
@@ -50,6 +51,7 @@ nav:
       - Aggregated API behavior: reference/aggregated-api-behavior.md
       - API:
           # BEGIN GENERATED API NAV
+          - CoderAIProvider: reference/api/coderaiprovider.md
           - CoderControlPlane: reference/api/codercontrolplane.md
           - CoderProvisioner: reference/api/coderprovisioner.md
           - CoderTemplateTest: reference/api/codertemplatetest.md

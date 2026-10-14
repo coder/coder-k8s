@@ -168,6 +168,12 @@ type CoderWorkspacePoolMemberStatus struct {
 	// BindExtended is true after the one deadline extension at bind.
 	// +optional
 	BindExtended bool `json:"bindExtended,omitempty"`
+	// BindExtendDeadline is the deadline that the extension at bind asks
+	// Coder for. The controller stores it before the first extend request.
+	// While BindExtended is false, a Coder deadline at or after it proves
+	// that the extension happened.
+	// +optional
+	BindExtendDeadline *metav1.Time `json:"bindExtendDeadline,omitempty"`
 	// DeleteBuildID is the ID of the current delete build.
 	// +optional
 	DeleteBuildID string `json:"deleteBuildID,omitempty"`

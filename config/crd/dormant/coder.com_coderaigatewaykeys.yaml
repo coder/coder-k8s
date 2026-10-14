@@ -156,6 +156,14 @@ spec:
               It holds Coder key IDs, names, serials, and times only. It never holds a
               key, a key prefix, a hash, or a masked key.
             properties:
+              answerMismatchGeneration:
+                description: |-
+                  AnswerMismatchGeneration is the generation in which Coder answered a
+                  create with a key that did not match the request. The controller
+                  creates no key until the generation changes. 0 means no mismatch.
+                format: int64
+                minimum: 0
+                type: integer
               appliedGeneration:
                 description: |-
                   AppliedGeneration is the last generation that the controller fully

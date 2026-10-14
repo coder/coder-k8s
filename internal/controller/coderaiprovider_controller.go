@@ -39,8 +39,12 @@ const (
 	aiProviderRetry = 30 * time.Second
 )
 
-// CoderAIProviderReconciler reconciles CoderAIProvider objects (#154). It is
-// not registered yet. It checks the spec, the credential Secret and the
+// +kubebuilder:rbac:groups=coder.com,resources=coderaiproviders,verbs=get;list;watch;patch
+// +kubebuilder:rbac:groups=coder.com,resources=coderaiproviders/status,verbs=get;update
+// +kubebuilder:rbac:groups=coder.com,resources=coderaiproviders/finalizers,verbs=update
+
+// CoderAIProviderReconciler reconciles CoderAIProvider objects (#154). It
+// checks the spec, the credential Secret and the
 // control plane, creates the Coder provider when the name is free, and sets
 // the spec values on the provider that it created. It never changes a
 // provider that it did not create.
@@ -70,9 +74,8 @@ func aiProviderStalled(requeue time.Duration, reason, format string, args ...any
 	return &aiProviderStep{stalled: true, reason: reason, message: fmt.Sprintf(format, args...), requeue: requeue}
 }
 
-// SetupWithManager wires the reconciler into controller-runtime. Nothing
-// calls it until activation. A change of the referenced control plane or of
-// the key Secret requeues the provider.
+// SetupWithManager wires the reconciler into controller-runtime. A change of
+// the referenced control plane or of the key Secret requeues the provider.
 func (r *CoderAIProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if mgr == nil || r.Client == nil || r.Scheme == nil {
 		return fmt.Errorf("assertion failed: AI provider reconciler needs a manager, a client, and a scheme")
@@ -152,15 +155,16 @@ func (r *CoderAIProviderReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if !controllerutil.ContainsFinalizer(provider, coderv1alpha1.CoderAIProviderCleanupFinalizer) {
 			return ctrl.Result{}, nil
 		}
-		if provider.Status.ProviderID == "" && provider.Status.CreateAttemptTime == nil {
-			// Nothing of this provider can exist in Coder.
+		release, step, err := r.deleteStep(ctx, provider)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if release {
+			r.sentKeys.Delete(provider.UID)
 			return ctrl.Result{}, r.patchFinalizer(ctx, provider, false)
 		}
-		// Keep the finalizer: this controller version cannot prove what Coder
-		// holds, so it neither deletes nor forgets the provider.
-		applyAIProviderStep(provider, aiProviderWait(0, "DeletePending",
-			"Provider %s can exist in Coder. This controller version keeps the finalizer and deletes nothing.", provider.Name))
-		return ctrl.Result{}, r.writeStatus(ctx, provider, before)
+		applyAIProviderStep(provider, step)
+		return ctrl.Result{RequeueAfter: step.requeue}, r.writeStatus(ctx, provider, before)
 	}
 
 	if err := r.patchFinalizer(ctx, provider, true); err != nil {

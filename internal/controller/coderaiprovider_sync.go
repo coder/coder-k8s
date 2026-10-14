@@ -34,10 +34,15 @@ func (r *CoderAIProviderReconciler) syncAIProvider(
 	if cred == nil {
 		return nil, false, fmt.Errorf("assertion failed: AI provider %s/%s has a provider ID without a credential", provider.Namespace, provider.Name)
 	}
+	if err := checkAIProviderID(provider); err != nil {
+		return nil, false, err
+	}
 	applied := provider.Status.AppliedGeneration == provider.Generation
 	found, err := sdk.AIProvider(ctx, provider.Status.ProviderID)
 	switch {
-	case isCoderNotFound(err):
+	case isCoderResourceNotFound(err):
+		// Only Coder's own 404 proves that the provider is gone. Any other
+		// error, a proxy 404 included, keeps ownership (#327).
 		return r.providerGone(provider, applied)
 	case err != nil:
 		return aiProviderWait(aiProviderRetry, "CoderUnavailable", "get provider %s: %s", provider.Name, coderErrorSummary(err)), false, nil
@@ -119,14 +124,16 @@ func (r *CoderAIProviderReconciler) syncAIProvider(
 		// gone, so ownership is kept until then.
 		if _, readErr := sdk.AIProvider(ctx, provider.Status.ProviderID); readErr == nil {
 			return aiProviderWait(aiProviderRetry, "CoderAnswerMismatch", "Coder answered 404 to the update of provider %s, but the provider exists.", provider.Name), false, nil
-		} else if !isCoderNotFound(readErr) {
+		} else if !isCoderResourceNotFound(readErr) {
 			return aiProviderWait(aiProviderRetry, "CoderUnavailable", "get provider %s after a 404 update: %s", provider.Name, coderErrorSummary(readErr)), false, nil
 		}
 		return r.providerGone(provider, applied)
 	case isCoderAuthFailure(status) || status == http.StatusTooManyRequests:
 		// No Kubernetes event follows a repaired token or role, so retry.
 		return aiProviderWait(aiProviderRetry, "CoderUnavailable", "update provider %s: %s", provider.Name, coderErrorSummary(err)), false, nil
-	case status >= 400 && status < 500:
+	case createRejected(status):
+		// The create rule: a proxy can answer 408 or 499 after it forwarded
+		// the PATCH, so those are retried below.
 		return aiProviderStalled(0, "CoderRejected", "Coder rejected the update: %s", coderErrorSummary(err)), false, nil
 	case err != nil:
 		return aiProviderWait(aiProviderRetry, "CoderUnavailable", "update provider %s: %s", provider.Name, coderErrorSummary(err)), false, nil

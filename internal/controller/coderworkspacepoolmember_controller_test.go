@@ -148,7 +148,8 @@ func requireMember(t *testing.T, member *coderv1alpha1.CoderWorkspacePoolMember,
 	require.Equal(t, phase, member.Status.Phase, member.Status.Message)
 	require.Equal(t, reason, member.Status.Reason, member.Status.Message)
 	require.Contains(t, member.Status.Message, messagePart)
-	require.True(t, meta.IsStatusConditionFalse(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionReady))
+	require.Equal(t, phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseReady,
+		meta.IsStatusConditionTrue(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionReady), "Ready=True exactly in phase Ready")
 	require.True(t, controllerutil.ContainsFinalizer(member, coderv1alpha1.CoderWorkspacePoolMemberCleanupFinalizer))
 }
 
@@ -159,8 +160,8 @@ func requireMemberFailed(t *testing.T, member *coderv1alpha1.CoderWorkspacePoolM
 	condition := meta.FindStatusCondition(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionWorkspaceDeleted)
 	require.NotNil(t, condition)
 	require.Equal(t, deleted, condition.Status)
-	require.Equal(t, deleted == metav1.ConditionTrue, member.Status.CreateAttemptTime == nil && member.Status.WorkspaceID == "",
-		"WorkspaceDeleted=True exactly when no create request can have had an effect")
+	// NotCreated exactly when no create request can have had an effect.
+	require.Equal(t, condition.Reason == "NotCreated", member.Status.CreateAttemptTime == nil && member.Status.WorkspaceID == "", condition.Reason)
 }
 
 func TestPoolMemberCreatesWorkspace(t *testing.T) {
@@ -219,21 +220,27 @@ func TestPoolMemberCreateResults(t *testing.T) {
 		phase   string
 		reason  string
 		message string
+		// confirmed is the reason once confirming reads ran after an
+		// uncertain or malformed answer.
+		confirmed string
 	}{
 		{name: "429", fault: fakeFault{Status: 429}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhasePending, reason: "CreateRetrying", message: "Coder answered 429"},
 		{name: "401", fault: fakeFault{Status: 401}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhasePending, reason: "CreateRetrying", message: "Coder answered 401"},
 		{name: "406", fault: fakeFault{Status: 406}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhasePending, reason: "TemplateVersionImporting"},
 		{name: "409", fault: fakeFault{Status: 409}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed, reason: "WorkspaceNameConflict"},
 		{name: "400", fault: fakeFault{Status: 400}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed, reason: "CreateRejected", message: "Coder answered 400: fake fault 400"},
-		{name: "502 before commit", fault: fakeFault{Status: 502}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate", message: "Coder answered 502"},
-		{name: "504 after commit", fault: fakeFault{Status: 504, AfterCommit: true}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate"},
-		{name: "connection reset", fault: fakeFault{Reset: true}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate"},
-		{name: "201 proxy page after commit", fault: fakeFault{Status: 201, AfterCommit: true, HTML: "<html>proxy</html>"}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate"},
+		{name: "502 before commit", fault: fakeFault{Status: 502}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate", message: "Coder answered 502", confirmed: "ConfirmingCreate"},
+		{name: "504 after commit", fault: fakeFault{Status: 504, AfterCommit: true}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate", confirmed: "WaitingForBuild"},
+		{name: "connection reset", fault: fakeFault{Reset: true}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate", confirmed: "ConfirmingCreate"},
+		// A proxy can answer 408 or 499 after it forwarded the request.
+		{name: "408 after commit", fault: fakeFault{Status: 408, AfterCommit: true}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate", message: "Coder answered 408", confirmed: "WaitingForBuild"},
+		{name: "499 after commit", fault: fakeFault{Status: 499, AfterCommit: true}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate", message: "Coder answered 499", confirmed: "WaitingForBuild"},
+		{name: "201 proxy page after commit", fault: fakeFault{Status: 201, AfterCommit: true, HTML: "<html>proxy</html>"}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "ConfirmingCreate", confirmed: "WaitingForBuild"},
 		{name: "wrong workspace in the answer", fault: fakeFault{Rewrite: func(a any) any {
 			ws := a.(codersdk.Workspace)
 			ws.OwnerID = uuid.New()
 			return ws
-		}}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "CoderAnswerMismatch", message: "Coder answered workspace owner "},
+		}}, phase: coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, reason: "CoderAnswerMismatch", message: "Coder answered workspace owner ", confirmed: "WaitingForBuild"},
 	}
 	for _, tc := range cases {
 		creates := e.fake.requestCount(routeCreateWorkspace)
@@ -261,7 +268,9 @@ func TestPoolMemberCreateResults(t *testing.T) {
 		default:
 			requireMember(t, member, tc.phase, tc.reason, tc.message)
 			require.NotNil(t, member.Status.CreateAttemptTime, tc.name)
-			requireMember(t, e.reconcileMember(t, key, 4), tc.phase, tc.reason, tc.message)
+			member = e.reconcileMember(t, key, 4)
+			requireMember(t, member, tc.phase, tc.confirmed, "")
+			require.Equal(t, tc.confirmed == "WaitingForBuild", member.Status.WorkspaceID != "", "%s: only a confirmed workspace is adopted", tc.name)
 			require.Equal(t, creates+1, e.fake.requestCount(routeCreateWorkspace), "%s: never a second create request", tc.name)
 		}
 	}
@@ -412,6 +421,8 @@ func TestPoolMemberRefusesOtherInputs(t *testing.T) {
 		message    string
 	}{
 		{name: "other version", edit: func(m *member) { m.Spec.TemplateVersionID = v2.String() }, message: "spec.templateVersionID"},
+		{name: "other owner", edit: func(m *member) { m.Spec.OwnerID = uuid.NewString() }, message: "spec.ownerID"},
+		{name: "other control plane", edit: func(m *member) { m.Spec.ControlPlaneRef.Name = "other" }, message: "spec.controlPlaneRef"},
 		{name: "parameters without their hash", edit: func(m *member) {
 			m.Spec.Parameters = []coderv1alpha1.CoderWorkspacePoolMemberParameter{{Name: "region", Value: "us"}}
 		}, message: "spec.parameters"},

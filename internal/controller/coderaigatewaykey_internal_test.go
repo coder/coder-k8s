@@ -86,6 +86,7 @@ func TestNextAIGatewayKeyAction(t *testing.T) {
 	}
 	for name, tc := range map[string]struct {
 		status     coderv1alpha1.CoderAIGatewayKeyStatus
+		rotation   coderv1alpha1.CoderAIGatewayKeyRotationSpec // IntervalSeconds 0 unless set.
 		generation int64
 		own        []codersdk.AIGatewayKey
 		holds      uuid.UUID
@@ -139,6 +140,33 @@ func TestNextAIGatewayKeyAction(t *testing.T) {
 			own: own, holds: current.ID, want: aiGatewayKeyReady,
 		},
 		"steady state": {status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus}, own: own, holds: current.ID, want: aiGatewayKeyReady},
+		// Plan 3.4: a scheduled rotation needs no retiring key, a requested
+		// one fewer than 2. Both wait behind the create gate.
+		"scheduled rotation due": {
+			status:   coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: issuedAgo(currentStatus, 25*time.Hour)},
+			rotation: coderv1alpha1.CoderAIGatewayKeyRotationSpec{IntervalSeconds: ptrToInt32(86400)}, own: own[:1], holds: current.ID, want: aiGatewayKeyRotate,
+		},
+		"scheduled rotation not due": {
+			status:   coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: issuedAgo(currentStatus, 23*time.Hour)},
+			rotation: coderv1alpha1.CoderAIGatewayKeyRotationSpec{IntervalSeconds: ptrToInt32(86400)}, own: own[:1], holds: current.ID, want: aiGatewayKeyReady,
+		},
+		"scheduled rotation while a key retires": {
+			status:   coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: issuedAgo(currentStatus, 25*time.Hour), RetiringKeys: recentRetiring(other)},
+			rotation: coderv1alpha1.CoderAIGatewayKeyRotationSpec{IntervalSeconds: ptrToInt32(86400)}, own: own, holds: current.ID, want: aiGatewayKeyReady,
+		},
+		"requested rotation while a key retires": {
+			status:   coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 3, CurrentKey: currentStatus, RetiringKeys: recentRetiring(other)},
+			rotation: coderv1alpha1.CoderAIGatewayKeyRotationSpec{Trigger: "r1"}, own: own, holds: current.ID, want: aiGatewayKeyRotate,
+		},
+		"handled trigger": {
+			status:   coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus, LastHandledTrigger: "r1"},
+			rotation: coderv1alpha1.CoderAIGatewayKeyRotationSpec{Trigger: "r1"}, own: own[:1], holds: current.ID, want: aiGatewayKeyReady,
+		},
+		"requested rotation behind the create gate": {
+			status:   coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 3, CurrentKey: currentStatus, LastCreateAttemptTime: recent},
+			rotation: coderv1alpha1.CoderAIGatewayKeyRotationSpec{Trigger: "r1"}, own: own, holds: current.ID, want: aiGatewayKeyReady,
+			key: other.ID, settleAt: &metav1.Time{Time: recent.Add(aiGatewayKeySettleWindow)},
+		},
 		"replaced key after its grace period": {
 			status: coderv1alpha1.CoderAIGatewayKeyStatus{
 				NextSerial: 3, CurrentKey: currentStatus, LastCreateAttemptTime: settled,
@@ -197,6 +225,10 @@ func TestNextAIGatewayKeyAction(t *testing.T) {
 		"secret holds another": {status: coderv1alpha1.CoderAIGatewayKeyStatus{NextSerial: 2, CurrentKey: currentStatus}, own: own, holds: other.ID, want: aiGatewayKeyReissue},
 	} {
 		key := &coderv1alpha1.CoderAIGatewayKey{Status: tc.status}
+		key.Spec.Rotation = tc.rotation
+		if key.Spec.Rotation.IntervalSeconds == nil {
+			key.Spec.Rotation.IntervalSeconds = ptrToInt32(0)
+		}
 		key.Generation = tc.generation
 		got := nextAIGatewayKeyAction(key, prefix, tc.own, tc.holds, now)
 		require.Equal(t, tc.want, got.action, name)
@@ -352,3 +384,73 @@ func TestAIGatewayKeyRetireState(t *testing.T) {
 }
 
 func ptrToInt32(v int32) *int32 { return &v }
+
+func issuedAgo(current *coderv1alpha1.CoderAIGatewayKeyCurrent, d time.Duration) *coderv1alpha1.CoderAIGatewayKeyCurrent {
+	c := *current
+	c.IssuedAt = metav1.NewTime(time.Unix(1700000000, 0).Add(-d))
+	return &c
+}
+
+func recentRetiring(keys ...codersdk.AIGatewayKey) []coderv1alpha1.CoderAIGatewayKeyRetiring {
+	var out []coderv1alpha1.CoderAIGatewayKeyRetiring
+	for i, k := range keys {
+		out = append(out, coderv1alpha1.CoderAIGatewayKeyRetiring{Serial: int64(10 + i), ID: k.ID.String(), Name: k.Name, ReplacedAt: metav1.NewTime(time.Unix(1700000000, 0))})
+	}
+	return out
+}
+
+// Plan 3.4 item 3: a third requested rotation while two keys retire is
+// blocked, and the step names a key that blocks it and keeps Ready=True.
+func TestAIGatewayKeyRotationBlocked(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1700000000, 0)
+	key := &coderv1alpha1.CoderAIGatewayKey{}
+	key.Spec.Rotation = coderv1alpha1.CoderAIGatewayKeyRotationSpec{IntervalSeconds: ptrToInt32(0), Trigger: "r3"}
+	key.Status.CurrentKey = &coderv1alpha1.CoderAIGatewayKeyCurrent{Serial: 2, Name: "ck8s-x-2"}
+	key.Status.LastHandledTrigger = "r2"
+	key.Status.RetiringKeys = []coderv1alpha1.CoderAIGatewayKeyRetiring{{Serial: 0, Name: "ck8s-x-0"}, {Serial: 1, Name: "ck8s-x-1"}}
+	due, blocked := aiGatewayKeyRotationDue(key, now)
+	require.False(t, due)
+	require.NotNil(t, blocked)
+	require.True(t, blocked.ready && blocked.inProgress && !blocked.stalled)
+	require.Equal(t, reasonRotationBlocked, blocked.reason)
+	require.Contains(t, blocked.message, "ck8s-x-0")
+	require.Equal(t, aiGatewayKeyResync, aiGatewayKeyResyncAfter(key, now, 0))
+	require.Equal(t, 9*time.Minute+time.Second, aiGatewayKeyResyncAfter(key, now, 59*time.Second))
+	for range 100 {
+		jitter := aiGatewayKeyJitter()
+		require.True(t, jitter >= 0 && jitter < aiGatewayKeyResync/10, "jitter %s", jitter)
+	}
+
+	// An overdue scheduled rotation while a key retires is blocked too, and
+	// its past due time does not make the resync a one-second poll.
+	key.Spec.Rotation = coderv1alpha1.CoderAIGatewayKeyRotationSpec{IntervalSeconds: ptrToInt32(86400)}
+	key.Status.CurrentKey.IssuedAt = metav1.NewTime(now.Add(-25 * time.Hour))
+	key.Status.RetiringKeys = key.Status.RetiringKeys[:1]
+	due, blocked = aiGatewayKeyRotationDue(key, now)
+	require.False(t, due)
+	require.NotNil(t, blocked)
+	require.Equal(t, 9*time.Minute, aiGatewayKeyResyncAfter(key, now, time.Minute))
+	key.Status.CurrentKey.IssuedAt = metav1.NewTime(now.Add(-24*time.Hour + time.Minute))
+	require.Equal(t, time.Minute, aiGatewayKeyResyncAfter(key, now, 0), "a future rotation still bounds the resync")
+}
+
+// retiringKeys never passes the API limit of 3: a fourth retirement, from
+// recovery 4.4 or an issue, fails with an assertion and changes nothing.
+func TestAIGatewayKeyRetireLimit(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1700000000, 0)
+	previous := codersdk.AIGatewayKey{ID: uuid.New(), Name: "ck8s-x-3"}
+	adopted := codersdk.AIGatewayKey{ID: uuid.New(), Name: "ck8s-x-4"}
+	key := &coderv1alpha1.CoderAIGatewayKey{}
+	key.Status.CurrentKey = &coderv1alpha1.CoderAIGatewayKeyCurrent{Serial: 3, ID: previous.ID.String(), Name: previous.Name}
+	key.Status.RetiringKeys = recentRetiring(codersdk.AIGatewayKey{ID: uuid.New()}, codersdk.AIGatewayKey{ID: uuid.New()})
+	require.NoError(t, retireAIGatewayKey(key.DeepCopy(), now), "the third entry fits")
+
+	key.Status.RetiringKeys = recentRetiring(codersdk.AIGatewayKey{ID: uuid.New()}, codersdk.AIGatewayKey{ID: uuid.New()}, codersdk.AIGatewayKey{ID: uuid.New()})
+	before := key.DeepCopy()
+	step, err := adoptAIGatewayKey(key, []codersdk.AIGatewayKey{previous, adopted}, aiGatewayKeyDecision{key: adopted, serial: 4}, now)
+	require.ErrorContains(t, err, "assertion failed")
+	require.Nil(t, step)
+	require.Equal(t, before.Status, key.Status)
+}

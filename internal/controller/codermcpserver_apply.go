@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -31,7 +32,7 @@ import (
 // After a full apply of this generation, a dashboard delete, disable or
 // credential clear is a kill switch: the controller reports it and writes
 // nothing until the spec changes (plan 4.7 item 2). An auth type user_oidc
-// is always set back, with only the auth fields, so a disable stays.
+// is always set back, with only the auth fields and url, so a disable stays.
 //
 // recreate is true when the config is gone before a full apply of this
 // generation: the caller then creates it again, if the slug is free.
@@ -83,6 +84,9 @@ func (r *CoderMCPServerReconciler) syncMCPServer(
 	if err != nil {
 		return nil, false, err
 	}
+	// A hash is only for a field of the spec's auth type: a change of the
+	// auth type cleared the others in Coder, also when its answer was lost.
+	r.pruneSentCredentials(server)
 	req, sent := r.mcpServerSparseRequest(server, full, found, values)
 	if kill != nil {
 		req = mcpServerAuthOnly(req)
@@ -93,6 +97,10 @@ func (r *CoderMCPServerReconciler) syncMCPServer(
 				return step, false, err
 			}
 		}
+		// Coder can commit the PATCH and the answer still get lost. Until a
+		// good answer, the controller does not know which value Coder holds,
+		// so a retry must send these credentials again.
+		r.forgetSentCredentials(server, sent)
 		updated, err := sdk.UpdateMCPServerConfig(ctx, orgID, id, req)
 		switch status := coderStatus(err); {
 		case status == http.StatusBadRequest:
@@ -210,10 +218,13 @@ func (r *CoderMCPServerReconciler) mcpServerSparseRequest(
 	return req, sent
 }
 
-// mcpServerAuthOnly keeps only the auth fields of req.
+// mcpServerAuthOnly keeps only the auth fields of req and url. The auth
+// fields can carry credentials, so url goes with them: Coder must never
+// store a credential next to a url that the Secret does not allow (plan 4.6
+// item 5).
 func mcpServerAuthOnly(req codersdk.UpdateMCPServerConfigRequest) codersdk.UpdateMCPServerConfigRequest {
 	return codersdk.UpdateMCPServerConfigRequest{
-		AuthType: req.AuthType, APIKeyHeader: req.APIKeyHeader, APIKeyValue: req.APIKeyValue, CustomHeaders: req.CustomHeaders,
+		URL: req.URL, AuthType: req.AuthType, APIKeyHeader: req.APIKeyHeader, APIKeyValue: req.APIKeyValue, CustomHeaders: req.CustomHeaders,
 		OAuth2ClientID: req.OAuth2ClientID, OAuth2ClientSecret: req.OAuth2ClientSecret, OAuth2AuthURL: req.OAuth2AuthURL,
 		OAuth2TokenURL: req.OAuth2TokenURL, OAuth2RevocationURL: req.OAuth2RevocationURL, OAuth2Scopes: req.OAuth2Scopes,
 	}
@@ -318,6 +329,36 @@ func (r *CoderMCPServerReconciler) rememberSentCredentials(server *coderv1alpha1
 	}
 	for _, field := range sent {
 		sums[field] = sha256.Sum256([]byte(values[field].Reveal()))
+	}
+	r.sentCredentials.Store(server.UID, sums)
+}
+
+// pruneSentCredentials drops the hashes of fields that the spec's auth type
+// does not use.
+func (r *CoderMCPServerReconciler) pruneSentCredentials(server *coderv1alpha1.CoderMCPServer) {
+	old, ok := r.sentCredentials.Load(server.UID)
+	if !ok {
+		return
+	}
+	sums := map[string][sha256.Size]byte{}
+	for _, c := range mcpServerCredentialRefs(server.Spec.Auth) {
+		if sum, ok := old.(map[string][sha256.Size]byte)[c.field]; ok {
+			sums[c.field] = sum
+		}
+	}
+	r.sentCredentials.Store(server.UID, sums)
+}
+
+// forgetSentCredentials drops the hashes of fields before a write that sends
+// them.
+func (r *CoderMCPServerReconciler) forgetSentCredentials(server *coderv1alpha1.CoderMCPServer, fields []string) {
+	old, ok := r.sentCredentials.Load(server.UID)
+	if !ok || len(fields) == 0 {
+		return
+	}
+	sums := maps.Clone(old.(map[string][sha256.Size]byte))
+	for _, field := range fields {
+		delete(sums, field)
 	}
 	r.sentCredentials.Store(server.UID, sums)
 }

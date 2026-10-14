@@ -3,6 +3,8 @@ package controller_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,6 +44,10 @@ func TestTemplateTestCreateResults(t *testing.T) {
 		{name: "502 before commit", fault: &fakeFault{Status: 502}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "ConfirmingCreate", message: "Coder answered 502", confirmed: "ConfirmingCreate"},
 		{name: "504 after commit", fault: &fakeFault{Status: 504, AfterCommit: true}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "ConfirmingCreate", confirmed: "WaitingForBuild"},
 		{name: "connection reset", fault: &fakeFault{Reset: true}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "ConfirmingCreate", confirmed: "ConfirmingCreate"},
+		// Coder never answers 408 or 499 on create. A proxy can, after it
+		// forwarded the request, so both stay uncertain, never rejected.
+		{name: "408 after commit", fault: &fakeFault{Status: 408, AfterCommit: true}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "ConfirmingCreate", message: "Coder answered 408", confirmed: "WaitingForBuild"},
+		{name: "499 after commit", fault: &fakeFault{Status: 499, AfterCommit: true}, phase: coderv1alpha1.CoderTemplateTestPhaseRunning, reason: "ConfirmingCreate", message: "Coder answered 499", confirmed: "WaitingForBuild"},
 		// Coder answers create with 201. Since codersdk v2.37, a 201 without
 		// the workspace's JSON is a *codersdk.Error with status 201. Another
 		// 2xx always was one. Both stay uncertain, never rejected.
@@ -118,6 +124,42 @@ func TestTemplateTestCreateResults(t *testing.T) {
 	}
 }
 
+// Two create answers without effect in a row must both clear the stored
+// marker. Before #318 the second round compared the cleared status with the
+// snapshot taken before the marker write, found no change, skipped the write,
+// and left the stored marker behind: the test then confirmed forever and
+// never sent the create again.
+func TestTemplateTestCreateNoEffectTwiceInARow(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	for _, tc := range []struct {
+		name   string
+		fault  fakeFault
+		reason string
+	}{
+		{name: "429", fault: fakeFault{Status: 429}, reason: "CreateRetrying"},
+		{name: "401", fault: fakeFault{Status: 401}, reason: "CreateRetrying"},
+		{name: "406", fault: fakeFault{Status: 406}, reason: "TemplateVersionImporting"},
+	} {
+		t.Run(tc.name, func(t *testing.T) { // Not parallel: the cases share e.
+			creates := e.fake.requestCount(routeCreateWorkspace)
+			key := e.createTest(t, "default.docker", coderv1alpha1.CoderTemplateTestVersion{Name: "v1"})
+			e.reconcile(t, key, 2) // Finalizer and initialization.
+			for round := 1; round <= 2; round++ {
+				e.fake.failNext(routeCreateWorkspace, tc.fault)
+				tt := e.reconcile(t, key, 1) // Lookups and create.
+				require.Equal(t, creates+round, e.fake.requestCount(routeCreateWorkspace), "%s round %d", tc.name, round)
+				// The stored object, not the in-memory one, must hold no marker.
+				require.Nil(t, tt.Status.CreateAttemptTime, "%s round %d: a result without effect clears the stored marker", tc.name, round)
+				require.Equal(t, coderv1alpha1.CoderTemplateTestPhasePending, tt.Status.Phase, "%s round %d", tc.name, round)
+				require.Equal(t, tc.reason, tt.Status.Reason, "%s round %d", tc.name, round)
+			}
+			requireTemplateTestRunning(t, e.settle(t, key), "WaitingForBuild", "")
+			require.Equal(t, creates+3, e.fake.requestCount(routeCreateWorkspace), "%s: the create is sent again after both answers", tc.name)
+		})
+	}
+}
+
 // markerConflictClient fails every status write that sets the create marker
 // of a test or a pool member, like a write from a stale object after a leader
 // handover.
@@ -152,6 +194,51 @@ func TestTemplateTestMarkerConflictSendsNoRequest(t *testing.T) {
 	tt := &coderv1alpha1.CoderTemplateTest{}
 	require.NoError(t, k8sClient.Get(e.ctx, key, tt))
 	require.Nil(t, tt.Status.CreateAttemptTime)
+}
+
+// After an uncertain create answer, every later wait starts with the answer's
+// HTTP status, also after a failed confirm read, so the final DeadlineExceeded
+// message still says why the test waited (#342). Coder's own text in a later
+// error never counts, and a long error never cuts the note off.
+func TestTemplateTestConfirmKeepsCreateAnswer(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	// A confirm read fails with a long message that quotes a create answer.
+	fakeAnswer := "The create result is uncertain (Coder answered 418 " + strings.Repeat("x", 300)
+	for _, tc := range []struct {
+		name  string
+		fault fakeFault
+		note  string // Empty: an answer without HTTP status has no note.
+	}{
+		{name: "408", fault: fakeFault{Status: 408}, note: "The create request got HTTP 408 from Coder or a proxy. "},
+		{name: "499", fault: fakeFault{Status: 499}, note: "The create request got HTTP 499 from Coder or a proxy. "},
+		{name: "502", fault: fakeFault{Status: 502}, note: "The create request got HTTP 502 from Coder or a proxy. "},
+		{name: "connection reset", fault: fakeFault{Reset: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) { // Not parallel: the cases share e and its clock.
+			creates := e.fake.requestCount(routeCreateWorkspace)
+			key := e.createTest(t, "default.docker", coderv1alpha1.CoderTemplateTestVersion{Name: "v1"})
+			e.fake.failNext(routeCreateWorkspace, tc.fault)
+			requireTemplateTestRunning(t, e.reconcile(t, key, 3), "ConfirmingCreate", "The create result is uncertain") // Finalizer, initialization, then lookups and create.
+
+			tt := e.reconcile(t, key, 1)
+			requireTemplateTestRunning(t, tt, "ConfirmingCreate", "Reading again.")
+			require.True(t, strings.HasPrefix(tt.Status.Message, tc.note), tt.Status.Message)
+			e.fake.failNext(routeWorkspaceByName, fakeFault{Status: 503, Message: fakeAnswer})
+			tt = e.reconcile(t, key, 1)
+			requireTemplateTestRunning(t, tt, "CoderUnavailable", "Coder answered 503")
+			require.True(t, strings.HasPrefix(tt.Status.Message, tc.note), tt.Status.Message)
+			tt = e.reconcile(t, key, 1)
+			require.Equal(t, tc.note+fmt.Sprintf("No workspace %s from this test found yet. Reading again.", tt.Status.WorkspaceName), tt.Status.Message,
+				"the note comes once, only with the create answer's status")
+
+			e.clock.SetTime(e.clock.Now().Add(900 * time.Second))
+			tt = e.reconcile(t, key, 1)
+			require.Equal(t, "DeadlineExceeded", tt.Status.Reason, tt.Status.Message)
+			require.Contains(t, tt.Status.Message, "Last wait: ConfirmingCreate: "+tc.note)
+			require.Equal(t, creates+1, e.fake.requestCount(routeCreateWorkspace), "never a second create request")
+		})
+	}
 }
 
 func TestTemplateTestDeadlineAfterCreate(t *testing.T) {
