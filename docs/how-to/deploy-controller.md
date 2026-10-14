@@ -169,7 +169,7 @@ Provisioner pods are not affected. They still connect to `status.url`.
 
 #### Redirects to another origin
 
-The operator never sends the operator token to another origin. Every operator client that sends the token follows a redirect only when the target has the same scheme, host and port as the URL that the client called. A redirect to any other origin fails the call. This covers the license and entitlements calls of the control-plane controller, the provisioner key calls, and the aggregated API server. The aggregated API server's client also serves template tests and the AI resources.
+The operator never sends the operator token to another origin. Every operator client that sends the token follows a redirect only when the target has the same scheme, host and port as the URL that the client called. A redirect to any other origin fails the call. This covers the license and entitlements calls of the control-plane controller, the provisioner key calls, and the aggregated API server. The aggregated API server's client also serves template tests and the AI resources. The check also covers the websocket that streams workspace build logs for `?follow=true`.
 
 Coder's `CODER_REDIRECT_TO_ACCESS_URL=true` setting (`--redirect-to-access-url`) conflicts with this. With that setting, Coder answers every request whose host is not the host of the access URL with a `307` to the access URL. The operator calls Coder on the in-cluster Service host, which is never the access URL host. So every operator call gets that redirect and fails. Without this check, the calls would also fail, because the redirect drops the API path, and the token would also go to the access URL.
 

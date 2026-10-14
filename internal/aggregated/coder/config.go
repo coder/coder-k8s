@@ -122,7 +122,10 @@ func NewSDKClient(cfg Config) (*codersdk.Client, error) {
 	}
 
 	client := codersdk.New(&coderURL, codersdk.WithHTTPClient(&http.Client{
-		Transport: transport,
+		// codersdk dials websockets (WorkspaceBuildLogsAfter for ?follow=true)
+		// with a new http.Client that keeps only this Transport, not
+		// CheckRedirect, so the Transport also refuses other origins.
+		Transport: sameorigin.RoundTripper(&coderURL, transport),
 		Timeout:   requestTimeout,
 		// net/http copies Coder-Session-Token to every redirect target, so refuse
 		// redirects that leave the Coder origin.

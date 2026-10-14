@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -184,7 +185,7 @@ func (r *CoderAIProviderReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 // check validates the base URL, reads the key through the credential Secret
 // contract, gets Coder access, and then creates or applies the provider. The
 // checks before Coder access send nothing to Coder, except the disable of a
-// provider whose key Secret withdrew its consent (#267).
+// provider whose key Secret fails the credential contract (#267, #290).
 func (r *CoderAIProviderReconciler) check(
 	ctx context.Context, provider *coderv1alpha1.CoderAIProvider, before *coderv1alpha1.CoderAIProviderStatus,
 ) (*aiProviderStep, error) {
@@ -195,9 +196,9 @@ func (r *CoderAIProviderReconciler) check(
 		return aiProviderStalled(0, credentialsecret.ReasonMalformed, //nolint:nilerr // Reported in status.
 			"spec.baseURL is not a URL that Coder accepts: it must be an http or https URL with a host, without user info, surrounding whitespace, or invalid percent escapes."), nil
 	}
-	key, err := credentialsecret.Read(ctx, r.Client, provider.Namespace, provider.Spec.APIKeySecretRef, baseURL)
+	key, err := r.readKey(ctx, provider, baseURL)
 	if credErr := (*credentialsecret.Error)(nil); errors.As(err, &credErr) {
-		if provider.Status.ProviderID != "" && aiProviderConsentWithdrawn(credErr) {
+		if provider.Status.ProviderID != "" {
 			return r.disableWithoutConsent(ctx, provider, credErr)
 		}
 		return aiProviderStalled(0, credErr.Reason, "%s", credErr.Message), nil
@@ -221,10 +222,13 @@ func (r *CoderAIProviderReconciler) check(
 		}
 	}
 	if recreate {
-		if step := aiProviderReservedName(provider, controlPlane); step != nil {
-			return step, nil
+		// A pending create is confirmed first (#289): only a new create
+		// request waits until the control plane no longer seeds the name.
+		reserved := aiProviderReservedName(provider, controlPlane)
+		if reserved != nil && provider.Status.CreateAttemptTime == nil {
+			return reserved, nil
 		}
-		if step, err = r.createOrConfirm(ctx, sdk, provider, key, before); err != nil {
+		if step, err = r.createOrConfirm(ctx, sdk, provider, key, before, reserved); err != nil {
 			return nil, err
 		}
 		if step == nil {
@@ -248,6 +252,21 @@ func (r *CoderAIProviderReconciler) check(
 	// Coder messages can echo the request, so scrub the key from them.
 	step.message = credentialsecret.Redact(step.message, key)
 	return step, nil
+}
+
+// readKey reads the key through the credential Secret contract for
+// destination. It also refuses a value that is not valid UTF-8: Coder receives
+// the key inside a JSON string, and encoding/json replaces invalid UTF-8 with
+// U+FFFD, so Coder would store another value (#277).
+func (r *CoderAIProviderReconciler) readKey(ctx context.Context, provider *coderv1alpha1.CoderAIProvider, destination *url.URL) (credentialsecret.Value, error) {
+	key, err := credentialsecret.Read(ctx, r.Client, provider.Namespace, provider.Spec.APIKeySecretRef, destination)
+	if err == nil && !utf8.ValidString(key.Reveal()) {
+		ref := provider.Spec.APIKeySecretRef
+		return credentialsecret.Value{}, &credentialsecret.Error{
+			Reason: credentialsecret.ReasonMalformed, Message: fmt.Sprintf("The value of key %s in Secret %s is not valid UTF-8.", ref.Key, ref.Name),
+		}
+	}
+	return key, err
 }
 
 // aiProviderBaseURL parses the exact spec value the way Coder validates

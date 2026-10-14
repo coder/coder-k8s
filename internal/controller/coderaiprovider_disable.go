@@ -11,18 +11,17 @@ import (
 	"github.com/coder/coder-k8s/internal/credentialsecret"
 )
 
-// aiProviderConsentWithdrawn reports the credential failures that say the key
-// Secret no longer allows an origin: the origin left the destinations
-// annotation, or the Secret lost its opt-in label or annotation.
-func aiProviderConsentWithdrawn(credErr *credentialsecret.Error) bool {
-	return credErr.Reason == credentialsecret.ReasonDestinationNotAllowed || credErr.Reason == credentialsecret.ReasonNotOptedIn
-}
-
 // disableWithoutConsent handles a provider that this object created when its
-// key Secret no longer allows the origin of spec.baseURL (#267). Coder keeps
-// the key and sends it to the base URL that Coder holds. If the Secret does
-// not allow that origin either, the controller disables the provider in
-// Coder with one PATCH that holds no key and no URL.
+// key Secret fails the credential contract (#267, #290). Coder keeps the key
+// and sends it to the base URL that Coder holds. Unless the recorded Secret
+// still passes the contract for that base URL, the controller disables the
+// provider in Coder with one PATCH that holds no key and no URL.
+//
+// It fails closed on every credentialsecret.Error: a removed origin or
+// opt-in, a deleted or refused Secret, a malformed annotation, and also a
+// missing or malformed key value. The Secret then no longer holds proof of
+// consent for the key that Coder uses, and an owner who deletes or empties
+// the key expects Coder to stop using it.
 //
 // The disable is a kill switch like a dashboard disable: appliedGeneration
 // stays, so a later sync reports DisabledExternally and only a spec edit
@@ -31,8 +30,8 @@ func aiProviderConsentWithdrawn(credErr *credentialsecret.Error) bool {
 func (r *CoderAIProviderReconciler) disableWithoutConsent(
 	ctx context.Context, provider *coderv1alpha1.CoderAIProvider, credErr *credentialsecret.Error,
 ) (*aiProviderStep, error) {
-	if provider.Status.ProviderID == "" || !aiProviderConsentWithdrawn(credErr) {
-		return nil, fmt.Errorf("assertion failed: AI provider %s/%s needs a provider ID and a withdrawn consent to be disabled", provider.Namespace, provider.Name)
+	if provider.Status.ProviderID == "" || credErr == nil {
+		return nil, fmt.Errorf("assertion failed: AI provider %s/%s needs a provider ID and a credential failure to be disabled", provider.Namespace, provider.Name)
 	}
 	// Status messages are cut at 256 characters, so the new fact goes first.
 	// No Kubernetes event follows a dashboard enable, so the stall resyncs.
@@ -64,24 +63,17 @@ func (r *CoderAIProviderReconciler) disableWithoutConsent(
 	}
 	// The spec can name a new origin while Coder still uses an allowed one.
 	// Coder holds the key of the recorded Secret, so only that Secret (same
-	// UID) can prove it. A refused or unparsable Coder origin, or another
-	// Secret, disables the provider.
+	// UID) passing the contract for Coder's base URL keeps the provider. Any
+	// other result disables it: a credential failure (it never clears by
+	// waiting), another Secret, or an unparsable Coder origin.
 	cred := provider.Status.Credential
 	if coderURL, parseErr := aiProviderBaseURL(found.BaseURL); parseErr == nil && cred != nil {
-		value, readErr := credentialsecret.Read(ctx, r.Client, provider.Namespace, provider.Spec.APIKeySecretRef, coderURL)
-		var coderCredErr *credentialsecret.Error
-		switch {
-		case readErr == nil && string(value.Token.SecretUID) == cred.SecretUID:
+		value, readErr := r.readKey(ctx, provider, coderURL)
+		if readErr == nil && string(value.Token.SecretUID) == cred.SecretUID {
 			return stalled("Coder still sends the key of provider %s to an origin that the Secret allows.", provider.Name), nil
-		case readErr == nil:
-			// Another Secret, or one recreated under the same name, did
-			// not consent for the key that Coder holds.
-		case !errors.As(readErr, &coderCredErr):
+		}
+		if coderCredErr := (*credentialsecret.Error)(nil); readErr != nil && !errors.As(readErr, &coderCredErr) {
 			return nil, readErr
-		case !aiProviderConsentWithdrawn(coderCredErr):
-			// The Secret changed between the two reads. The next reconcile
-			// reads it again.
-			return aiProviderWait(aiProviderRetry, coderCredErr.Reason, "%s", coderCredErr.Message), nil
 		}
 	}
 
@@ -99,5 +91,5 @@ func (r *CoderAIProviderReconciler) disableWithoutConsent(
 	}
 	// The reason stays the credential reason, so it does not flap between
 	// this reconcile and the next one, which finds the provider disabled.
-	return stalled("The controller disabled provider %s in Coder: the Secret does not allow the origin that Coder uses. After the Secret allows it again, a spec edit enables the provider.", provider.Name), nil
+	return stalled("The controller disabled provider %s in Coder: the key Secret no longer proves consent for the key that Coder uses. After the Secret is fixed, a spec edit enables the provider.", provider.Name), nil
 }

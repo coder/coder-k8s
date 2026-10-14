@@ -5,6 +5,11 @@
 // a cross-domain hop. Every Coder client that sends the operator token sets
 // RedirectPolicy as its CheckRedirect, so a redirect to another origin fails
 // instead of sending the token there.
+//
+// codersdk dials websockets with a new http.Client that copies only the
+// Transport, so CheckRedirect does not apply there. A client that can dial a
+// websocket also wraps its Transport with RoundTripper, which refuses every
+// request that leaves the origin.
 package sameorigin
 
 import (
@@ -90,5 +95,47 @@ func effectivePort(u *url.URL) string {
 		return "443"
 	default:
 		return ""
+	}
+}
+
+// RoundTripper returns an http.RoundTripper that sends a request through base
+// only when the request URL is on the origin of origin. It returns
+// ErrCrossOrigin for every other request, so a redirect that a caller follows
+// without RedirectPolicy still cannot send the token to another origin.
+func RoundTripper(origin *url.URL, base http.RoundTripper) http.RoundTripper {
+	if origin == nil {
+		panic("assertion failed: round tripper origin must not be nil")
+	}
+	if base == nil {
+		panic("assertion failed: round tripper base must not be nil")
+	}
+	originCopy := *origin
+	return &roundTripper{origin: &originCopy, base: base}
+}
+
+type roundTripper struct {
+	origin *url.URL
+	base   http.RoundTripper
+}
+
+func (t *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req == nil || req.URL == nil {
+		return nil, errors.New("assertion failed: round trip request URL must not be nil")
+	}
+	if !Same(req.URL, t.origin) {
+		// The RoundTripper contract requires closing the body, even on error.
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		return nil, ErrCrossOrigin
+	}
+	return t.base.RoundTrip(req)
+}
+
+// CloseIdleConnections forwards to base, so http.Client.CloseIdleConnections
+// still reaches the shared transport.
+func (t *roundTripper) CloseIdleConnections() {
+	if closer, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
 	}
 }
