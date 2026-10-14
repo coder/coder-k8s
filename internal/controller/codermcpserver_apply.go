@@ -3,7 +3,9 @@ package controller
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -27,12 +29,14 @@ import (
 // it, so the ACL never holds a group that neither generation allows (plan
 // S20).
 //
-// A dashboard delete after a full apply of this generation is a kill switch:
-// the controller reports it and writes nothing until the spec changes (plan
-// 4.7 item 2). The other kill switches come in the next change. recreate is
-// true when the config is gone before a full apply of this generation: the
-// caller then creates it again, if the slug is free.
-func syncMCPServer(
+// After a full apply of this generation, a dashboard delete, disable or
+// credential clear is a kill switch: the controller reports it and writes
+// nothing until the spec changes (plan 4.7 item 2). An auth type user_oidc
+// is always set back, with only the auth fields, so a disable stays.
+//
+// recreate is true when the config is gone before a full apply of this
+// generation: the caller then creates it again, if the slug is free.
+func (r *CoderMCPServerReconciler) syncMCPServer(
 	ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, orgID uuid.UUID, values map[string]credentialsecret.Value,
 ) (step *mcpServerStep, recreate bool, err error) {
 	id, err := uuid.Parse(server.Status.ConfigID)
@@ -47,6 +51,7 @@ func syncMCPServer(
 			"MCP server config %s was deleted in Coder. The controller does not create it again until the spec changes.", id), false, nil
 	case isCoderNotFound(err):
 		server.Status.ConfigID, server.Status.Credentials = "", nil
+		r.sentCredentials.Delete(server.UID)
 		return nil, true, nil
 	case err != nil:
 		return mcpServerWait(mcpServerRetry, "CoderUnavailable", "get MCP server config %s: %s", id, coderErrorSummary(err)), false, nil
@@ -56,13 +61,38 @@ func syncMCPServer(
 			"assertion failed: Coder answered MCP server config %s with slug %s in organization %s when asked for %s", found.ID, found.Slug, found.OrganizationID, id), false, nil
 	}
 
+	// user_oidc sends each chat user's login token to url (plan F14), so it is
+	// set back even when a kill switch holds every other write.
+	oidc := found.AuthType == "user_oidc"
+	enabled := server.Spec.Enabled == nil || *server.Spec.Enabled
+	var kill *mcpServerStep
+	switch active := mcpServerActiveCredentials(server.Spec.Auth); {
+	case applied && enabled && !found.Enabled:
+		kill = mcpServerStalled(mcpServerResync, "DisabledExternally",
+			"MCP server config %s was disabled in Coder. The controller does not enable it again until the spec changes.", id)
+	case applied && !oidc && (active.apiKey && !found.HasAPIKey || active.headers && !found.HasCustomHeaders || active.secret && !found.HasOAuth2Secret):
+		// A dashboard change of the auth type lands here too: Coder clears
+		// the credentials of the old type (plan F9).
+		kill = mcpServerStalled(mcpServerResync, "CredentialClearedExternally",
+			"A credential of MCP server config %s was cleared in Coder (auth type %s). The controller does not send it again until the spec changes.", id, found.AuthType)
+	}
+	if kill != nil && !oidc {
+		return kill, false, nil
+	}
+
 	full, err := mcpServerUpdateRequest(server, values)
 	if err != nil {
 		return nil, false, err
 	}
-	if req := mcpServerSparseRequest(server, full, found, values); req != (codersdk.UpdateMCPServerConfigRequest{}) {
-		if step, err := narrowMCPServerACL(ctx, sdk, orgID, id, server.Spec.Access); step != nil || err != nil {
-			return step, false, err
+	req, sent := r.mcpServerSparseRequest(server, full, found, values)
+	if kill != nil {
+		req = mcpServerAuthOnly(req)
+	}
+	if req != (codersdk.UpdateMCPServerConfigRequest{}) {
+		if kill == nil {
+			if step, err := narrowMCPServerACL(ctx, sdk, orgID, id, server.Spec.Access); step != nil || err != nil {
+				return step, false, err
+			}
 		}
 		updated, err := sdk.UpdateMCPServerConfig(ctx, orgID, id, req)
 		switch status := coderStatus(err); {
@@ -74,11 +104,20 @@ func syncMCPServer(
 			// so the GET of the next reconcile decides whether the config is gone.
 			return mcpServerWait(mcpServerRetry, "CoderUnavailable", "update MCP server config %s: %s", id, coderErrorSummary(err)), false, nil
 		}
-		if field := mcpServerMismatch(server.Spec.Auth, full, updated); field != "" || updated.ID != id {
+		check := full
+		if kill != nil {
+			check = mcpServerAuthOnly(full)
+		}
+		if field := mcpServerMismatch(server.Spec.Auth, check, updated); field != "" || updated.ID != id {
 			return mcpServerStalled(mcpServerResync, "CoderAnswerMismatch", "assertion failed: Coder answered the update of MCP server config %s with another %s", id, cmp.Or(field, "ID")), false, nil
 		}
+		r.rememberSentCredentials(server, sent, values)
 	} else if field := mcpServerMismatch(server.Spec.Auth, full, found); field != "" {
 		return nil, false, fmt.Errorf("assertion failed: MCP server %s/%s differs in %s, but the sync request is empty", server.Namespace, server.Name, field)
+	}
+	if kill != nil {
+		kill.message = "The controller set the auth type back from user_oidc. " + kill.message
+		return kill, false, nil
 	}
 	if step, err := syncMCPServerACL(ctx, sdk, orgID, id, server.Spec.Access); step != nil || err != nil {
 		return step, false, err
@@ -97,11 +136,12 @@ func mcpServerActiveCredentials(auth coderv1alpha1.CoderMCPServerAuth) mcpServer
 
 // mcpServerSparseRequest drops every field of full that found already holds.
 // It keeps a credential when a URL or the auth type changes, when its change
-// token changed, or when Coder lost it. It clears credentials of the other
-// auth types that Coder holds (#314).
-func mcpServerSparseRequest(
+// token changed and Coder does not hold the value already, or when Coder lost
+// it. It clears credentials of the other auth types that Coder holds (#314).
+// It returns the credential fields that the request sends.
+func (r *CoderMCPServerReconciler) mcpServerSparseRequest(
 	server *coderv1alpha1.CoderMCPServer, full codersdk.UpdateMCPServerConfigRequest, found codersdk.MCPServerConfig, values map[string]credentialsecret.Value,
-) codersdk.UpdateMCPServerConfigRequest {
+) (codersdk.UpdateMCPServerConfigRequest, []string) {
 	req := full
 	authChanged := found.AuthType != *full.AuthType
 	for _, f := range mcpServerStringFields(&req, found) {
@@ -125,7 +165,11 @@ func mcpServerSparseRequest(
 		}
 		token := values[field].Token
 		c, ok := recorded[field]
-		return !ok || c.SecretName != token.SecretName || c.SecretKey != token.SecretKey || c.SecretUID != string(token.SecretUID) || c.SecretResourceVersion != token.ResourceVersion
+		if ok && c.SecretName == token.SecretName && c.SecretKey == token.SecretKey && c.SecretUID == string(token.SecretUID) && c.SecretResourceVersion == token.ResourceVersion {
+			return false
+		}
+		// Only the Secret's metadata changed when Coder holds this value.
+		return !r.sentCredentialMatches(server, field, values[field])
 	}
 	var sent []string
 	for _, c := range mcpServerCredentialRefs(server.Spec.Auth) {
@@ -138,8 +182,13 @@ func mcpServerSparseRequest(
 	sends := func(prefix string) bool {
 		return slices.ContainsFunc(sent, func(f string) bool { return strings.HasPrefix(f, prefix) })
 	}
-	// Custom headers are one Coder field, so they all go together.
-	if !active.headers || !sends("header:") {
+	if active.headers && sends("header:") {
+		// Custom headers are one Coder field, so they all go together.
+		sent = slices.DeleteFunc(sent, func(f string) bool { return strings.HasPrefix(f, "header:") })
+		for _, h := range server.Spec.Auth.CustomHeaders {
+			sent = append(sent, "header:"+h.Name)
+		}
+	} else {
 		req.CustomHeaders = nil
 	}
 	if !active.apiKey || !sends("apiKey") {
@@ -159,7 +208,16 @@ func mcpServerSparseRequest(
 	if !active.secret && found.HasOAuth2Secret {
 		req.OAuth2ClientSecret = &empty
 	}
-	return req
+	return req, sent
+}
+
+// mcpServerAuthOnly keeps only the auth fields of req.
+func mcpServerAuthOnly(req codersdk.UpdateMCPServerConfigRequest) codersdk.UpdateMCPServerConfigRequest {
+	return codersdk.UpdateMCPServerConfigRequest{
+		AuthType: req.AuthType, APIKeyHeader: req.APIKeyHeader, APIKeyValue: req.APIKeyValue, CustomHeaders: req.CustomHeaders,
+		OAuth2ClientID: req.OAuth2ClientID, OAuth2ClientSecret: req.OAuth2ClientSecret, OAuth2AuthURL: req.OAuth2AuthURL,
+		OAuth2TokenURL: req.OAuth2TokenURL, OAuth2RevocationURL: req.OAuth2RevocationURL, OAuth2Scopes: req.OAuth2Scopes,
+	}
 }
 
 type mcpServerStringField struct {
@@ -242,6 +300,30 @@ func mcpServerMismatch(auth coderv1alpha1.CoderMCPServerAuth, want codersdk.Upda
 		return "has_oauth2_secret"
 	}
 	return ""
+}
+
+// rememberSentCredentials keeps a SHA-256 of each credential value that Coder
+// now holds, in process memory only (plan 4.6 item 4), so a metadata-only
+// Secret change sends nothing. After a restart the map is empty, so one
+// resend can happen.
+func (r *CoderMCPServerReconciler) rememberSentCredentials(server *coderv1alpha1.CoderMCPServer, sent []string, values map[string]credentialsecret.Value) {
+	sums := map[string][sha256.Size]byte{}
+	if old, ok := r.sentCredentials.Load(server.UID); ok {
+		maps.Copy(sums, old.(map[string][sha256.Size]byte))
+	}
+	for _, field := range sent {
+		sums[field] = sha256.Sum256([]byte(values[field].Reveal()))
+	}
+	r.sentCredentials.Store(server.UID, sums)
+}
+
+func (r *CoderMCPServerReconciler) sentCredentialMatches(server *coderv1alpha1.CoderMCPServer, field string, value credentialsecret.Value) bool {
+	sums, ok := r.sentCredentials.Load(server.UID)
+	if !ok {
+		return false
+	}
+	sum, ok := sums.(map[string][sha256.Size]byte)[field]
+	return ok && sum == sha256.Sum256([]byte(value.Reveal()))
 }
 
 // mcpServerReady reports a config that matches the spec.
