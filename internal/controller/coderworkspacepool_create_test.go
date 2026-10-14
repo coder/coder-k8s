@@ -89,7 +89,9 @@ func TestPoolCreatesMembers(t *testing.T) {
 func TestPoolCreationCaps(t *testing.T) {
 	t.Parallel()
 	e := newPoolMemberEnv(t)
-	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas, s.MaxInFlight = new(int32(3)), new(int32(2)) })
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) {
+		s.Replicas, s.MaxInFlight = new(int32(3)), new(int32(2))
+	})
 	members := func() []coderv1alpha1.CoderWorkspacePoolMember { return e.poolMembers(t, e.pool.Name) }
 	e.reconcilePool(t, 2)
 	require.Len(t, members(), 2)

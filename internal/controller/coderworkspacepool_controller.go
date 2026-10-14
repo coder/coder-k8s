@@ -51,7 +51,7 @@ const (
 // poolMemberCounts sorts the members of one pool.
 type poolMemberCounts struct {
 	unclaimed, ready, current, readyCurrent, outdated, bound, used int32
-	building int32 // Unclaimed members that are not ready yet.
+	building                                                       int32 // Unclaimed members that are not ready yet.
 }
 
 // Reconcile resolves the pool's inputs, counts its members, and writes the
@@ -104,7 +104,7 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	var requeue time.Duration
 	if step == nil {
-		step, requeue, err = r.createMembers(ctx, pool, members.Items, &counts, maxWorkspaces)
+		step, requeue, err = r.createMembers(ctx, pool, &counts, maxWorkspaces)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -181,8 +181,7 @@ func (r *CoderWorkspacePoolReconciler) deleteFailedMember(
 // plane fewer than maxWorkspaces, and the failure backoff passed. It returns
 // the wait that stops it, if any, and when to read again.
 func (r *CoderWorkspacePoolReconciler) createMembers(
-	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, members []coderv1alpha1.CoderWorkspacePoolMember,
-	counts *poolMemberCounts, maxWorkspaces int32,
+	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, counts *poolMemberCounts, maxWorkspaces int32,
 ) (*coderStep, time.Duration, error) {
 	st, now := &pool.Status, r.Clock.Now()
 	need := *pool.Spec.Replicas - counts.current // Claims add their demand in PR 11.
@@ -237,7 +236,7 @@ func (r *CoderWorkspacePoolReconciler) createMember(ctx context.Context, pool *c
 	resolved := pool.Status.Resolved
 	params := make([]coderv1alpha1.CoderWorkspacePoolMemberParameter, 0, len(pool.Spec.Parameters))
 	for _, p := range pool.Spec.Parameters {
-		params = append(params, coderv1alpha1.CoderWorkspacePoolMemberParameter{Name: p.Name, Value: p.Value})
+		params = append(params, coderv1alpha1.CoderWorkspacePoolMemberParameter(p))
 	}
 	member := &coderv1alpha1.CoderWorkspacePoolMember{
 		ObjectMeta: metav1.ObjectMeta{
