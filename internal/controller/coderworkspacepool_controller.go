@@ -60,8 +60,11 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if r.Client == nil || r.APIReader == nil || r.Scheme == nil || r.Clock == nil {
 		return ctrl.Result{}, errors.New("assertion failed: pool reconciler needs a client, an API reader, a scheme, and a clock")
 	}
+	// Uncached: the stored failure run and resolved inputs decide creates,
+	// and a reconcile that a member delete starts must see the status
+	// written right before that delete.
 	pool := &coderv1alpha1.CoderWorkspacePool{}
-	if err := r.Get(ctx, req.NamespacedName, pool); err != nil {
+	if err := r.APIReader.Get(ctx, req.NamespacedName, pool); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if pool.Name != req.Name || pool.Namespace != req.Namespace {
@@ -115,9 +118,9 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	switch {
 	case step != nil:
 	case resolvedChanged:
-		// Members check their inputs against the pool's status.resolved in
-		// the shared cache. So the pool creates members only after a read
-		// of its own object shows the new resolved inputs.
+		// Members check their inputs against the pool's stored
+		// status.resolved. So the pool creates members only after a read of
+		// its own object shows the new resolved inputs stored.
 		requeue = time.Second
 	default:
 		step, requeue, err = r.createMembers(ctx, pool, all.Items, &counts)
@@ -186,6 +189,8 @@ func (r *CoderWorkspacePoolReconciler) deleteFailedMembers(
 			Member: m.Name, Reason: m.Status.Reason, Message: truncateTemplateTestMessage(m.Status.Message), Time: &metav1.Time{Time: at},
 		})
 	}
+	// A member can store an older failure after the pool stored a newer one.
+	slices.SortStableFunc(run, func(a, b coderv1alpha1.CoderWorkspacePoolFailure) int { return a.Time.Compare(b.Time.Time) })
 	run = run[max(0, len(run)-poolFailureLimit):]
 	if !runStart.IsZero() {
 		st.FailureRunStart = &metav1.Time{Time: runStart}

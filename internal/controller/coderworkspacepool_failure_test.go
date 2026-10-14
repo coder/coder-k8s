@@ -297,3 +297,60 @@ func TestPoolPublishGateAfterFailureWrite(t *testing.T) {
 	e.reconcilePool(t, 1)
 	require.Len(t, e.poolMembers(t, e.pool.Name), 1)
 }
+
+// stalePoolStatusClient answers pool reads from a cache that has not seen
+// the stored failure run.
+type stalePoolStatusClient struct{ client.Client }
+
+func (c stalePoolStatusClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := c.Client.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	if pool, ok := obj.(*coderv1alpha1.CoderWorkspacePool); ok {
+		pool.Status.RunFailures, pool.Status.ConsecutiveFailures, pool.Status.LastFailure, pool.Status.FailureRunStart = nil, 0, nil, nil
+	}
+	return nil
+}
+
+// TestPoolFailureRunUncached: the pool reads its own object without the
+// cache, so a reconcile that a member delete starts before the cache sees
+// the stored run still backs off.
+func TestPoolFailureRunUncached(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.reconcilePool(t, 1)
+	members := e.poolMembers(t, e.pool.Name)
+	require.Len(t, members, 1)
+	e.tick()
+	e.setMemberStatus(t, memberKey(members[0]), e.failedStatus("BuildFailed"))
+	requirePool(t, e.reconcilePool(t, 1), "FailureBackoff", false, false)
+	r := &controller.CoderWorkspacePoolReconciler{Client: stalePoolStatusClient{k8sClient}, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}})
+	require.NoError(t, err)
+	require.Empty(t, e.poolMembers(t, e.pool.Name), "the backoff holds on a stale cache")
+}
+
+// TestPoolFailureRunSorted: a failure that becomes visible after a newer
+// one still lands in time order, so lastFailure and the backoff use the
+// newest failure.
+func TestPoolFailureRunSorted(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(0)) })
+	e.reconcilePool(t, 1)
+	e.tick()
+	older := e.clock.Now()
+	e.tick()
+	newer := e.clock.Now()
+	pool := e.reconcilePool(t, 0)
+	pool.Status.RunFailures = []coderv1alpha1.CoderWorkspacePoolFailure{{Member: "seen-first", Reason: "BuildFailed", Time: &metav1.Time{Time: newer}}}
+	require.NoError(t, k8sClient.Status().Update(e.ctx, pool))
+	e.clock.SetTime(older)
+	late := e.createMember(t, nil)
+	e.setMemberStatus(t, late, e.failedStatus("BuildFailed"))
+	e.clock.SetTime(newer.Add(time.Minute))
+	pool = e.reconcilePool(t, 1)
+	require.Len(t, pool.Status.RunFailures, 2)
+	require.Equal(t, late.Name, pool.Status.RunFailures[0].Member, "oldest first")
+	require.Equal(t, "seen-first", pool.Status.LastFailure.Member, "the newest failure")
+}
