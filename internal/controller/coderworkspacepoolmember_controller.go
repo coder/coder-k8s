@@ -97,7 +97,7 @@ func (r *CoderWorkspacePoolMemberReconciler) Reconcile(ctx context.Context, req 
 		step = poolMemberDeadlineExceeded(member, member.Status.Reason, member.Status.Message)
 	case poolMemberMayHaveWorkspace(member):
 		// A create request may exist: read Coder, never send it again.
-		step, err = r.readWorkspace(ctx, member, workspaceName, now)
+		step, err = r.readWorkspace(ctx, member, before, workspaceName, now)
 		if step, err = memberWaitOnWrongAnswer(ctx, step, err); err != nil {
 			return ctrl.Result{}, err
 		}

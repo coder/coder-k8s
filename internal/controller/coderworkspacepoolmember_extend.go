@@ -8,7 +8,6 @@ import (
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/clock"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 )
@@ -24,13 +23,13 @@ const (
 	poolMemberMinExtension = 30 * time.Minute
 )
 
-// keepPoolMemberWarm runs the deadline steps of a ready member (plan 6.2
+// keepWarm runs the deadline steps of a ready member (plan 6.2
 // step 10 rule 5 and step 11 rule 1). An unclaimed workspace gets a new
 // deadline when its deadline is near. A bound workspace gets one extension at
 // bind, so the claimant has a full TTL, and then never another. Each
 // extension follows a fresh read that proves the workspace is this member's.
-func keepPoolMemberWarm(
-	ctx context.Context, sdk *codersdk.Client, member *coderv1alpha1.CoderWorkspacePoolMember, clock clock.PassiveClock, now time.Time,
+func (r *CoderWorkspacePoolMemberReconciler) keepWarm(
+	ctx context.Context, sdk *codersdk.Client, member *coderv1alpha1.CoderWorkspacePoolMember, before *coderv1alpha1.CoderWorkspacePoolMemberStatus, now time.Time,
 ) (*coderStep, error) {
 	name, bound := member.Status.WorkspaceName, member.Spec.ClaimRef != nil
 	if bound && member.Status.BindExtended {
@@ -65,7 +64,7 @@ func keepPoolMemberWarm(
 	}
 	// The reads can take a while, so the new deadline counts from a fresh
 	// clock reading. Coder refuses one less than about 30 minutes ahead.
-	now = clock.Now()
+	now = r.Clock.Now()
 	extendTo := now.Add(max(time.Duration(template.DefaultTTLMillis)*time.Millisecond, poolMemberMinExtension))
 	if bound && !deadline.Time.Before(extendTo) {
 		// The workspace already has a full TTL: an extension would shorten it.
@@ -73,12 +72,22 @@ func keepPoolMemberWarm(
 		return coderWait(reason, "Workspace %s is bound to claim %s. Its deadline %s needs no extension.",
 			name, member.Spec.ClaimRef.Name, deadline.Time.UTC().Format(time.RFC3339)), nil
 	}
+	if bound {
+		// At most one extension at bind: store the flag before the request,
+		// so a lost status write after it never leads to a second one.
+		member.Status.BindExtended = true
+		if err := r.writeStatus(ctx, member, before); err != nil {
+			return nil, err
+		}
+		*before = *member.Status.DeepCopy()
+	}
 	err = sdk.PutExtendWorkspace(ctx, workspace.ID, codersdk.PutExtendWorkspaceRequest{Deadline: extendTo})
 	switch status := coderStatus(err); {
 	case err == nil:
 	case status == http.StatusConflict:
 		// The workspace changed after the read, for example a new build.
 		// Read again at the next poll.
+		member.Status.BindExtended = false
 		return coderWait(reason, "Coder could not extend workspace %s now: %s", name, coderErrorSummary(err)), nil
 	case status == http.StatusBadRequest:
 		// For example the template's max deadline. The deadline stays, and
@@ -86,11 +95,15 @@ func keepPoolMemberWarm(
 		member.Status.BindExtended = bound
 		return coderWait(reason, "Coder refused to extend workspace %s: %s", name, coderErrorSummary(err)), nil
 	default:
+		// Only a request that provably changed nothing is sent again. After
+		// an uncertain result, the bind extension counts as done.
+		if createHadNoEffect(err) {
+			member.Status.BindExtended = false
+		}
 		return coderStepUnavailable("extend workspace", err), nil
 	}
 	deadlineText := extendTo.UTC().Format(time.RFC3339)
 	if bound {
-		member.Status.BindExtended = true
 		return coderWait(reason, "Workspace %s is bound to claim %s. Its deadline is now %s.", name, member.Spec.ClaimRef.Name, deadlineText), nil
 	}
 	member.Status.LastExtendTime = &metav1.Time{Time: now}

@@ -1,15 +1,21 @@
 package controller_test
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/controller"
@@ -156,6 +162,66 @@ func TestPoolMemberExtendsOnceAtBind(t *testing.T) {
 	requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "Bound", "no autostop deadline")
 	require.True(t, member.Status.BindExtended)
 	require.Equal(t, extends, e.fake.requestCount(routeExtendWorkspace))
+}
+
+// lostBindWriteClient fails the status write that reports a done bind
+// extension, like a conflict right after the extend request.
+type lostBindWriteClient struct{ client.Client }
+
+func (c lostBindWriteClient) Status() client.SubResourceWriter {
+	return lostBindWriter{c.Client.Status()}
+}
+
+type lostBindWriter struct{ client.SubResourceWriter }
+
+func (w lostBindWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	if m, ok := obj.(*coderv1alpha1.CoderWorkspacePoolMember); ok && strings.Contains(m.Status.Message, "is bound to claim") {
+		return apierrors.NewConflict(schema.GroupResource{Group: "coder.com", Resource: "coderworkspacepoolmembers"}, m.Name, errors.New("stale object"))
+	}
+	return w.SubResourceWriter.Update(ctx, obj, opts...)
+}
+
+// TestPoolMemberBindExtensionAtMostOnce: the member stores bindExtended
+// before the extend request, so neither a lost status write nor an uncertain
+// answer leads to a second extension. A request that provably changed
+// nothing is sent again.
+func TestPoolMemberBindExtensionAtMostOnce(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.fake.setTemplateSchedule(e.tplID, time.Hour, 0)
+	started := e.clock.Now()
+	bound := func(t *testing.T) types.NamespacedName {
+		t.Helper()
+		e.clock.SetTime(started)
+		key, _ := e.readyMember(t)
+		member := e.reconcileMember(t, key, 0)
+		member.Spec.ClaimRef = &coderv1alpha1.CoderWorkspaceClaimReference{Name: "build-1", UID: uuid.NewString()}
+		require.NoError(t, k8sClient.Update(e.ctx, member))
+		e.clock.SetTime(started.Add(10 * time.Minute))
+		return key
+	}
+
+	key := bound(t)
+	r := &controller.CoderWorkspacePoolMemberReconciler{Client: lostBindWriteClient{k8sClient}, Scheme: scheme, Clock: e.clock}
+	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+	require.True(t, apierrors.IsConflict(err), "the lost write ends the reconcile: %v", err)
+	require.Equal(t, 1, e.fake.requestCount(routeExtendWorkspace))
+	require.True(t, e.reconcileMember(t, key, 2).Status.BindExtended)
+	require.Equal(t, 1, e.fake.requestCount(routeExtendWorkspace), "no second extension after a lost status write")
+
+	key = bound(t)
+	e.fake.failNext(routeExtendWorkspace, fakeFault{Status: 502})
+	member := e.reconcileMember(t, key, 1)
+	requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "CoderUnavailable", "extend workspace")
+	require.True(t, member.Status.BindExtended)
+	e.reconcileMember(t, key, 2)
+	require.Equal(t, 2, e.fake.requestCount(routeExtendWorkspace), "no second extension after an uncertain answer")
+
+	key = bound(t)
+	e.fake.failNext(routeExtendWorkspace, fakeFault{Status: 429})
+	require.False(t, e.reconcileMember(t, key, 1).Status.BindExtended, "a 429 changed nothing")
+	requireMember(t, e.reconcileMember(t, key, 1), coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "Bound", "Its deadline is now")
+	require.Equal(t, 4, e.fake.requestCount(routeExtendWorkspace))
 }
 
 // TestPoolMemberGuardsEveryExtension: the read right before an extension

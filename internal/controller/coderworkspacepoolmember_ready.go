@@ -16,10 +16,11 @@ import (
 )
 
 // readWorkspace runs the step of a member whose create request may exist
-// (plan 6.2 steps 7 to 9). It only reads Coder: it confirms an uncertain
-// create result, or it applies the readiness rules to the start build.
+// (plan 6.2 steps 7 to 11): it confirms an uncertain create result, applies
+// the readiness rules to the start build, or runs the deadline steps of a
+// ready member.
 func (r *CoderWorkspacePoolMemberReconciler) readWorkspace(
-	ctx context.Context, member *coderv1alpha1.CoderWorkspacePoolMember, workspaceName string, now time.Time,
+	ctx context.Context, member *coderv1alpha1.CoderWorkspacePoolMember, before *coderv1alpha1.CoderWorkspacePoolMemberStatus, workspaceName string, now time.Time,
 ) (*coderStep, error) {
 	if member.Status.WorkspaceName != workspaceName {
 		return nil, fmt.Errorf("assertion failed: pool member %s/%s may have a workspace, but status.workspaceName is %q", member.Namespace, member.Name, member.Status.WorkspaceName)
@@ -35,7 +36,7 @@ func (r *CoderWorkspacePoolMemberReconciler) readWorkspace(
 	case member.Status.ReadyTime == nil:
 		return checkPoolMemberReadiness(ctx, sdk, member, now)
 	default:
-		return keepPoolMemberWarm(ctx, sdk, member, r.Clock, now)
+		return r.keepWarm(ctx, sdk, member, before, now)
 	}
 }
 
