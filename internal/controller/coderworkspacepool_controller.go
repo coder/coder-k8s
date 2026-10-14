@@ -81,7 +81,8 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	before := pool.Status.DeepCopy()
-	resolved, step, err := r.resolve(ctx, pool)
+	var ownerName string
+	resolved, step, err := r.resolve(ctx, pool, &ownerName)
 	if step, err = memberWaitOnWrongAnswer(ctx, step, err); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -113,6 +114,10 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 			members = append(members, m)
 		}
 	}
+	claims, err := r.poolClaims(ctx, pool)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.releaseUsedMembers(ctx, pool, members); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -141,6 +146,9 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if err := r.trimToOwnerCap(ctx, pool, maxWorkspaces, all.Items); err != nil {
 			return ctrl.Result{}, err
 		}
+		if err := r.bindClaims(ctx, pool, claims, all.Items, &counts); err != nil {
+			return ctrl.Result{}, err
+		}
 		step, requeue, err = r.createMembers(ctx, pool, maxWorkspaces, all.Items, &counts)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -148,6 +156,9 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 	// The namespace list, where trimToOwnerCap marked its deletes.
 	if err := r.deleteUnclaimedMembers(ctx, pool, all.Items, step); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.writeClaimStatuses(ctx, pool, claims, all.Items, ownerName); err != nil {
 		return ctrl.Result{}, err
 	}
 	r.applyPoolStatus(pool, counts, step)
@@ -537,8 +548,10 @@ func (r *CoderWorkspacePoolReconciler) createMember(ctx context.Context, pool *c
 // resolve reads the pool's inputs from Coder (plan 6.3 step 2) with the
 // rules that the member checks again before it creates. A nil step means
 // that new members can pin the returned values.
+// It also stores the owner's Coder username in ownerName, once the owner
+// read succeeded.
 func (r *CoderWorkspacePoolReconciler) resolve(
-	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool,
+	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, ownerName *string,
 ) (*coderv1alpha1.CoderWorkspacePoolResolved, *coderStep, error) {
 	spec := pool.Spec
 	sdk, controlPlane, wait, err := controlPlaneCoderClient(ctx, r.Client, pool.Namespace, spec.ControlPlaneRef.Name)
@@ -559,6 +572,7 @@ func (r *CoderWorkspacePoolReconciler) resolve(
 	if step != nil || err != nil {
 		return nil, step, err
 	}
+	*ownerName = owner.Username
 	template, step, err := resolveCoderTemplate(ctx, sdk, spec.Template, owner)
 	if step != nil || err != nil {
 		return nil, step, err
