@@ -134,6 +134,16 @@ func SetupControllers(mgr manager.Manager) error {
 		return fmt.Errorf("unable to create AI provider controller: %w", err)
 	}
 
+	aiGatewayKeyReconciler := &controller.CoderAIGatewayKeyReconciler{
+		Client:    client,
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    managerScheme,
+		Clock:     clock.RealClock{},
+	}
+	if err := aiGatewayKeyReconciler.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create AI Gateway key controller: %w", err)
+	}
+
 	return nil
 }
 

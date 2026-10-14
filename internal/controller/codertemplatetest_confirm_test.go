@@ -156,6 +156,26 @@ func TestTemplateTestConfirmSettleWindow(t *testing.T) {
 	require.Equal(t, 1, e.fake.requestCount(routeCreateWorkspace), "never a second create request")
 }
 
+// Only Coder's own 404 proves that no workspace exists. A proxy's 404 page,
+// or "Route not found." for a wrong base URL, keeps the marker and waits,
+// also after the settle window (#351).
+func TestTemplateTestConfirmTrustsOnlyCodersNotFound(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	for _, tc := range nonCoderNotFounds {
+		t.Run(tc.name, func(t *testing.T) { // Not parallel: the cases share e and its clock.
+			creates := e.fake.requestCount(routeCreateWorkspace)
+			key := e.uncertainCreate(t, fakeFault{Status: 502}, 3600)
+			e.clock.SetTime(e.clock.Now().Add(15 * time.Minute))
+			e.fake.failNext(routeWorkspaceByName, tc.fault)
+			requireTemplateTestRunning(t, e.reconcile(t, key, 1), "CoderUnavailable", "get workspace by name: Coder answered 404")
+			// Coder's own 404 after the window proves that no workspace exists.
+			requireTemplateTestFailed(t, e.settle(t, key), "CreateOutcomeUnknown")
+			require.Equal(t, creates+1, e.fake.requestCount(routeCreateWorkspace), "never a second create request")
+		})
+	}
+}
+
 func TestTemplateTestConfirmWrongAnswers(t *testing.T) {
 	t.Parallel()
 	e := newTemplateTestEnv(t)

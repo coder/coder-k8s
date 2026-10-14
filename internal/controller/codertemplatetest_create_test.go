@@ -241,6 +241,37 @@ func TestTemplateTestConfirmKeepsCreateAnswer(t *testing.T) {
 	}
 }
 
+// nonCoderNotFounds are 404 answers that Coder itself never gives on the
+// workspace routes: a proxy's page, and Coder's own answer to a wrong route
+// (coderd/httpapi/httpapi.go:180 in v2.37.3).
+var nonCoderNotFounds = []struct {
+	name  string
+	fault fakeFault
+}{
+	{name: "HTML 404", fault: fakeFault{Status: 404, HTML: "<html>404 Not Found</html>"}},
+	{name: "Route not found", fault: fakeFault{Status: 404, Message: "Route not found."}},
+}
+
+// Before the create, only Coder's own 404 proves that the workspace name is
+// free. Another 404 waits and sends no create request (#351).
+func TestTemplateTestLookupTrustsOnlyCodersNotFound(t *testing.T) {
+	t.Parallel()
+	e := newTemplateTestEnv(t)
+	for _, tc := range nonCoderNotFounds {
+		t.Run(tc.name, func(t *testing.T) { // Not parallel: the cases share e.
+			creates := e.fake.requestCount(routeCreateWorkspace)
+			key := e.createTest(t, "default.docker", coderv1alpha1.CoderTemplateTestVersion{Name: "v1"})
+			e.fake.failNext(routeWorkspaceByName, tc.fault)
+			tt := e.reconcile(t, key, 3) // Finalizer, initialization, then lookups.
+			requireTemplateTestWaiting(t, tt, "CoderUnavailable", "get workspace by name: Coder answered 404")
+			require.Nil(t, tt.Status.CreateAttemptTime, "no marker without a create request")
+			require.Equal(t, creates, e.fake.requestCount(routeCreateWorkspace), "no create request")
+			requireTemplateTestRunning(t, e.settle(t, key), "WaitingForBuild", "")
+			require.Equal(t, creates+1, e.fake.requestCount(routeCreateWorkspace))
+		})
+	}
+}
+
 func TestTemplateTestDeadlineAfterCreate(t *testing.T) {
 	t.Parallel()
 	e := newTemplateTestEnv(t)

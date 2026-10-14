@@ -69,10 +69,13 @@ const (
 	aiGatewayKeyNameAnnotation = "coder.com/ai-gateway-key-name"
 )
 
+// +kubebuilder:rbac:groups=coder.com,resources=coderaigatewaykeys,verbs=get;list;watch;patch
+// +kubebuilder:rbac:groups=coder.com,resources=coderaigatewaykeys/status,verbs=get;update
+// +kubebuilder:rbac:groups=coder.com,resources=coderaigatewaykeys/finalizers,verbs=update
+
 // CoderAIGatewayKeyReconciler reconciles CoderAIGatewayKey objects (#156). It
-// is not registered yet. This version runs the checks of the observe step
-// (plan 4.2) and claims the output Secret. It creates and deletes no Coder
-// key.
+// issues a Coder AI Gateway key into an owned Secret, rotates it, retires
+// replaced keys, and deletes every key of the object when the object goes.
 type CoderAIGatewayKeyReconciler struct {
 	client.Client
 	// APIReader reads the output Secret and the objects of the reserved-name
@@ -105,10 +108,9 @@ func aiGatewayKeyStalled(reason, format string, args ...any) *aiGatewayKeyStep {
 	return &aiGatewayKeyStep{stalled: true, reason: reason, message: fmt.Sprintf(format, args...), requeue: aiGatewayKeyResync}
 }
 
-// SetupWithManager wires the reconciler into controller-runtime. Nothing
-// calls it until activation (K10). A change of the output Secret, or of any
-// control plane in the namespace (any of them can reserve the Secret name),
-// requeues the object at once.
+// SetupWithManager wires the reconciler into controller-runtime. A change of
+// the output Secret, or of any control plane in the namespace (any of them
+// can reserve the Secret name), requeues the object at once.
 func (r *CoderAIGatewayKeyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if mgr == nil || r.Client == nil || r.APIReader == nil || r.Scheme == nil || r.Clock == nil {
 		return errors.New("assertion failed: AI Gateway key reconciler needs a manager, a client, an API reader, a scheme, and a clock")
@@ -161,11 +163,16 @@ func (r *CoderAIGatewayKeyReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		if !controllerutil.ContainsFinalizer(key, coderv1alpha1.CoderAIGatewayKeyCleanupFinalizer) {
 			return ctrl.Result{}, nil
 		}
+		forgetReleasedWithoutDelete(key.UID)
 		release, deleteStep, err := r.deleteStep(ctx, key)
 		if err != nil {
 			return ctrl.Result{}, err
 		} else if release {
-			return ctrl.Result{}, r.patchFinalizer(ctx, key, false)
+			if err := r.patchFinalizer(ctx, key, false); err != nil {
+				return ctrl.Result{}, err
+			}
+			releasedWithoutDeleteDone(key.UID)
+			return ctrl.Result{}, nil
 		}
 		step = deleteStep
 	} else {

@@ -281,7 +281,7 @@ func (r *CoderTemplateTestReconciler) resolveInputs(
 		// Nothing of this test exists yet, so the workspace belongs to
 		// someone else. The controller never touches it.
 		return templateTestFail("WorkspaceNameConflict", "Coder user %s already has a workspace named %s.", ownerID, workspaceName), nil
-	case !isCoderNotFound(err):
+	case !isCoderResourceNotFound(err): // Only Coder's own 404 proves that the name is free (#351).
 		return coderUnavailable("get workspace by name", err), nil
 	}
 	return nil, nil

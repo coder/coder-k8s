@@ -10,7 +10,7 @@ A `CoderAIProvider` manages one AI provider in Coder (Coder's `/api/v2/ai/provid
 - A `CoderControlPlane` in the same namespace with `status.operatorAccessReady: true`. The operator user must be a site owner. Coder answers `403` to anyone else on the provider routes.
 - An API key for the provider, for example an OpenAI key.
 - Coder v2.37.2 or later. The Kind end-to-end test runs Coder v2.37.2, and the operator is built against the v2.37.3 SDK. Coder has the provider API since v2.34.0, but versions before v2.37.2 are not tested.
-- An operator release after v0.1.3. The `dist/install.yaml` on `main` installs the `CoderAIProvider` CRD, but its `ghcr.io/coder/coder-k8s:latest` image is v0.1.3 until the next release, and v0.1.3 has no `CoderAIProvider` controller. Install from a release tag that includes `CoderAIProvider`, and pin the image to the same version (see [Deploy a Coder Control Plane](../tutorials/getting-started.md#1-install-the-operator)).
+- coder-k8s v0.1.4 or later. Install from the release tag, and pin the image to the same version (see [Deploy a Coder Control Plane](../tutorials/getting-started.md#1-install-the-operator)).
 
 ## 1. Prepare the key Secret
 
@@ -76,7 +76,7 @@ The object has the conditions `Ready`, `Reconciling` and `Stalled`. A stalled ob
 | `CredentialSecretNotFound`, `CredentialNotOptedIn`, `CredentialDestinationNotAllowed`, `CredentialRefused`, `CredentialKeyMissing`, `CredentialMalformed` | The key Secret fails the credential contract. See [the credential kill switch](#the-credential-kill-switch). |
 | `NameConflict` | Coder has a provider with this name that the operator did not create. |
 | `NameReservedByEnv` | The control plane can seed a provider with this name. See [Seeding limits](#seeding-limits). |
-| `CoderRejected` | Coder rejected the create request. Fix the spec. |
+| `CoderRejected` | Coder rejected the create or update request. Fix the spec. |
 | `DisabledExternally`, `KeyChangedExternally`, `DeletedExternally` | Someone disabled the provider, changed its key or deleted it in Coder. See [Kill switches](#kill-switches). |
 
 ## Kill switches
@@ -122,9 +122,10 @@ Deleting the object deletes the provider in Coder. With only an unconfirmed crea
 
 - When Coder is unreachable, or the control plane has no operator access, the finalizer `coder.com/ai-provider-cleanup` stays and the operator retries every 60 seconds. See [Stuck finalizer](#stuck-finalizer).
 - When the control plane is gone, nothing can delete the provider. The finalizer goes at once, and the operator logs the provider ID. Delete the provider in the Coder dashboard.
-- While the control plane is being deleted and its operator access still works, the operator sends one delete with a 10-second limit, then removes the finalizer. Without working access, the finalizer goes without a delete. Either way a namespace deletion finishes. When the delete did not succeed, the operator logs the provider ID: delete the provider in the Coder dashboard.
+- When you delete the control plane while `CoderAIProvider` or `CoderAIGatewayKey` objects that use it are being deleted, the control plane waits for them for up to 10 minutes, plus 30 seconds and 10 seconds per object of one kind (at most 5 minutes) for a last bounded attempt. It keeps its finalizer, so Coder keeps running, and the delete above runs with its retries. The operator removes the workspace RBAC of the control plane before it waits, so Coder loses its Kubernetes access at once. An object that you do not delete holds the control plane for only 30 seconds, so delete the objects together with the control plane. A foreground deletion (`kubectl delete --cascade=foreground`) does not wait.
+- When the control plane does not wait (its namespace is being deleted, it is deleted in the foreground, or the 10 minutes have passed) and its operator access still works, the operator sends one delete with a 10-second limit, then removes the finalizer. Without working access, the finalizer goes without a delete. Either way a namespace deletion finishes. When the delete did not succeed, the operator logs the provider ID: delete the provider in the Coder dashboard. The metric `coder_k8s_cleanup_released_without_delete_total` (label `kind`) counts these releases.
 
-Delete `CoderAIProvider` objects before their control plane. Coder deletes a provider even while chat models use it. Those models stop working.
+Delete `CoderAIProvider` objects before their namespace: a namespace deletion removes Coder's pods at once, so the control plane cannot wait for them. Coder deletes a provider even while chat models use it. Those models stop working.
 
 ### Stuck finalizer
 

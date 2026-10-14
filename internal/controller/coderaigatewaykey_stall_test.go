@@ -345,3 +345,41 @@ func TestCoderAIGatewayKeyUndeletableOrphanWhileReady(t *testing.T) {
 		})
 	}
 }
+
+// Only Coder's own 404 proves that a key is gone. An HTML 404 of a proxy on
+// a sweep or retire DELETE is CoderUnavailable: the orphan stays an orphan,
+// the replaced key stays retiring, and the next DELETE runs.
+func TestCoderAIGatewayKeyProxyNotFoundDeletesNothing(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	proxy404 := fakeFault{Status: http.StatusNotFound, HTML: "<html>404</html>"}
+	t.Run("sweep", func(t *testing.T) {
+		t.Parallel()
+		env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+		got, orphan := readyWithOrphan(ctx, t, &env)
+		env.fake.failNext(routeDeleteAIGatewayKey, proxy404)
+		got, _ = env.reconcile(ctx, t, got)
+		requireReadyWhile(t, got, "CoderUnavailable")
+		require.Len(t, env.fake.aiGatewayKeys(), 2)
+		got, _ = env.reconcile(ctx, t, got)
+		requireReadyWhile(t, got, "DeletingOrphans")
+		require.Equal(t, 2, env.fake.requestCount(routeDeleteAIGatewayKey), "the sweep tries again")
+		for _, k := range env.fake.aiGatewayKeys() {
+			require.NotEqual(t, orphan.id, k.id)
+		}
+	})
+	t.Run("retire", func(t *testing.T) {
+		t.Parallel()
+		env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+		got, old := retiringAfterDrift(ctx, t, &env)
+		env.clock.Step(time.Hour)
+		env.fake.failNext(routeDeleteAIGatewayKey, proxy404)
+		got, _ = env.reconcile(ctx, t, got)
+		requireReadyWhile(t, got, "CoderUnavailable")
+		require.Equal(t, []string{old.id.String()}, retiringIDs(got), "the key stays retiring")
+		got, _ = env.reconcile(ctx, t, got)
+		requireReadyWhile(t, got, "RetiringKey")
+		require.Empty(t, got.Status.RetiringKeys)
+		require.Len(t, env.fake.aiGatewayKeys(), 1)
+	})
+}

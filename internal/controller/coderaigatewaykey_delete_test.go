@@ -9,9 +9,13 @@ import (
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/controller"
 )
 
 // rotatedKey issues the first key and rotates once, so Coder holds the
@@ -89,6 +93,15 @@ func TestCoderAIGatewayKeyDeleteRetries(t *testing.T) {
 			heal:   func(*fakeCoder) {},
 			reason: "CoderUnavailable", requeue: time.Minute,
 		},
+		// A 404 that is not Coder's own (an HTML page of a proxy) proves
+		// nothing, so the key stays and the deletion retries.
+		"proxy 404": {
+			fail: func(f *fakeCoder) {
+				f.failNext(routeDeleteAIGatewayKey, fakeFault{Status: http.StatusNotFound, HTML: "<html>404</html>"})
+			},
+			heal:   func(*fakeCoder) {},
+			reason: "CoderUnavailable", requeue: time.Minute,
+		},
 		"premium feature": {
 			fail: func(f *fakeCoder) { f.setAIGatewayFeature(false) }, heal: func(f *fakeCoder) { f.setAIGatewayFeature(true) },
 			stalled: true, reason: "LicenseRequired", requeue: 10 * time.Minute,
@@ -97,6 +110,14 @@ func TestCoderAIGatewayKeyDeleteRetries(t *testing.T) {
 			fail:    func(f *fakeCoder) { f.failNext(routeDeleteAIGatewayKey, fakeFault{Status: http.StatusForbidden}) },
 			heal:    func(*fakeCoder) {},
 			stalled: true, reason: "CoderRejected", requeue: 10 * time.Minute,
+		},
+		// Coder's 404 for a route it does not have: a person must fix it.
+		"route not found": {
+			fail: func(f *fakeCoder) {
+				f.failNext(routeDeleteAIGatewayKey, fakeFault{Status: http.StatusNotFound, Message: "Route not found."})
+			},
+			heal:    func(*fakeCoder) {},
+			stalled: true, reason: "NotSupported", requeue: 10 * time.Minute,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -147,15 +168,27 @@ func TestCoderAIGatewayKeyDeleteWithControlPlaneGoing(t *testing.T) {
 			require.NoError(t, k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: env.namespace}}))
 			holdControlPlane(ctx, t, env.namespace)
 			require.NoError(t, k8sClient.Delete(ctx, got))
+			var orphan codersdk.CreateAIGatewayKeyResponse
 			if fail {
+				// An orphan that status does not name: only the pass's LIST knows it.
+				require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(got), got))
+				editStatus(ctx, t, got, func(s *coderv1alpha1.CoderAIGatewayKeyStatus) { s.NextSerial = 3 })
+				var err error
+				orphan, err = env.fake.client(t, 5*time.Second).CreateAIGatewayKey(ctx, codersdk.CreateAIGatewayKeyRequest{Name: aiGatewayKeyPrefix(got) + "2"})
+				require.NoError(t, err)
 				env.fake.failNext(routeDeleteAIGatewayKey, fakeFault{Status: http.StatusBadGateway})
 			}
-			gone, _ := env.reconcile(ctx, t, got)
-			require.Nil(t, gone, "the finalizer went inside the settle window")
+			r := &controller.CoderAIGatewayKeyReconciler{Client: env.client, APIReader: env.client, Scheme: scheme, Clock: env.clock}
+			logCtx, logs := capturingContext(ctx)
+			_, err := r.Reconcile(logCtx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(got)})
+			require.NoError(t, err)
+			require.True(t, apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(got), got)), "the finalizer went inside the settle window")
 			require.Equal(t, 1, env.fake.requestCount(routeAIGatewayKeys)-2, "one LIST")
 			if fail {
 				require.Equal(t, 1, env.fake.requestCount(routeDeleteAIGatewayKey), "the pass stops at the failed DELETE")
-				require.Len(t, env.fake.aiGatewayKeys(), 2)
+				require.Len(t, env.fake.aiGatewayKeys(), 3)
+				// The release log names the keys that the pass listed and left.
+				require.Contains(t, logs.String(), orphan.ID.String())
 			} else {
 				require.Empty(t, env.fake.aiGatewayKeys())
 			}

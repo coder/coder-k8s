@@ -28,10 +28,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -217,6 +220,16 @@ type CoderControlPlaneReconciler struct {
 	OperatorAccessProvisioner coderbootstrap.OperatorAccessProvisioner
 	LicenseUploader           LicenseUploader
 	EntitlementsInspector     EntitlementsInspector
+	// Clock is optional (nil: the real clock). Tests set it to move the
+	// dependent hold of a deleted control plane.
+	Clock clock.PassiveClock
+}
+
+func (r *CoderControlPlaneReconciler) now() time.Time {
+	if r.Clock == nil {
+		return time.Now()
+	}
+	return r.Clock.Now()
 }
 
 // +kubebuilder:rbac:groups=coder.com,resources=codercontrolplanes,verbs=get;list;watch;create;update;patch;delete
@@ -603,9 +616,31 @@ func (r *CoderControlPlaneReconciler) finalizeWorkspaceRBAC(
 	if !controllerutil.ContainsFinalizer(coderControlPlane, workspaceRBACFinalizer) {
 		return ctrl.Result{}, nil
 	}
-
+	// Revoke Coder's workspace RBAC first: the hold below keeps the Coder
+	// Deployment and its service account, but the AI cleanup calls Coder with
+	// the operator's token and does not need that Kubernetes access.
 	if err := r.cleanupManagedWorkspaceRBAC(ctx, coderControlPlane, nil, nil); err != nil {
 		return ctrl.Result{}, err
+	}
+	// The finalizer keeps the Coder Deployment (owned by this object)
+	// running while AI Gateway keys and AI providers that use it still
+	// delete their resources in Coder (#353). The grace period after the hold
+	// lets each of them run its bounded pass before Coder goes.
+	now := r.now()
+	dependents, perKind, err := controlPlaneDependents(ctx, r.Client, coderControlPlane, now)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if len(dependents) > 0 {
+		holds, err := controlPlaneHolds(ctx, r.Client, coderControlPlane, now.Add(-controlPlaneDependentGraceFor(perKind)))
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if holds {
+			log.FromContext(ctx).Info("Waiting for the objects that use this control plane to delete their resources in Coder",
+				"dependents", dependents, "until", coderControlPlane.DeletionTimestamp.Add(controlPlaneDependentHold).UTC())
+			return ctrl.Result{RequeueAfter: controlPlaneDependentPoll}, nil
+		}
 	}
 
 	original := coderControlPlane.DeepCopy()
@@ -3269,7 +3304,12 @@ func (r *CoderControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(r.reconcileRequestsForEnvFromConfigMap),
-		)
+		).
+		// A control plane that is being deleted waits for these (#353).
+		Watches(&coderv1alpha1.CoderAIGatewayKey{}, handler.EnqueueRequestsFromMapFunc(requestForDependentControlPlane),
+			ctrlbuilder.WithPredicates(dependentRemoved)).
+		Watches(&coderv1alpha1.CoderAIProvider{}, handler.EnqueueRequestsFromMapFunc(requestForDependentControlPlane),
+			ctrlbuilder.WithPredicates(dependentRemoved))
 
 	// Gateway API is optional; only watch HTTPRoutes when the CRD is installed.
 	httpRouteGVK := schema.GroupVersionKind{Group: gatewayv1.GroupVersion.Group, Version: gatewayv1.GroupVersion.Version, Kind: "HTTPRoute"}

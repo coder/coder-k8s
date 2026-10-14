@@ -46,7 +46,7 @@ k() { kubectl --request-timeout=30s "$@"; } # every non-streaming kubectl reques
 cleanup() {
   local p
   for p in "${BG_PIDS[@]}"; do kill "$p" 2>/dev/null || true; done
-  rm -f "$WORK/coder.hdr" "$WORK/coder-body.json" "$WORK/tester.json" "$WORK"/ai-key-* "$WORK"/secret-*.json "$WORK/ai-leak.txt"
+  rm -f "$WORK/coder.hdr" "$WORK/coder-body.json" "$WORK/tester.json" "$WORK"/ai-key-* "$WORK"/secret-*.json "$WORK/ai-leak.txt" "$WORK/coder-raw.json"
   [[ $RESULT == PASS || -z $CURRENT ]] || CASES+=("case: $CURRENT = FAILED")
   # Sanitized evidence receipt: identifiers only, never the token.
   printf '%s\n' "=== RECEIPT ($RESULT) ===" "source_sha=$SOURCE_SHA" "run_id=${GITHUB_RUN_ID:-unset}" \
@@ -102,6 +102,10 @@ coder_api() { # <method> <path> [json-body]: the token and the body reach curl t
   [[ $# -lt 3 ]] || { printf '%s' "$3" >"$WORK/coder-body.json" && args+=(--data @"$WORK/coder-body.json"); }
   curl "${args[@]}" "$CODER_URL$2"
 }
+coder_status() { # <path>: a GET without -f that prints the HTTP status; the body goes to $WORK/coder-raw.json
+  curl -sS --max-time 30 -o "$WORK/coder-raw.json" -w '%{http_code}' -H @"$WORK/coder.hdr" "$CODER_URL$1"
+}
+CODER_NOT_FOUND="Resource not found or you do not have access to this resource" # Coder's own 404 message (#325)
 
 # build_done <name> <buildID> <status>: true once the build reached status; fails on terminal failure.
 build_done() {
@@ -423,13 +427,16 @@ ws_delete "$AGENT_NAME" "$AGENT_UID" >/dev/null || fail "cannot delete the agent
 wait_until "delete build of $AGENT_NAME (404)" gone "$AGENT_NAME"
 wait_until "delete job of $AGENT_UID to succeed" delete_succeeded "$AGENT_UID"
 
-# db_count <table> <column> <value>: rows of a Coder table (deleted rows included) through psql in the CNPG
+# db_count <table> [<column> <value>]: rows of a Coder table (deleted rows included) through psql in the CNPG
 # primary. A read-only count: it never selects key values or hashes.
 db_count() {
-  local pod
-  [[ $3 =~ ^[A-Za-z0-9-]+$ ]] || fail "assertion failed: unsafe value for $1.$2: '$3'"
+  local pod where=""
+  if (($# > 1)); then
+    [[ $3 =~ ^[A-Za-z0-9-]+$ ]] || fail "assertion failed: unsafe value for $1.$2: '$3'"
+    where=" WHERE $2 = '$3'"
+  fi
   pod=$(k -n "$NS" get cluster coder-db -o json | jq -er '.status.currentPrimary') || return 1
-  k -n "$NS" exec "$pod" -c postgres -- psql -d coder -XtAc "SELECT count(*) FROM $1 WHERE $2 = '$3'" | grep -Ex '[0-9]+'
+  k -n "$NS" exec "$pod" -c postgres -- psql -d coder -XtAc "SELECT count(*) FROM $1$where" | grep -Ex '[0-9]+'
 }
 tt_create() { # <name> [parameters JSON] [spec JSON] [create flags]: a test of the agent template's active version
   jq -n --arg n "$1" --arg ns "$NS" --arg t "$ORG.$AGENT_TEMPLATE" --argjson p "${2:-[]}" --argjson x "${3:-"{}"}" '{apiVersion: "coder.com/v1alpha1",
@@ -678,11 +685,114 @@ step "CoderAIProvider delete: deleting the object deletes the provider in Coder 
 T0=$SECONDS
 k -n "$NS" delete coderaiprovider "$AI" --wait=false >/dev/null || fail "cannot delete CoderAIProvider $AI"
 wait_until "CoderAIProvider $AI to disappear" gone_obj coderaiprovider "$AI"
-if coder_api GET "/api/v2/ai/providers/$AI_ID" >/dev/null 2>"$WORK/ai-get.err"; then
-  fail "provider $AI ($AI_ID) still exists in Coder after its object was deleted"
-fi
-grep -q 'error: 404' "$WORK/ai-get.err" || fail "GET provider $AI_ID after the delete: $(head -c 300 "$WORK/ai-get.err")"
+CODE=$(coder_status "/api/v2/ai/providers/$AI_ID") || fail "cannot call GET provider $AI_ID after the delete"
+[[ $CODE != 200 ]] || fail "provider $AI ($AI_ID) still exists in Coder after its object was deleted"
+# Only Coder's own 404 proves the delete (#348): a proxy or a wrong route also answers 404.
+jq -e --arg c "$CODE" --arg m "$CODER_NOT_FOUND" '$c == "404" and .message == $m' "$WORK/coder-raw.json" >/dev/null 2>&1 ||
+  fail "GET provider $AI_ID after the delete answered HTTP $CODE without Coder's own 404 message: $(head -c 300 "$WORK/coder-raw.json")"
 phase ai-delete
+
+# CoderAIGatewayKey phases (#156, plan 9). Kind runs Coder without a license, so they test the unlicensed path only:
+# the controller stalls and sends no key create. The synthetic Secret value stays in a 0600 file: never argv or output.
+GW_SEEN="" GW_S=""
+gw_key() { # <name> <Secret>: kubectl apply of a CoderAIGatewayKey of control plane coder
+  jq -n --arg n "$1" --arg ns "$NS" --arg s "$2" '{apiVersion: "coder.com/v1alpha1", kind: "CoderAIGatewayKey",
+    metadata: {name: $n, namespace: $ns}, spec: {controlPlaneRef: {name: "coder"}, secretName: $s}}' >"$WORK/gw-$1.json" ||
+    fail "cannot render CoderAIGatewayKey $1"
+  apply_manifest "$WORK/gw-$1.json"
+}
+gw_state() { # <name>: reads the object into $WORK/gw-<name>.state.json; sets GW_S to "<Stalled status> <reason>" of the current generation
+  k -n "$NS" get coderaigatewaykey "$1" -o json >"$WORK/gw-$1.state.json" 2>"$WORK/gw.err" || return 1
+  GW_S=$(jq -r '.metadata.generation as $g | if .status.observedGeneration == $g then [.status.conditions[]? |
+    select(.type == "Stalled" and .observedGeneration == $g) | "\(.status) \(.reason)"][0] // "- -" else "- -" end' "$WORK/gw-$1.state.json") || return 1
+  [[ "$1 $GW_S" == "$GW_SEEN" ]] || { GW_SEEN="$1 $GW_S" && log "AI Gateway key $1: $GW_S"; }
+}
+gw_is() { # <name> <reason> [earlier reason]: true once Stalled=True has reason for the current generation; another stall fails at once
+  gw_state "$1" || return 1
+  [[ $GW_S == "True $2" ]] && return 0
+  [[ $GW_S != True* || $GW_S == "True ${3:-}" ]] ||
+    fail "AI Gateway key $1 stalled with $GW_S, want $2: $(jq -r '[.status.conditions[] | select(.type == "Stalled")][0].message' "$WORK/gw-$1.state.json")"
+  return 1
+}
+gw_rows() { # Coder holds no AI Gateway key: the ai_gateway_keys table has 0 rows
+  local n
+  n=$(db_count ai_gateway_keys) || fail "cannot count the ai_gateway_keys rows"
+  [[ $n == 0 ]] || fail "Coder holds $n ai_gateway_keys rows, want 0"
+}
+gw_clean() { # <name>: the object sent no create (nextSerial 0, no current or pending key), and Coder holds no key
+  jq -e '(.status.nextSerial // 0) == 0 and .status.currentKey == null and .status.pendingKey == null' "$WORK/gw-$1.state.json" >/dev/null ||
+    fail "AI Gateway key $1 has key state: nextSerial=$(jq -r '.status.nextSerial // 0' "$WORK/gw-$1.state.json")"
+  gw_rows
+}
+secret_seen() { # <name>: resourceVersion, ownerReferences and a SHA-256 of the data, never the data itself
+  local s
+  s=$(k -n "$NS" get secret "$1" -o json) || return 1
+  printf '%s data=%s\n' "$(jq -r '"rv=\(.metadata.resourceVersion) owners=\(.metadata.ownerReferences // [] | tojson)"' <<<"$s")" \
+    "$(jq -j '.data | tojson' <<<"$s" | sha256sum | cut -d' ' -f1)"
+}
+
+step "CoderAIGatewayKey gate: unlicensed Coder has no aibridge feature and answers the key LIST 403 Premium (plan 9.1)"
+T0=$SECONDS
+coder_api GET /api/v2/entitlements >"$WORK/entitlements.json" || fail "cannot read the Coder entitlements"
+jq -e '(.features | type) == "object" and (.features.aibridge.enabled // false) == false' "$WORK/entitlements.json" >/dev/null ||
+  fail "Coder has the aibridge feature enabled: the AI Gateway key phases test the unlicensed path only"
+CODE=$(coder_status /api/v2/ai-gateway/keys) || fail "cannot call GET /api/v2/ai-gateway/keys"
+jq -e --arg c "$CODE" '$c == "403" and (.message | endswith("is a Premium feature. Contact sales!"))' "$WORK/coder-raw.json" >/dev/null 2>&1 ||
+  fail "GET /api/v2/ai-gateway/keys answered HTTP $CODE, want 403 with the Premium message: $(jq -r 'if type == "object" then .message // "no message" else "a body without a message" end' "$WORK/coder-raw.json" 2>/dev/null | head -c 300)"
+gw_rows
+phase gw-gate
+
+step "CoderAIGatewayKey without the control plane opt-in stalls NotAllowed and creates no Secret (plan 9.2)"
+T0=$SECONDS
+gw_key e2e-gw-off e2e-gw-key
+wait_until "AI Gateway key e2e-gw-off to stall with NotAllowed" gw_is e2e-gw-off NotAllowed
+gone_obj secret e2e-gw-key || fail "Secret e2e-gw-key exists while AI Gateway key e2e-gw-off is NotAllowed"
+gw_clean e2e-gw-off
+phase gw-not-allowed
+
+# The opt-in stays on: no CoderAIGatewayKey is left when the namespace phase runs.
+step "CoderAIGatewayKey with the opt-in stalls LicenseRequired: the LIST fails before any Secret claim (plan 9.3)"
+T0=$SECONDS
+k -n "$NS" patch codercontrolplane coder --type=merge -p '{"spec":{"aiGateway":{"allowKeys":true}}}' >/dev/null ||
+  fail "cannot set aiGateway.allowKeys on codercontrolplane coder"
+wait_until "AI Gateway key e2e-gw-off to stall with LicenseRequired" gw_is e2e-gw-off LicenseRequired NotAllowed
+gone_obj secret e2e-gw-key || fail "Secret e2e-gw-key exists while AI Gateway key e2e-gw-off is LicenseRequired"
+gw_clean e2e-gw-off
+phase gw-license-required
+
+step "CoderAIGatewayKey refuses an existing Secret that it does not own: SecretNotOwned, the Secret is unchanged (plan 9.4)"
+T0=$SECONDS
+v=$(head -c 96 /dev/urandom | base64 -w0 | tr -dc 'A-Za-z0-9') && printf '%s' "${v:0:43}" >"$WORK/ai-key-gw" && unset v &&
+  [[ $(wc -c <"$WORK/ai-key-gw") == 43 ]] || fail "cannot generate the synthetic AI Gateway key value"
+[[ ${GITHUB_ACTIONS:-} != true ]] || echo "::add-mask::$(<"$WORK/ai-key-gw")"
+key_secret create e2e-gw-hijack ai-key-gw '{}' || fail "cannot create Secret e2e-gw-hijack"
+HIJACK_SEEN=$(secret_seen e2e-gw-hijack) || fail "cannot read Secret e2e-gw-hijack"
+gw_key e2e-gw-hijack e2e-gw-hijack
+wait_until "AI Gateway key e2e-gw-hijack to stall with SecretNotOwned" gw_is e2e-gw-hijack SecretNotOwned
+[[ $(secret_seen e2e-gw-hijack) == "$HIJACK_SEEN" ]] || fail "Secret e2e-gw-hijack changed: before=[$HIJACK_SEEN] after=[$(secret_seen e2e-gw-hijack)]"
+gw_clean e2e-gw-hijack
+phase gw-secret-not-owned
+
+step "CoderAIGatewayKey leak check: no key-shaped value or Secret value in the operator log or the objects (plan 9.5)"
+T0=$SECONDS
+k -n "$OP_NS" logs deploy/coder-k8s >"$WORK/operator-gw.txt" || fail "cannot read the operator log"
+k -n "$NS" get coderaigatewaykey e2e-gw-off e2e-gw-hijack -o yaml >"$WORK/gw-objects.yaml" || fail "cannot read the AI Gateway key objects"
+# A key is a run of exactly 43 letters and digits. Only the log lines of the key controller are searched for one.
+LEAKS=$({ grep -i coderaigatewaykey "$WORK/operator-gw.txt" || true; cat "$WORK/gw-objects.yaml"; } |
+  grep -cE '(^|[^A-Za-z0-9])[A-Za-z0-9]{43}([^A-Za-z0-9]|$)' || true)
+LEAKS=$((LEAKS + $(cat "$WORK/operator-gw.txt" "$WORK/gw-objects.yaml" | grep -cFf "$WORK/ai-key-gw" || true)))
+[[ $LEAKS == 0 ]] || fail "the operator log or an AI Gateway key object holds a key-shaped value or the Secret value ($LEAKS lines)"
+phase gw-leak-check
+
+step "CoderAIGatewayKey delete: both finalizers go within 30 s without a key call to Coder (plan 9.6)"
+T0=$SECONDS
+k -n "$NS" delete coderaigatewaykey e2e-gw-off e2e-gw-hijack --wait=false >/dev/null || fail "cannot delete the AI Gateway key objects"
+gw_gone() { gone_obj coderaigatewaykey e2e-gw-off && gone_obj coderaigatewaykey e2e-gw-hijack; }
+TIMEOUT=$((TIMEOUT < 30 ? TIMEOUT : 30)) wait_until "AI Gateway keys e2e-gw-off and e2e-gw-hijack to disappear" gw_gone
+gw_rows
+[[ $(secret_seen e2e-gw-hijack) == "$HIJACK_SEEN" ]] || fail "deleting AI Gateway key e2e-gw-hijack changed Secret e2e-gw-hijack"
+gone_obj secret e2e-gw-key || fail "Secret e2e-gw-key exists after the delete"
+phase gw-delete
 
 # Last: it scales Coder to zero and deletes namespace $NS. Later CI steps must not need either.
 step "namespace deletion releases a running test while Coder is unreachable (plan A1, A13.2)"
@@ -718,6 +828,9 @@ ns_gone() { # the namespace disappears (#209), and with it the test, the provide
 }
 TIMEOUT=$NS_DELETE_TIMEOUT wait_until "test, provider, control plane, and namespace $NS deleted (ControlPlaneGone release)" ns_gone
 NS_DELETE_SECONDS=$((SECONDS - T0))
+k -n "$OP_NS" logs deploy/coder-k8s >"$WORK/operator-ns.txt" || fail "cannot read the operator log after the namespace deletion"
+grep -F 'Releasing the finalizer without a delete in Coder' "$WORK/operator-ns.txt" | grep -F '"ControlPlaneGone"' | grep -qF '"e2e-ns-keep"' ||
+  fail "the operator log has no ControlPlaneGone release of AI provider e2e-ns-keep (plan 8.2 P7)"
 log "namespace $NS deleted in ${NS_DELETE_SECONDS}s, after its test, provider and control plane"
 CASES+=("case: $CURRENT = passed") && CURRENT="" && RESULT=PASS
 log "PASS: workspace lifecycle"

@@ -76,7 +76,10 @@ spec:
                     description: |-
                       Groups are Coder group names in the server's organization. Everyone is
                       the group of all organization members. An empty list leaves the server
-                      to organization admins. Coder reserves the names new and create.
+                      to organization admins. Coder reserves the names new and create. While a
+                      listed group does not exist, the controller removes the access of every
+                      group that this list does not name, adds none, disables the server if
+                      the spec disables it, and waits with GroupNotFound for the rest.
                     items:
                       maxLength: 255
                       minLength: 1
@@ -421,8 +424,12 @@ spec:
             description: CoderMCPServerStatus defines the observed state of a CoderMCPServer.
             properties:
               appliedGeneration:
-                description: AppliedGeneration is the last generation whose spec Coder
-                  fully holds.
+                description: |-
+                  AppliedGeneration is the last generation whose spec Coder fully holds,
+                  or that a kill switch holds: when the controller disables the config
+                  because a credential Secret or the control plane withdrew consent, it
+                  sets this field before it sends the disable, so only a later spec edit
+                  enables the config again. Ready tells whether Coder holds the spec.
                 format: int64
                 type: integer
               conditions:

@@ -126,14 +126,14 @@ type CoderControlPlaneSpec struct {
 	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
 
 	// MCPServers configures CoderMCPServer objects that use this control
-	// plane. It has no effect yet: the CoderMCPServer controller is not
-	// shipped.
+	// plane. Removing it disables in Coder each server config that a
+	// CoderMCPServer created through this control plane. It has no effect
+	// yet: the CoderMCPServer controller is not shipped.
 	// +optional
 	MCPServers *MCPServersSpec `json:"mcpServers,omitempty"`
 
 	// AIGateway configures CoderAIGatewayKey objects that use this control
-	// plane. It has no effect yet: the CoderAIGatewayKey controller is not
-	// shipped.
+	// plane.
 	// +optional
 	AIGateway *AIGatewaySpec `json:"aiGateway,omitempty"`
 

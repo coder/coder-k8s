@@ -115,7 +115,11 @@ func newFakeCoder(t *testing.T) *fakeCoder {
 		return found(f.userByIdent(r.PathValue("user")))
 	})
 	f.route(mux, "GET /api/v2/organizations/{org}", routeOrganization, func(r *http.Request) (int, any) {
-		return found(f.orgByIdent(r.PathValue("org")))
+		org, ok := f.orgByIdent(r.PathValue("org"))
+		if !ok { // coderd/httpmw/organizationparam.go:94 answers httpapi.ResourceNotFound.
+			return http.StatusNotFound, fakeResourceNotFound
+		}
+		return http.StatusOK, org
 	})
 	f.route(mux, "GET /api/v2/organizations/{org}/members/{user}", routeOrgMember, f.getOrgMember)
 	f.route(mux, "GET /api/v2/organizations/{org}/templates/{name}", routeTemplateByName, func(r *http.Request) (int, any) {
@@ -615,11 +619,12 @@ func (f *fakeCoder) createWorkspace(r *http.Request) (int, any) {
 }
 
 // getWorkspaceByOwnerAndName prefers the live workspace. With
-// include_deleted=true it falls back to the newest deleted one.
+// include_deleted=true it falls back to the newest deleted one. Its 404 has
+// Coder's own message, which the controllers check (#351).
 func (f *fakeCoder) getWorkspaceByOwnerAndName(r *http.Request) (int, any) {
 	owner, ok := f.userByIdent(r.PathValue("user"))
 	if !ok {
-		return fakeError(http.StatusNotFound, "Resource not found.")
+		return http.StatusNotFound, fakeResourceNotFound
 	}
 	name := r.PathValue("name")
 	if fw := f.liveWorkspace(owner.ID, name); fw != nil {
@@ -634,7 +639,7 @@ func (f *fakeCoder) getWorkspaceByOwnerAndName(r *http.Request) (int, any) {
 		}
 	}
 	if newest == nil {
-		return fakeError(http.StatusNotFound, "Resource not found.")
+		return http.StatusNotFound, fakeResourceNotFound
 	}
 	return http.StatusOK, newest.view()
 }

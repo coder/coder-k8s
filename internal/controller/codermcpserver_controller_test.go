@@ -354,9 +354,16 @@ func TestCoderMCPServerControlPlaneAndOptIn(t *testing.T) {
 	require.NoError(t, k8sClient.Update(ctx, server))
 	mcp := env.mcpRequests()
 	got, _ = env.reconcile(ctx, t, server)
-	requireMCPServerStep(t, got, true, "ForceOnNotAllowed")
-	require.Equal(t, mcp, env.mcpRequests())
+	// The config exists, so the withdrawn opt-in disables it (#336): one read
+	// and one PATCH.
+	require.Contains(t, requireMCPServerStep(t, got, true, "ForceOnNotAllowed"), "The controller disabled")
+	require.Equal(t, mcp+2, env.mcpRequests())
 	env.setOptIn(ctx, t, &coderv1alpha1.MCPServersSpec{Organizations: []string{"coder"}, AllowForceOn: true})
+	got, _ = env.reconcile(ctx, t, server)
+	requireMCPServerStep(t, got, true, "DisabledExternally")
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(server), server))
+	server.Spec.Description = "re-armed"
+	require.NoError(t, k8sClient.Update(ctx, server))
 	got, _ = env.reconcile(ctx, t, server)
 	requireMCPServerStep(t, got, false, "Applied")
 }
@@ -586,8 +593,8 @@ func TestCoderMCPServerWatches(t *testing.T) {
 		}, 30*time.Second, 100*time.Millisecond, reason)
 	}
 	requireReason("Applied")
-	// A withdrawn consent disables the config in Coder (plan G8), so only a
-	// spec edit applies it again.
+	// A withdrawn consent (plan G8) or opt-in (#336) disables the config in
+	// Coder, so only a spec edit applies it again.
 	rearm := func(description string) {
 		t.Helper()
 		requireReason("DisabledExternally")
@@ -609,7 +616,7 @@ func TestCoderMCPServerWatches(t *testing.T) {
 	env.setOptIn(ctx, t, nil)
 	requireReason("MCPServersNotAllowed")
 	env.setOptIn(ctx, t, &coderv1alpha1.MCPServersSpec{Organizations: []string{"coder"}})
-	requireReason("Applied")
+	rearm("opt-in back")
 
 	// Another control plane that uses a credential Secret for its own access
 	// makes it unusable. Deleting that control plane makes it usable again.

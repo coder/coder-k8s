@@ -138,6 +138,30 @@ func TestPoolMemberReadinessFailures(t *testing.T) {
 	}
 }
 
+// Only Coder's own 404 proves that no workspace of the member exists. A
+// proxy's 404 page, or "Route not found.", keeps the marker and waits, also
+// after the settle window (#351).
+func TestPoolMemberConfirmTrustsOnlyCodersNotFound(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	long := func(m *coderv1alpha1.CoderWorkspacePoolMember) { m.Spec.ReadyTimeoutSeconds = 7200 }
+	for _, tc := range nonCoderNotFounds {
+		t.Run(tc.name, func(t *testing.T) { // Not parallel: the cases share e and its clock.
+			creates := e.fake.requestCount(routeCreateWorkspace)
+			key := e.uncertainMember(t, fakeFault{Status: 502}, long)
+			marker := e.reconcileMember(t, key, 0).Status.CreateAttemptTime.Time
+			e.clock.SetTime(marker.Add(15 * time.Minute))
+			e.fake.failNext(routeWorkspaceByName, tc.fault)
+			member := e.reconcileMember(t, key, 1)
+			requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, "CoderUnavailable", "get workspace by name: Coder answered 404")
+			require.NotNil(t, member.Status.CreateAttemptTime, "the marker stays")
+			// Coder's own 404 after the window proves that no workspace exists.
+			requireMemberFailed(t, e.reconcileMember(t, key, 1), "CreateOutcomeUnknown", "appeared within 15m0s", metav1.ConditionTrue)
+			require.Equal(t, creates+1, e.fake.requestCount(routeCreateWorkspace), "never a second create request")
+		})
+	}
+}
+
 func TestPoolMemberConfirmsCreate(t *testing.T) {
 	t.Parallel()
 	e := newPoolMemberEnv(t)

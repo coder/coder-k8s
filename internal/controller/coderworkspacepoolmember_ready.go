@@ -57,7 +57,8 @@ func confirmPoolMemberCreate(
 	// With include_deleted, Coder answers the live workspace first.
 	workspace, err := sdk.WorkspaceByOwnerAndName(ctx, spec.OwnerID, name, codersdk.WorkspaceOptions{IncludeDeleted: true})
 	found := err == nil
-	if !found && !isCoderNotFound(err) {
+	// Only Coder's own 404 proves that no workspace exists (#351).
+	if !found && !isCoderResourceNotFound(err) {
 		return coderStepUnavailable("get workspace by name", err), nil
 	}
 	live := false
