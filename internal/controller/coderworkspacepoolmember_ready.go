@@ -32,8 +32,10 @@ func (r *CoderWorkspacePoolMemberReconciler) readWorkspace(
 		return nil, err
 	case member.Status.WorkspaceID == "":
 		return confirmPoolMemberCreate(ctx, sdk, member, now)
-	default:
+	case member.Status.ReadyTime == nil:
 		return checkPoolMemberReadiness(ctx, sdk, member, now)
+	default:
+		return keepPoolMemberWarm(ctx, sdk, member, now)
 	}
 }
 
@@ -119,17 +121,38 @@ func confirmPoolMemberCreate(
 	return coderFail("CreateOutcomeUnknown", "No workspace %s from this member appeared within %s of the create request.", name, templateTestSettleWindow), nil
 }
 
-// checkPoolMemberReadiness reads the member's workspace once and applies the
-// readiness rules to its start build. It also checks the workspace's
-// identity against values that no status writer can change, so a member
-// never reports another workspace as its own.
+// checkPoolMemberReadiness applies the readiness rules to the member's start
+// build once.
 func checkPoolMemberReadiness(
 	ctx context.Context, sdk *codersdk.Client, member *coderv1alpha1.CoderWorkspacePoolMember, now time.Time,
 ) (*coderStep, error) {
+	workspace, step, err := readOwnPoolMemberWorkspace(ctx, sdk, member)
+	if step != nil || err != nil {
+		return step, err
+	}
+	name := member.Status.WorkspaceName
+	if step := workspaceBuildReadiness(workspace.LatestBuild, name); step != nil {
+		return step, nil
+	}
+	// last_used_at from this read is the baseline for the use check: a
+	// create that Coder serves from one of its prebuilds sets it at the claim.
+	member.Status.ReadyTime = &metav1.Time{Time: now}
+	member.Status.ReadyLastUsedAt = &metav1.Time{Time: workspace.LastUsedAt}
+	return coderWait("WorkspaceReady", "Every agent of workspace %s is ready.", name), nil
+}
+
+// readOwnPoolMemberWorkspace reads the member's workspace and checks its
+// identity (plan 6.2, identity guard) against values that no status writer
+// can change: the owner from the immutable spec, the kwp- name derived from
+// the UID, and the template. It also requires that the latest build is the
+// start build. A nil step means the workspace is this member's own.
+func readOwnPoolMemberWorkspace(
+	ctx context.Context, sdk *codersdk.Client, member *coderv1alpha1.CoderWorkspacePoolMember,
+) (codersdk.Workspace, *coderStep, error) {
 	spec, name := member.Spec, member.Status.WorkspaceName
 	workspaceID, err := uuid.Parse(member.Status.WorkspaceID)
 	if err != nil || workspaceID == uuid.Nil || member.Status.StartBuildID == "" {
-		return nil, fmt.Errorf("assertion failed: pool member %s/%s has workspace ID %q and start build ID %q",
+		return codersdk.Workspace{}, nil, fmt.Errorf("assertion failed: pool member %s/%s has workspace ID %q and start build ID %q",
 			member.Namespace, member.Name, member.Status.WorkspaceID, member.Status.StartBuildID)
 	}
 	workspace, err := sdk.Workspace(ctx, workspaceID)
@@ -139,29 +162,22 @@ func checkPoolMemberReadiness(
 	case coderStatus(err) == http.StatusGone:
 		step := coderFail("WorkspaceDeletedExternally", "Workspace %s was deleted by someone else.", name)
 		step.deleted = &metav1.Condition{Status: metav1.ConditionTrue, Reason: "DeletedExternally", Message: step.message}
-		return step, nil
+		return workspace, step, nil
 	case err != nil:
-		return coderStepUnavailable("get workspace", err), nil
+		return workspace, coderStepUnavailable("get workspace", err), nil
 	}
 	build := workspace.LatestBuild
 	if err := errors.Join(coderAnswerFor("workspace", workspaceID.String(), workspace.ID.String()),
 		coderAnswerFor("latest build workspace", workspaceID.String(), build.WorkspaceID.String())); err != nil {
-		return nil, err
+		return workspace, nil, err
 	}
 	if workspace.OwnerID.String() != spec.OwnerID || workspace.Name != name || workspace.TemplateID.String() != spec.TemplateID {
 		step := coderFail("OwnershipUnknown", "Workspace %s is not the workspace of this member.", workspaceID)
 		step.deleted = &metav1.Condition{Status: metav1.ConditionUnknown, Reason: "OwnershipUnknown", Message: step.message}
-		return step, nil
+		return workspace, step, nil
 	}
 	if build.ID.String() != member.Status.StartBuildID {
-		return coderFail("ChangedExternally", "Someone else started build %d of workspace %s.", build.BuildNumber, name), nil
+		return workspace, coderFail("ChangedExternally", "Someone else started build %d of workspace %s.", build.BuildNumber, name), nil
 	}
-	if step := workspaceBuildReadiness(build, name); step != nil {
-		return step, nil
-	}
-	// last_used_at from this read is the baseline for the use check: a
-	// create that Coder serves from one of its prebuilds sets it at the claim.
-	member.Status.ReadyTime = &metav1.Time{Time: now}
-	member.Status.ReadyLastUsedAt = &metav1.Time{Time: workspace.LastUsedAt}
-	return coderWait("WorkspaceReady", "Every agent of workspace %s is ready.", name), nil
+	return workspace, nil, nil
 }

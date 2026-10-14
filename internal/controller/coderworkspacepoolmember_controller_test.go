@@ -148,7 +148,8 @@ func requireMember(t *testing.T, member *coderv1alpha1.CoderWorkspacePoolMember,
 	require.Equal(t, phase, member.Status.Phase, member.Status.Message)
 	require.Equal(t, reason, member.Status.Reason, member.Status.Message)
 	require.Contains(t, member.Status.Message, messagePart)
-	require.True(t, meta.IsStatusConditionFalse(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionReady))
+	require.Equal(t, phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseReady,
+		meta.IsStatusConditionTrue(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionReady), "Ready=True exactly in phase Ready")
 	require.True(t, controllerutil.ContainsFinalizer(member, coderv1alpha1.CoderWorkspacePoolMemberCleanupFinalizer))
 }
 
