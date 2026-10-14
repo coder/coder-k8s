@@ -25,6 +25,9 @@ AGENT_TIMEOUT=${E2E_AGENT_TIMEOUT_SECONDS:-300} # create until every agent is co
 TT_TIMEOUT=${E2E_TEMPLATE_TEST_TIMEOUT_SECONDS:-300}      # create until a CoderTemplateTest is final
 NS_DELETE_TIMEOUT=${E2E_NAMESPACE_DELETE_TIMEOUT_SECONDS:-300}
 TIMEOUT=${E2E_TIMEOUT_SECONDS:-300}
+# "<source> v<version>" that terraform init must install from a filesystem mirror in the agent build (#369).
+# Empty: no check, for runs without a mirror.
+TF_MIRROR_PROVIDER=${E2E_EXPECT_TF_MIRROR_PROVIDER:-}
 EVENT_TIMEOUT=${E2E_EVENT_TIMEOUT_SECONDS:-60}
 POLL=${E2E_POLL_SECONDS:-3}
 PORT=${E2E_CODER_LOCAL_PORT:-13000}
@@ -409,6 +412,17 @@ OBJ=$(k create --raw "$API" -f "$WORK/ws-$AGENT_WS.json") || fail "cannot create
 AGENT_UID=$(jq -er '.metadata.uid' <<<"$OBJ") || fail "agent workspace lacks uid: $OBJ"
 BUILD=$(jq -er '.status.latestBuildID' <<<"$OBJ") || fail "agent workspace lacks latestBuildID: $OBJ"
 wait_until "start build $BUILD" build_done "$AGENT_NAME" "$BUILD" running
+if [[ -n $TF_MIRROR_PROVIDER ]]; then
+  # Terraform 1.15 reports a filesystem-mirror install as unauthenticated and a registry install as signed.
+  # With a lock file it takes the provider from Coder's shared plugin cache, which only the mirror can fill.
+  k get --raw "$API/$AGENT_NAME/log" >"$WORK/agent-build.log" || fail "cannot read coderworkspaces/log of $AGENT_NAME"
+  ! grep -qF "Installed provider version: $TF_MIRROR_PROVIDER (signed" "$WORK/agent-build.log" ||
+    fail "the agent build installed $TF_MIRROR_PROVIDER from the registry"
+  grep -qF -e "Installed provider version: $TF_MIRROR_PROVIDER (unauthenticated)" \
+    -e "$TF_MIRROR_PROVIDER: Using from the shared cache directory" "$WORK/agent-build.log" ||
+    fail "the agent build did not install $TF_MIRROR_PROVIDER from the provider mirror (log contents not printed)"
+  log "agent build: $TF_MIRROR_PROVIDER installed from the provider mirror or its cache"
+fi
 AGENTS_SEEN=""
 agents_ready() { # every agent of build $BUILD is connected and ready; a failed lifecycle fails at once
   local w seen

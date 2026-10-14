@@ -202,6 +202,14 @@ case "${pos[0]}:${pos[1]:-}" in
       [[ $SCENARIO != follow-fails || $raw != *follow=true* ]] || err InternalError "stream failed"
       line='2026-10-02T10:00:00Z [info] [provisioner|Planning infrastructure] Terraform 1.14.0 ok'
       if [[ $raw == *limitBytes=64 ]]; then printf '%s\n%s\n' "$line" "$line" | head -c 64; else printf '%s\n%s\n' "$line" "$line"; fi
+      if [[ $raw == */coderworkspaces/coder.e2e-tester.e2e-agent/log ]]; then # terraform init of the agent build; mirror-* break it
+        case $SCENARIO in
+          mirror-missing) ;;
+          mirror-cached) echo '2026-10-02T10:00:01Z [info] [provisioner|Initializing terraform] coder/coder v2.19.0: Using from the shared cache directory' ;;
+          mirror-signed | mirror-unchecked) echo '2026-10-02T10:00:01Z [info] [provisioner|Initializing terraform] Installed provider version: coder/coder v2.19.0 (signed by a HashiCorp partnerkey_id: 93C75807601AA0EC)' ;;
+          *) echo '2026-10-02T10:00:01Z [info] [provisioner|Initializing terraform] Installed provider version: coder/coder v2.19.0 (unauthenticated)' ;;
+        esac
+      fi
       exit 0
     fi
     if [[ $raw == */coderworkspaces ]]; then # LIST; list-* scenarios drop the item or skew its token
@@ -416,6 +424,7 @@ run_scenario() {
   env PATH="$STUBS:$PATH" REAL_JQ="$(command -v jq)" STUB_STATE="$S" SCENARIO="$name" SERVING_ID="$BUILT" BUILT_IMAGE_ID="$BUILT" \
     REPO_DIGEST="docker.io/library/import-2026-09-23@$NEW_DIGEST" \
     E2E_EXPECT_CODER_VERSION=v2.37.2 E2E_SOURCE_SHA=0123abc GITHUB_RUN_ID=42 GITHUB_RUN_ATTEMPT=1 \
+    E2E_EXPECT_TF_MIRROR_PROVIDER="coder/coder v2.19.0" \
     E2E_WORKDIR="$T/work" E2E_POLL_SECONDS=0.1 E2E_TIMEOUT_SECONDS=3 E2E_EVENT_TIMEOUT_SECONDS=2 GITHUB_ACTIONS=false \
     "$@" timeout 60 bash "$DRIVER" >"$T/out" 2>&1 || RC=$?
   SECS=$((SECONDS - start))
@@ -443,6 +452,7 @@ summary() { echo "  (native driver exit=$RC, ${SECS}s)"; }
 echo "TEST pass: full lifecycle against a well-behaved fake"
 run_scenario pass; summary
 check "driver exits 0 and prints PASS" eval '[[ $RC -eq 0 ]] && out_has "PASS: workspace lifecycle"'
+check "the agent build installed coder/coder from the provider mirror (#369)" out_has "agent build: coder/coder v2.19.0 installed from the provider mirror or its cache"
 # shellcheck disable=SC2034 # rv is used by the eval'd check below
 rv=$(jq -r .metadata.resourceVersion "$S/first_update.json")
 check "watch URL uses the current token and only watch/resourceVersion/timeoutSeconds" \
@@ -680,6 +690,26 @@ check "fails before activation and the agent template" eval 'failed_with "tester
 echo "TEST tester-stays-dormant: activating the tester does not make it active"
 run_scenario tester-stays-dormant; summary
 check "fails at the tester; no agent template or workspace" eval 'failed_with "cannot activate the tester user e2e-tester" && no_mutations_after "$LIFECYCLE,curl POST,curl PUT"'
+
+echo "TEST mirror-missing (#369): the agent build log shows no install of coder/coder from the mirror"
+run_scenario mirror-missing; summary
+check "fails after the start build; no delete" eval 'failed_with "the agent build did not install coder/coder v2.19.0 from the provider mirror" &&
+  no_mutations_after "$LIFECYCLE,curl POST,curl PUT,kubectl apply,kubectl create"'
+
+echo "TEST mirror-cached (#369): the agent build took coder/coder from the shared plugin cache, which only the mirror fills"
+run_scenario mirror-cached; summary
+check "driver exits 0 and accepts the cache" eval '[[ $RC -eq 0 ]] && out_has "PASS: workspace lifecycle" &&
+  out_has "agent build: coder/coder v2.19.0 installed from the provider mirror or its cache"'
+
+echo "TEST mirror-signed (#369): the agent build installed coder/coder from the registry"
+run_scenario mirror-signed; summary
+check "fails after the start build; no delete" eval 'failed_with "the agent build installed coder/coder v2.19.0 from the registry" &&
+  no_mutations_after "$LIFECYCLE,curl POST,curl PUT,kubectl apply,kubectl create"'
+
+echo "TEST mirror-unchecked (#369): without E2E_EXPECT_TF_MIRROR_PROVIDER the driver does not read the agent build log"
+run_scenario mirror-unchecked E2E_EXPECT_TF_MIRROR_PROVIDER=; summary
+check "driver exits 0 without the mirror check" eval '[[ $RC -eq 0 ]] && out_has "PASS: workspace lifecycle" &&
+  ! out_has "from the provider mirror" && ! grep -q "coderworkspaces/coder.e2e-tester.e2e-agent/log" "$S/calls.log"'
 
 echo "TEST agent-start-error: the agent lifecycle ends in start_error"
 run_scenario agent-start-error; summary
