@@ -32,7 +32,9 @@ const (
 // release when the finalizer can go. Otherwise the step says why it stays.
 func (r *CoderAIGatewayKeyReconciler) deleteStep(ctx context.Context, key *coderv1alpha1.CoderAIGatewayKey) (release bool, step *aiGatewayKeyStep, err error) {
 	if key.Status.NextSerial == 0 {
-		return true, nil, nil // No create was ever sent, so no key of this object can exist.
+		// No create was ever sent, so no key of this object can exist. A
+		// record can, when the marker write after it failed.
+		return true, nil, deleteCleanupRecord(ctx, r.Client, r.APIReader, r.OperatorNamespace, key.UID)
 	}
 	ref := types.NamespacedName{Namespace: key.Namespace, Name: key.Spec.ControlPlaneRef.Name}
 	controlPlane := &coderv1alpha1.CoderControlPlane{}
@@ -53,9 +55,17 @@ func (r *CoderAIGatewayKeyReconciler) deleteStep(ctx context.Context, key *coder
 		}
 		deleting = !holds
 		if holds {
+			// A pass under the hold ends at the hold end, however slowly
+			// Coder answers, so the bounded pass after it still fits in the
+			// control plane's grace period (#384 follow-up 4).
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithDeadline(ctx, controlPlaneHoldEnd(controlPlane))
+			defer cancel()
 			defer func() {
 				if step != nil {
-					step.requeue = controlPlaneHoldRequeue(controlPlane, now, step.requeue)
+					// From the end of the pass: a pass that ran until the
+					// deadline retries right after the hold end.
+					step.requeue = controlPlaneHoldRequeue(controlPlane, r.Clock.Now(), step.requeue)
 				}
 			}()
 		}
@@ -76,12 +86,25 @@ func (r *CoderAIGatewayKeyReconciler) deleteStep(ctx context.Context, key *coder
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, aiGatewayKeyBoundedDeleteTimeout)
 		defer cancel()
+		if other, wait, err := r.aiGatewayKeyRecordDeployment(ctx, sdk, key); err != nil {
+			return false, nil, err
+		} else if wait != nil || other != "" {
+			return r.releaseWithoutDelete(ctx, key, "the deployment check while CoderControlPlane is being deleted failed: "+other+aiGatewayKeyStepMessage(wait)), nil, nil
+		}
 		if _, left, failure, err := r.deleteKeys(ctx, sdk, key); err != nil {
 			return false, nil, err
 		} else if failure != nil {
 			return r.releaseWithoutDelete(ctx, key, "the one pass while CoderControlPlane is being deleted failed: "+failure.message, left...), nil, nil
 		}
-		return true, nil, nil
+		if last := key.Status.LastCreateAttemptTime; last == nil || r.Clock.Now().Before(last.Add(aiGatewayKeySettleWindow)) {
+			// A create of the last attempt can still commit after this LIST,
+			// so only a sweep after the settle window can prove that no key
+			// is left. The record stays for it.
+			log.FromContext(ctx).Info("Releasing the finalizer after one pass inside the settle window: the cleanup record stays for a sweep",
+				"record", r.OperatorNamespace+"/"+cleanupRecordObjectName(key.UID))
+			return true, nil, nil
+		}
+		return true, nil, deleteCleanupRecord(ctx, r.Client, r.APIReader, r.OperatorNamespace, key.UID)
 	}
 
 	now := r.Clock.Now()
@@ -96,14 +119,22 @@ func (r *CoderAIGatewayKeyReconciler) deleteStep(ctx context.Context, key *coder
 			"The object is being deleted. The operator deletes its keys in Coder at %s, when no create of the last attempt can still commit.",
 			settleAt.UTC().Format(time.RFC3339)), nil
 	}
+	// The record names the deployment that holds the keys. When the control
+	// plane now reaches another deployment, an empty LIST there proves
+	// nothing, so the record stays for a sweep (#353 invariant 7).
+	if other, wait, err := r.aiGatewayKeyRecordDeployment(ctx, sdk, key); err != nil || wait != nil {
+		return false, wait, err
+	} else if other != "" {
+		return r.releaseWithoutDelete(ctx, key, other), nil, nil
+	}
 	// The pass repeats until a LIST shows no key of this object, so the
-	// release follows a LIST that proves it.
+	// release follows a LIST that proves it. Only then does the record go.
 	for range 2 {
 		deleted, _, failure, err := r.deleteKeys(ctx, sdk, key)
 		if err != nil || failure != nil {
 			return false, failure, err
 		} else if deleted == 0 {
-			return true, nil, nil
+			return true, nil, deleteCleanupRecord(ctx, r.Client, r.APIReader, r.OperatorNamespace, key.UID)
 		}
 	}
 	return false, aiGatewayKeyWait(aiGatewayKeyDeleteRetry, reasonDeletingKeys,
@@ -151,6 +182,14 @@ func aiGatewayKeyDeleteFailure(action string, err error) *aiGatewayKeyStep {
 		step.message = "The object is being deleted, but the operator cannot delete its keys in Coder. " + step.message
 	}
 	return step
+}
+
+// aiGatewayKeyStepMessage returns the message of step, or "".
+func aiGatewayKeyStepMessage(step *aiGatewayKeyStep) string {
+	if step == nil {
+		return ""
+	}
+	return step.message
 }
 
 // releaseWithoutDelete logs the key IDs that can stay in Coder, because

@@ -83,6 +83,8 @@ type CoderAIGatewayKeyReconciler struct {
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
 	Clock     clock.PassiveClock
+	// OperatorNamespace holds the cleanup records (#353).
+	OperatorNamespace string
 
 	rateLimited coderBackoff // Keyed by types.NamespacedName.
 }
@@ -112,8 +114,8 @@ func aiGatewayKeyStalled(reason, format string, args ...any) *aiGatewayKeyStep {
 // the output Secret, or of any control plane in the namespace (any of them
 // can reserve the Secret name), requeues the object at once.
 func (r *CoderAIGatewayKeyReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if mgr == nil || r.Client == nil || r.APIReader == nil || r.Scheme == nil || r.Clock == nil {
-		return errors.New("assertion failed: AI Gateway key reconciler needs a manager, a client, an API reader, a scheme, and a clock")
+	if mgr == nil || r.Client == nil || r.APIReader == nil || r.Scheme == nil || r.Clock == nil || r.OperatorNamespace == "" {
+		return errors.New("assertion failed: AI Gateway key reconciler needs a manager, a client, an API reader, a scheme, a clock, and the operator namespace")
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&coderv1alpha1.CoderAIGatewayKey{}).
@@ -139,8 +141,8 @@ func (r *CoderAIGatewayKeyReconciler) keysInNamespace(ctx context.Context, obj c
 // Reconcile handles deletion first, stores the finalizer before any Coder
 // call, then runs the observe step and at most one action.
 func (r *CoderAIGatewayKeyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	if r.Client == nil || r.APIReader == nil || r.Scheme == nil || r.Clock == nil {
-		return ctrl.Result{}, errors.New("assertion failed: AI Gateway key reconciler needs a client, an API reader, a scheme, and a clock")
+	if r.Client == nil || r.APIReader == nil || r.Scheme == nil || r.Clock == nil || r.OperatorNamespace == "" {
+		return ctrl.Result{}, errors.New("assertion failed: AI Gateway key reconciler needs a client, an API reader, a scheme, a clock, and the operator namespace")
 	}
 	// Only a wait after HTTP 429 keeps the backoff count.
 	keepBackoff := false
@@ -273,6 +275,7 @@ func (r *CoderAIGatewayKeyReconciler) observe(
 		// Coder lists the current key, so no kill switch holds. A stale
 		// generation would re-arm a later kill switch at once.
 		key.Status.KillSwitchGeneration = 0
+		r.recordAIGatewayKeyID(ctx, sdk, key, prefix)
 	}
 	if stall != nil {
 		// The Secret is not this object's, but its live value still decides
