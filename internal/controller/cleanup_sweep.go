@@ -133,8 +133,9 @@ func (r *CleanupRecordReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if req.Namespace != r.OperatorNamespace {
 		return ctrl.Result{}, nil
 	}
+	// A live read: the cache can still hold an older create time.
 	configMap := &corev1.ConfigMap{}
-	if err := r.Get(ctx, req.NamespacedName, configMap); apierrors.IsNotFound(err) {
+	if err := r.APIReader.Get(ctx, req.NamespacedName, configMap); apierrors.IsNotFound(err) {
 		if uid, ok := strings.CutPrefix(req.Name, cleanupRecordPrefix); ok {
 			r.setUnmatched(types.UID(uid), "", false)
 		}
@@ -168,16 +169,16 @@ func (r *CleanupRecordReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: wait}, nil
 	}
 
-	sdk, controlPlane, unknown, err := r.matchingControlPlane(ctx, record)
+	matches, unknown, err := r.matchingControlPlanes(ctx, record)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if sdk == nil && unknown {
+	if len(matches) == 0 && unknown {
 		// A ready control plane did not answer its deployment ID, for
 		// example while its Coder pods start. It can still match.
 		return ctrl.Result{RequeueAfter: cleanupRetry}, nil
 	}
-	if sdk == nil {
+	if len(matches) == 0 {
 		r.setUnmatched(record.UID, record.Kind, true)
 		r.Recorder.Eventf(configMap, nil, corev1.EventTypeWarning, "NoMatchingDeployment", "Sweep",
 			"No ready CoderControlPlane in namespace %s reaches Coder deployment %s, which holds the provider of deleted %s %s/%s. Delete the provider in Coder by hand, then delete this ConfigMap.",
@@ -185,14 +186,20 @@ func (r *CleanupRecordReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: cleanupUnmatchedRecheck}, nil
 	}
 	r.setUnmatched(record.UID, record.Kind, false)
-	logger := log.FromContext(ctx).WithValues("record", configMap.Name, "deploymentID", record.DeploymentID,
-		"controlPlane", types.NamespacedName{Namespace: controlPlane.Namespace, Name: controlPlane.Name}, "provider", record.Namespace+"/"+record.Name)
-	gone, why, err := sweepAIProvider(ctx, sdk, record)
-	if err != nil {
-		return ctrl.Result{}, err
+	logger := log.FromContext(ctx).WithValues("record", configMap.Name, "deploymentID", record.DeploymentID, "provider", record.Namespace+"/"+record.Name)
+	// Each matching control plane has its own operator token, so a failure
+	// through one tries the next.
+	gone, why, through := false, "", logger
+	for _, m := range matches {
+		through = logger.WithValues("controlPlane", types.NamespacedName{Namespace: m.controlPlane.Namespace, Name: m.controlPlane.Name})
+		if gone, why, err = sweepAIProvider(ctx, m.sdk, record); err != nil {
+			return ctrl.Result{}, err
+		} else if gone {
+			break
+		}
+		through.Info("The cleanup of a deleted provider in Coder failed", "why", why)
 	}
 	if !gone {
-		logger.Info("The cleanup of a deleted provider in Coder failed, retrying", "why", why)
 		return ctrl.Result{RequeueAfter: cleanupRetry}, nil
 	}
 	// Coder confirmed the delete in the matching deployment (invariant 7).
@@ -200,13 +207,19 @@ func (r *CleanupRecordReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 	cleanupRecordsSwept.WithLabelValues(record.Kind).Inc()
-	logger.Info("Swept the provider of a deleted CoderAIProvider in Coder", "result", why, "providerID", record.CoderID)
+	through.Info("Swept the provider of a deleted CoderAIProvider in Coder", "result", why, "providerID", record.CoderID)
 	return ctrl.Result{}, nil
 }
 
-// matchingControlPlane returns a Coder client of a ready control plane in
-// the record's namespace whose current deployment ID is the record's, or nil
-// when there is none (#353 invariant 4). The ID comes from Coder now, never
+// controlPlaneMatch is a control plane whose Coder deployment is a record's.
+type controlPlaneMatch struct {
+	sdk          *codersdk.Client
+	controlPlane *coderv1alpha1.CoderControlPlane
+}
+
+// matchingControlPlanes returns the Coder clients of the ready control planes
+// in the record's namespace whose current deployment ID is the record's
+// (#353 invariant 4). The ID comes from Coder now, never
 // from the record or a URL. unknown reports a ready control plane whose
 // deployment ID read failed.
 //
@@ -215,13 +228,14 @@ func (r *CleanupRecordReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 // records of a namespace, and the control planes that sweep them, are then
 // under the control of the same people, and a sweep can only delete what
 // their own operator access could delete.
-func (r *CleanupRecordReconciler) matchingControlPlane(ctx context.Context, record *cleanupRecord) (*codersdk.Client, *coderv1alpha1.CoderControlPlane, bool, error) {
+func (r *CleanupRecordReconciler) matchingControlPlanes(ctx context.Context, record *cleanupRecord) ([]controlPlaneMatch, bool, error) {
 	deploymentID := record.DeploymentID
 	controlPlanes := &coderv1alpha1.CoderControlPlaneList{}
 	if err := r.List(ctx, controlPlanes, client.InNamespace(record.Namespace)); err != nil {
-		return nil, nil, false, fmt.Errorf("list control planes: %w", err)
+		return nil, false, fmt.Errorf("list control planes: %w", err)
 	}
 	unknown := false
+	var matches []controlPlaneMatch
 	for i := range controlPlanes.Items {
 		cp := &controlPlanes.Items[i]
 		// A live read: the cache can show the control plane ready before
@@ -240,10 +254,10 @@ func (r *CleanupRecordReconciler) matchingControlPlane(ctx context.Context, reco
 			continue
 		}
 		if id == deploymentID {
-			return sdk, cp, false, nil
+			matches = append(matches, controlPlaneMatch{sdk: sdk, controlPlane: cp})
 		}
 	}
-	return nil, nil, unknown, nil
+	return matches, unknown, nil
 }
 
 // sweepAIProvider deletes the provider of record in Coder. It returns gone
@@ -276,9 +290,10 @@ func sweepAIProvider(ctx context.Context, sdk *codersdk.Client, record *cleanupR
 		if err := coderAnswerFor("AI provider", record.Name, found.Name); err != nil {
 			return false, err.Error(), nil //nolint:nilerr // A wrong answer retries the sweep.
 		}
-		if found.DisplayName != record.Nonce {
+		if found.DisplayName != record.Nonce || string(found.Type) != record.Type {
 			// Another provider holds the name, so no create of this object
-			// committed after the settle window.
+			// committed after the settle window. The nonce and the type
+			// prove ownership, as on the controller's own paths.
 			return true, "the provider of that name is not this object's", nil
 		}
 		if found.ID == uuid.Nil {

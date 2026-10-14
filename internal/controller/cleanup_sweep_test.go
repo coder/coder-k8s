@@ -215,6 +215,65 @@ func TestCleanupSweepAIProviderCases(t *testing.T) {
 		require.Zero(t, s.fake.requestCount(routeDeleteAIProvider), "only a control plane in the object's namespace sweeps")
 		require.NotNil(t, cleanupRecord(ctx, t, s.namespace, s.provider.UID))
 	})
+	t.Run("first matching control plane has no site owner", func(t *testing.T) {
+		t.Parallel()
+		s := newSweepEnv(ctx, t)
+		other := newFakeCoder(t) // A second Coder on the same database: same deployment, its own users.
+		other.mu.Lock()
+		other.deploymentID = s.fake.deploymentID
+		other.mu.Unlock()
+		other.updateUser(other.operatorID, func(u *codersdk.User) { u.Roles = []codersdk.SlimRole{} })
+		createTestControlPlane(ctx, t, s.namespace, "coder-a", other.server.URL)
+		createTestControlPlane(ctx, t, s.namespace, "coder-b", s.fake.server.URL)
+		s.clock.Step(6 * time.Minute)
+		require.Zero(t, s.sweep(ctx, t).RequeueAfter, "the next matching control plane sweeps")
+		_, ok := s.fake.aiProvider("openai")
+		require.False(t, ok)
+	})
+	t.Run("same name and nonce, another type", func(t *testing.T) {
+		t.Parallel()
+		s := newSweepEnv(ctx, t)
+		createTestControlPlane(ctx, t, s.namespace, "coder-b", s.fake.server.URL)
+		configMap := &corev1.ConfigMap{}
+		require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: s.namespace, Name: "ck8s-cleanup-" + string(s.provider.UID)}, configMap))
+		configMap.Data["coderID"] = ""
+		require.NoError(t, k8sClient.Update(ctx, configMap))
+		s.fake.mu.Lock()
+		for _, p := range s.fake.aiProviders {
+			p.displayName, p.providerType = "coder-k8s:"+string(s.provider.UID), codersdk.AIProviderTypeAnthropic
+		}
+		s.fake.mu.Unlock()
+		s.clock.Step(6 * time.Minute)
+		s.sweep(ctx, t)
+		_, ok := s.fake.aiProvider("openai")
+		require.True(t, ok, "only the nonce and the recorded type prove ownership")
+	})
+	t.Run("stale cache of the record", func(t *testing.T) {
+		t.Parallel()
+		s := newSweepEnv(ctx, t)
+		createTestControlPlane(ctx, t, s.namespace, "coder-b", s.fake.server.URL)
+		// A newer create attempt, written right before; a stale cache would
+		// still show the old time.
+		configMap := &corev1.ConfigMap{}
+		require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: s.namespace, Name: "ck8s-cleanup-" + string(s.provider.UID)}, configMap))
+		old := configMap.DeepCopy()
+		configMap.Data["createAttemptTime"] = s.clock.Now().Add(6 * time.Minute).UTC().Format(time.RFC3339)
+		require.NoError(t, k8sClient.Update(ctx, configMap))
+		cached := s.sweeper.Client
+		s.sweeper.Client = interceptor.NewClient(cached.(client.WithWatch), interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if cm, ok := obj.(*corev1.ConfigMap); ok {
+					old.DeepCopyInto(cm)
+					return nil
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		})
+		s.clock.Step(6 * time.Minute)
+		require.Greater(t, s.sweep(ctx, t).RequeueAfter, time.Duration(0), "the sweep waits for the settle window after the newest create")
+		_, ok := s.fake.aiProvider("openai")
+		require.True(t, ok)
+	})
 	t.Run("stale cache of the token Secret", func(t *testing.T) {
 		t.Parallel()
 		s := newSweepEnv(ctx, t)
