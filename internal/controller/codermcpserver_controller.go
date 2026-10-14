@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -172,7 +173,7 @@ func (r *CoderMCPServerReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if err := r.patchFinalizer(ctx, server, true); err != nil {
 		return ctrl.Result{}, err
 	}
-	step, err := r.check(ctx, server)
+	step, err := r.check(ctx, server, before)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -184,9 +185,13 @@ func (r *CoderMCPServerReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 }
 
 // check gets Coder access, resolves and pins the organization, applies the
-// control plane's opt-in, reads the credentials, and looks up the slug. Every
-// Coder call before the slug lookup is an organization lookup.
-func (r *CoderMCPServerReconciler) check(ctx context.Context, server *coderv1alpha1.CoderMCPServer) (*mcpServerStep, error) {
+// control plane's opt-in, reads the credentials, creates the config or
+// records the one that this object created, and applies a new generation of
+// the spec. Every Coder call before the slug lookup is an organization
+// lookup.
+func (r *CoderMCPServerReconciler) check(
+	ctx context.Context, server *coderv1alpha1.CoderMCPServer, before *coderv1alpha1.CoderMCPServerStatus,
+) (*mcpServerStep, error) {
 	sdk, controlPlane, wait, err := controlPlaneCoderClient(ctx, r.Client, server.Namespace, server.Spec.ControlPlaneRef.Name)
 	if err != nil {
 		return nil, err
@@ -212,9 +217,36 @@ func (r *CoderMCPServerReconciler) check(ctx context.Context, server *coderv1alp
 	if step != nil || err != nil {
 		return step, err
 	}
-	step = lookUpMCPServerSlug(ctx, sdk, server, org.ID)
+	if server.Status.ConfigID == "" {
+		if step, err = r.createOrRecord(ctx, sdk, server, org.ID, values, before); err != nil {
+			return nil, err
+		}
+		if step == nil {
+			// Store the ID before anything replaces the nonce: after that,
+			// only the stored ID proves that this object created the config.
+			if err := r.writeStatus(ctx, server, before); err != nil {
+				return nil, err
+			}
+			*before = *server.Status.DeepCopy()
+		}
+	}
+	switch {
+	case step != nil:
+	case server.Status.AppliedGeneration == server.Generation &&
+		slices.Equal(server.Status.Credentials, mcpServerCredentialStatus(server.Spec.Auth, values)):
+		// A Secret change moves its change token without a new generation.
+		step = mcpServerReady(server)
+	default:
+		if step, err = applyMCPServer(ctx, sdk, server, org.ID, values); err != nil {
+			return nil, err
+		}
+	}
 	// Coder messages can echo the request, so scrub the credentials from them.
-	step.message = credentialsecret.Redact(step.message, values...)
+	all := make([]credentialsecret.Value, 0, len(values))
+	for _, v := range values {
+		all = append(all, v)
+	}
+	step.message = credentialsecret.Redact(step.message, all...)
 	return step, nil
 }
 
@@ -339,10 +371,12 @@ func mcpServerURLs(spec coderv1alpha1.CoderMCPServerSpec) (map[string]*url.URL, 
 }
 
 // readMCPServerCredentials reads every credential of the spec's auth type
-// through the credential Secret contract, once per destination. It returns
-// the values for redaction. All reads of one Secret must see the same Secret
-// state, or the Secret changed during the reconcile (plan 5.2 rule 2).
-func readMCPServerCredentials(ctx context.Context, reader client.Reader, server *coderv1alpha1.CoderMCPServer) ([]credentialsecret.Value, *mcpServerStep, error) {
+// through the credential Secret contract, once per destination, and returns
+// them by status.credentials field. All reads of one Secret must see the same
+// Secret state, or the Secret changed during the reconcile (plan 5.2 rule 2).
+func readMCPServerCredentials(
+	ctx context.Context, reader client.Reader, server *coderv1alpha1.CoderMCPServer,
+) (map[string]credentialsecret.Value, *mcpServerStep, error) {
 	auth := server.Spec.Auth
 	switch auth.Type {
 	case "none", "api_key", "custom_headers", "oauth2":
@@ -356,7 +390,7 @@ func readMCPServerCredentials(ctx context.Context, reader client.Reader, server 
 	if step != nil {
 		return nil, step, nil
 	}
-	var values []credentialsecret.Value
+	values := map[string]credentialsecret.Value{}
 	seen := map[string]credentialsecret.ChangeToken{}
 	for _, c := range mcpServerCredentialRefs(auth) {
 		for _, destination := range c.destinations {
@@ -366,7 +400,7 @@ func readMCPServerCredentials(ctx context.Context, reader client.Reader, server 
 			} else if err != nil {
 				return nil, nil, err
 			}
-			values = append(values, value)
+			values[c.field] = value
 			token := value.Token
 			if first, ok := seen[c.ref.Name]; ok && (first.SecretUID != token.SecretUID || first.ResourceVersion != token.ResourceVersion) {
 				return nil, mcpServerWait(mcpServerSecretChangedRetry, "CredentialSecretChanged",
@@ -400,34 +434,29 @@ func isHTTPFieldValue(s string) bool {
 	return true
 }
 
-// lookUpMCPServerSlug lists the organization's configs, because Coder has no
-// lookup by slug. A config with the slug and a display name other than this
-// object's nonce belongs to someone else, and the controller never changes it
-// (no adoption).
-func lookUpMCPServerSlug(ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, orgID uuid.UUID) *mcpServerStep {
+// findMCPServerSlug lists the organization's configs, because Coder has no
+// lookup by slug, and returns the one with the spec's slug, or nil. Slugs are
+// unique per organization, with case.
+func findMCPServerSlug(
+	ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, orgID uuid.UUID,
+) (*codersdk.MCPServerConfig, *mcpServerStep) {
 	configs, err := sdk.MCPServerConfigs(ctx, orgID)
 	if err != nil {
-		return mcpServerWait(mcpServerRetry, "CoderUnavailable", "list MCP server configs: %s", coderErrorSummary(err))
+		return nil, mcpServerWait(mcpServerRetry, "CoderUnavailable", "list MCP server configs: %s", coderErrorSummary(err))
 	}
-	for _, config := range configs {
+	for i, config := range configs {
 		if err := coderAnswerFor("MCP server config organization", orgID.String(), config.OrganizationID.String()); err != nil {
-			return mcpServerStalled(mcpServerResync, "CoderAnswerMismatch", "%s", err.Error())
+			return nil, mcpServerStalled(mcpServerResync, "CoderAnswerMismatch", "%s", err.Error())
 		}
 		if config.Slug != server.Spec.Slug {
 			continue
 		}
 		if config.ID == uuid.Nil {
-			return mcpServerStalled(mcpServerResync, "CoderAnswerMismatch", "assertion failed: Coder answered the MCP server config with slug %s without an ID", config.Slug)
+			return nil, mcpServerStalled(mcpServerResync, "CoderAnswerMismatch", "assertion failed: Coder answered the MCP server config with slug %s without an ID", config.Slug)
 		}
-		if config.DisplayName == mcpServerNoncePrefix+string(server.UID) {
-			return mcpServerWait(mcpServerResync, "Pending",
-				"MCP server config %s carries this object's nonce. This controller version does not record it.", config.ID)
-		}
-		return mcpServerStalled(mcpServerResync, "SlugConflict",
-			"Coder organization %s already has an MCP server config with slug %s (ID %s). The controller does not change a config that it did not create.",
-			server.Spec.Organization, server.Spec.Slug, config.ID)
+		return &configs[i], nil
 	}
-	return mcpServerWait(mcpServerResync, "Pending", "Coder has no MCP server config with slug %s. This controller version does not create it.", server.Spec.Slug)
+	return nil, nil
 }
 
 // patchFinalizer adds or removes the cleanup finalizer with a merge patch. The

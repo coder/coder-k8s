@@ -118,8 +118,9 @@ func TestTemplateTestCreateResults(t *testing.T) {
 	}
 }
 
-// markerConflictClient fails every status write that sets the create marker,
-// like a write from a stale object after a leader handover.
+// markerConflictClient fails every status write that sets the create marker
+// of a test or a pool member, like a write from a stale object after a leader
+// handover.
 type markerConflictClient struct{ client.Client }
 
 func (c markerConflictClient) Status() client.SubResourceWriter {
@@ -131,6 +132,9 @@ type markerConflictWriter struct{ client.SubResourceWriter }
 func (w markerConflictWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 	if tt, ok := obj.(*coderv1alpha1.CoderTemplateTest); ok && tt.Status.CreateAttemptTime != nil {
 		return apierrors.NewConflict(schema.GroupResource{Group: "coder.com", Resource: "codertemplatetests"}, tt.Name, errors.New("stale object"))
+	}
+	if m, ok := obj.(*coderv1alpha1.CoderWorkspacePoolMember); ok && m.Status.CreateAttemptTime != nil {
+		return apierrors.NewConflict(schema.GroupResource{Group: "coder.com", Resource: "coderworkspacepoolmembers"}, m.Name, errors.New("stale object"))
 	}
 	return w.SubResourceWriter.Update(ctx, obj, opts...)
 }
