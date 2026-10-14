@@ -7,11 +7,14 @@ import (
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 )
@@ -165,10 +168,40 @@ func TestCoderAIProviderDeletePendingCreateNeedsSiteOwner(t *testing.T) {
 	provider.Status.CreateAttemptTime = &metav1.Time{Time: time.Now()}
 	require.NoError(t, k8sClient.Status().Update(ctx, provider))
 	env.fake.updateUser(env.fake.operatorID, func(u *codersdk.User) { u.Roles = []codersdk.SlimRole{} })
-	got, _ := env.deleteAIProvider(ctx, t, provider)
+	got, result := env.deleteAIProvider(ctx, t, provider)
 	require.NotNil(t, got)
 	require.Contains(t, requireAIProviderStep(t, got, false, "ConfirmingCreate"), "not a site owner")
+	require.Equal(t, 60*time.Second, result.RequeueAfter, "a delete waits with the delete poll")
 	require.Equal(t, []string{coderv1alpha1.CoderAIProviderCleanupFinalizer}, got.Finalizers)
+	require.Zero(t, env.fake.requestCount(routeDeleteAIProvider))
+}
+
+// A name lookup that answers this object's provider without an ID is
+// impossible. The reconcile fails fast, deletes nothing and keeps the
+// finalizer.
+func TestCoderAIProviderDeletePendingCreateAnswerWithoutID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newAIProviderCreateEnv(ctx, t)
+	_, err := env.fake.client(t, 2*time.Second).CreateAIProvider(ctx, codersdk.CreateAIProviderRequest{
+		Type: codersdk.AIProviderTypeOpenAI, Name: provider.Name, DisplayName: "coder-k8s:" + string(provider.UID),
+		BaseURL: provider.Spec.BaseURL, APIKeys: []string{testAIProviderKey},
+	})
+	require.NoError(t, err)
+	provider.Finalizers = []string{coderv1alpha1.CoderAIProviderCleanupFinalizer}
+	require.NoError(t, k8sClient.Update(ctx, provider))
+	provider.Status.CreateAttemptTime = &metav1.Time{Time: time.Now()}
+	require.NoError(t, k8sClient.Status().Update(ctx, provider))
+	env.fake.failNext(routeAIProvider, fakeFault{Rewrite: func(answer any) any {
+		p := answer.(codersdk.AIProvider)
+		p.ID = uuid.Nil
+		return p
+	}})
+	require.NoError(t, k8sClient.Delete(ctx, provider))
+	_, err = env.r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(provider)})
+	require.ErrorContains(t, err, "assertion failed: Coder answered AI provider openai without an ID")
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(provider), provider))
+	require.Equal(t, []string{coderv1alpha1.CoderAIProviderCleanupFinalizer}, provider.Finalizers)
 	require.Zero(t, env.fake.requestCount(routeDeleteAIProvider))
 }
 
@@ -208,6 +241,26 @@ func TestCoderAIProviderDeleteWithControlPlaneGoing(t *testing.T) {
 			require.Equal(t, fail, found)
 		})
 	}
+	t.Run("control plane being deleted, operator token read fails", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		env, _, provider := newReadyAIProvider(ctx, t)
+		holdControlPlane(ctx, t, env.namespace)
+		base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+		require.NoError(t, err)
+		env.r.Client = interceptor.NewClient(base, interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.Secret); ok && key.Name == "coder-operator-token" {
+					return apierrors.NewTimeoutError("the server was unable to return a response in the time allotted", 1)
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		})
+		requests := env.fake.totalRequests()
+		got, _ := env.deleteAIProvider(ctx, t, provider)
+		require.Nil(t, got, "the finalizer went")
+		require.Equal(t, requests, env.fake.totalRequests(), "no Coder request")
+	})
 	t.Run("control plane being deleted without operator access", func(t *testing.T) {
 		t.Parallel()
 		ctx := context.Background()

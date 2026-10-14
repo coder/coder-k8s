@@ -2,9 +2,11 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
+	"github.com/google/uuid"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -40,6 +42,9 @@ func (r *CoderAIProviderReconciler) deleteStep(ctx context.Context, provider *co
 	deleting := !controlPlane.DeletionTimestamp.IsZero()
 	sdk, _, wait, err := controlPlaneCoderClientFor(ctx, r.Client, ref.Namespace, ref.Name, deleting)
 	switch {
+	case err != nil && deleting:
+		// One attempt only, also when the access setup fails (plan D12).
+		return r.releaseWithoutDelete(ctx, provider, "the Coder access of CoderControlPlane, which is being deleted, failed: "+err.Error()), nil, nil
 	case err != nil:
 		return false, nil, err
 	case wait != nil && deleting:
@@ -54,7 +59,9 @@ func (r *CoderAIProviderReconciler) deleteStep(ctx context.Context, provider *co
 		ctx, cancel = context.WithTimeout(ctx, aiProviderBoundedDeleteTimeout)
 		defer cancel()
 	}
-	step = r.deleteInCoder(ctx, sdk, provider)
+	if step, err = r.deleteInCoder(ctx, sdk, provider); err != nil {
+		return false, nil, err
+	}
 	if step != nil && deleting {
 		return r.releaseWithoutDelete(ctx, provider, "the one delete attempt while CoderControlPlane is being deleted failed: "+step.message), nil, nil
 	}
@@ -64,32 +71,40 @@ func (r *CoderAIProviderReconciler) deleteStep(ctx context.Context, provider *co
 // deleteInCoder deletes the provider of this object in Coder and returns nil
 // when Coder holds none. With only a create marker, a read decides first:
 // only the nonce and the type prove that the provider is this object's.
-func (r *CoderAIProviderReconciler) deleteInCoder(ctx context.Context, sdk *codersdk.Client, provider *coderv1alpha1.CoderAIProvider) *aiProviderStep {
+func (r *CoderAIProviderReconciler) deleteInCoder(ctx context.Context, sdk *codersdk.Client, provider *coderv1alpha1.CoderAIProvider) (*aiProviderStep, error) {
 	id := provider.Status.ProviderID
 	if id == "" {
 		found, err := sdk.AIProvider(ctx, provider.Name)
 		switch {
 		case isCoderNotFound(err):
-			// A 404 proves absence only for a site owner.
-			return requireSiteOwner(ctx, sdk)
+			// A 404 proves absence only for a site owner. A role change in
+			// Coder has no watch, so the wait uses the delete poll.
+			if step := requireSiteOwner(ctx, sdk); step != nil {
+				step.requeue = aiProviderDeletePoll
+				return step, nil
+			}
+			return nil, nil
 		case err != nil:
-			return aiProviderWait(aiProviderDeletePoll, "CoderUnavailable", "get provider %s: %s", provider.Name, coderErrorSummary(err))
+			return aiProviderWait(aiProviderDeletePoll, "CoderUnavailable", "get provider %s: %s", provider.Name, coderErrorSummary(err)), nil
 		}
 		if err := coderAnswerFor("AI provider", provider.Name, found.Name); err != nil {
 			log.FromContext(ctx).Error(err, "Coder answered something other than the controller asked for")
-			return aiProviderWait(aiProviderDeletePoll, "CoderAnswerMismatch", "%s", err.Error())
+			return aiProviderWait(aiProviderDeletePoll, "CoderAnswerMismatch", "%s", err.Error()), nil
 		}
 		if found.DisplayName != aiProviderNonce(provider) || string(found.Type) != provider.Spec.Type {
 			// Someone else's provider holds the name, so no create of this
 			// object committed. The controller never deletes it.
-			return nil
+			return nil, nil
+		}
+		if found.ID == uuid.Nil {
+			return nil, fmt.Errorf("assertion failed: Coder answered AI provider %s without an ID", provider.Name)
 		}
 		id = found.ID.String()
 	}
 	if err := sdk.DeleteAIProvider(ctx, id); err != nil && !isCoderNotFound(err) {
-		return aiProviderWait(aiProviderDeletePoll, "CoderUnavailable", "delete provider %s (ID %s): %s", provider.Name, id, coderErrorSummary(err))
+		return aiProviderWait(aiProviderDeletePoll, "CoderUnavailable", "delete provider %s (ID %s): %s", provider.Name, id, coderErrorSummary(err)), nil
 	}
-	return nil
+	return nil, nil
 }
 
 // releaseWithoutDelete logs what can stay in Coder, because nothing can
