@@ -151,10 +151,19 @@ Before each key create, the operator writes a cleanup record: a ConfigMap named 
 
 When the control plane later reaches another Coder deployment (for example after its database Secret changed), the record still locates the keys in the old one. The operator then stalls the object with `CoderDeploymentChanged` at its next key create, keeps the record and creates no key in the new deployment. A delete of the object then removes the finalizer without a delete in Coder. Delete the keys in the old deployment, then delete the ConfigMap.
 
-The operator removes the record only after a list in the record's deployment shows no key of the object: at the end of a normal delete, or after the one bounded pass when the last create was more than 5 minutes before it. In every other release without a delete, the record stays and names where the keys are. Find the records with `kubectl -n coder-system get configmaps -l coder.com/cleanup-record=CoderAIGatewayKey`. The operator gets write access to ConfigMaps only in that namespace. Do not give other users write access to ConfigMaps there.
+The operator removes the record only after a list in the record's deployment shows no key of the object: at the end of a normal delete, or after the one bounded pass when the last create was more than 5 minutes before it. In every other release without a delete, for example in a namespace deletion, the record stays, and the operator sweeps it:
+
+1. It waits until the object with that UID is gone and 5 minutes have passed since the last create, so that a create still in flight commits first.
+2. It looks for a ready `CoderControlPlane` in the object's namespace whose Coder answers the record's deployment ID now. It never matches by URL or name: a new Coder database behind the same URL has another deployment ID and is never swept. A control plane in another namespace never sweeps the record.
+3. Through that control plane, whose operator user must be a site owner, it lists the keys and deletes every key whose name is the record's prefix `ck8s-<UID without dashes>-` followed by a serial number (the names that the operator gives, such as `ck8s-<UID without dashes>-3`). It never deletes any other key.
+4. It removes the record when a list shows no such key. A failed list or delete, or a `404` that is not Coder's own, keeps the record, and the operator retries every minute.
+
+So after a namespace deletion with an external database, the leftover keys go once you create the namespace again with a control plane that uses the same database. The metric `coder_k8s_cleanup_records_swept_total` (label `kind`) counts the swept records.
+
+When no ready control plane reaches the record's deployment, the record stays. The gauge `coder_k8s_cleanup_records_unmatched` counts these records, and the operator writes a `NoMatchingDeployment` Warning Event on the ConfigMap every 10 minutes. When that Coder deployment never comes back, delete the keys with the record's prefix in Coder by hand, then delete the ConfigMap. Find the records with `kubectl -n coder-system get configmaps -l coder.com/cleanup-record=CoderAIGatewayKey`. The operator gets write access to ConfigMaps only in that namespace. Do not give other users write access to ConfigMaps there: a record names the keys that a sweep deletes.
 
 !!! warning "Delete the keys before the namespace"
-    When you delete the namespace, Kubernetes deletes the control plane and the `CoderAIGatewayKey` objects at the same time. The control plane is usually gone before the operator handles the objects, so the finalizers go without a delete, and the keys stay valid in Coder. The namespace deletion finishes, and the operator logs the key IDs with reason `ControlPlaneGone`.
+    When you delete the namespace, Kubernetes deletes the control plane and the `CoderAIGatewayKey` objects at the same time. The control plane is usually gone before the operator handles the objects, so the finalizers go without a delete, and the keys stay valid in Coder. The namespace deletion finishes, and the operator logs the key IDs with reason `ControlPlaneGone`. A [sweep](#cleanup-records) deletes the keys only when the namespace comes back with a control plane on the same Coder database. Until then they stay valid.
 
 Delete the `CoderAIGatewayKey` objects first and wait until they are gone, then delete the control plane or the namespace:
 
@@ -191,7 +200,7 @@ A deletion that keeps failing never ends by itself. Leave it in one of these way
 
 ## Known limits
 
-- **Leftover keys.** A key that commits more than 5 minutes after a lost create answer, or after the object is gone, stays in Coder. So do the keys of objects that go together with their control plane, for example in a namespace deletion. Find keys of deleted objects with `coder ai-gateway keys list`: their names start with `ck8s-` and a UID that no `CoderAIGatewayKey` has.
+- **Leftover keys.** A key that commits more than 5 minutes after a lost create answer, or after the object is gone, stays in Coder. So do the keys of objects that go together with their control plane, for example in a namespace deletion, until a [sweep](#cleanup-records) deletes them. Find keys of deleted objects with `coder ai-gateway keys list`: their names start with `ck8s-` and a UID that no `CoderAIGatewayKey` has.
 - **A short key list.** The operator reads all keys with one list call. When a list answer names the current key but leaves out a replaced key, the operator treats the replaced key as deleted. If the key appears again, the operator deletes it as an orphan, without the rest of its grace period. Coder lists all keys in one answer, so only a proxy between the operator and Coder that changes the answer can cause this.
 
 ## Grant access
