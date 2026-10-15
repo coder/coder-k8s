@@ -852,7 +852,15 @@ mcp_chat() { # [header file]: POST of a chat of the stub model that selects $MCP
   curl -sS --max-time 30 -o "$WORK/coder-raw.json" -w '%{http_code}' -X POST -H @"${1:-$WORK/coder.hdr}" -H 'Content-Type: application/json' \
     --data @"$WORK/mcp-chat.json" "$CODER_URL/api/v2/chats"
 }
-mcp_turn() { mcp_report && jq -e --argjson l "$LLM_OFF" --arg p "${MCP}__" 'any(.llm[$l:][].tools[]?; startswith($p))' "$WORK/mcp-report.json" >/dev/null; }
+REPORT_SEEN=""
+mcp_turn() { # true once an LLM request of the new turn lists the tools of $MCP; logs the request counts and methods on change
+  local seen
+  mcp_report || return 1
+  seen=$(jq -c --argjson o "$MCP_OFF" --argjson l "$LLM_OFF" '{mcp: [.mcp[$o:][].method], llm: [.llm[$l:][] | {stream, tools: (.tools | length)}]}' \
+    "$WORK/mcp-report.json") || return 1
+  [[ $seen == "$REPORT_SEEN" ]] || { REPORT_SEEN=$seen && log "stub report since the chat: $seen"; }
+  jq -e --argjson l "$LLM_OFF" --arg p "${MCP}__" 'any(.llm[$l:][].tools[]?; startswith($p))' "$WORK/mcp-report.json" >/dev/null
+}
 mcp_turn_ok() { # <key file> <host> [header file]: a new chat turn lists the tools at host with only that key; the LLM gets the three stub tools
   local code h
   mcp_report || fail "cannot read the stub report"
@@ -888,6 +896,11 @@ PROVIDER_ID=$(coder_api POST /api/v2/ai/providers "$(jq -nc --arg u "http://$MCP
   fail "cannot create the stub LLM provider through the Coder API"
 MODEL_ID=$(coder_api POST "/api/v2/organizations/$ORG/chats/models" "$(jq -nc --arg p "$PROVIDER_ID" '{ai_provider_id: $p, model: "stub-model",
   context_limit: 100000, display_name: "E2E stub model", enabled: true, is_default: true}')" | jq -er '.id') || fail "cannot create the stub chat model"
+# The chats run as the tester, an organization member with a password login: the operator user does not run chats.
+MEMBER_TOKEN=$(coder_api POST /api/v2/users/login "$(jq -nc --arg e "$TESTER@e2e.example.com" --arg p "$TESTER_PASSWORD" '{email: $e, password: $p}')" |
+  jq -er '.session_token') || fail "cannot log in as the tester $TESTER"
+[[ ${GITHUB_ACTIONS:-} != true ]] || echo "::add-mask::$MEMBER_TOKEN"
+printf 'Coder-Session-Token: %s\n' "$MEMBER_TOKEN" >"$WORK/member.hdr" && unset MEMBER_TOKEN
 # P4e runs here: unlicensed Coder has one organization, and a list without it later would disable the P1 server.
 k -n "$NS" patch codercontrolplane coder --type=merge -p '{"spec":{"mcpServers":{"organizations":["e2e-no-such-org"]}}}' >/dev/null ||
   fail "cannot set mcpServers.organizations on codercontrolplane coder"
@@ -918,9 +931,9 @@ LEAKS=$(cat "$WORK/mcp-$MCP.state.json" "$WORK/operator-mcp.txt" | grep -cFf "$W
 [[ $LEAKS == 0 ]] || fail "CoderMCPServer $MCP or the operator log holds the MCP server key ($LEAKS lines)"
 phase mcp-apply
 
-step "CoderMCPServer chat: the owner's chat reaches the stub with the key; the LLM gets the stub tools (plan 7.3 P2)"
+step "CoderMCPServer chat: the tester's chat reaches the stub with the key; the LLM gets the stub tools (plan 7.3 P2)"
 T0=$SECONDS
-mcp_turn_ok ai-key-mcp-1 "$MCP_HOST"
+mcp_turn_ok ai-key-mcp-1 "$MCP_HOST" "$WORK/member.hdr"
 phase mcp-chat
 
 step "CoderMCPServer rotation: the next chat turn carries a new key; a metadata-only Secret change writes nothing to Coder (plan 7.3 P3)"
@@ -930,7 +943,7 @@ AI_ORIGIN=http://$MCP_HOST key_secret replace "$MCP_SECRET" ai-key-mcp-2 '{"code
   fail "cannot write the second key to Secret $MCP_SECRET"
 wait_until "MCP server $MCP to record the second Secret version" mcp_rv "$MCP_SECRET"
 wait_until "MCP server $MCP Ready after the rotation" mcp_is "$MCP" True Applied
-mcp_turn_ok ai-key-mcp-2 "$MCP_HOST"
+mcp_turn_ok ai-key-mcp-2 "$MCP_HOST" "$WORK/member.hdr"
 mcp_coder || fail "cannot read MCP server config $MCP_ID"
 UPDATED=$(jq -er '.updated_at' "$WORK/mcp-coder.json") || fail "Coder config $MCP_ID has no updated_at"
 k -n "$NS" annotate secret "$MCP_SECRET" e2e.coder.com/touched=1 >/dev/null || fail "cannot annotate Secret $MCP_SECRET"
@@ -978,17 +991,13 @@ wait_until "MCP server $MCP Ready after the consent" mcp_is "$MCP" True Applied
 mcp_coder || fail "cannot read MCP server config $MCP_ID"
 jq -e --arg u "http://$MCP_HOST2/mcp" '.url == $u and .enabled == true' "$WORK/mcp-coder.json" >/dev/null ||
   fail "Coder config $MCP_ID does not hold the new URL: $(mcp_seen)"
-mcp_turn_ok ai-key-mcp-2 "$MCP_HOST2"
+mcp_turn_ok ai-key-mcp-2 "$MCP_HOST2" "$WORK/member.hdr"
 phase mcp-url-change
 
 step "CoderMCPServer access: with access.groups [] a member's chat cannot select the server; with [Everyone] it can (plan 7.3 P6)"
 T0=$SECONDS
 k -n "$NS" patch codermcpserver "$MCP" --type=merge -p '{"spec":{"access":{"groups":[]}}}' >/dev/null || fail "cannot empty access.groups of $MCP"
 wait_until "MCP server $MCP Ready with no groups" mcp_is "$MCP" True Applied
-MEMBER_TOKEN=$(coder_api POST /api/v2/users/login "$(jq -nc --arg e "$TESTER@e2e.example.com" --arg p "$TESTER_PASSWORD" '{email: $e, password: $p}')" |
-  jq -er '.session_token') || fail "cannot log in as the tester $TESTER"
-[[ ${GITHUB_ACTIONS:-} != true ]] || echo "::add-mask::$MEMBER_TOKEN"
-printf 'Coder-Session-Token: %s\n' "$MEMBER_TOKEN" >"$WORK/member.hdr" && unset MEMBER_TOKEN
 CODE=$(mcp_chat "$WORK/member.hdr") || fail "cannot call POST /api/v2/chats as the tester"
 jq -e --arg c "$CODE" '$c == "400" and .message == "One or more MCP server IDs are invalid or disabled."' "$WORK/coder-raw.json" >/dev/null 2>&1 ||
   fail "a tester chat that selects $MCP with access.groups [] answered HTTP $CODE, want 400 invalid or disabled"

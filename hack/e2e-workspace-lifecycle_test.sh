@@ -542,12 +542,12 @@ P3M="$P2M,curl POST,kubectl create,kubectl apply,kubectl apply,kubectl apply,kub
 AIP="$P3D,curl PATCH,kubectl annotate,kubectl patch,kubectl delete"
 # AI Gateway keys: the opted-out object, the opt-in patch, the unlabeled Secret and the second object, then the delete of both.
 GW1="$PHASED,$AIP,kubectl apply" && GW2="$GW1,kubectl patch" && GW3="$GW2,kubectl create,kubectl apply" && GW="$GW3,kubectl delete"
-# MCP servers: P0 stub, LLM provider and model, opt-in [e2e-no-such-org], unlisted object and its delete, opt-in [coder]; P1 Secret and server;
+# MCP servers: P0 stub, LLM provider and model, tester login, opt-in [e2e-no-such-org], unlisted object and its delete, opt-in [coder]; P1 Secret and server;
 # P2 chat; P3 rotation, chat, annotation; P4 e2e-mcp-taken in Coder, Secret, five refused objects, their delete; P5 URL patch, consent, chat;
-# P6 groups [], tester login, refused chat, groups [Everyone], chat; P7 disable in Coder, poke, spec edit; P9 delete.
-M0="$GW,kubectl apply,curl POST,curl POST,kubectl patch,kubectl apply,kubectl delete,kubectl patch" && M1="$M0,kubectl create,kubectl apply"
+# P6 groups [], refused chat, groups [Everyone], chat; P7 disable in Coder, poke, spec edit; P9 delete.
+M0="$GW,kubectl apply,curl POST,curl POST,curl POST,kubectl patch,kubectl apply,kubectl delete,kubectl patch" && M1="$M0,kubectl create,kubectl apply"
 M2="$M1,curl POST" && M3="$M2,kubectl replace,curl POST,kubectl annotate" && M4A="$M3,curl POST,kubectl create$(printf ',kubectl apply%.0s' 1 2 3 4 5)"
-M5="$M4A,kubectl delete,kubectl patch" && M6="$M5,kubectl annotate,curl POST,kubectl patch" && M6B="$M6,curl POST,curl POST,kubectl patch,curl POST"
+M5="$M4A,kubectl delete,kubectl patch" && M6="$M5,kubectl annotate,curl POST,kubectl patch" && M6B="$M6,curl POST,kubectl patch,curl POST"
 M7="$M6B,curl PATCH,kubectl annotate" && MCPM="$M7,kubectl patch,kubectl delete"
 NSM="$MCPM,kubectl create,kubectl apply,kubectl apply" # the namespace phase: test, provider e2e-ns-keep, MCP server e2e-mcp-keep
 check "mutation order: lifecycle, tester, agent, owner, tests, AI providers, AI Gateway keys, MCP servers, namespace objects, Coder to zero, namespace delete" \
@@ -891,7 +891,7 @@ mcp-no-rotation|the tools/list requests of the chat turn do not all reach mcp-st
 mcp-meta-resend|a metadata-only Secret change wrote to Coder: updated_at 2 -> 3|$M3
 mcp-wrong-reason|MCP server e2e-mcp-origin stalled with False CredentialMalformed stalled=True, want Ready=False CredentialDestinationNotAllowed|$M4A
 mcp-url-early|Coder config mcp-e2e-mcp changed before the Secret allowed the new origin|$M5
-mcp-acl-open|a tester chat that selects e2e-mcp with access.groups [] answered HTTP 201, want 400 invalid or disabled|$M6,curl POST,curl POST
+mcp-acl-open|a tester chat that selects e2e-mcp with access.groups [] answered HTTP 201, want 400 invalid or disabled|$M6,curl POST
 mcp-kill-undone|the controller undid the disable of MCP server e2e-mcp|$M7
 mcp-delete-kept|MCP server config e2e-mcp (mcp-e2e-mcp) still exists in Coder after its object was deleted|$MCPM
 mcp-ns-stuck|timed out after 2s waiting for: test, provider, control plane, and namespace coder deleted|$NSM,kubectl patch,kubectl delete
