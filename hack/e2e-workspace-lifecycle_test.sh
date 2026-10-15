@@ -440,6 +440,7 @@ case "$method $path" in
   "GET /api/v2/users/e2e-tester") # tester-exists-oidc: someone else's login under the tester's name
     lt=password && [[ $SCENARIO != tester-exists-oidc ]] || lt=oidc
     printf '{"id":"user-tester","username":"e2e-tester","login_type":"%s","organization_ids":["org-1"],"status":"active"}\n' "$lt" ;;
+  "PUT /api/v2/users/user-tester/password") ;; # a reused tester gets the run's password (204)
   "PUT /api/v2/users/user-tester/status/activate")
     st=active && [[ $SCENARIO != tester-stays-dormant ]] || st=dormant; printf '{"id":"user-tester","status":"%s"}\n' "$st" ;;
   "PATCH /api/v2/workspaces/"*)
@@ -769,7 +770,8 @@ check "fails at the tester; no agent template or workspace" eval 'failed_with "c
 echo "TEST tester-exists: a local rerun finds the tester (409) and reuses it"
 run_scenario tester-exists; summary
 check "reuses the password tester, still activates it, and passes" eval '[[ $RC -eq 0 ]] && out_has "tester user e2e-tester exists (409): reusing it" &&
-  grep -q "PUT .*/api/v2/users/user-tester/status/activate" "$S/calls.log" && grep -qx "tester=e2e-tester/user-tester" "$T/work/receipt.txt"'
+  grep -q "PUT .*/api/v2/users/user-tester/status/activate" "$S/calls.log" && grep -qx "tester=e2e-tester/user-tester" "$T/work/receipt.txt" &&
+  grep -q "PUT .*/api/v2/users/user-tester/password" "$S/calls.log" && [[ $(grep -n "PUT .*/api/v2/users/user-tester/password" "$S/calls.log" | head -1 | cut -d: -f1) -lt $(grep -n "POST .*/api/v2/users/login" "$S/calls.log" | head -1 | cut -d: -f1) ]]'
 
 echo "TEST tester-exists-oidc: the existing e2e-tester is not a password user"
 run_scenario tester-exists-oidc; summary

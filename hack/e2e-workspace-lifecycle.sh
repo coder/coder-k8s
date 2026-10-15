@@ -392,11 +392,15 @@ jq -nc --arg u "$TESTER" --arg p "$TESTER_PASSWORD" --arg o "$ORG_ID" '{username
 if USER_JSON=$(coder_api POST /api/v2/users "$(<"$WORK/tester.json")" 2>"$WORK/tester.err"); then :
 elif grep -q 'error: 409' "$WORK/tester.err"; then # a local rerun: reuse the tester after the same checks
   log "tester user $TESTER exists (409): reusing it"
+  TESTER_REUSED=1
   USER_JSON=$(coder_api GET "/api/v2/users/$TESTER") || fail "cannot read the existing tester user $TESTER"
 else fail "cannot create the tester user $TESTER: $(head -c 300 "$WORK/tester.err")"; fi
 rm -f "$WORK/tester.json" "$WORK/coder-body.json"
 TESTER_ID=$(jq -er --arg u "$TESTER" --arg o "$ORG_ID" 'select(.username == $u and .login_type == "password" and
   (.organization_ids | index($o))) | .id' <<<"$USER_JSON") || fail "tester user $TESTER has an unexpected shape or organization"
+# The MCP phases log in as the tester: a reused tester gets this run's password.
+[[ -z ${TESTER_REUSED:-} ]] || coder_api PUT "/api/v2/users/$TESTER_ID/password" "$(jq -nc --arg p "$TESTER_PASSWORD" '{password: $p}')" \
+  >/dev/null || fail "cannot reset the password of the reused tester user $TESTER"
 # New API users start dormant, and Coder refuses agents of workspaces whose owner is not active (401).
 coder_api PUT "/api/v2/users/$TESTER_ID/status/activate" | jq -e '.status == "active"' >/dev/null ||
   fail "cannot activate the tester user $TESTER"
