@@ -476,6 +476,8 @@ STUB
 chmod +x "$STUBS"/*
 
 # run_scenario <name> [VAR=value...]: runs the driver against the stubs; sets T, S, RC, SECS.
+# SCENARIO_TIMEOUT caps one driver run. The full lifecycle with the MCP phases takes about 70 s on a loaded host.
+SCENARIO_TIMEOUT=${E2E_TEST_SCENARIO_TIMEOUT_SECONDS:-180}
 run_scenario() {
   local name=$1 endpoint_ip=${ENDPOINT_IP:-10.244.0.5} start=$SECONDS
   shift
@@ -495,7 +497,7 @@ run_scenario() {
     E2E_EXPECT_CODER_VERSION=v2.37.2 E2E_SOURCE_SHA=0123abc GITHUB_RUN_ID=42 GITHUB_RUN_ATTEMPT=1 \
     E2E_EXPECT_TF_MIRROR_PROVIDER="coder/coder v2.19.0" \
     E2E_WORKDIR="$T/work" E2E_POLL_SECONDS=0.1 E2E_TIMEOUT_SECONDS=3 E2E_EVENT_TIMEOUT_SECONDS=2 GITHUB_ACTIONS=false \
-    "$@" timeout 60 bash "$DRIVER" >"$T/out" 2>&1 || RC=$?
+    "$@" timeout "$SCENARIO_TIMEOUT" bash "$DRIVER" >"$T/out" 2>&1 || RC=$?
   SECS=$((SECONDS - start))
 }
 
