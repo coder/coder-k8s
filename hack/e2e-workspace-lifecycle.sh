@@ -874,11 +874,11 @@ mcp_turn_ok() { # <key file> <host> [header file]: a new chat turn lists the too
 step "CoderMCPServer setup: the stub, a stub LLM provider and model, and the opt-in; an unlisted organization is refused (plan 7.3 P0, P4e)"
 T0=$SECONDS
 coder_api GET /api/v2/entitlements | jq -e '.has_license == false' >/dev/null || fail "Coder has a license: the MCP phases test unlicensed Coder"
-jq -n --arg ns "$NS" --arg i "$MCP_STUB_IMAGE" '{apiVersion: "v1", kind: "List", items: [{apiVersion: "apps/v1", kind: "Deployment",
+jq -n --arg ns "$NS" --arg i "$MCP_STUB_IMAGE" '{apiVersion: "v1", kind: "List", items: ([{apiVersion: "apps/v1", kind: "Deployment",
   metadata: {name: "mcp-stub", namespace: $ns}, spec: {replicas: 1, selector: {matchLabels: {app: "mcp-stub"}}, template: {metadata: {labels: {app: "mcp-stub"}},
   spec: {containers: [{name: "stub", image: $i, imagePullPolicy: "Never", ports: [{containerPort: 8080}],
-  readinessProbe: {httpGet: {path: "/healthz", port: 8080}}}]}}}}] + [("mcp-stub", "mcp-stub-2") | {apiVersion: "v1", kind: "Service",
-  metadata: {name: ., namespace: $ns}, spec: {selector: {app: "mcp-stub"}, ports: [{port: 8080, targetPort: 8080}]}}]}' >"$WORK/stub-mcp.json" ||
+  readinessProbe: {httpGet: {path: "/healthz", port: 8080}}}]}}}}] + (["mcp-stub", "mcp-stub-2"] | map({apiVersion: "v1", kind: "Service",
+  metadata: {name: (.), namespace: $ns}, spec: {selector: {app: "mcp-stub"}, ports: [{port: 8080, targetPort: 8080}]}})))}' >"$WORK/stub-mcp.json" ||
   fail "cannot render the MCP stub manifest"
 apply_manifest "$WORK/stub-mcp.json"
 stub_ready() { k -n "$NS" get deploy mcp-stub -o json | jq -e '.status.readyReplicas == 1' >/dev/null; }
