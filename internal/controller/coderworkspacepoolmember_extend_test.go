@@ -146,7 +146,7 @@ func TestPoolMemberExtendsOnceAtBind(t *testing.T) {
 	require.True(t, member.Status.BindExtended)
 	require.Equal(t, 2, e.fake.requestCount(routeExtendWorkspace), "the bind extends even with 50 minutes left")
 	require.True(t, e.deadline(t, workspaceID).Time.Equal(e.clock.Now().Add(time.Hour)))
-	require.Zero(t, e.lastStep.RequeueAfter)
+	require.Equal(t, time.Minute, e.lastStep.RequeueAfter, "a bound member keeps watching for a deleted workspace")
 
 	e.clock.SetTime(e.clock.Now().Add(55 * time.Minute)) // 5 minutes left.
 	requireMember(t, e.reconcileMember(t, key, 2), coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "Bound", "")

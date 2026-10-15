@@ -11,6 +11,7 @@ import (
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -65,8 +66,10 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// and a reconcile that a member delete starts must see the status
 	// written right before that delete.
 	pool := &coderv1alpha1.CoderWorkspacePool{}
-	if err := r.APIReader.Get(ctx, req.NamespacedName, pool); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+	if err := r.APIReader.Get(ctx, req.NamespacedName, pool); apierrors.IsNotFound(err) {
+		return ctrl.Result{}, r.reconcileOrphanClaims(ctx, req.Namespace, req.Name)
+	} else if err != nil {
+		return ctrl.Result{}, fmt.Errorf("get pool %s: %w", req, err)
 	}
 	if pool.Name != req.Name || pool.Namespace != req.Namespace {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: fetched pool %s/%s does not match request %s", pool.Namespace, pool.Name, req)
@@ -76,8 +79,8 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 	if !pool.DeletionTimestamp.IsZero() {
 		// Garbage collection deletes the unclaimed members. Their finalizers
-		// run the last use check.
-		return ctrl.Result{}, nil
+		// run the last use check. Bound members belong to their claims.
+		return ctrl.Result{}, r.reconcileOrphanClaims(ctx, pool.Namespace, pool.Name)
 	}
 
 	before := pool.Status.DeepCopy()
@@ -114,7 +117,7 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 			members = append(members, m)
 		}
 	}
-	claims, err := r.poolClaims(ctx, pool)
+	claims, err := r.poolClaims(ctx, pool.Namespace, pool.Name)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -152,16 +155,16 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if err := r.bindClaims(ctx, pool, claims, all.Items, &counts, ownerName); err != nil {
 			return ctrl.Result{}, err
 		}
-		step, requeue, err = r.createMembers(ctx, pool, maxWorkspaces, all.Items, &counts)
+		step, requeue, err = r.createMembers(ctx, pool, poolWant(pool, claims, all.Items), maxWorkspaces, all.Items, &counts)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 	// The namespace list, where trimToOwnerCap marked its deletes.
-	if err := r.deleteUnclaimedMembers(ctx, pool, all.Items, step); err != nil {
+	if err := r.deleteUnclaimedMembers(ctx, pool, poolWant(pool, claims, all.Items), all.Items, step); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.writeClaimStatuses(ctx, pool, claims, all.Items, ownerName); err != nil {
+	if err := r.writeClaimStatuses(ctx, pool.Name, false, claims, all.Items, ownerName); err != nil {
 		return ctrl.Result{}, err
 	}
 	r.applyPoolStatus(pool, counts, step)
@@ -310,13 +313,12 @@ var poolConsentLostReasons = []string{"OwnerNotAllowed", "TemplateNotAllowed", "
 // go here. After a consent removal or an owner refusal, all other unclaimed
 // members go. Otherwise, new before old: outdated members that are not ready
 // go at once, and outdated ready members go oldest first, down to what the
-// current ready members do not cover yet. Current members above
-// spec.replicas go in this order: those without a create request, those not
+// current ready members do not cover yet. Current members above want
+// (spec.replicas plus the waiting claims) go in this order: those without a create request, those not
 // ready (newest first), then ready ones (oldest first).
 func (r *CoderWorkspacePoolReconciler) deleteUnclaimedMembers(
-	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, members []coderv1alpha1.CoderWorkspacePoolMember, step *coderStep,
+	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, want int32, members []coderv1alpha1.CoderWorkspacePoolMember, step *coderStep,
 ) error {
-	want := *pool.Spec.Replicas // Claims add their demand in PR 11.
 	var current, outdatedReady, doomed []*coderv1alpha1.CoderWorkspacePoolMember
 	var readyCurrent int32
 	for i := range members {
@@ -419,17 +421,18 @@ func (r *CoderWorkspacePoolReconciler) freshOwnerCap(ctx context.Context, pool *
 }
 
 // createMembers creates current members while all caps hold (plan 6.3 step
-// 7): current unclaimed members fewer than spec.replicas, building members
+// 7): current unclaimed members fewer than want (spec.replicas plus the
+// waiting claims, decision D4), building members
 // fewer than spec.maxInFlight, the owner's live members on this control
 // plane fewer than maxWorkspaces (from an uncached read), and the failure
 // backoff passed. It returns the wait that stops it, if any, and when to
 // read again.
 func (r *CoderWorkspacePoolReconciler) createMembers(
-	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, maxWorkspaces int32,
+	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, want, maxWorkspaces int32,
 	all []coderv1alpha1.CoderWorkspacePoolMember, counts *poolMemberCounts,
 ) (*coderStep, time.Duration, error) {
 	st, now := &pool.Status, r.Clock.Now()
-	need := *pool.Spec.Replicas - counts.current // Claims add their demand in PR 11.
+	need := want - counts.current
 	if need <= 0 {
 		return nil, 0, nil
 	}

@@ -20,12 +20,12 @@ import (
 // poolClaims lists the claims of the pool in its namespace, oldest first.
 // The list can come from the cache: the member list, which decides the
 // binds, is uncached.
-func (r *CoderWorkspacePoolReconciler) poolClaims(ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool) ([]coderv1alpha1.CoderWorkspaceClaim, error) {
+func (r *CoderWorkspacePoolReconciler) poolClaims(ctx context.Context, namespace, poolName string) ([]coderv1alpha1.CoderWorkspaceClaim, error) {
 	list := &coderv1alpha1.CoderWorkspaceClaimList{}
-	if err := r.List(ctx, list, client.InNamespace(pool.Namespace)); err != nil {
-		return nil, fmt.Errorf("list workspace claims in namespace %s: %w", pool.Namespace, err)
+	if err := r.List(ctx, list, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("list workspace claims in namespace %s: %w", namespace, err)
 	}
-	claims := slices.DeleteFunc(list.Items, func(c coderv1alpha1.CoderWorkspaceClaim) bool { return c.Spec.PoolName != pool.Name })
+	claims := slices.DeleteFunc(list.Items, func(c coderv1alpha1.CoderWorkspaceClaim) bool { return c.Spec.PoolName != poolName })
 	for i := range claims {
 		if claims[i].UID == "" {
 			return nil, fmt.Errorf("assertion failed: workspace claim %s/%s has no UID", claims[i].Namespace, claims[i].Name)
@@ -35,6 +35,41 @@ func (r *CoderWorkspacePoolReconciler) poolClaims(ctx context.Context, pool *cod
 		return cmp.Or(a.CreationTimestamp.Compare(b.CreationTimestamp.Time), cmp.Compare(a.Name, b.Name))
 	})
 	return claims, nil
+}
+
+// poolClaimWaits reports a claim that no member holds yet and that can
+// still bind.
+func poolClaimWaits(claim *coderv1alpha1.CoderWorkspaceClaim, all []coderv1alpha1.CoderWorkspacePoolMember) bool {
+	return claim.DeletionTimestamp.IsZero() && !poolClaimEverBound(claim) && poolClaimHolder(claim, all) == nil
+}
+
+// poolWant is the number of current unclaimed members the pool wants:
+// spec.replicas plus the waiting claims (decision D4), so a pool at
+// replicas 0 still creates a member for each claim.
+func poolWant(pool *coderv1alpha1.CoderWorkspacePool, claims []coderv1alpha1.CoderWorkspaceClaim, all []coderv1alpha1.CoderWorkspacePoolMember) int32 {
+	want := *pool.Spec.Replicas
+	for i := range claims {
+		if poolClaimWaits(&claims[i], all) {
+			want++
+		}
+	}
+	return want
+}
+
+// reconcileOrphanClaims writes the status of the claims of a pool that is
+// gone or being deleted: a claim that a member holds stays as its member
+// says, so a bound claim stays Bound, and the others wait with
+// PoolNotFound.
+func (r *CoderWorkspacePoolReconciler) reconcileOrphanClaims(ctx context.Context, namespace, poolName string) error {
+	claims, err := r.poolClaims(ctx, namespace, poolName)
+	if err != nil || len(claims) == 0 {
+		return err
+	}
+	all := &coderv1alpha1.CoderWorkspacePoolMemberList{}
+	if err := r.APIReader.List(ctx, all, client.InNamespace(namespace)); err != nil {
+		return fmt.Errorf("list pool members in namespace %s: %w", namespace, err)
+	}
+	return r.writeClaimStatuses(ctx, poolName, true, claims, all.Items, "")
 }
 
 // poolClaimHolder returns the member of the claim's pool that holds the
@@ -134,7 +169,7 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 		if len(free) == 0 {
 			return nil
 		}
-		if !claim.DeletionTimestamp.IsZero() || poolClaimEverBound(claim) || poolClaimHolder(claim, all) != nil {
+		if !poolClaimWaits(claim, all) {
 			continue
 		}
 		if claim.Status.OwnerName != ownerName {
@@ -173,10 +208,12 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 }
 
 // writeClaimStatuses writes the status of every claim of the pool from the
-// member that holds it (plan 6.3 step 10). ownerName is the owner's Coder
+// member that holds it (plan 6.3 step 10). A claim whose member's workspace
+// is deleted becomes Lost, which is final. ownerName is the owner's Coder
 // username from this reconcile, or "" when the owner read did not run.
+// poolMissing marks a pool that is gone or being deleted.
 func (r *CoderWorkspacePoolReconciler) writeClaimStatuses(
-	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, claims []coderv1alpha1.CoderWorkspaceClaim,
+	ctx context.Context, poolName string, poolMissing bool, claims []coderv1alpha1.CoderWorkspaceClaim,
 	all []coderv1alpha1.CoderWorkspacePoolMember, ownerName string,
 ) error {
 	now := metav1.NewTime(r.Clock.Now())
@@ -187,7 +224,10 @@ func (r *CoderWorkspacePoolReconciler) writeClaimStatuses(
 		}
 		before := claim.Status.DeepCopy()
 		st := &claim.Status
-		ready, lost, reason, message := false, false, "WaitingForReadyWorkspace", fmt.Sprintf("CoderWorkspacePool %s has no ready workspace for this claim yet.", pool.Name)
+		ready, lost, reason, message := false, false, "WaitingForReadyWorkspace", fmt.Sprintf("CoderWorkspacePool %s has no ready workspace for this claim yet.", poolName)
+		if poolMissing {
+			reason, message = "PoolNotFound", fmt.Sprintf("CoderWorkspacePool %s does not exist or is being deleted.", poolName)
+		}
 		m := poolClaimHolder(claim, all)
 		if m == nil && poolClaimEverBound(claim) {
 			// Lost is final, so check the holder on an uncached list first:
@@ -215,6 +255,10 @@ func (r *CoderWorkspacePoolReconciler) writeClaimStatuses(
 			reason, message = "WorkspaceReady", fmt.Sprintf("Workspace %s is ready.", m.Status.WorkspaceName)
 			if !ready {
 				reason, message = cmp.Or(m.Status.Reason, "WorkspaceNotReady"), truncateTemplateTestMessage(m.Status.Message)
+			}
+			if meta.IsStatusConditionTrue(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionWorkspaceDeleted) {
+				st.Phase, lost = coderv1alpha1.CoderWorkspaceClaimPhaseLost, true
+				reason, message = "WorkspaceDeleted", fmt.Sprintf("Workspace %s was deleted. The claim never binds again.", m.Status.WorkspaceName)
 			}
 		default:
 			st.Phase = coderv1alpha1.CoderWorkspaceClaimPhasePending
