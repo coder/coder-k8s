@@ -99,10 +99,50 @@ gw_get() { # <name>: one reconcile of a fake CoderAIGatewayKey controller agains
   jq --arg r "$r" '.metadata.generation as $g | .status += {observedGeneration: $g, conditions: [{type: "Ready", status: "False", reason: $r,
     observedGeneration: $g}, {type: "Stalled", status: "True", reason: $r, message: "stub", observedGeneration: $g}]}' "$cr"
 }
+mcp_get() { # <name>: one reconcile of a fake CoderMCPServer controller against the fake Coder configs in $S/mcpc (sent key: <slug>.json.key)
+  local cr=$S/mcp/$1.json c sf u v rv r=Applied
+  [[ -f $cr ]] || err NotFound "codermcpservers.coder.com \"$1\" not found"
+  c=$S/mcpc/$(jq -r .spec.slug "$cr").json u=$(jq -r .spec.url "$cr") sf=$S/secrets/$(jq -r .spec.auth.apiKey.secretRef.name "$cr").json
+  if [[ -f $S/ns-deleted ]]; then ai_json "$cr" ControlPlaneGone; [[ $SCENARIO == mcp-ns-stuck ]] || rm "$cr"; return; fi
+  if [[ ,$(cat "$S/mcp-orgs" 2>/dev/null), != *,$(jq -r .spec.organization "$cr"),* ]]; then r=MCPServersNotAllowed
+  elif [[ $(jq -r '.spec.availability // ""' "$cr") == force_on ]]; then r=ForceOnNotAllowed
+  elif [[ ! -f $sf ]]; then r=CredentialRefused # only the driver's Secrets are in the store; the operator token is refused
+  elif [[ $(jq -r '.metadata.labels["coder.com/credential"] // ""' "$sf") != true ]]; then r=CredentialNotOptedIn
+  elif [[ ,$(jq -r '.metadata.annotations["coder.com/credential-destinations"]' "$sf"), != *,${u%/*},* ]]; then
+    r=CredentialDestinationNotAllowed && [[ $SCENARIO != mcp-wrong-reason ]] || r=CredentialMalformed
+    [[ $SCENARIO != mcp-url-early || ! -f $c ]] || ai_set "$c" --arg u "$u" '.url = $u'
+  elif [[ -f $c && $(jq -r '.status.configID // ""' "$cr") == "" ]]; then r=SlugConflict
+  elif [[ $SCENARIO == mcp-never-ready ]]; then r=CoderUnavailable
+  elif [[ -f $c && ($(jq .enabled "$c") == false || -f $S/mcp-killed) && $(jq .metadata.generation "$cr") == "$(jq .status.appliedGeneration "$cr")" ]]; then
+    r=DisabledExternally && [[ $SCENARIO != mcp-kill-undone ]] || { ai_set "$c" '.enabled = true' && touch "$S/mcp-killed"; }
+  else # create or sync: updated_at moves when Coder changes (mcp-meta-resend: on any Secret change; mcp-no-rotation: the first key stays)
+    [[ -f $c ]] || jq -n --slurpfile cr "$cr" '{id: ("mcp-" + $cr[0].spec.slug), slug: $cr[0].spec.slug, updated_at: 0}' >"$c"
+    v=$(jq -r '.data["api-key"] | @base64d' "$sf") rv=$(jq -r .metadata.resourceVersion "$sf")
+    [[ $SCENARIO != mcp-no-rotation || ! -f $c.key ]] || v=$(<"$c.key")
+    ai_set "$c" --slurpfile cr "$cr" --arg v "$v" --arg old "$(cat "$c.key" 2>/dev/null)" --arg rv "$rv" --arg sc "$SCENARIO" '$cr[0] as $o |
+      {url: $o.spec.url, display_name: $o.spec.displayName, enabled: true, has_api_key: true,
+      groups: (if $sc == "mcp-acl-open" then ["Everyone"] else $o.spec.access.groups end)} as $d |
+      if . + $d != . or $v != $old or ($sc == "mcp-meta-resend" and ($o.status.credentials[0].secretResourceVersion // $rv) != $rv)
+      then . + $d | .updated_at += 1 else . end'
+    printf '%s' "$v" >"$c.key"
+    ai_set "$cr" --slurpfile c "$c" --arg rv "$rv" --arg v "$v" --arg sc "$SCENARIO" '.status += {configID: $c[0].id, appliedGeneration: .metadata.generation,
+      credentials: [{field: "apiKey", secretResourceVersion: $rv} + (if $sc == "mcp-cr-leak" then {value: $v} else {} end)]}'
+  fi
+  ai_json "$cr" "$r"
+}
 ai_watch() { local f; for f in "$S"/cr/*.json; do [[ $(jq -r .spec.apiKeySecretRef.name "$f") != "$1" ]] || ai_get "$(basename "$f" .json)" >/dev/null; done; }
 case "${pos[0]}:${pos[1]:-}" in
   get:pods) cat "$S/pods.json" ;;
   get:coderaiprovider) ai_get "${pos[2]}" ;;
+  get:codermcpserver) mcp_get "${pos[2]}" ;;
+  patch:codermcpserver) ai_set "$S/mcp/${pos[2]}.json" --argjson p "$patch" '. * $p | .metadata.generation += 1'; echo patched ;;
+  annotate:codermcpserver) mcp_get "${pos[2]}" >/dev/null; echo annotated ;;
+  delete:codermcpserver) # the controller deletes only the Coder config that it created (mcp-delete-kept: none)
+    for n in "${pos[@]:2}"; do
+      c=$(jq -r .spec.slug "$S/mcp/$n.json")
+      [[ $SCENARIO == mcp-delete-kept || $(jq -r '.status.configID // ""' "$S/mcp/$n.json") != "mcp-$c" ]] || rm "$S/mcpc/$c.json"
+      rm "$S/mcp/$n.json"
+    done; echo deleted ;;
   get:coderaigatewaykey) if ((${#pos[@]} == 3)); then gw_get "${pos[2]}"; else for n in "${pos[@]:2}"; do cat "$S/gw/$n.json"; done; fi ;;
   delete:coderaigatewaykey) [[ $SCENARIO == gw-finalizer-stuck ]] || for n in "${pos[@]:2}"; do rm "$S/gw/$n.json"; done; echo deleted ;;
   delete:coderaiprovider) # the controller deletes only the Coder provider that it created (ai-delete-kept: none)
@@ -118,11 +158,12 @@ case "${pos[0]}:${pos[1]:-}" in
   patch:codercontrolplane) # templateTests.ownerUserID, aiGateway.allowKeys, then spec.replicas=0 in the namespace phase
     if [[ $patch == *ownerUserID* ]]; then [[ $SCENARIO != owner-patch-fails ]] || err Invalid "bad ownerUserID"; touch "$S/owner"
     elif [[ $patch == *allowKeys* ]]; then touch "$S/gw-allowed"
+    elif [[ $patch == *mcpServers* ]]; then jq -r '.spec.mcpServers.organizations | join(",")' <<<"$patch" >"$S/mcp-orgs"
     else touch "$S/replicas0"; fi; echo "codercontrolplane.coder.com/coder patched" ;;
   get:deploy) # coder-rolls: the owner patch changes the pod template; coder-stays-up: replicas=0 never removes the pod
     r=1 g=1 && [[ ! -f $S/replicas0 ]] || r=0 && [[ $SCENARIO != coder-rolls || ! -f $S/owner ]] || g=2
     jq -n --argjson r "$r" --argjson g "$g" --arg sc "$SCENARIO" '{metadata: {generation: $g}, spec: {replicas: $r},
-      status: {replicas: (if $sc == "coder-stays-up" then 1 else $r end)}}' ;;
+      status: {replicas: (if $sc == "coder-stays-up" then 1 else $r end), readyReplicas: 1}}' ;;
   get:cluster) echo '{"status":{"currentPrimary":"coder-db-1"}}' ;;
   exec:coder-db-1) # psql counts: api_keys 2 then 5; workspaces 1 (ws-rows-2: 2)
     case $all in
@@ -181,8 +222,10 @@ case "${pos[0]}:${pos[1]:-}" in
     echo 'INFO Starting Controller {"controller": "coderaigatewaykey", "controllerKind": "CoderAIGatewayKey"}'
     [[ $SCENARIO != gw-log-leak || ! -f $S/secrets/e2e-gw-hijack.json ]] ||
       echo "INFO stub {\"controller\": \"coderaigatewaykey\", \"value\": \"$(jq -r '.data["api-key"] | @base64d' "$S/secrets/e2e-gw-hijack.json")\"}"
-    [[ ! -f $S/ns-deleted || $SCENARIO == ai-ns-no-release ]] || echo 'INFO Releasing the finalizer without a delete in Coder: the provider can stay in the Coder database {"controller": "coderaiprovider", "reason": "ControlPlaneGone", "provider": "e2e-ns-keep"}' ;;
+    [[ ! -f $S/ns-deleted || $SCENARIO == ai-ns-no-release ]] || echo 'INFO Releasing the finalizer without a delete in Coder: the provider can stay in the Coder database {"controller": "coderaiprovider", "reason": "ControlPlaneGone", "provider": "e2e-ns-keep"}'
+    [[ ! -f $S/ns-deleted ]] || echo 'INFO Releasing the finalizer without a delete in Coder: the MCP server config can stay in the Coder database {"controller": "codermcpserver", "reason": "ControlPlaneGone", "slug": "e2e-mcp-keep"}' ;;
   get:)
+    [[ $raw != /api/v1/namespaces/coder/services/mcp-stub:8080/proxy/report ]] || exec cat "$S/report.json"
     if [[ $raw == */codertemplatetests?watch=1* ]]; then # the e2e-ttl watch: passed (ttl-failed: failed), then deleted
       echo "I1003 round_trippers.go:553] GET https://127.0.0.1:6443$raw 200 OK in 2 milliseconds" >&2
       p=Succeeded && [[ $SCENARIO != ttl-failed ]] || p=Failed
@@ -262,6 +305,10 @@ case "${pos[0]}:${pos[1]:-}" in
     elif [[ ${file##*/} == ai-*.json ]]; then # a CoderAIProvider: created at generation 1
       f=$S/cr/$(jq -r .metadata.name "$file").json && [[ -f $f ]] || jq '.metadata.generation = 1 | .status = {}' "$file" >"$f"
       echo "coderaiprovider configured"
+    elif [[ ${file##*/} == mcp-*.json ]]; then # a CoderMCPServer: created at generation 1
+      f=$S/mcp/$(jq -r .metadata.name "$file").json && [[ -f $f ]] || jq '.metadata.generation = 1 | .status = {}' "$file" >"$f"
+      echo "codermcpserver configured"
+    elif [[ ${file##*/} == stub-mcp.json ]]; then echo "deployment.apps/mcp-stub created"
     elif [[ ${file##*/} == gw-*.json ]]; then # a CoderAIGatewayKey: created at generation 1
       f=$S/gw/$(jq -r .metadata.name "$file").json && [[ -f $f ]] || jq '.metadata.generation = 1 | .status = {}' "$file" >"$f"
       echo "coderaigatewaykey configured"
@@ -314,13 +361,13 @@ cat >"$STUBS/curl" <<'STUB'
 set -euo pipefail
 S=$STUB_STATE
 echo "curl $*" >>"$S/calls.log"
-method=GET data="" url="" out=""
+method=GET data="" url="" out="" hdr=""
 while (($#)); do
   case $1 in
     -X) method=$2; shift 2 ;;
     -o) out=$2; shift 2 ;;
     -w) shift 2 ;;
-    -H) [[ $2 != @* ]] || stat -c %a "${2#@}" >>"$S/file-modes"; shift 2 ;;
+    -H) [[ $2 != @* ]] || { stat -c %a "${2#@}" >>"$S/file-modes"; hdr=${2#@}; }; shift 2 ;;
     --max-time) shift 2 ;;
     --data) data=$2; [[ $data != @* ]] || { stat -c %a "${data#@}" >>"$S/file-modes"; data=$(<"${data#@}"); }; shift 2 ;;
     -*) shift ;;
@@ -331,7 +378,7 @@ path=/${url#http://*/}
 answer() { printf '%s' "$2" >"$out"; printf '%s' "$1"; exit 0; } # <status> <body>: the answer to a call with -o and -w, without -f
 case "$method $path" in
   "GET /api/v2/entitlements") en=false && [[ $SCENARIO != gw-entitled ]] || en=true
-    jq -n --argjson e "$en" '{features: {aibridge: {entitlement: "not_entitled", enabled: $e}}, has_license: false}' ;;
+    jq -n --argjson e "$en" --arg sc "$SCENARIO" '{features: {aibridge: {entitlement: "not_entitled", enabled: $e}}, has_license: ($sc == "mcp-licensed")}' ;;
   "GET /api/v2/ai-gateway/keys") [[ -n $out ]] || exit 97; answer 403 '{"message":"AI Gateway is a Premium feature. Contact sales!"}' ;;
   "GET /api/v2/buildinfo") printf '{"version":"%s"}\n' "${CODER_VERSION_REPORTED:-v2.37.2+eb69e27}" ;;
   "GET /api/v2/organizations/coder/templates/e2e-template")
@@ -361,6 +408,28 @@ case "$method $path" in
     [[ -f $f ]] || { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
     [[ $method == GET ]] || { jq --argjson d "$data" '. + $d | .updated_at = "2"' "$f" >"$f.tmp" && mv "$f.tmp" "$f"; }
     cat "$f" ;;
+  "POST /api/v2/organizations/coder/chats/models") echo '{"id":"model-1"}' ;;
+  "POST /api/v2/users/login") echo '{"session_token":"member-token-value"}' ;;
+  "GET /api/v2/organizations/coder/mcp-servers") f=("$S"/mcpc/*.json) && if [[ -e ${f[0]} ]]; then jq -s . "${f[@]}"; else echo '[]'; fi ;;
+  "POST /api/v2/organizations/coder/mcp-servers") # a config created out of band
+    jq '{id: ("mcp-" + .slug), slug, url, enabled, display_name, updated_at: 0, groups: ["Everyone"]}' <<<"$data" >"$S/mcpc/$(jq -r .slug <<<"$data").json" ;;
+  "GET /api/v2/organizations/coder/mcp-servers/mcp-"*/acl) f=${path%/acl} && jq '{users: [], groups: [.groups[] | {name: ., role: "read"}]}' "$S/mcpc/${f##*/mcp-}.json" ;;
+  "GET /api/v2/organizations/coder/mcp-servers/mcp-"* | "PATCH /api/v2/organizations/coder/mcp-servers/mcp-"*) # a config by ID; PATCH bumps updated_at
+    f=$S/mcpc/${path##*/mcp-}.json
+    [[ -z $out ]] || { [[ ! -f $f ]] || answer 200 "$(<"$f")"; answer 404 '{"message":"Resource not found or you do not have access to this resource"}'; }
+    [[ -f $f ]] || { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
+    [[ $method == GET ]] || { jq --argjson d "$data" '. + $d | .updated_at += 1' "$f" >"$f.tmp" && mv "$f.tmp" "$f"; }
+    cat "$f" ;;
+  "POST /api/v2/chats") # one chat turn: the stub report gets the tools/list requests and the LLM tools of the selected config
+    id=$(jq -r '.mcp_server_ids[0]' <<<"$data") && f=$S/mcpc/${id#mcp-}.json
+    [[ -f $f ]] && jq -e '.enabled' "$f" >/dev/null && { [[ $hdr != */member.hdr ]] || jq -e '.groups | index("Everyone")' "$f" >/dev/null; } ||
+      answer 400 '{"message":"One or more MCP server IDs are invalid or disabled."}'
+    h=$(sha256sum <"$f.key" | cut -d' ' -f1) && [[ $SCENARIO != mcp-hash-mismatch ]] || h=0000
+    jq --slurpfile c "$f" --arg h "$h" --arg sc "$SCENARIO" '($c[0].url | sub("^http://"; "") | sub("/.*$"; "")) as $host | ($c[0].slug + "__") as $p |
+      .mcp += [("initialize", "tools/list") | {host: $host, method: ., apiKeyHash: $h, headerHash: ""}] | .llm += [{stream: false, tools: null},
+      {stream: true, tools: (["read_file", $p + "alpha", $p + "beta"] + (if $sc == "mcp-tools-missing" then [] else [$p + "Gamma"] end))}]' \
+      "$S/report.json" >"$S/report.tmp" && mv "$S/report.tmp" "$S/report.json"
+    answer 201 '{"id":"chat-1"}' ;;
   "GET /api/v2/organizations") echo '[{"id":"org-2","is_default":false},{"id":"org-1","is_default":true}]' ;;
   "POST /api/v2/users")
     printf '%s' "$data" >"$S/tester-body.json"
@@ -371,6 +440,7 @@ case "$method $path" in
   "GET /api/v2/users/e2e-tester") # tester-exists-oidc: someone else's login under the tester's name
     lt=password && [[ $SCENARIO != tester-exists-oidc ]] || lt=oidc
     printf '{"id":"user-tester","username":"e2e-tester","login_type":"%s","organization_ids":["org-1"],"status":"active"}\n' "$lt" ;;
+  "PUT /api/v2/users/user-tester/password") ;; # a reused tester gets the run's password (204)
   "PUT /api/v2/users/user-tester/status/activate")
     st=active && [[ $SCENARIO != tester-stays-dormant ]] || st=dormant; printf '{"id":"user-tester","status":"%s"}\n' "$st" ;;
   "PATCH /api/v2/workspaces/"*)
@@ -407,11 +477,13 @@ STUB
 chmod +x "$STUBS"/*
 
 # run_scenario <name> [VAR=value...]: runs the driver against the stubs; sets T, S, RC, SECS.
+# SCENARIO_TIMEOUT caps one driver run. The full lifecycle with the MCP phases takes about 70 s on a loaded host.
+SCENARIO_TIMEOUT=${E2E_TEST_SCENARIO_TIMEOUT_SECONDS:-180}
 run_scenario() {
   local name=$1 endpoint_ip=${ENDPOINT_IP:-10.244.0.5} start=$SECONDS
   shift
   T=$BASE/$name S=$BASE/$name/state
-  mkdir -p "$S/ws" "$S/secrets" "$S/cr" "$S/aip" "$S/gw"
+  mkdir -p "$S/ws" "$S/secrets" "$S/cr" "$S/aip" "$S/gw" "$S/mcp" "$S/mcpc" && echo '{"mcp":[],"llm":[]}' >"$S/report.json"
   : >"$S/calls.log" && : >"$S/events" && echo 0 >"$S/counter"
   jq -n '{items: [
     {metadata: {name: "coder-k8s-old", deletionTimestamp: "2026-09-23T00:00:00Z"}, spec: {containers: [{image: "ghcr.io/coder/coder-k8s:e2e"}]},
@@ -426,11 +498,11 @@ run_scenario() {
     E2E_EXPECT_CODER_VERSION=v2.37.2 E2E_SOURCE_SHA=0123abc GITHUB_RUN_ID=42 GITHUB_RUN_ATTEMPT=1 \
     E2E_EXPECT_TF_MIRROR_PROVIDER="coder/coder v2.19.0" \
     E2E_WORKDIR="$T/work" E2E_POLL_SECONDS=0.1 E2E_TIMEOUT_SECONDS=3 E2E_EVENT_TIMEOUT_SECONDS=2 GITHUB_ACTIONS=false \
-    "$@" timeout 60 bash "$DRIVER" >"$T/out" 2>&1 || RC=$?
+    "$@" timeout "$SCENARIO_TIMEOUT" bash "$DRIVER" >"$T/out" 2>&1 || RC=$?
   SECS=$((SECONDS - start))
 }
 
-mutations() { grep -E '^kubectl .*((create|replace|delete) --raw|apply -f|(create|replace) -f|patch |annotate |delete (namespace|pod|codertemplatetest|coderaiprovider|coderaigatewaykey) )|^curl .*-X (PATCH|POST|PUT|DELETE)' "$S/calls.log" |
+mutations() { grep -E '^kubectl .*((create|replace|delete) --raw|apply -f|(create|replace) -f|patch |annotate |delete (namespace|pod|codertemplatetest|coderaiprovider|coderaigatewaykey|codermcpserver) )|^curl .*-X (PATCH|POST|PUT|DELETE)' "$S/calls.log" |
   awk '/^kubectl/ {for (i = 2; i <= NF; i++) if ($i ~ /^(create|replace|delete|apply|patch|annotate)$/) {print "kubectl " $i; next}}
     /^curl/ {for (i = 2; i <= NF; i++) if ($i == "-X") {print "curl " $(i + 1); next}}' | paste -sd, -; }
 VERSIONS="kubectl apply,kubectl apply,kubectl create,kubectl create,kubectl create" # template, second version, promote v1, repeat, dry-run v2
@@ -471,8 +543,16 @@ P3M="$P2M,curl POST,kubectl create,kubectl apply,kubectl apply,kubectl apply,kub
 AIP="$P3D,curl PATCH,kubectl annotate,kubectl patch,kubectl delete"
 # AI Gateway keys: the opted-out object, the opt-in patch, the unlabeled Secret and the second object, then the delete of both.
 GW1="$PHASED,$AIP,kubectl apply" && GW2="$GW1,kubectl patch" && GW3="$GW2,kubectl create,kubectl apply" && GW="$GW3,kubectl delete"
-check "mutation order: lifecycle, tester, agent, owner, tests, AI providers, AI Gateway keys, namespace test and provider, Coder to zero, namespace delete" \
-  no_mutations_after "$GW,kubectl create,kubectl apply,kubectl patch,kubectl delete"
+# MCP servers: P0 stub, LLM provider and model, tester login, opt-in [e2e-no-such-org], unlisted object and its delete, opt-in [coder]; P1 Secret and server;
+# P2 chat; P3 rotation, chat, annotation; P4 e2e-mcp-taken in Coder, Secret, five refused objects, their delete; P5 URL patch, consent, chat;
+# P6 groups [], refused chat, groups [Everyone], chat; P7 disable in Coder, poke, spec edit; P9 delete.
+M0="$GW,kubectl apply,curl POST,curl POST,curl POST,kubectl patch,kubectl apply,kubectl delete,kubectl patch" && M1="$M0,kubectl create,kubectl apply"
+M2="$M1,curl POST" && M3="$M2,kubectl replace,curl POST,kubectl annotate" && M4A="$M3,curl POST,kubectl create$(printf ',kubectl apply%.0s' 1 2 3 4 5)"
+M5="$M4A,kubectl delete,kubectl patch" && M6="$M5,kubectl annotate,curl POST,kubectl patch" && M6B="$M6,curl POST,kubectl patch,curl POST"
+M7="$M6B,curl PATCH,kubectl annotate" && MCPM="$M7,kubectl patch,kubectl delete"
+NSM="$MCPM,kubectl create,kubectl apply,kubectl apply" # the namespace phase: test, provider e2e-ns-keep, MCP server e2e-mcp-keep
+check "mutation order: lifecycle, tester, agent, owner, tests, AI providers, AI Gateway keys, MCP servers, namespace objects, Coder to zero, namespace delete" \
+  no_mutations_after "$NSM,kubectl patch,kubectl delete"
 check "stale requests carry the genuine pre-rename token; rename changed it" eval 'grep -qx "rv_pre_rename=2" "$T/work/receipt.txt" &&
   grep -qx "rv_post_rename=2-renamed" "$T/work/receipt.txt" && jq -e ".metadata.resourceVersion == \"2\"" "$T/work/stale-update.json" >/dev/null'
 check "template applied with the long request timeout, then re-applied before any lifecycle mutation" eval '[[ $(grep -c -- "--request-timeout=600s apply -f config/e2e/codertemplate.yaml" "$S/calls.log") -eq 2 ]]'
@@ -487,9 +567,9 @@ check "background port-forward and watch stopped" bg_stopped
 check "every non-streaming kubectl request carries --request-timeout=30s" \
   eval '! grep "^kubectl" "$S/calls.log" | grep -v -e "watch=1" -e port-forward | grep -qvE -- "--request-timeout=[0-9]+s "'
 check "recreate only after the delete job succeeded" eval '[[ $(grep -n include_deleted "$S/calls.log" | head -1 | cut -d: -f1) -lt $(grep -n "create --raw .*ws-e2e-lifecycle-renamed.json" "$S/calls.log" | cut -d: -f1) ]]'
-check "receipt: source, run, version, identity, UIDs, 39 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
-  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 39 ]]'
-check "remaining phases: durations recorded; dry run, restart, mid-run, and TTL calls as planned" eval 'grep -Eqx "phase_seconds=agent-failure=[0-9]+s bad-parameter=[0-9]+s restart=[0-9]+s delete-mid-run=[0-9]+s immutability-and-dry-run=[0-9]+s ttl=[0-9]+s ai-provider=[0-9]+s ai-rotation=[0-9]+s ai-refusals=[0-9]+s ai-kill-switch=[0-9]+s ai-delete=[0-9]+s gw-gate=[0-9]+s gw-not-allowed=[0-9]+s gw-license-required=[0-9]+s gw-secret-not-owned=[0-9]+s gw-leak-check=[0-9]+s gw-delete=[0-9]+s" "$T/work/receipt.txt" &&
+check "receipt: source, run, version, identity, UIDs, 48 passed cases" eval 'grep -q "=== RECEIPT (PASS) ===" "$T/out" && grep -qx "source_sha=0123abc" "$T/work/receipt.txt" &&
+  grep -qx "run_id=42" "$T/work/receipt.txt" && grep -qx "coder_version=v2.37.2+eb69e27" "$T/work/receipt.txt" && grep -qx "uid1=uid-3" "$T/work/receipt.txt" && [[ $(grep -c "= passed$" "$T/work/receipt.txt") -eq 48 ]]'
+check "remaining phases: durations recorded; dry run, restart, mid-run, and TTL calls as planned" eval 'grep -Eqx "phase_seconds=agent-failure=[0-9]+s bad-parameter=[0-9]+s restart=[0-9]+s delete-mid-run=[0-9]+s immutability-and-dry-run=[0-9]+s ttl=[0-9]+s ai-provider=[0-9]+s ai-rotation=[0-9]+s ai-refusals=[0-9]+s ai-kill-switch=[0-9]+s ai-delete=[0-9]+s gw-gate=[0-9]+s gw-not-allowed=[0-9]+s gw-license-required=[0-9]+s gw-secret-not-owned=[0-9]+s gw-leak-check=[0-9]+s gw-delete=[0-9]+s mcp-setup=[0-9]+s mcp-apply=[0-9]+s mcp-chat=[0-9]+s mcp-rotation=[0-9]+s mcp-refusals=[0-9]+s mcp-url-change=[0-9]+s mcp-access=[0-9]+s mcp-kill-switch=[0-9]+s mcp-delete=[0-9]+s" "$T/work/receipt.txt" &&
   grep -q "create --dry-run=server -f .*tt-e2e-dry-run.json" "$S/calls.log" && grep -q "FROM workspaces WHERE name = .ktt-d0d0d0d0d0d0d0d0d0d0d0d0d0d0." "$S/calls.log" &&
   grep -q "coder-system delete pod coder-k8s-new" "$S/calls.log" && grep -q "workspaces/ttws-e2e-midrun?include_deleted=true" "$S/calls.log" &&
   jq -e ".spec.ttlSecondsAfterFinished == 0" "$T/work/tt-e2e-ttl.json" >/dev/null && jq -e ".spec.parameters == [{name: \"fail\", value: \"notabool\"}]" "$T/work/tt-e2e-bad-param.json" >/dev/null'
@@ -511,13 +591,14 @@ check "tester: password user in the default organization; receipt records its us
 pw=$(jq -r .password "$S/tester-body.json")
 check "tester password is random, never printed, and in no argv" eval '[[ ${#pw} -ge 32 ]] && ! out_has "$pw" && ! grep -qF -- "$pw" "$T/work/receipt.txt" "$S/calls.log"'
 check "token and bodies reach curl through 0600 files that the driver removes" eval '! grep -q secret-token-value "$S/calls.log" &&
-  ! grep "^curl " "$S/calls.log" | grep -vqF -- "-H @$T/work/coder.hdr" && ! grep "^curl " "$S/calls.log" | grep -qE -- "--data [^@]" &&
-  [[ $(sort -u "$S/file-modes") == 600 && ! -e $T/work/coder.hdr && ! -e $T/work/coder-body.json && ! -e $T/work/tester.json ]]'
+  ! grep "^curl " "$S/calls.log" | grep -vqE -- "-H @$T/work/(coder|member)\.hdr" && ! grep "^curl " "$S/calls.log" | grep -qE -- "--data [^@]" &&
+  [[ $(sort -u "$S/file-modes") == 600 && ! -e $T/work/coder.hdr && ! -e $T/work/coder-body.json && ! -e $T/work/tester.json && ! -e $T/work/member.hdr ]] &&
+  ! grep -q member-token-value "$S/calls.log" "$T/out"'
 check "agent workspace: tester-owned, from the agent template, ready time logged, delete job checked" eval 'grep -q "create --raw .*ws-e2e-agent.json" "$S/calls.log" &&
   jq -e ".metadata.name == \"coder.e2e-tester.e2e-agent\" and .spec.templateName == \"e2e-agent\"" "$T/work/ws-e2e-agent.json" >/dev/null &&
   out_has "agent time-to-ready: " && out_has "agents: main=connected/ready" && grep -q "^agent_ready_seconds=[0-9]" "$T/work/receipt.txt" &&
   grep -q "workspaces/uid-4?include_deleted=true" "$S/calls.log"'
-check "AI provider keys and the AI Gateway Secret value: four, never printed or in argv, files removed" eval '[[ $(grep -c . "$S/ai-keys.txt") == 4 ]] &&
+check "AI provider and MCP server keys and the AI Gateway Secret value: seven, never printed or in argv, files removed" eval '[[ $(grep -c . "$S/ai-keys.txt") == 7 ]] &&
   ! grep -qFf "$S/ai-keys.txt" "$T/out" "$S/calls.log" "$T/work/receipt.txt" && ! compgen -G "$T/work/ai-key-*" && ! compgen -G "$T/work/secret-*.json"'
 check "AI provider phases: each refusal reason seen; e2e-taken kept in Coder; e2e-openai deleted; e2e-ns-keep released" eval 'out_has "AI provider e2e-p3-unlabeled: False CredentialNotOptedIn" &&
   out_has "AI provider e2e-p3-refused: False CredentialRefused" && out_has "AI provider e2e-p3-origin: False CredentialDestinationNotAllowed" &&
@@ -527,9 +608,18 @@ check "AI provider phases: each refusal reason seen; e2e-taken kept in Coder; e2
 check "AI Gateway key phases: NotAllowed, then LicenseRequired after the opt-in, SecretNotOwned; both objects deleted; a 43-character Secret value" \
   eval 'out_has "AI Gateway key e2e-gw-off: True NotAllowed" && out_has "AI Gateway key e2e-gw-off: True LicenseRequired" &&
   out_has "AI Gateway key e2e-gw-hijack: True SecretNotOwned" && grep -qF "{\"spec\":{\"aiGateway\":{\"allowKeys\":true}}}" "$S/calls.log" &&
-  [[ ! -f $S/gw/e2e-gw-off.json && ! -f $S/gw/e2e-gw-hijack.json && $(tail -n 1 "$S/ai-keys.txt" | tr -d "\n" | wc -c) == 43 ]] &&
+  [[ ! -f $S/gw/e2e-gw-off.json && ! -f $S/gw/e2e-gw-hijack.json && $(sed -n 4p "$S/ai-keys.txt" | tr -d "\n" | wc -c) == 43 ]] &&
   jq -e ".spec == {controlPlaneRef: {name: \"coder\"}, secretName: \"e2e-gw-hijack\"}" "$T/work/gw-e2e-gw-hijack.json" >/dev/null &&
   grep -q "curl -sS --max-time 30 -o .*/coder-raw.json .*/api/v2/ai-gateway/keys$" "$S/calls.log"'
+check "MCP server phases: each refusal reason seen; chats at both hosts and as the tester; e2e-mcp-taken kept; e2e-mcp deleted; e2e-mcp-keep released" \
+  eval 'out_has "MCP server e2e-mcp-unlisted: False MCPServersNotAllowed" && out_has "MCP server e2e-mcp-unlabeled: False CredentialNotOptedIn" &&
+  out_has "MCP server e2e-mcp-refused: False CredentialRefused" && out_has "MCP server e2e-mcp-origin: False CredentialDestinationNotAllowed" &&
+  out_has "MCP server e2e-mcp-taken: False SlugConflict" && out_has "MCP server e2e-mcp-forced: False ForceOnNotAllowed" &&
+  out_has "MCP server e2e-mcp: False DisabledExternally" && out_has "MCP server e2e-mcp-keep: False ControlPlaneGone" &&
+  [[ $(grep -c "key hash match" "$T/out") == 4 && $(grep -c "tools/list of the chat turn at mcp-stub-2.coder.svc:8080" "$T/out") == 2 ]] &&
+  [[ -f $S/mcpc/e2e-mcp-taken.json && ! -f $S/mcpc/e2e-mcp.json ]] && grep -q -- "-H @$T/work/member.hdr .*/api/v2/chats$" "$S/calls.log" &&
+  jq -e ".spec.auth.apiKey.secretRef == {name: \"op-token\", key: \"token\"}" "$T/work/mcp-e2e-mcp-refused.json" >/dev/null &&
+  grep -q "get --raw /api/v1/namespaces/coder/services/mcp-stub:8080/proxy/report" "$S/calls.log"'
 
 echo "TEST image-mismatch: serving image differs from built image"
 run_scenario image-mismatch SERVING_ID="$OTHER"; summary
@@ -680,7 +770,8 @@ check "fails at the tester; no agent template or workspace" eval 'failed_with "c
 echo "TEST tester-exists: a local rerun finds the tester (409) and reuses it"
 run_scenario tester-exists; summary
 check "reuses the password tester, still activates it, and passes" eval '[[ $RC -eq 0 ]] && out_has "tester user e2e-tester exists (409): reusing it" &&
-  grep -q "PUT .*/api/v2/users/user-tester/status/activate" "$S/calls.log" && grep -qx "tester=e2e-tester/user-tester" "$T/work/receipt.txt"'
+  grep -q "PUT .*/api/v2/users/user-tester/status/activate" "$S/calls.log" && grep -qx "tester=e2e-tester/user-tester" "$T/work/receipt.txt" &&
+  grep -q "PUT .*/api/v2/users/user-tester/password" "$S/calls.log" && [[ $(grep -n "PUT .*/api/v2/users/user-tester/password" "$S/calls.log" | head -1 | cut -d: -f1) -lt $(grep -n "POST .*/api/v2/users/login" "$S/calls.log" | head -1 | cut -d: -f1) ]]'
 
 echo "TEST tester-exists-oidc: the existing e2e-tester is not a password user"
 run_scenario tester-exists-oidc; summary
@@ -739,9 +830,9 @@ tt-failed|template test e2e-pass-1 failed: Failed AgentStartError|$AGENT,kubectl
 ws-rows-2|expected exactly one workspaces row named ktt-e2e-pass-1 (deleted rows included), found 2|$TESTS
 coder-rolls|setting templateTests.ownerUserID rolled deploy/coder|$TESTS
 keys-after-fails|cannot count the api_keys rows of the tester after the tests|$PHASED
-coder-stays-up|timed out after 3s waiting for: deploy/coder without pods|$GW,kubectl create,kubectl apply,kubectl patch
-ns-delete-stuck|timed out after 2s waiting for: test, provider, control plane, and namespace coder deleted|$GW,kubectl create,kubectl apply,kubectl patch,kubectl delete
-ns-stays-terminating|timed out after 2s waiting for: test, provider, control plane, and namespace coder deleted|$GW,kubectl create,kubectl apply,kubectl patch,kubectl delete
+coder-stays-up|timed out after 3s waiting for: deploy/coder without pods|$NSM,kubectl patch
+ns-delete-stuck|timed out after 2s waiting for: test, provider, control plane, and namespace coder deleted|$NSM,kubectl patch,kubectl delete
+ns-stays-terminating|timed out after 2s waiting for: test, provider, control plane, and namespace coder deleted|$NSM,kubectl patch,kubectl delete
 fail-ignored|template test e2e-agent-fail ended Succeeded Succeeded deleted=True/Deleted, want Failed AgentStartError|$TESTS,kubectl create
 badparam-created|template test e2e-bad-param: expected 0 workspaces rows named ktt-e2e-bad-param (deleted rows included), found 1|$TESTS,kubectl create,kubectl create
 restart-failed|template test e2e-restart failed: Failed AgentStartError|$TESTS,kubectl create,kubectl create,kubectl create,kubectl delete
@@ -768,8 +859,8 @@ ai-conflict-writes|a refused CoderAIProvider wrote to Coder|$PHASED,$P3M
 ai-kill-undone|the controller undid the disable of provider e2e-openai|$PHASED,$P3D,curl PATCH,kubectl annotate
 ai-delete-kept|provider e2e-openai (aip-e2e-openai) still exists in Coder after its object was deleted|$PHASED,$AIP
 ai-delete-foreign-404|GET provider aip-e2e-openai after the delete answered HTTP 404 without Coder's own 404 message: {"message":"Route not found."}|$PHASED,$AIP
-ai-ns-stuck|timed out after 2s waiting for: test, provider, control plane, and namespace coder deleted|$GW,kubectl create,kubectl apply,kubectl patch,kubectl delete
-ai-ns-no-release|the operator log has no ControlPlaneGone release of AI provider e2e-ns-keep|$GW,kubectl create,kubectl apply,kubectl patch,kubectl delete
+ai-ns-stuck|timed out after 2s waiting for: test, provider, control plane, and namespace coder deleted|$NSM,kubectl patch,kubectl delete
+ai-ns-no-release|the operator log has no ControlPlaneGone release of AI provider e2e-ns-keep|$NSM,kubectl patch,kubectl delete
 CASES
 
 # name|expected message|mutations: each CoderAIGatewayKey phase failure (plan 9) stops before the next mutation.
@@ -785,6 +876,27 @@ gw-create-sent|AI Gateway key e2e-gw-off has key state: nextSerial=1|$GW2
 gw-hijack-written|Secret e2e-gw-hijack changed|$GW3
 gw-log-leak|the operator log or an AI Gateway key object holds a key-shaped value or the Secret value (2 lines)|$GW3
 gw-finalizer-stuck|timed out after 3s waiting for: AI Gateway keys e2e-gw-off and e2e-gw-hijack to disappear|$GW
+CASES
+
+# name|expected message|mutations: each CoderMCPServer phase failure (plan 7.3) stops before the next mutation.
+while IFS='|' read -r name msg muts; do
+  echo "TEST $name (CoderMCPServer phases)"
+  run_scenario "$name" E2E_NAMESPACE_DELETE_TIMEOUT_SECONDS=2 </dev/null; summary
+  check "fails with '$msg'" eval 'failed_with "$msg" && no_mutations_after "$muts"'
+done <<CASES
+mcp-licensed|Coder has a license: the MCP phases test unlicensed Coder|$GW
+mcp-never-ready|timed out after 3s waiting for: MCP server e2e-mcp Ready|$M1
+mcp-cr-leak|CoderMCPServer e2e-mcp or the operator log holds the MCP server key (1 lines)|$M1
+mcp-hash-mismatch|the tools/list requests of the chat turn do not all reach mcp-stub.coder.svc:8080 with the key in ai-key-mcp-1: key hash no match|$M2
+mcp-tools-missing|the LLM did not get exactly the tools e2e-mcp__alpha, e2e-mcp__beta and e2e-mcp__Gamma: ["e2e-mcp__alpha","e2e-mcp__beta","read_file"]|$M2
+mcp-no-rotation|the tools/list requests of the chat turn do not all reach mcp-stub.coder.svc:8080 with the key in ai-key-mcp-2: key hash no match|$M2,kubectl replace,curl POST
+mcp-meta-resend|a metadata-only Secret change wrote to Coder: updated_at 2 -> 3|$M3
+mcp-wrong-reason|MCP server e2e-mcp-origin stalled with False CredentialMalformed stalled=True, want Ready=False CredentialDestinationNotAllowed|$M4A
+mcp-url-early|Coder config mcp-e2e-mcp changed before the Secret allowed the new origin|$M5
+mcp-acl-open|a tester chat that selects e2e-mcp with access.groups [] answered HTTP 201, want 400 invalid or disabled|$M6,curl POST
+mcp-kill-undone|the controller undid the disable of MCP server e2e-mcp|$M7
+mcp-delete-kept|MCP server config e2e-mcp (mcp-e2e-mcp) still exists in Coder after its object was deleted|$MCPM
+mcp-ns-stuck|timed out after 2s waiting for: test, provider, control plane, and namespace coder deleted|$NSM,kubectl patch,kubectl delete
 CASES
 
 echo "TEST missing-built-id: BUILT_IMAGE_ID is not a sha256 ID"

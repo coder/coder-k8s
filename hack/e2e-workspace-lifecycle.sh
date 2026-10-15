@@ -49,7 +49,7 @@ k() { kubectl --request-timeout=30s "$@"; } # every non-streaming kubectl reques
 cleanup() {
   local p
   for p in "${BG_PIDS[@]}"; do kill "$p" 2>/dev/null || true; done
-  rm -f "$WORK/coder.hdr" "$WORK/coder-body.json" "$WORK/tester.json" "$WORK"/ai-key-* "$WORK"/secret-*.json "$WORK/ai-leak.txt" "$WORK/coder-raw.json"
+  rm -f "$WORK/coder.hdr" "$WORK/coder-body.json" "$WORK/tester.json" "$WORK"/ai-key-* "$WORK"/secret-*.json "$WORK/ai-leak.txt" "$WORK/coder-raw.json" "$WORK/member.hdr"
   [[ $RESULT == PASS || -z $CURRENT ]] || CASES+=("case: $CURRENT = FAILED")
   # Sanitized evidence receipt: identifiers only, never the token.
   printf '%s\n' "=== RECEIPT ($RESULT) ===" "source_sha=$SOURCE_SHA" "run_id=${GITHUB_RUN_ID:-unset}" \
@@ -392,11 +392,15 @@ jq -nc --arg u "$TESTER" --arg p "$TESTER_PASSWORD" --arg o "$ORG_ID" '{username
 if USER_JSON=$(coder_api POST /api/v2/users "$(<"$WORK/tester.json")" 2>"$WORK/tester.err"); then :
 elif grep -q 'error: 409' "$WORK/tester.err"; then # a local rerun: reuse the tester after the same checks
   log "tester user $TESTER exists (409): reusing it"
+  TESTER_REUSED=1
   USER_JSON=$(coder_api GET "/api/v2/users/$TESTER") || fail "cannot read the existing tester user $TESTER"
 else fail "cannot create the tester user $TESTER: $(head -c 300 "$WORK/tester.err")"; fi
 rm -f "$WORK/tester.json" "$WORK/coder-body.json"
 TESTER_ID=$(jq -er --arg u "$TESTER" --arg o "$ORG_ID" 'select(.username == $u and .login_type == "password" and
   (.organization_ids | index($o))) | .id' <<<"$USER_JSON") || fail "tester user $TESTER has an unexpected shape or organization"
+# The MCP phases log in as the tester: a reused tester gets this run's password.
+[[ -z ${TESTER_REUSED:-} ]] || coder_api PUT "/api/v2/users/$TESTER_ID/password" "$(jq -nc --arg p "$TESTER_PASSWORD" '{password: $p}')" \
+  >/dev/null || fail "cannot reset the password of the reused tester user $TESTER"
 # New API users start dormant, and Coder refuses agents of workspaces whose owner is not active (401).
 coder_api PUT "/api/v2/users/$TESTER_ID/status/activate" | jq -e '.status == "active"' >/dev/null ||
   fail "cannot activate the tester user $TESTER"
@@ -808,6 +812,229 @@ gw_rows
 gone_obj secret e2e-gw-key || fail "Secret e2e-gw-key exists after the delete"
 phase gw-delete
 
+# CoderMCPServer phases (#155, plan 7.3 P0-P7, P9). The stub (hack/e2e/mcpstub) is the MCP server and the LLM, and its /report
+# holds only SHA-256 hashes of the headers. Keys are synthetic and stay in 0600 files: never argv or output.
+MCP=e2e-mcp MCP_SECRET=e2e-mcp-key MCP_STUB_IMAGE=${E2E_MCP_STUB_IMAGE:-e2e.local/mcpstub:e2e}
+MCP_HOST=mcp-stub.$NS.svc:8080 MCP_HOST2=mcp-stub-2.$NS.svc:8080 MCPS=/api/v2/organizations/$ORG/mcp-servers
+MCP_SEEN="" MCP_S="" MCP_OFF=0 LLM_OFF=0
+mcp_server() { # <name> <Secret> <key> [url] [spec JSON]: kubectl apply of an api_key CoderMCPServer (slug = name) that Everyone can read
+  local x=${5:-}
+  [[ -n $x ]] || x='{}'
+  jq -n --arg n "$1" --arg ns "$NS" --arg o "$ORG" --arg s "$2" --arg k "$3" --arg u "${4:-http://$MCP_HOST/mcp}" --argjson x "$x" \
+    '{apiVersion: "coder.com/v1alpha1", kind: "CoderMCPServer", metadata: {name: $n, namespace: $ns}, spec: ({controlPlaneRef: {name: "coder"},
+    organization: $o, slug: $n, displayName: ("E2E " + $n), url: $u, access: {groups: ["Everyone"]},
+    auth: {type: "api_key", apiKey: {header: "X-Api-Key", secretRef: {name: $s, key: $k}}}} + $x)}' >"$WORK/mcp-$1.json" ||
+    fail "cannot render CoderMCPServer $1"
+  apply_manifest "$WORK/mcp-$1.json"
+}
+mcp_state() { # <name>: reads the object into $WORK/mcp-<name>.state.json; sets MCP_S to "<Ready status> <reason> stalled=<status>"
+  k -n "$NS" get codermcpserver "$1" -o json >"$WORK/mcp-$1.state.json" 2>"$WORK/mcp.err" || return 1
+  MCP_S=$(jq -r '.metadata.generation as $g | [.status.conditions[]? | select(.observedGeneration == $g)] as $c |
+    "\([$c[] | select(.type == "Ready") | "\(.status) \(.reason)"][0] // "- -") stalled=\([$c[] | select(.type == "Stalled") | .status][0] // "-")"' \
+    "$WORK/mcp-$1.state.json") || return 1
+  [[ "$1 $MCP_S" == "$MCP_SEEN" ]] || { MCP_SEEN="$1 $MCP_S" && log "MCP server $1: $MCP_S"; }
+}
+mcp_is() { # <name> <Ready status> <reason>: true once Ready has them for the current generation; another stall fails at once
+  mcp_state "$1" || return 1
+  [[ $MCP_S == "$2 $3 "* ]] && return 0
+  [[ $MCP_S != *stalled=True ]] || fail "MCP server $1 stalled with $MCP_S, want Ready=$2 $3: $(jq -r '.status.conditions[0].message' "$WORK/mcp-$1.state.json")"
+  return 1
+}
+mcp_coder() { coder_api GET "$MCPS/$MCP_ID" >"$WORK/mcp-coder.json"; } # Coder's config of $MCP
+mcp_seen() { jq -c '{slug, url, enabled, display_name, has_api_key, updated_at}' "$WORK/mcp-coder.json"; }
+mcp_list() { coder_api GET "$MCPS" | jq -ce 'map({id, slug, url, enabled, updated_at}) | sort_by(.slug)'; }
+mcp_acl() { coder_api GET "$MCPS/$MCP_ID/acl" | jq -ce '{users: (.users // []), groups: [.groups[]? | {name, role}]}'; }
+mcp_rv() { # <Secret>: true once $MCP records the Secret's current resourceVersion
+  local rv
+  rv=$(k -n "$NS" get secret "$1" -o json | jq -er '.metadata.resourceVersion') || return 1
+  mcp_state "$MCP" && jq -e --arg rv "$rv" '.status.credentials[0].secretResourceVersion == $rv' "$WORK/mcp-$MCP.state.json" >/dev/null
+}
+mcp_report() { k get --raw "/api/v1/namespaces/$NS/services/mcp-stub:8080/proxy/report" >"$WORK/mcp-report.json"; } # API server service proxy
+mcp_chat() { # [header file]: POST of a chat of the stub model that selects $MCP_ID; prints the HTTP status, the body goes to $WORK/coder-raw.json
+  jq -nc --arg o "$ORG_ID" --arg m "$MODEL_ID" --arg id "$MCP_ID" '{organization_id: $o, model_config_id: $m, mcp_server_ids: [$id],
+    content: [{type: "text", text: "E2E: list your tools."}]}' >"$WORK/mcp-chat.json" || return 1
+  curl -sS --max-time 30 -o "$WORK/coder-raw.json" -w '%{http_code}' -X POST -H @"${1:-$WORK/coder.hdr}" -H 'Content-Type: application/json' \
+    --data @"$WORK/mcp-chat.json" "$CODER_URL/api/v2/chats"
+}
+REPORT_SEEN=""
+mcp_turn() { # true once an LLM request of the new turn lists the tools of $MCP; logs the request counts and methods on change
+  local seen
+  mcp_report || return 1
+  seen=$(jq -c --argjson o "$MCP_OFF" --argjson l "$LLM_OFF" '{mcp: [.mcp[$o:][].method], llm: [.llm[$l:][] | {stream, tools: (.tools | length)}]}' \
+    "$WORK/mcp-report.json") || return 1
+  [[ $seen == "$REPORT_SEEN" ]] || { REPORT_SEEN=$seen && log "stub report since the chat: $seen"; }
+  jq -e --argjson l "$LLM_OFF" --arg p "${MCP}__" 'any(.llm[$l:][].tools[]?; startswith($p))' "$WORK/mcp-report.json" >/dev/null
+}
+mcp_turn_ok() { # <key file> <host> [header file]: a new chat turn lists the tools at host with only that key; the LLM gets the three stub tools
+  local code h
+  mcp_report || fail "cannot read the stub report"
+  MCP_OFF=$(jq -er '.mcp | length' "$WORK/mcp-report.json") || fail "the stub report has no MCP request list"
+  LLM_OFF=$(jq -er '.llm | length' "$WORK/mcp-report.json") || fail "the stub report has no LLM request list"
+  code=$(mcp_chat "${3:-}") || fail "cannot create a chat that selects MCP server $MCP"
+  [[ $code == 201 ]] || fail "a chat that selects MCP server $MCP answered HTTP $code: $(jq -r '.message?' "$WORK/coder-raw.json" 2>/dev/null | head -c 300)"
+  wait_until "the chat turn to list the tools of MCP server $MCP" mcp_turn
+  h=$(sha256sum <"$WORK/$1" | cut -d' ' -f1) # only "match" or "no match" is printed
+  jq -e --argjson o "$MCP_OFF" --arg h "$h" --arg host "$2" '[.mcp[$o:][] | select(.method == "tools/list")] |
+    length > 0 and all(.host == $host and .apiKeyHash == $h)' "$WORK/mcp-report.json" >/dev/null ||
+    fail "the tools/list requests of the chat turn do not all reach $2 with the key in $1: key hash no match"
+  log "MCP tools/list of the chat turn at $2: key hash match"
+  jq -e --argjson l "$LLM_OFF" --arg p "${MCP}__" '[.llm[$l:][].tools[]? | select(startswith($p))] | unique == [$p + "Gamma", $p + "alpha", $p + "beta"]' \
+    "$WORK/mcp-report.json" >/dev/null || fail "the LLM did not get exactly the tools ${MCP}__alpha, ${MCP}__beta and ${MCP}__Gamma: $(jq -c \
+    --argjson l "$LLM_OFF" '[.llm[$l:][].tools[]?] | unique' "$WORK/mcp-report.json")"
+}
+
+step "CoderMCPServer setup: the stub, a stub LLM provider and model, and the opt-in; an unlisted organization is refused (plan 7.3 P0, P4e)"
+T0=$SECONDS
+coder_api GET /api/v2/entitlements | jq -e '.has_license == false' >/dev/null || fail "Coder has a license: the MCP phases test unlicensed Coder"
+jq -n --arg ns "$NS" --arg i "$MCP_STUB_IMAGE" '{apiVersion: "v1", kind: "List", items: ([{apiVersion: "apps/v1", kind: "Deployment",
+  metadata: {name: "mcp-stub", namespace: $ns}, spec: {replicas: 1, selector: {matchLabels: {app: "mcp-stub"}}, template: {metadata: {labels: {app: "mcp-stub"}},
+  spec: {containers: [{name: "stub", image: $i, imagePullPolicy: "Never", ports: [{containerPort: 8080}],
+  readinessProbe: {httpGet: {path: "/healthz", port: 8080}}}]}}}}] + (["mcp-stub", "mcp-stub-2"] | map({apiVersion: "v1", kind: "Service",
+  metadata: {name: (.), namespace: $ns}, spec: {selector: {app: "mcp-stub"}, ports: [{port: 8080, targetPort: 8080}]}})))}' >"$WORK/stub-mcp.json" ||
+  fail "cannot render the MCP stub manifest"
+apply_manifest "$WORK/stub-mcp.json"
+stub_ready() { k -n "$NS" get deploy mcp-stub -o json | jq -e '.status.readyReplicas == 1' >/dev/null; }
+wait_until "deploy/mcp-stub Ready" stub_ready
+PROVIDER_ID=$(coder_api POST /api/v2/ai/providers "$(jq -nc --arg u "http://$MCP_HOST/v1" '{type: "openai-compat", name: "e2e-mcp-llm",
+  display_name: "E2E MCP stub", enabled: true, base_url: $u, api_keys: ["e2e-stub-llm-key"]}')" | jq -er '.id') ||
+  fail "cannot create the stub LLM provider through the Coder API"
+MODEL_ID=$(coder_api POST "/api/v2/organizations/$ORG/chats/models" "$(jq -nc --arg p "$PROVIDER_ID" '{ai_provider_id: $p, model: "stub-model",
+  context_limit: 100000, display_name: "E2E stub model", enabled: true, is_default: true}')" | jq -er '.id') || fail "cannot create the stub chat model"
+# The chats run as the tester, an organization member with a password login: the operator user does not run chats.
+MEMBER_TOKEN=$(coder_api POST /api/v2/users/login "$(jq -nc --arg e "$TESTER@e2e.example.com" --arg p "$TESTER_PASSWORD" '{email: $e, password: $p}')" |
+  jq -er '.session_token') || fail "cannot log in as the tester $TESTER"
+[[ ${GITHUB_ACTIONS:-} != true ]] || echo "::add-mask::$MEMBER_TOKEN"
+printf 'Coder-Session-Token: %s\n' "$MEMBER_TOKEN" >"$WORK/member.hdr" && unset MEMBER_TOKEN
+# P4e runs here: unlicensed Coder has one organization, and a list without it later would disable the P1 server.
+k -n "$NS" patch codercontrolplane coder --type=merge -p '{"spec":{"mcpServers":{"organizations":["e2e-no-such-org"]}}}' >/dev/null ||
+  fail "cannot set mcpServers.organizations on codercontrolplane coder"
+MCP_BEFORE=$(mcp_list) || fail "cannot list the Coder MCP server configs"
+mcp_server e2e-mcp-unlisted e2e-no-such-secret api-key
+wait_until "MCP server e2e-mcp-unlisted to stall with MCPServersNotAllowed" mcp_is e2e-mcp-unlisted False MCPServersNotAllowed
+k -n "$NS" delete codermcpserver e2e-mcp-unlisted --wait=false >/dev/null || fail "cannot delete CoderMCPServer e2e-mcp-unlisted"
+wait_until "CoderMCPServer e2e-mcp-unlisted to disappear" gone_obj codermcpserver e2e-mcp-unlisted
+[[ $(mcp_list) == "$MCP_BEFORE" ]] || fail "a CoderMCPServer of an unlisted organization wrote to Coder"
+k -n "$NS" patch codercontrolplane coder --type=merge -p "$(jq -nc --arg o "$ORG" '{spec: {mcpServers: {organizations: [$o]}}}')" >/dev/null ||
+  fail "cannot set mcpServers.organizations on codercontrolplane coder"
+phase mcp-setup
+
+step "CoderMCPServer: a server on an opted-in Secret is Ready; Coder holds the spec, the key and an Everyone read ACL (plan 7.3 P1)"
+T0=$SECONDS
+new_key ai-key-mcp-1 || fail "cannot generate the first MCP server key"
+AI_ORIGIN=http://$MCP_HOST key_secret create "$MCP_SECRET" ai-key-mcp-1 '{"coder.com/credential": "true"}' || fail "cannot create Secret $MCP_SECRET"
+mcp_server "$MCP" "$MCP_SECRET" api-key
+wait_until "MCP server $MCP Ready" mcp_is "$MCP" True Applied
+MCP_ID=$(jq -er '.status.configID' "$WORK/mcp-$MCP.state.json") || fail "MCP server $MCP is Ready without status.configID"
+mcp_coder || fail "cannot read MCP server config $MCP_ID"
+jq -e --arg s "$MCP" --arg u "http://$MCP_HOST/mcp" '.slug == $s and .url == $u and .enabled == true and .has_api_key == true' \
+  "$WORK/mcp-coder.json" >/dev/null || fail "Coder config $MCP_ID does not match the spec of $MCP: $(mcp_seen)"
+ACL=$(mcp_acl) || fail "cannot read the ACL of MCP server config $MCP_ID"
+[[ $ACL == '{"users":[],"groups":[{"name":"Everyone","role":"read"}]}' ]] || fail "the ACL of $MCP is not Everyone read only: $ACL"
+k -n "$OP_NS" logs deploy/coder-k8s >"$WORK/operator-mcp.txt" || fail "cannot read the operator log"
+LEAKS=$(cat "$WORK/mcp-$MCP.state.json" "$WORK/operator-mcp.txt" | grep -cFf "$WORK/ai-key-mcp-1" || true)
+[[ $LEAKS == 0 ]] || fail "CoderMCPServer $MCP or the operator log holds the MCP server key ($LEAKS lines)"
+phase mcp-apply
+
+step "CoderMCPServer chat: the tester's chat reaches the stub with the key; the LLM gets the stub tools (plan 7.3 P2)"
+T0=$SECONDS
+mcp_turn_ok ai-key-mcp-1 "$MCP_HOST" "$WORK/member.hdr"
+phase mcp-chat
+
+step "CoderMCPServer rotation: the next chat turn carries a new key; a metadata-only Secret change writes nothing to Coder (plan 7.3 P3)"
+T0=$SECONDS
+new_key ai-key-mcp-2 || fail "cannot generate the second MCP server key"
+AI_ORIGIN=http://$MCP_HOST key_secret replace "$MCP_SECRET" ai-key-mcp-2 '{"coder.com/credential": "true"}' ||
+  fail "cannot write the second key to Secret $MCP_SECRET"
+wait_until "MCP server $MCP to record the second Secret version" mcp_rv "$MCP_SECRET"
+wait_until "MCP server $MCP Ready after the rotation" mcp_is "$MCP" True Applied
+mcp_turn_ok ai-key-mcp-2 "$MCP_HOST" "$WORK/member.hdr"
+mcp_coder || fail "cannot read MCP server config $MCP_ID"
+UPDATED=$(jq -er '.updated_at' "$WORK/mcp-coder.json") || fail "Coder config $MCP_ID has no updated_at"
+k -n "$NS" annotate secret "$MCP_SECRET" e2e.coder.com/touched=1 >/dev/null || fail "cannot annotate Secret $MCP_SECRET"
+wait_until "MCP server $MCP to record the annotated Secret version" mcp_rv "$MCP_SECRET"
+mcp_coder || fail "cannot read MCP server config $MCP_ID"
+[[ $(jq -r '.updated_at' "$WORK/mcp-coder.json") == "$UPDATED" ]] ||
+  fail "a metadata-only Secret change wrote to Coder: updated_at $UPDATED -> $(jq -r '.updated_at' "$WORK/mcp-coder.json")"
+phase mcp-rotation
+
+step "CoderMCPServer refusals: an unlabeled Secret, the operator token, a foreign origin, a taken slug and force_on write nothing (plan 7.3 P4)"
+T0=$SECONDS
+coder_api POST "$MCPS" "$(jq -nc --arg u "http://$MCP_HOST/mcp" '{display_name: "Taken out of band", slug: "e2e-mcp-taken", url: $u,
+  transport: "streamable_http", availability: "default_off", enabled: false, auth_type: "none"}')" >/dev/null ||
+  fail "cannot create MCP server config e2e-mcp-taken through the Coder API"
+new_key ai-key-mcp-3 || fail "cannot generate the third MCP server key"
+AI_ORIGIN=http://$MCP_HOST key_secret create e2e-mcp-unlabeled ai-key-mcp-3 '{}' || fail "cannot create Secret e2e-mcp-unlabeled"
+MCP_BEFORE=$(mcp_list) || fail "cannot list the Coder MCP server configs"
+mcp_server e2e-mcp-unlabeled e2e-mcp-unlabeled api-key
+mcp_server e2e-mcp-refused "$SECRET" "$KEY"
+mcp_server e2e-mcp-origin "$MCP_SECRET" api-key http://other.invalid:8080/mcp
+mcp_server e2e-mcp-taken "$MCP_SECRET" api-key
+mcp_server e2e-mcp-forced "$MCP_SECRET" api-key "" '{"availability": "force_on"}'
+MCP_REFUSED=(e2e-mcp-unlabeled:CredentialNotOptedIn e2e-mcp-refused:CredentialRefused e2e-mcp-origin:CredentialDestinationNotAllowed
+  e2e-mcp-taken:SlugConflict e2e-mcp-forced:ForceOnNotAllowed)
+for c in "${MCP_REFUSED[@]}"; do
+  wait_until "MCP server ${c%%:*} to stall with ${c#*:}" mcp_is "${c%%:*}" False "${c#*:}"
+  jq -e '(.status.configID // "") == ""' "$WORK/mcp-${c%%:*}.state.json" >/dev/null || fail "refused MCP server ${c%%:*} has a configID"
+done
+[[ $(mcp_list) == "$MCP_BEFORE" ]] || fail "a refused CoderMCPServer wrote to Coder: before=$MCP_BEFORE after=$(mcp_list)"
+k -n "$NS" delete codermcpserver "${MCP_REFUSED[@]%%:*}" --wait=false >/dev/null || fail "cannot delete the refused CoderMCPServers"
+for c in "${MCP_REFUSED[@]%%:*}"; do wait_until "CoderMCPServer $c to disappear" gone_obj codermcpserver "$c"; done
+[[ $(mcp_list) == "$MCP_BEFORE" ]] || fail "deleting a refused CoderMCPServer wrote to Coder: before=$MCP_BEFORE after=$(mcp_list)"
+phase mcp-refusals
+
+step "CoderMCPServer URL change: Coder keeps the old URL until the Secret allows the new origin (plan 7.3 P5)"
+T0=$SECONDS
+k -n "$NS" patch codermcpserver "$MCP" --type=merge -p "{\"spec\":{\"url\":\"http://$MCP_HOST2/mcp\"}}" >/dev/null || fail "cannot change spec.url of $MCP"
+wait_until "MCP server $MCP to stall with CredentialDestinationNotAllowed" mcp_is "$MCP" False CredentialDestinationNotAllowed
+mcp_coder || fail "cannot read MCP server config $MCP_ID"
+jq -e --arg u "http://$MCP_HOST/mcp" '.url == $u and .enabled == true' "$WORK/mcp-coder.json" >/dev/null ||
+  fail "Coder config $MCP_ID changed before the Secret allowed the new origin: $(mcp_seen)"
+k -n "$NS" annotate secret "$MCP_SECRET" "coder.com/credential-destinations=http://$MCP_HOST,http://$MCP_HOST2" --overwrite >/dev/null ||
+  fail "cannot add the second origin to Secret $MCP_SECRET"
+wait_until "MCP server $MCP Ready after the consent" mcp_is "$MCP" True Applied
+mcp_coder || fail "cannot read MCP server config $MCP_ID"
+jq -e --arg u "http://$MCP_HOST2/mcp" '.url == $u and .enabled == true' "$WORK/mcp-coder.json" >/dev/null ||
+  fail "Coder config $MCP_ID does not hold the new URL: $(mcp_seen)"
+mcp_turn_ok ai-key-mcp-2 "$MCP_HOST2" "$WORK/member.hdr"
+phase mcp-url-change
+
+step "CoderMCPServer access: with access.groups [] a member's chat cannot select the server; with [Everyone] it can (plan 7.3 P6)"
+T0=$SECONDS
+k -n "$NS" patch codermcpserver "$MCP" --type=merge -p '{"spec":{"access":{"groups":[]}}}' >/dev/null || fail "cannot empty access.groups of $MCP"
+wait_until "MCP server $MCP Ready with no groups" mcp_is "$MCP" True Applied
+CODE=$(mcp_chat "$WORK/member.hdr") || fail "cannot call POST /api/v2/chats as the tester"
+jq -e --arg c "$CODE" '$c == "400" and .message == "One or more MCP server IDs are invalid or disabled."' "$WORK/coder-raw.json" >/dev/null 2>&1 ||
+  fail "a tester chat that selects $MCP with access.groups [] answered HTTP $CODE, want 400 invalid or disabled"
+ACL=$(mcp_acl) || fail "cannot read the ACL of MCP server config $MCP_ID"
+[[ $ACL == '{"users":[],"groups":[]}' ]] || fail "the ACL of $MCP is not empty with access.groups []: $ACL"
+k -n "$NS" patch codermcpserver "$MCP" --type=merge -p '{"spec":{"access":{"groups":["Everyone"]}}}' >/dev/null || fail "cannot set access.groups of $MCP"
+wait_until "MCP server $MCP Ready with Everyone" mcp_is "$MCP" True Applied
+mcp_turn_ok ai-key-mcp-2 "$MCP_HOST2" "$WORK/member.hdr"
+phase mcp-access
+
+step "CoderMCPServer kill switch: a disable in Coder stalls the object; a spec edit enables the server again (plan 7.3 P7)"
+T0=$SECONDS
+coder_api PATCH "$MCPS/$MCP_ID" '{"enabled":false}' >/dev/null || fail "cannot disable MCP server config $MCP_ID in Coder"
+k -n "$NS" annotate codermcpserver "$MCP" e2e.coder.com/poke=1 >/dev/null || fail "cannot annotate CoderMCPServer $MCP"
+wait_until "MCP server $MCP to stall with DisabledExternally" mcp_is "$MCP" False DisabledExternally
+mcp_coder || fail "cannot read MCP server config $MCP_ID"
+jq -e '.enabled == false' "$WORK/mcp-coder.json" >/dev/null || fail "the controller undid the disable of MCP server $MCP: $(mcp_seen)"
+k -n "$NS" patch codermcpserver "$MCP" --type=merge -p '{"spec":{"displayName":"E2E edited"}}' >/dev/null || fail "cannot edit spec.displayName of $MCP"
+wait_until "MCP server $MCP Ready after the spec edit" mcp_is "$MCP" True Applied
+mcp_coder || fail "cannot read MCP server config $MCP_ID"
+jq -e '.enabled == true and .display_name == "E2E edited"' "$WORK/mcp-coder.json" >/dev/null || fail "Coder config $MCP_ID is not enabled with the edit: $(mcp_seen)"
+phase mcp-kill-switch
+
+step "CoderMCPServer delete: deleting the object deletes the config in Coder (plan 7.3 P9)"
+T0=$SECONDS
+k -n "$NS" delete codermcpserver "$MCP" --wait=false >/dev/null || fail "cannot delete CoderMCPServer $MCP"
+wait_until "CoderMCPServer $MCP to disappear" gone_obj codermcpserver "$MCP"
+CODE=$(coder_status "$MCPS/$MCP_ID") || fail "cannot call GET MCP server config $MCP_ID after the delete"
+[[ $CODE != 200 ]] || fail "MCP server config $MCP ($MCP_ID) still exists in Coder after its object was deleted"
+jq -e --arg c "$CODE" --arg m "$CODER_NOT_FOUND" '$c == "404" and .message == $m' "$WORK/coder-raw.json" >/dev/null 2>&1 ||
+  fail "GET MCP server config $MCP_ID after the delete answered HTTP $CODE without Coder's own 404 message: $(head -c 300 "$WORK/coder-raw.json")"
+phase mcp-delete
+
 # Last: it scales Coder to zero and deletes namespace $NS. Later CI steps must not need either.
 step "namespace deletion releases a running test while Coder is unreachable (plan A1, A13.2)"
 tt_create e2e-ns-delete "$(param startup_delay 120)" || fail "cannot create template test e2e-ns-delete"
@@ -815,6 +1042,8 @@ tt_waiting() { tt_state e2e-ns-delete && [[ $TT_S == "Running WaitingForAgents "
 wait_until "template test e2e-ns-delete at Running/WaitingForAgents" tt_waiting
 ai_provider e2e-ns-keep "$AI_SECRET" api-key # plan 8.2 P7: a Ready provider goes with the namespace
 wait_until "AI provider e2e-ns-keep Ready" ai_is e2e-ns-keep True Applied
+mcp_server e2e-mcp-keep "$MCP_SECRET" api-key # plan 7.3 P9: a Ready MCP server goes with the namespace
+wait_until "MCP server e2e-mcp-keep Ready" mcp_is e2e-mcp-keep True Applied
 # spec.replicas is the operator's desired state for deploy/coder: the operator keeps it at zero instead of undoing it.
 k -n "$NS" patch codercontrolplane coder --type=merge -p '{"spec":{"replicas":0}}' >/dev/null || fail "cannot scale Coder to zero"
 coder_down() { k -n "$NS" get deploy coder -o json | jq -e '.spec.replicas == 0 and (.status.replicas // 0) == 0' >/dev/null; }
@@ -824,9 +1053,10 @@ wait_until "template test e2e-ns-delete to report CoderUnavailable" tt_unavailab
 T0=$SECONDS
 k delete namespace "$NS" --wait=false >/dev/null || fail "cannot delete namespace $NS"
 NS_SEEN=""
-ns_gone() { # the namespace disappears (#209), and with it the test, the provider and the control plane
+ns_gone() { # the namespace disappears (#209), and with it the test, the provider, the MCP server and the control plane
   tt_state e2e-ns-delete || true # logs the ControlPlaneGone release while the object still exists
   ai_state e2e-ns-keep || true
+  mcp_state e2e-mcp-keep || true
   if k get namespace "$NS" -o json >"$WORK/ns.json" 2>"$WORK/ns.err"; then
     # Diagnostics from the first poll on, so a run shows NamespaceDeletionContentFailure (the aggregated
     # LIST errors while the control plane still exists): the phase and every True condition, on change.
@@ -838,13 +1068,15 @@ ns_gone() { # the namespace disappears (#209), and with it the test, the provide
     return 1
   fi
   grep -q NotFound "$WORK/ns.err" && gone_obj codertemplatetest e2e-ns-delete && gone_obj coderaiprovider e2e-ns-keep &&
-    gone_obj codercontrolplane coder
+    gone_obj codermcpserver e2e-mcp-keep && gone_obj codercontrolplane coder
 }
 TIMEOUT=$NS_DELETE_TIMEOUT wait_until "test, provider, control plane, and namespace $NS deleted (ControlPlaneGone release)" ns_gone
 NS_DELETE_SECONDS=$((SECONDS - T0))
 k -n "$OP_NS" logs deploy/coder-k8s >"$WORK/operator-ns.txt" || fail "cannot read the operator log after the namespace deletion"
 grep -F 'Releasing the finalizer without a delete in Coder' "$WORK/operator-ns.txt" | grep -F '"ControlPlaneGone"' | grep -qF '"e2e-ns-keep"' ||
   fail "the operator log has no ControlPlaneGone release of AI provider e2e-ns-keep (plan 8.2 P7)"
+grep -F 'Releasing the finalizer without a delete in Coder: the MCP server config' "$WORK/operator-ns.txt" | grep -F '"ControlPlaneGone"' |
+  grep -qF '"e2e-mcp-keep"' || fail "the operator log has no ControlPlaneGone release of MCP server e2e-mcp-keep (plan 7.3 P9)"
 log "namespace $NS deleted in ${NS_DELETE_SECONDS}s, after its test, provider and control plane"
 CASES+=("case: $CURRENT = passed") && CURRENT="" && RESULT=PASS
 log "PASS: workspace lifecycle"
