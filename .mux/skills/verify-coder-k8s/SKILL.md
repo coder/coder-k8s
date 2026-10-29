@@ -33,7 +33,7 @@ Requirements: Linux amd64, Docker, Go (the version in `go.mod`), `jq`, `curl`, `
 
 `launch` goes from an empty state to a usable state. It refuses a `VERIFY_RUN_DIR` that already holds a run. Its steps, in order (`$VERIFY_RUN_DIR/launch-steps.tsv` records each duration):
 
-1. Downloads kind `v0.26.0` and kubectl `v1.31.4` into `$VERIFY_BASE/bin` (default `${XUM_SCRATCH_DIR:-${TMPDIR:-/tmp}}/verify-coder-k8s/bin`) and checks their SHA-256 sums. These are the versions of `helm/kind-action` v1.12.0 in the CI job "E2E (Kind + CNPG + Templates)". The script puts this directory first on `PATH`, so a `kind` shim on the host is never used.
+1. Downloads kind `v0.26.0` and kubectl `v1.31.4` into `$VERIFY_BASE/bin` (default `${XUM_SCRATCH_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}}/verify-coder-k8s/bin`) and checks their SHA-256 sums. The script refuses `VERIFY_BASE`, `bin` and the run directory unless this user owns them and no other user can write them: `bin` goes first on `PATH` and `run.env` is sourced. These are the versions of `helm/kind-action` v1.12.0 in the CI job "E2E (Kind + CNPG + Templates)". The script puts this directory first on `PATH`, so a `kind` shim on the host is never used.
 2. Picks a run ID `vck-<6 hex>`. The run ID is also the KIND cluster name and the image tag suffix, so two runs can live side by side. It reads the Coder image (`CODER_E2E_IMAGE`) and version (`E2E_EXPECT_CODER_VERSION`) from `.github/workflows/ci.yaml`.
 3. Runs `./hack/kind-dev.sh up` with `CLUSTER_NAME=<run ID>`, `KIND_NODE_IMAGE=kindest/node:v1.32.0` and `KUBECONFIG=$VERIFY_RUN_DIR/kubeconfig`. That creates the cluster and applies `config/e2e/namespace.yaml`, `config/crd/bases/` and `config/rbac/`. Your own `~/.kube/config` does not change. Then it writes the ownership marker ConfigMap `kube-system/verify-coder-k8s-run` (`data.run` = run ID).
 4. Builds `./` into `$VERIFY_RUN_DIR/build/linux/amd64/coder-k8s` (`GOFLAGS=-mod=vendor CGO_ENABLED=0`, Go cache in `$VERIFY_BASE/gocache`), and builds the image `coder-k8s-verify:<run ID>` from `Dockerfile.goreleaser`. Nothing is written into the checkout.
@@ -60,7 +60,7 @@ Teardown is the [Cleanup](#cleanup) command `"$V" cleanup`.
 1. The cluster is ours: `kind get clusters` lists the run ID, the node container carries the label `io.x-k8s.kind.cluster=<run ID>`, and the marker ConfigMap holds the run ID. If this fails, doctor checks nothing else.
 2. Exactly one Ready, non-terminating operator pod (`coder-system`, label `app=coder-k8s`) runs the built image: the node image `ghcr.io/coder/coder-k8s:e2e` has the Docker image ID of `coder-k8s-verify:<run ID>`, and the pod's image digest is one of its repo digests.
 3. Every CRD in `config/crd/bases/` is `Established`.
-4. `apiservice/v1alpha1.aggregation.coder.com` is `Available`, and the discovery document lists `codertemplates`, `codertemplateversions` and `coderworkspaces` with their subresources.
+4. `apiservice/v1alpha1.aggregation.coder.com` is `Available`, and the discovery document lists all 7 resources: `codertemplates`, `codertemplates/promote`, `codertemplateversions`, `coderworkspaces`, `coderworkspaces/log`, `coderworkspaces/start` and `coderworkspaces/stop`.
 5. `codercontrolplane/coder` in namespace `coder` has `phase=Ready` and `operatorAccessReady=true`.
 6. The Coder API answers the operator token with the expected version.
 
@@ -155,7 +155,7 @@ Environment variables of `scripts/verify.sh`:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `VERIFY_RUN_DIR` | none (required) | Absolute run directory: `run.env`, logs, evidence. |
-| `VERIFY_BASE` | `${XUM_SCRATCH_DIR:-${TMPDIR:-/tmp}}/verify-coder-k8s` | Shared tools (`bin/`) and Go cache (`gocache/`). |
+| `VERIFY_BASE` | `${XUM_SCRATCH_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}}/verify-coder-k8s` (created with mode 0700, never a shared `/tmp`) | Shared tools (`bin/`) and Go cache (`gocache/`). |
 | `GOCACHE` | `$VERIFY_BASE/gocache` | Go build cache for the operator binary. |
 
 Other repo harnesses, for deeper checks:

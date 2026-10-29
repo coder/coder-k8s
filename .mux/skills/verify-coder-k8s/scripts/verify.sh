@@ -20,8 +20,25 @@ OP_NS=coder-system
 CCP=coder
 APISERVICE=v1alpha1.aggregation.coder.com
 
-VERIFY_BASE="${VERIFY_BASE:-${XUM_SCRATCH_DIR:-${TMPDIR:-/tmp}}/verify-coder-k8s}"
+# private_dir DIR creates DIR (mode 0700) if needed, then refuses it unless this
+# user owns it and nobody else can write it: BIN goes first on PATH, and
+# run.env is sourced, so a directory that another user can write would let
+# that user run code as this one.
+private_dir() {
+	(umask 077 && mkdir -p -- "$1")
+	local owner mode
+	read -r owner mode < <(stat -c '%u %a' -- "$1")
+	if [[ ${owner} != "$(id -u)" ]] || (((8#${mode} & 8#022) != 0)); then
+		printf 'verify-coder-k8s: refusing %s: owner uid %s, mode %s (need this user and no group or other write)\n' "$1" "${owner}" "${mode}" >&2
+		exit 1
+	fi
+}
+
+# Never a shared /tmp default: see private_dir.
+VERIFY_BASE="${VERIFY_BASE:-${XUM_SCRATCH_DIR:-${XDG_CACHE_HOME:-${HOME}/.cache}}/verify-coder-k8s}"
 BIN="${VERIFY_BASE}/bin"
+private_dir "${VERIFY_BASE}"
+private_dir "${BIN}"
 export PATH="${BIN}:${PATH}"
 # A private Go build cache: the shared ~/.cache/go-build on this host can be damaged ("no such file").
 export GOCACHE="${GOCACHE:-${VERIFY_BASE}/gocache}"
@@ -61,6 +78,8 @@ require_run_dir() {
 load_run() {
 	require_run_dir
 	[[ -f ${RUN_DIR}/run.env ]] || die "no run.env in ${RUN_DIR}: run launch first"
+	private_dir "${RUN_DIR}"
+	[[ -O ${RUN_DIR}/run.env ]] || die "refusing ${RUN_DIR}/run.env: another user owns it"
 	# shellcheck disable=SC1091
 	source "${RUN_DIR}/run.env"
 	[[ -n ${RUN_ID:-} && -n ${CLUSTER:-} ]] || die "assertion failed: run.env lacks RUN_ID or CLUSTER"
@@ -123,7 +142,8 @@ step() {
 cmd_launch() {
 	require_run_dir
 	[[ ! -e ${RUN_DIR}/run.env ]] || die "refusing: ${RUN_DIR} already holds a run (run.env); use a new VERIFY_RUN_DIR"
-	mkdir -p "${RUN_DIR}" "${EVIDENCE}"
+	private_dir "${RUN_DIR}"
+	mkdir -p "${EVIDENCE}"
 	exec > >(tee -a "${RUN_DIR}/launch.log") 2>&1
 	local t_all=${SECONDS}
 
@@ -276,7 +296,11 @@ doc_crds() {
 }
 doc_apiservice() {
 	[[ $(k get apiservice "${APISERVICE}" -o jsonpath='{.status.conditions[?(@.type=="Available")].status}') == True ]] || { echo "not Available"; return 1; }
-	k get --raw /apis/aggregation.coder.com/v1alpha1 | jq -r '[.resources[].name] | join(",")'
+	local want=(codertemplates codertemplates/promote codertemplateversions coderworkspaces coderworkspaces/log coderworkspaces/start coderworkspaces/stop) have missing=() r
+	have=$(k get --raw /apis/aggregation.coder.com/v1alpha1 | jq -r '.resources[].name') || { echo "no discovery document"; return 1; }
+	for r in "${want[@]}"; do grep -qx -- "${r}" <<<"${have}" || missing+=("${r}"); done
+	((${#missing[@]} == 0)) || { echo "discovery lacks: ${missing[*]}"; return 1; }
+	paste -sd, <<<"${have}"
 }
 doc_ccp() {
 	k -n "${NS}" get codercontrolplane "${CCP}" -o jsonpath='{.status.phase} {.status.operatorAccessReady}' | grep -qx 'Ready true' ||

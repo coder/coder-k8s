@@ -66,7 +66,7 @@ Run `git diff --stat <sync commit> -- 'internal/controller/coderaigatewaykey_*.g
 | `writeKeySecret`, `writeOwnedSecret`, `getOwnedSecret` | `coderaigatewaykey_issue.go`, `owned_secret.go` | `WriteLoopReadsSecret`, `SendsSecretWrite`, `SecretWriteAnswered`, `SecretWriteTimesOut`, `SecretWriteLands` |
 | `deleteStep`, `deleteKeys` | `coderaigatewaykey_delete.go` | `DeleteWaitsForSettle`, `DeleteLists`, `DeleteDeletes` |
 
-`hack/formal/aigatewaykey/covered.sha256` holds a fingerprint of each function body. The check reports `STALE` when a body changed. A comment above a function is not part of its body.
+`hack/formal/aigatewaykey/covered.sha256` holds a fingerprint of each function body. The check reports `STALE` when a body changed, or when a function joined or left the covered list. A comment above a function is not part of its body.
 
 ## Run
 

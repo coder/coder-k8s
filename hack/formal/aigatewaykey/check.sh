@@ -180,7 +180,9 @@ current=$(for c in "${covered[@]}"; do
 	[[ -n $text ]] || { echo "covered function not found: $file $sig" >&2; exit 2; }
 	printf '%s  %s  %s\n' "$(printf '%s\n' "$text" | sha256sum | cut -c1-16)" "$file" "$sig"
 done)
-stale=$(diff <(cat "$fingerprints" 2>/dev/null) <(printf '%s\n' "$current") | sed -n 's/^> /  /p' || true)
+# A changed body shows on both sides. A function that left the covered list
+# shows only as "<", and a new one only as ">": both are stale.
+stale=$(diff <(cat "$fingerprints" 2>/dev/null) <(printf '%s\n' "$current") | sed -n -e 's/^> /  now:      /p' -e 's/^< /  reviewed: /p' || true)
 
 # --- The model configuration. ---
 declare -A c=(
@@ -219,7 +221,8 @@ jar=$jar_dir/tla2tools-1.7.4.jar
 jar_sha=936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 if [[ ! -f $jar ]] || ! echo "$jar_sha  $jar" | sha256sum -c --quiet - 2>/dev/null; then
 	mkdir -p "$jar_dir"
-	curl -fsSL -o "$jar.tmp" https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+	curl -fsSL -o "$jar.tmp" https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar ||
+		{ echo "downloading tla2tools.jar failed" >&2; rm -f "$jar.tmp"; exit 2; }
 	echo "$jar_sha  $jar.tmp" | sha256sum -c --quiet - || { echo "tla2tools.jar checksum mismatch" >&2; exit 2; }
 	mv "$jar.tmp" "$jar"
 fi
