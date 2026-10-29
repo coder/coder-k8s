@@ -40,6 +40,7 @@ private_dir() {
 # user, and a directory that others can write must be sticky (like /tmp).
 safe_ancestors() {
 	local real p owner mode type
+	[[ $1 == /* ]] || { printf 'verify-coder-k8s: %s must be an absolute path\n' "$1" >&2; exit 1; }
 	real=$(realpath -e -- "$1")
 	for p in "$1" "${real}"; do
 		while :; do
@@ -163,7 +164,7 @@ step() {
 
 cmd_launch() {
 	require_run_dir
-	[[ ! -e ${RUN_DIR}/run.env ]] || die "refusing: ${RUN_DIR} already holds a run (run.env); use a new VERIFY_RUN_DIR"
+	[[ ! -e ${RUN_DIR} || -z $(ls -A -- "${RUN_DIR}") ]] || die "refusing: ${RUN_DIR} is not empty; use a new VERIFY_RUN_DIR"
 	private_dir "${RUN_DIR}"
 	mkdir -p "${EVIDENCE}"
 	exec > >(tee -a "${RUN_DIR}/launch.log") 2>&1

@@ -201,10 +201,11 @@ for kv in "${sets[@]}"; do
 	echo "Override: ${kv%%=*} = ${kv#*=} (not the value from the code or the config)"
 done
 
-out=${out:-$(mktemp -d "${TMPDIR:-/tmp}/aigatewaykey-tlc.XXXXXX")}
-mkdir -p "$out"
-out=$(cd "$out" && pwd)
-cp "$here/AIGatewayKey.tla" "$out/"
+if [[ -z $out ]]; then
+	out=$(mktemp -d "${TMPDIR:-/tmp}/aigatewaykey-tlc.XXXXXX") || { echo "cannot create a temp output folder" >&2; exit 2; }
+fi
+{ mkdir -p "$out" && out=$(cd "$out" && pwd) && cp "$here/AIGatewayKey.tla" "$out/"; } ||
+	{ echo "cannot use the output folder $out" >&2; exit 2; }
 {
 	echo "SPECIFICATION Spec"
 	echo "CONSTANTS"
@@ -220,12 +221,19 @@ jar_dir=${TLA2TOOLS_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/coder-k8s-tla}
 jar=$jar_dir/tla2tools-1.7.4.jar
 jar_sha=936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 if [[ ! -f $jar ]] || ! echo "$jar_sha  $jar" | sha256sum -c --quiet - 2>/dev/null; then
-	mkdir -p "$jar_dir"
+	(umask 077 && mkdir -p "$jar_dir") || { echo "cannot create $jar_dir" >&2; exit 2; }
 	curl -fsSL -o "$jar.tmp" https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar ||
 		{ echo "downloading tla2tools.jar failed" >&2; rm -f "$jar.tmp"; exit 2; }
 	echo "$jar_sha  $jar.tmp" | sha256sum -c --quiet - || { echo "tla2tools.jar checksum mismatch" >&2; exit 2; }
 	mv "$jar.tmp" "$jar"
 fi
+# Run TLC from a private copy whose checksum is checked after the copy, so a
+# user who can write the cache folder cannot swap the JAR before java opens it.
+run_jar_dir=$(mktemp -d) || { echo "cannot create a private folder for tla2tools.jar" >&2; exit 2; }
+trap 'rm -rf "$run_jar_dir"' EXIT
+{ cp "$jar" "$run_jar_dir/tla2tools.jar" && echo "$jar_sha  $run_jar_dir/tla2tools.jar" | sha256sum -c --quiet -; } ||
+	{ echo "tla2tools.jar checksum mismatch after the copy" >&2; exit 2; }
+jar=$run_jar_dir/tla2tools.jar
 java=${JAVA:-java}
 workers=${TLC_WORKERS:-$(($(nproc) < 8 ? $(nproc) : 8))}
 
