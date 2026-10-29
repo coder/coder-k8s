@@ -16,10 +16,10 @@ All commands run from the repository root. One helper does the work:
 
 ```bash
 export V="$PWD/.mux/skills/verify-coder-k8s/scripts/verify.sh"
-export VERIFY_RUN_DIR="${XUM_SCRATCH_DIR:-/tmp}/verify-coder-k8s/runs/$(date -u +%Y%m%dT%H%M%SZ)"
+export VERIFY_RUN_DIR="${XUM_SCRATCH_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}}/verify-coder-k8s/runs/$(date -u +%Y%m%dT%H%M%SZ)"
 ```
 
-`VERIFY_RUN_DIR` is the run directory. It must be absolute and new. Every later command reads `$VERIFY_RUN_DIR/run.env`, so set the same value in every shell of the run. The evidence goes to `$VERIFY_RUN_DIR/evidence/` and stays there after cleanup.
+`VERIFY_RUN_DIR` is the run directory. It must be absolute and new. The script refuses it when another user owns one of its parent directories, or can write one that is not sticky. Every later command reads `$VERIFY_RUN_DIR/run.env`, so set the same value in every shell of the run. The evidence goes to `$VERIFY_RUN_DIR/evidence/` and stays there after cleanup.
 
 The feature map is in [features/README.md](features/README.md). Pick a feature there after Launch and Doctor pass.
 
@@ -128,7 +128,7 @@ Proof standards:
 `cleanup` deletes only what this run created, by the names in `$VERIFY_RUN_DIR/run.env`:
 
 1. If the KIND cluster of the run exists and passes the ownership check, it runs `collect`.
-2. It deletes the KIND cluster by its recorded name with `kind delete cluster --name <run ID>`, only if `run.env` records `CLUSTER_CREATED=1` and the node container carries the KIND label of that name.
+2. It deletes the KIND cluster by its recorded name with `kind delete cluster --name <run ID>`, only if `run.env` records `CLUSTER_CREATED=1`, the node container carries the KIND label of that name, and its container ID equals `NODE_ID`, which launch records right after it creates the cluster. A cluster that someone created later with the same name is never deleted.
 3. It removes the image tag `coder-k8s-verify:<run ID>`.
 4. It removes `kindest/node:v1.32.0` and `gcr.io/distroless/static:nonroot` only when this run pulled them (`PULLED_IMAGES` in `run.env`) and no container uses them.
 5. It removes the run's build directory, token files and kubeconfig.

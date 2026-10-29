@@ -26,12 +26,33 @@ APISERVICE=v1alpha1.aggregation.coder.com
 # that user run code as this one.
 private_dir() {
 	(umask 077 && mkdir -p -- "$1")
+	safe_ancestors "$1"
 	local owner mode
 	read -r owner mode < <(stat -c '%u %a' -- "$1")
 	if [[ ${owner} != "$(id -u)" ]] || (((8#${mode} & 8#022) != 0)); then
 		printf 'verify-coder-k8s: refusing %s: owner uid %s, mode %s (need this user and no group or other write)\n' "$1" "${owner}" "${mode}" >&2
 		exit 1
 	fi
+}
+
+# safe_ancestors DIR refuses DIR when another user could rename or replace it:
+# every ancestor, as spelled and after symlinks, must be owned by root or this
+# user, and a directory that others can write must be sticky (like /tmp).
+safe_ancestors() {
+	local real p owner mode type
+	real=$(realpath -e -- "$1")
+	for p in "$1" "${real}"; do
+		while :; do
+			read -r owner mode type < <(stat -c '%u %a %F' -- "${p}")
+			if [[ ${owner} != 0 && ${owner} != "$(id -u)" ]] ||
+				{ [[ ${type} == directory ]] && (((8#${mode} & 8#022) != 0 && (8#${mode} & 8#1000) == 0)); }; then
+				printf 'verify-coder-k8s: refusing %s: ancestor %s has owner uid %s, mode %s\n' "$1" "${p}" "${owner}" "${mode}" >&2
+				exit 1
+			fi
+			[[ ${p} == / ]] && break
+			p=$(dirname -- "${p}")
+		done
+	done
 }
 
 # Never a shared /tmp default: see private_dir.
@@ -98,6 +119,7 @@ owned() {
 	[[ ${CLUSTER_CREATED:-0} == 1 ]] || return 1
 	kind get clusters 2>/dev/null | grep -qx "${CLUSTER}" || return 1
 	[[ $(docker inspect -f '{{index .Config.Labels "io.x-k8s.kind.cluster"}}' "${NODE}" 2>/dev/null) == "${CLUSTER}" ]] || return 1
+	[[ -n ${NODE_ID:-} && $(docker inspect -f '{{.Id}}' "${NODE}" 2>/dev/null) == "${NODE_ID}" ]] || return 1
 	[[ $(k -n "${MARKER_NS}" get configmap "${MARKER_CM}" -o jsonpath='{.data.run}' 2>/dev/null) == "${RUN_ID}" ]]
 }
 guard() {
@@ -169,7 +191,7 @@ cmd_launch() {
 	record CODER_IMAGE "${CODER_IMAGE}"
 	record CODER_VERSION "${CODER_VERSION}"
 	record SOURCE_SHA "$(git rev-parse HEAD)"
-	record SOURCE_DIRTY "$(git status --porcelain --untracked-files=no | wc -l | tr -d ' ')"
+	record SOURCE_DIRTY "$(git status --porcelain | wc -l | tr -d ' ')" # untracked files too: go build ./ reads them
 	record STARTED_AT "$(date -u +%FT%TZ)"
 	local pulled=()
 	image_present "${KIND_NODE_IMAGE}" || pulled+=("${KIND_NODE_IMAGE}")
@@ -180,7 +202,12 @@ cmd_launch() {
 	step "KIND cluster + namespace coder-system + CRDs + RBAC (hack/kind-dev.sh up)"
 	record CLUSTER_CREATED 1 # from here on, cleanup owns the cluster name
 	CLUSTER_CREATED=1
-	KUBECONFIG="${KCFG}" CLUSTER_NAME="${CLUSTER}" KIND_NODE_IMAGE="${KIND_NODE_IMAGE}" ./hack/kind-dev.sh up
+	local up_rc=0
+	KUBECONFIG="${KCFG}" CLUSTER_NAME="${CLUSTER}" KIND_NODE_IMAGE="${KIND_NODE_IMAGE}" ./hack/kind-dev.sh up || up_rc=$?
+	# The node container ID binds cleanup to this run's cluster, not to its name.
+	record NODE_ID "$(docker inspect -f '{{.Id}}' "${NODE}" 2>/dev/null || true)"
+	NODE_ID=$(docker inspect -f '{{.Id}}' "${NODE}" 2>/dev/null || true)
+	((up_rc == 0)) || die "hack/kind-dev.sh up failed (exit ${up_rc})"
 	chmod 600 "${KCFG}"
 	k -n "${MARKER_NS}" create configmap "${MARKER_CM}" --from-literal=run="${RUN_ID}" \
 		--from-literal=sourceSHA="$(git rev-parse HEAD)" >/dev/null
@@ -335,7 +362,8 @@ cmd_doctor() {
 cmd_kubectl() {
 	local arg
 	for arg in "$@"; do
-		[[ ! $arg =~ ^--?(context|cluster|user|kubeconfig|server|s)(=|$) ]] ||
+		# -s takes its value attached too (-shttps://...), as pflag allows.
+		[[ ! $arg =~ ^(--?(context|cluster|user|kubeconfig|server)(=|$)|-s) ]] ||
 			die "refusing ${arg}: this helper only talks to the run's cluster"
 	done
 	guard
@@ -448,6 +476,8 @@ cmd_cleanup() {
 		fi
 		[[ $(docker inspect -f '{{index .Config.Labels "io.x-k8s.kind.cluster"}}' "${NODE}" 2>/dev/null) == "${CLUSTER}" ]] ||
 			die "refusing: node ${NODE} does not carry the KIND label of ${CLUSTER}"
+		[[ -n ${NODE_ID:-} && $(docker inspect -f '{{.Id}}' "${NODE}" 2>/dev/null) == "${NODE_ID}" ]] ||
+			die "refusing: node ${NODE} is not the container this run created (NODE_ID ${NODE_ID:-unrecorded}). If launch stopped before it recorded NODE_ID, check the node's creation time and delete it by hand: kind delete cluster --name ${CLUSTER}"
 		kind delete cluster --name "${CLUSTER}" --kubeconfig "${KCFG}"
 	else
 		log "no cluster ${CLUSTER} to delete"
