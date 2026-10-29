@@ -1,0 +1,76 @@
+# Throwaway PostgreSQL for the verify-coder-k8s skill (disposable KIND clusters only).
+# The data lives in an emptyDir: a pod restart loses the Coder database. The Secret
+# coder-db-app/uri has the same name and key as the CloudNativePG Secret that
+# examples/cloudnativepg/codercontrolplane.yaml references, so that manifest works unchanged.
+# The password is a fixed throwaway value: never apply this file outside a disposable cluster.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: coder-db-app
+  namespace: coder
+type: Opaque
+stringData:
+  uri: postgres://coder:verify-coder-k8s@postgres.coder.svc.cluster.local:5432/coder?sslmode=disable
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: coder
+spec:
+  selector:
+    app: verify-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: coder
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: verify-postgres
+  template:
+    metadata:
+      labels:
+        app: verify-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          env:
+            - name: POSTGRES_USER
+              value: coder
+            - name: POSTGRES_PASSWORD
+              value: verify-coder-k8s
+            - name: POSTGRES_DB
+              value: coder
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "coder", "-d", "coder", "-h", "127.0.0.1"]
+            periodSeconds: 3
+          # Guaranteed QoS (requests == limits) keeps the shared host's OOM killer away from it.
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          emptyDir: {}

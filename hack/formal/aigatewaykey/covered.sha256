@@ -1,0 +1,30 @@
+c660b6cd0cb0b49c  internal/controller/coderaigatewaykey_controller.go  (r *CoderAIGatewayKeyReconciler) Reconcile(
+df86c21431eb50fa  internal/controller/coderaigatewaykey_controller.go  (r *CoderAIGatewayKeyReconciler) observe(
+bed4d566ecbecaa3  internal/controller/coderaigatewaykey_controller.go  func aiGatewayKeySecretHolds(
+92b39a6090c35477  internal/controller/coderaigatewaykey_controller.go  func ownAIGatewayKeys(
+8732e8c10712642c  internal/controller/coderaigatewaykey_controller.go  func aiGatewayKeySerial(
+e3780cf5007e1f82  internal/controller/coderaigatewaykey_controller.go  (r *CoderAIGatewayKeyReconciler) patchFinalizer(
+435a369fc29ee334  internal/controller/coderaigatewaykey_controller.go  (r *CoderAIGatewayKeyReconciler) writeStatus(
+0bd5bef6497504e7  internal/controller/coderaigatewaykey_issue.go  (r *CoderAIGatewayKeyReconciler) issueKey(
+dd720c2897e2d24e  internal/controller/coderaigatewaykey_issue.go  (r *CoderAIGatewayKeyReconciler) writeKeySecret(
+00ffd6203bde64b9  internal/controller/coderaigatewaykey_issue.go  func setAIGatewayKeyCurrent(
+12c722af7ab73532  internal/controller/coderaigatewaykey_issue.go  func aiGatewayKeyCreateFailure(
+ca2dba28fa14c77f  internal/controller/coderaigatewaykey_recover.go  func nextAIGatewayKeyAction(
+8217bc50bcbb00a4  internal/controller/coderaigatewaykey_recover.go  func aiGatewayKeyOrphan(
+a40a23df521a026a  internal/controller/coderaigatewaykey_recover.go  func aiGatewayKeyDriftBlocked(
+6497fbcdfe1210c6  internal/controller/coderaigatewaykey_recover.go  func aiGatewayKeyRearmed(
+55c5c038db1a459b  internal/controller/coderaigatewaykey_recover.go  func aiGatewayKeyRetiring(
+2aba949ee4b9d76d  internal/controller/coderaigatewaykey_recover.go  func adoptAIGatewayKey(
+b004e7b64ffa8f4a  internal/controller/coderaigatewaykey_recover.go  func retireAIGatewayKey(
+af66af7b49b2f665  internal/controller/coderaigatewaykey_recover.go  (r *CoderAIGatewayKeyReconciler) sweepOrphan(
+b7f78353b6187ab2  internal/controller/coderaigatewaykey_recover.go  (r *CoderAIGatewayKeyReconciler) deleteOwnKey(
+bfa8d77d8f8453e8  internal/controller/coderaigatewaykey_recover.go  (r *CoderAIGatewayKeyReconciler) liveSecretHolds(
+175f2c8217b75651  internal/controller/coderaigatewaykey_recover.go  (r *CoderAIGatewayKeyReconciler) deleteOnly(
+10aaec79f07bf238  internal/controller/coderaigatewaykey_retire.go  func aiGatewayKeyRetireState(
+f9a3ba557fab4159  internal/controller/coderaigatewaykey_retire.go  (r *CoderAIGatewayKeyReconciler) retireKey(
+fdfabe4b01bfa744  internal/controller/coderaigatewaykey_retire.go  func dropAIGatewayKeyRetiring(
+48f5763bb9d7239f  internal/controller/coderaigatewaykey_rotate.go  func aiGatewayKeyRotationDue(
+fa860b93236bcd94  internal/controller/coderaigatewaykey_delete.go  (r *CoderAIGatewayKeyReconciler) deleteStep(
+66ed09feb988649b  internal/controller/coderaigatewaykey_delete.go  (r *CoderAIGatewayKeyReconciler) deleteKeys(
+e3f93bfcaecd4c18  internal/controller/owned_secret.go  func writeOwnedSecret(
+c9bdab64a71452eb  internal/controller/owned_secret.go  func getOwnedSecret(
