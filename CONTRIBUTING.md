@@ -7,7 +7,7 @@ Thank you for your contribution to `coder-k8s`.
 
 ## Development prerequisites
 
-- Go 1.26.9 or later (`go.mod` declares Go 1.26.9)
+- Go 1.26.10 or later (`go.mod` declares Go 1.26.10)
 - A Kubernetes cluster (OrbStack, KIND, or another conformant cluster)
 - `kubectl`, configured for your target cluster
 
