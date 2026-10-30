@@ -146,10 +146,11 @@ func workspaceProxyInstanceLabelValue(name string) string {
 
 func TestCoderWorkspaceProxyReconcile_UsingDirectTokenSecret(t *testing.T) {
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-proxy")
 	secretName := "proxy-session-token"
 
 	secret := &corev1.Secret{
-		ObjectMeta: consentedObjectMeta(secretName, "default", "https://coder.example.com"),
+		ObjectMeta: consentedObjectMeta(secretName, testNamespace, "https://coder.example.com"),
 		Type:       corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			coderv1alpha1.DefaultTokenSecretKey: []byte("token-value"),
@@ -163,7 +164,7 @@ func TestCoderWorkspaceProxyReconcile_UsingDirectTokenSecret(t *testing.T) {
 	})
 
 	workspaceProxy := &coderv1alpha1.CoderWorkspaceProxy{
-		ObjectMeta: metav1.ObjectMeta{Name: "proxy-direct", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "proxy-direct", Namespace: testNamespace},
 		Spec: coderv1alpha1.WorkspaceProxySpec{
 			Image:            "proxy-image:latest",
 			PrimaryAccessURL: "https://coder.example.com",
@@ -215,10 +216,11 @@ func TestCoderWorkspaceProxyReconcile_UsingDirectTokenSecret(t *testing.T) {
 
 func TestCoderWorkspaceProxyReconcile_DoesNotCollideWithControlPlaneChildren(t *testing.T) {
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-proxy")
 	resourceName := "shared-name"
 
 	secret := &corev1.Secret{
-		ObjectMeta: consentedObjectMeta("proxy-shared-token", "default", "https://coder.example.com"),
+		ObjectMeta: consentedObjectMeta("proxy-shared-token", testNamespace, "https://coder.example.com"),
 		Type:       corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			coderv1alpha1.DefaultTokenSecretKey: []byte("proxy-token"),
@@ -232,7 +234,7 @@ func TestCoderWorkspaceProxyReconcile_DoesNotCollideWithControlPlaneChildren(t *
 	})
 
 	controlPlane := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "control-plane-image:latest",
 		},
@@ -245,7 +247,7 @@ func TestCoderWorkspaceProxyReconcile_DoesNotCollideWithControlPlaneChildren(t *
 	})
 
 	workspaceProxy := &coderv1alpha1.CoderWorkspaceProxy{
-		ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: testNamespace},
 		Spec: coderv1alpha1.WorkspaceProxySpec{
 			Image:            "proxy-image:latest",
 			PrimaryAccessURL: "https://coder.example.com",
@@ -289,11 +291,12 @@ func TestCoderWorkspaceProxyReconcile_DoesNotCollideWithControlPlaneChildren(t *
 
 func TestCoderWorkspaceProxyReconcile_TruncatesLongInstanceLabelValue(t *testing.T) {
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-proxy")
 	resourceName := strings.Repeat("a", 70)
 	secretName := "proxy-long-name-token"
 
 	secret := &corev1.Secret{
-		ObjectMeta: consentedObjectMeta(secretName, "default", "https://coder.example.com"),
+		ObjectMeta: consentedObjectMeta(secretName, testNamespace, "https://coder.example.com"),
 		Type:       corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			coderv1alpha1.DefaultTokenSecretKey: []byte("token-value"),
@@ -307,7 +310,7 @@ func TestCoderWorkspaceProxyReconcile_TruncatesLongInstanceLabelValue(t *testing
 	})
 
 	workspaceProxy := &coderv1alpha1.CoderWorkspaceProxy{
-		ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: testNamespace},
 		Spec: coderv1alpha1.WorkspaceProxySpec{
 			Image:            "proxy-image:latest",
 			PrimaryAccessURL: "https://coder.example.com",
@@ -359,8 +362,9 @@ func TestCoderWorkspaceProxyReconcile_TruncatesLongInstanceLabelValue(t *testing
 
 func TestCoderWorkspaceProxyReconcile_WithBootstrap(t *testing.T) {
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-proxy")
 	credentialsSecret := &corev1.Secret{
-		ObjectMeta: consentedObjectMeta("proxy-bootstrap-credentials", "default", "https://coder.example.com"),
+		ObjectMeta: consentedObjectMeta("proxy-bootstrap-credentials", testNamespace, "https://coder.example.com"),
 		Type:       corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			coderv1alpha1.DefaultTokenSecretKey: []byte("coder-session-token"),
@@ -374,7 +378,7 @@ func TestCoderWorkspaceProxyReconcile_WithBootstrap(t *testing.T) {
 	})
 
 	workspaceProxy := &coderv1alpha1.CoderWorkspaceProxy{
-		ObjectMeta: metav1.ObjectMeta{Name: "proxy-bootstrap", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "proxy-bootstrap", Namespace: testNamespace},
 		Spec: coderv1alpha1.WorkspaceProxySpec{
 			Image: "proxy-image:latest",
 			Bootstrap: &coderv1alpha1.ProxyBootstrapSpec{

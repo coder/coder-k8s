@@ -582,8 +582,8 @@ github.com/fzipp/gocyclo
 # github.com/ghostiam/protogetter v0.3.18
 ## explicit; go 1.24.0
 github.com/ghostiam/protogetter
-# github.com/go-chi/chi/v5 v5.3.1
-## explicit; go 1.23
+# github.com/go-chi/chi/v5 v5.4.0
+## explicit; go 1.24
 github.com/go-chi/chi/v5
 # github.com/go-critic/go-critic v0.14.3
 ## explicit; go 1.24.0

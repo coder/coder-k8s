@@ -61,8 +61,9 @@ func TestReconcile_OperatorAccess_UnownedTokenSecret(t *testing.T) {
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
+			testNamespace := createTestNamespace(ctx, t, "test-cp")
 			cp := &coderv1alpha1.CoderControlPlane{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-operator-token-unowned-" + string(rune('a'+i)), Namespace: "default"},
+				ObjectMeta: metav1.ObjectMeta{Name: "test-operator-token-unowned-" + string(rune('a'+i)), Namespace: testNamespace},
 				Spec: coderv1alpha1.CoderControlPlaneSpec{
 					Image:          "test-operator-token-unowned:latest",
 					ExtraEnv:       []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: "postgres://example.unowned/coder"}},
@@ -151,9 +152,10 @@ func TestReconcile_OperatorAccess_UnownedTokenSecret(t *testing.T) {
 func TestReconcile_OperatorAccess_OwnedTokenSecretIsReused(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-operator-token-owned-reuse", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-operator-token-owned-reuse", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image:    "test-operator-token-owned:latest",
 			ExtraEnv: []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: "postgres://example.owned/coder"}},
@@ -212,9 +214,10 @@ func TestReconcile_OperatorAccess_OwnedTokenSecretIsReused(t *testing.T) {
 func TestReconcile_OperatorAccess_TokenSecretCreateRace(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-operator-token-create-race", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-operator-token-create-race", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image:    "test-operator-token-race:latest",
 			ExtraEnv: []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: "postgres://example.race/coder"}},
