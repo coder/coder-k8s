@@ -1692,18 +1692,17 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 
 	if coderControlPlane.Spec.OperatorAccess.Disabled {
 		meta.RemoveStatusCondition(&nextStatus.Conditions, coderv1alpha1.CoderControlPlaneConditionOperatorTokenSecretOwned)
-		cleanupErr := r.cleanupDisabledOperatorAccess(ctx, coderControlPlane)
 		nextStatus.OperatorAccessReady = false
-		if cleanupErr != nil {
-			pendingSecretName := operatorAccessTokenSecretName(coderControlPlane)
-			if strings.TrimSpace(pendingSecretName) == "" {
-				return ctrl.Result{}, fmt.Errorf("assertion failed: operator token secret name must not be empty")
-			}
-			nextStatus.OperatorTokenSecretRef = &coderv1alpha1.SecretKeySelector{
-				Name: pendingSecretName,
-				Key:  coderv1alpha1.DefaultTokenSecretKey,
-			}
+		if err := r.deleteManagedOperatorTokenSecret(ctx, coderControlPlane); err != nil {
 			//nolint:nilerr // disabling operator access should retry cleanup without surfacing a terminal reconcile error.
+			return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+		}
+		// The record stays while its token can still work in Coder.
+		revoke, err := r.revokeRecordedOperatorToken(ctx, coderControlPlane)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if revoke == operatorTokenRevokePending || revoke == operatorTokenRevokeRefused {
 			return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
 		}
 		nextStatus.OperatorTokenSecretRef = nil
@@ -1738,38 +1737,22 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 		// or adopt it, and stop publishing it to consumers of the status.
 		nextStatus.OperatorAccessReady = false
 		message := operatorTokenSecretNotOwnedMessage(coderControlPlane, operatorTokenSecretName)
-		// The stored status names a Secret only while a token that the operator
-		// provisioned for this control plane can still work in Coder. Without
-		// that record the token is not provably ours, so it stays. While the
-		// revoke fails, the reference stays as the record. The token name is
-		// the same in every database, so the operator deletes only in the
-		// database that it recorded when it created the token.
-		if coderControlPlane.Status.OperatorTokenSecretRef != nil {
-			pending := fmt.Sprintf(" The operator has not deleted its earlier operator token in Coder yet. It retries every %s.", operatorAccessRetryInterval)
-			recordedDatabase := coderControlPlane.Status.OperatorTokenDatabaseHash
-			postgresURL, err := r.resolveBootstrapPostgresURL(ctx, coderControlPlane)
-			switch {
-			case err != nil:
-				message += pending
-			case recordedDatabase == "" || recordedDatabase != operatorTokenDatabaseHash(postgresURL):
-				log.FromContext(ctx).Info("Not deleting the earlier operator token: cannot confirm that the control plane still uses the database where the operator created it",
-					"tokenName", operatorTokenName)
-				message += fmt.Sprintf(" The operator does not delete its earlier operator token %q of user %q in Coder, "+
-					"because it cannot confirm that the database URL names the database where it created that token. "+
-					"That token can still work. Set the database URL back to that database, or delete the token in Coder yourself.",
-					operatorTokenName, defaultOperatorAccessUsername)
-			default:
-				if err := r.OperatorAccessProvisioner.RevokeOperatorToken(ctx, coderbootstrap.RevokeOperatorTokenRequest{
-					PostgresURL:      postgresURL,
-					OperatorUsername: defaultOperatorAccessUsername,
-					TokenName:        operatorTokenName,
-				}); err != nil {
-					message += pending
-				} else {
-					nextStatus.OperatorTokenSecretRef = nil
-					nextStatus.OperatorTokenDatabaseHash = ""
-				}
-			}
+		revoke, err := r.revokeRecordedOperatorToken(ctx, coderControlPlane)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		switch revoke {
+		case operatorTokenRevokePending:
+			message += fmt.Sprintf(" The operator has not deleted its earlier operator token in Coder yet. It retries every %s.", operatorAccessRetryInterval)
+		case operatorTokenRevokeRefused:
+			message += fmt.Sprintf(" The operator does not delete its earlier operator token %q of user %q in Coder, "+
+				"because it cannot confirm that the database URL names the database where it created that token. "+
+				"That token can still work. Set the database URL back to that database, or delete the token in Coder yourself.",
+				operatorTokenName, defaultOperatorAccessUsername)
+		case operatorTokenRevoked:
+			nextStatus.OperatorTokenSecretRef = nil
+			nextStatus.OperatorTokenDatabaseHash = ""
+		case operatorTokenNotRecorded:
 		}
 		if err := setControlPlaneCondition(
 			nextStatus,
@@ -1802,10 +1785,10 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 		existingToken = string(tokenSecret.Data[coderv1alpha1.DefaultTokenSecretKey])
 	}
 
+	// On the errors below, the record of an earlier token stays, so that a
+	// later replacement of the Secret still deletes that token.
 	postgresURL, resolveErr := r.resolveBootstrapPostgresURL(ctx, coderControlPlane)
 	if resolveErr != nil {
-		nextStatus.OperatorTokenSecretRef = nil
-		nextStatus.OperatorTokenDatabaseHash = ""
 		nextStatus.OperatorAccessReady = false
 		//nolint:nilerr // missing bootstrap inputs should requeue without surfacing a terminal reconcile error.
 		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
@@ -1820,6 +1803,11 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 		}
 	}
 
+	// Record the token only once this control plane holds the Secret, so that
+	// a Secret that someone else created never leads to a delete.
+	if err := r.recordOperatorToken(ctx, coderControlPlane, nextStatus, operatorTokenSecretName, operatorTokenDatabaseHash(postgresURL)); err != nil {
+		return ctrl.Result{}, err
+	}
 	token, provisionErr := r.OperatorAccessProvisioner.EnsureOperatorToken(ctx, coderbootstrap.EnsureOperatorTokenRequest{
 		PostgresURL:      postgresURL,
 		OperatorUsername: defaultOperatorAccessUsername,
@@ -1829,8 +1817,6 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 		ExistingToken:    existingToken,
 	})
 	if provisionErr != nil {
-		nextStatus.OperatorTokenSecretRef = nil
-		nextStatus.OperatorTokenDatabaseHash = ""
 		nextStatus.OperatorAccessReady = false
 		//nolint:nilerr // transient provisioning errors should requeue without surfacing a terminal reconcile error.
 		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
@@ -1850,11 +1836,6 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 		return ctrl.Result{}, err
 	}
 
-	nextStatus.OperatorTokenSecretRef = &coderv1alpha1.SecretKeySelector{
-		Name: operatorTokenSecretName,
-		Key:  coderv1alpha1.DefaultTokenSecretKey,
-	}
-	nextStatus.OperatorTokenDatabaseHash = operatorTokenDatabaseHash(postgresURL)
 	nextStatus.OperatorAccessReady = true
 
 	return ctrl.Result{}, nil
@@ -2283,7 +2264,9 @@ func licenseTierFromEntitlements(entitlements codersdk.Entitlements) string {
 	return coderv1alpha1.CoderControlPlaneLicenseTierEnterprise
 }
 
-func (r *CoderControlPlaneReconciler) cleanupDisabledOperatorAccess(
+// deleteManagedOperatorTokenSecret deletes the operator token Secret when this
+// control plane controls it.
+func (r *CoderControlPlaneReconciler) deleteManagedOperatorTokenSecret(
 	ctx context.Context,
 	coderControlPlane *coderv1alpha1.CoderControlPlane,
 ) error {
@@ -2296,49 +2279,18 @@ func (r *CoderControlPlaneReconciler) cleanupDisabledOperatorAccess(
 		return fmt.Errorf("assertion failed: operator token secret name must not be empty")
 	}
 
-	operatorTokenName := operatorAccessDatabaseTokenName(coderControlPlane)
-	if strings.TrimSpace(operatorTokenName) == "" {
-		return fmt.Errorf("assertion failed: operator token name must not be empty")
-	}
-
 	secret := &corev1.Secret{}
 	err := r.Get(ctx, types.NamespacedName{Name: operatorTokenSecretName, Namespace: coderControlPlane.Namespace}, secret)
-	secretExists := false
 	switch {
-	case err == nil:
-		secretExists = true
 	case apierrors.IsNotFound(err):
-		secretExists = false
-	default:
+		return nil
+	case err != nil:
 		return fmt.Errorf("get operator token secret %q while disabling operator access: %w", operatorTokenSecretName, err)
-	}
-
-	managedSecretExists := secretExists && isManagedOperatorTokenSecret(secret, coderControlPlane)
-	cleanupRequired := managedSecretExists || coderControlPlane.Status.OperatorTokenSecretRef != nil
-
-	if managedSecretExists {
-		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("delete operator token secret %q while disabling operator access: %w", operatorTokenSecretName, err)
-		}
-	}
-
-	postgresURL, err := r.resolveBootstrapPostgresURL(ctx, coderControlPlane)
-	if err != nil {
-		if cleanupRequired {
-			return fmt.Errorf("resolve postgres URL while disabling operator access: %w", err)
-		}
+	case !isManagedOperatorTokenSecret(secret, coderControlPlane):
 		return nil
 	}
-
-	if r.OperatorAccessProvisioner == nil {
-		return fmt.Errorf("assertion failed: operator access provisioner must not be nil while disabling managed credentials")
-	}
-	if err := r.OperatorAccessProvisioner.RevokeOperatorToken(ctx, coderbootstrap.RevokeOperatorTokenRequest{
-		PostgresURL:      postgresURL,
-		OperatorUsername: defaultOperatorAccessUsername,
-		TokenName:        operatorTokenName,
-	}); err != nil {
-		return fmt.Errorf("revoke operator token while disabling operator access: %w", err)
+	if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete operator token secret %q while disabling operator access: %w", operatorTokenSecretName, err)
 	}
 
 	return nil
@@ -2359,25 +2311,6 @@ func (r *CoderControlPlaneReconciler) readPublishedOperatorToken(
 
 func isManagedOperatorTokenSecret(secret *corev1.Secret, coderControlPlane *coderv1alpha1.CoderControlPlane) bool {
 	return operatortoken.ControlledBy(secret, coderControlPlane)
-}
-
-// operatorTokenDatabaseHash returns the SHA-256 hex hash of postgresURL
-// without its password, or "" when postgresURL is not a postgres:// or
-// postgresql:// URL. The password is left out so that the status reveals
-// nothing about it and a new password keeps the hash.
-func operatorTokenDatabaseHash(postgresURL string) string {
-	parsed, err := url.Parse(strings.TrimSpace(postgresURL))
-	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
-		return ""
-	}
-	if parsed.User != nil {
-		parsed.User = url.User(parsed.User.Username())
-	}
-	query := parsed.Query()
-	query.Del("password")
-	parsed.RawQuery = query.Encode()
-	sum := sha256.Sum256([]byte(parsed.String()))
-	return hex.EncodeToString(sum[:])
 }
 
 // resolveBootstrapPostgresURL returns the PostgreSQL URL used for operator

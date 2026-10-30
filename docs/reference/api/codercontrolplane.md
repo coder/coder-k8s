@@ -53,7 +53,7 @@
 | `readyReplicas` | integer | ReadyReplicas is the number of ready pods observed in the deployment. |
 | `url` | string | URL is the in-cluster URL for the control plane service. |
 | `operatorTokenSecretRef` | [SecretKeySelector](#secretkeyselector) | OperatorTokenSecretRef points to the Secret key containing the `coder-k8s-operator` API token. |
-| `operatorTokenDatabaseHash` | string | OperatorTokenDatabaseHash is the SHA-256 hex hash of the PostgreSQL connection URL, without its password, with which the operator created the token in OperatorTokenSecretRef. The operator deletes that token only while the control plane uses a URL with the same hash. It is empty when that URL is not a postgres:// or postgresql:// URL. |
+| `operatorTokenDatabaseHash` | string | OperatorTokenDatabaseHash is the SHA-256 hex hash of the PostgreSQL connection URL, without its password, with which the operator creates the token in OperatorTokenSecretRef. A key=value connection string has the hash of the postgres:// URL with the same parts. The operator deletes that token only while the control plane uses a URL with the same hash. It is empty when that URL is neither a postgres:// or postgresql:// URL nor a key=value connection string. |
 | `operatorAccessReady` | boolean | OperatorAccessReady reports whether operator API access bootstrap succeeded. |
 | `licenseLastApplied` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#time-v1-meta) | LicenseLastApplied is the timestamp of the most recent successful operator-managed license upload. |
 | `licenseLastAppliedHash` | string | LicenseLastAppliedHash is the SHA-256 hex hash of the trimmed license JWT that LicenseLastApplied refers to. |

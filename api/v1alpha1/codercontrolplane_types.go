@@ -203,10 +203,12 @@ type CoderControlPlaneStatus struct {
 	// OperatorTokenSecretRef points to the Secret key containing the `coder-k8s-operator` API token.
 	OperatorTokenSecretRef *SecretKeySelector `json:"operatorTokenSecretRef,omitempty"`
 	// OperatorTokenDatabaseHash is the SHA-256 hex hash of the PostgreSQL
-	// connection URL, without its password, with which the operator created the
-	// token in OperatorTokenSecretRef. The operator deletes that token only
-	// while the control plane uses a URL with the same hash. It is empty when
-	// that URL is not a postgres:// or postgresql:// URL.
+	// connection URL, without its password, with which the operator creates the
+	// token in OperatorTokenSecretRef. A key=value connection string has the
+	// hash of the postgres:// URL with the same parts. The operator deletes
+	// that token only while the control plane uses a URL with the same hash.
+	// It is empty when that URL is neither a postgres:// or postgresql:// URL
+	// nor a key=value connection string.
 	// +optional
 	OperatorTokenDatabaseHash string `json:"operatorTokenDatabaseHash,omitempty"`
 	// OperatorAccessReady reports whether operator API access bootstrap succeeded.
