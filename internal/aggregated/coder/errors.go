@@ -1,6 +1,7 @@
 package coder
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -12,6 +13,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
+
+	"github.com/coder/coder-k8s/internal/sameorigin"
 )
 
 // coderTimeoutMessage is the 504 message for a Coder call that ran out of time. It leaves out
@@ -98,17 +101,40 @@ func MapCoderError(err error, resource schema.GroupResource, name string) error 
 	}
 }
 
-// MapCoderCreateError maps the error of the Coder POST that creates name. A 2xx *codersdk.Error
-// means that the POST got through, but the answer is not the one that Coder sends: the SDK returns
-// this error for a 2xx other than the expected one, and since codersdk v2.37 also for the expected
-// 2xx with a body that is not JSON (for example a proxy page or an empty body). Coder can have
-// created the object, so this is a 504 that says the result is uncertain, like any other write
-// that times out. It has no Retry-After, so clients do not send the create again on their own.
-// Every other error maps as in MapCoderError. That includes the SDK's plain errors for a body that
-// breaks off while it is read and for malformed JSON on an unexpected 2xx (#242).
-func MapCoderCreateError(err error, resource schema.GroupResource, name string) error {
+// Write names the Coder write in the message of an uncertain result.
+type Write string
+
+// The writes of the aggregated storages.
+const (
+	WriteCreate Write = "create"
+	WriteUpdate Write = "update"
+	WriteDelete Write = "delete"
+)
+
+// IsUncertainStatus reports whether a Coder or proxy status leaves it open whether Coder applied
+// a write. A 2xx status means that the request got through, but the answer is not the one that
+// Coder sends: the SDK returns a *codersdk.Error for a 2xx other than the expected one, and since
+// codersdk v2.37 also for the expected 2xx with a body that is not JSON (for example a proxy page
+// or an empty body). A proxy in front of Coder can answer 502, 503 or 504 after Coder applied the
+// write.
+func IsUncertainStatus(status int) bool {
+	return (status >= http.StatusOK && status < http.StatusMultipleChoices) ||
+		status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
+}
+
+// MapCoderWriteError maps the error of the Coder call that creates, updates or deletes name.
+// When the error leaves it open whether Coder applied the write, it returns the uncertain 504 of
+// UncertainWriteError. Those are the statuses of IsUncertainStatus except 504, and every error
+// without a status that the request can have caused after it was sent: a connection that breaks
+// before or while the answer is read, or a body that is not the expected JSON. A timeout or a
+// Coder 504 keeps the 504 of MapCoderError, which says the same to clients. So does every
+// other error, including a request that provably never reached Coder (see notSent).
+func MapCoderWriteError(err error, write Write, resource schema.GroupResource, name string) error {
 	if err == nil {
 		return fmt.Errorf("assertion failed: error must not be nil")
+	}
+	if write == "" {
+		return fmt.Errorf("assertion failed: write must not be empty")
 	}
 	if resource.Empty() {
 		return fmt.Errorf("assertion failed: resource must not be empty")
@@ -118,15 +144,45 @@ func MapCoderCreateError(err error, resource schema.GroupResource, name string) 
 	}
 
 	var coderErr *codersdk.Error
-	if errors.As(err, &coderErr) && coderErr.StatusCode() >= http.StatusOK && coderErr.StatusCode() < http.StatusMultipleChoices {
-		// The message leaves out the Coder URL.
-		return apierrors.NewTimeoutError(fmt.Sprintf(
-			"the result is uncertain: the Coder API answered the create of %s %q with status %d, but not with the answer that Coder sends; re-read the object with kubectl get before you retry",
-			resource.Resource, name, coderErr.StatusCode(),
-		), 0)
+	if errors.As(err, &coderErr) {
+		status := coderErr.StatusCode()
+		if status != http.StatusGatewayTimeout && IsUncertainStatus(status) {
+			logHiddenError(err, resource, name, status)
+			return UncertainWriteError(write, resource, name, fmt.Sprintf("status %d from the Coder API", status))
+		}
+		return MapCoderError(err, resource, name)
 	}
 
-	return MapCoderError(err, resource, name)
+	var netErr net.Error
+	if (errors.As(err, &netErr) && netErr.Timeout()) || notSent(err) {
+		return MapCoderError(err, resource, name)
+	}
+	logHiddenError(err, resource, name, 0)
+	return UncertainWriteError(write, resource, name, "an answer from the Coder API that broke off or could not be read")
+}
+
+// UncertainWriteError is the 504 for a write that Coder can have applied. reason names the answer
+// that the write got, for example "status 502 from the Coder API", and must not name the Coder URL. It has no Retry-After, so clients do not send the write
+// again on their own.
+func UncertainWriteError(write Write, resource schema.GroupResource, name, reason string) error {
+	return apierrors.NewTimeoutError(fmt.Sprintf(
+		"the result is uncertain: the %s of %s %q got %s; re-read the object with kubectl get before you retry",
+		write, resource.Resource, name, reason,
+	), 0)
+}
+
+// notSent reports whether err proves that the request did not reach Coder: the connection to
+// Coder (or to the proxy in front of it) failed, the TLS handshake failed, or the client refused
+// a request or a redirect to another origin. A redirect answer does not apply a write.
+func notSent(err error) bool {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && (opErr.Op == "dial" || opErr.Op == "proxyconnect") {
+		return true
+	}
+	var certErr *tls.CertificateVerificationError
+	var recordErr tls.RecordHeaderError
+	return errors.As(err, &certErr) || errors.As(err, &recordErr) ||
+		errors.Is(err, sameorigin.ErrCrossOrigin) || errors.Is(err, sameorigin.ErrCrossOriginRequest)
 }
 
 // coderErrorMessage returns Coder's message for a 4xx answer. Without one, it returns a fixed

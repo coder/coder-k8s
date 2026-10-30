@@ -13,10 +13,28 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// TemplateToK8s converts a codersdk.Template to an aggregated API CoderTemplate.
-func TemplateToK8s(namespace string, t codersdk.Template) *aggregationv1alpha1.CoderTemplate {
+// nameField is a field of a Coder answer that becomes a segment of the Kubernetes name.
+type nameField struct{ segment, value string }
+
+// requireNameFields returns an error when a field cannot be a segment of the name, for example in
+// the {} that a proxy answers instead of Coder.
+func requireNameFields(object string, fields ...nameField) error {
+	for _, field := range fields {
+		if err := coder.NameSegmentError(field.segment, field.value); err != nil {
+			return fmt.Errorf("the Coder API answered a %s without a valid name: %w", object, err)
+		}
+	}
+	return nil
+}
+
+// TemplateToK8s converts a codersdk.Template to an aggregated API CoderTemplate. It returns an
+// error when t lacks the fields of the name.
+func TemplateToK8s(namespace string, t codersdk.Template) (*aggregationv1alpha1.CoderTemplate, error) {
 	if namespace == "" {
 		panic("assertion failed: namespace must not be empty")
+	}
+	if err := requireNameFields("template", nameField{"organization", t.OrganizationName}, nameField{"template", t.Name}); err != nil {
+		return nil, err
 	}
 
 	updatedAt := metav1.NewTime(t.UpdatedAt)
@@ -47,7 +65,7 @@ func TemplateToK8s(namespace string, t codersdk.Template) *aggregationv1alpha1.C
 			Deprecated:       t.Deprecated,
 			UpdatedAt:        &updatedAt,
 		},
-	}
+	}, nil
 }
 
 // TemplateCreateRequestFromK8s builds a codersdk.CreateTemplateRequest from a K8s CoderTemplate.

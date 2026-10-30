@@ -122,11 +122,21 @@ func parseNameSegments(name string, expectedSegments int, objectType string) ([]
 	return segments, nil
 }
 
-func assertNameSegment(segmentType, value string) {
+// NameSegmentError reports why value cannot be the segmentType segment of a name. Converters
+// check the fields of Coder answers with it, so a broken answer is an error and not the panic of
+// the Build functions.
+func NameSegmentError(segmentType, value string) error {
 	if value == "" {
-		panic(fmt.Sprintf("assertion failed: %s must not be empty", segmentType))
+		return fmt.Errorf("%s must not be empty", segmentType)
 	}
 	if strings.Contains(value, nameSeparator) {
-		panic(fmt.Sprintf("assertion failed: %s must not contain %q", segmentType, nameSeparator))
+		return fmt.Errorf("%s must not contain %q", segmentType, nameSeparator)
+	}
+	return nil
+}
+
+func assertNameSegment(segmentType, value string) {
+	if err := NameSegmentError(segmentType, value); err != nil {
+		panic("assertion failed: " + err.Error())
 	}
 }

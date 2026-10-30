@@ -29,16 +29,25 @@ const (
 // metadata.resourceVersion is a fingerprint (hex SHA-256) of the returned object. It changes when
 // any returned field changes, including the active flag, which Coder does not reflect in the
 // version's own updated_at. Compare it only for equality.
-func TemplateVersionToK8s(namespace string, tpl codersdk.Template, v codersdk.TemplateVersion) *aggregationv1alpha1.CoderTemplateVersion {
+//
+// It returns an error when tpl or v lack the fields of the name and labels.
+func TemplateVersionToK8s(namespace string, tpl codersdk.Template, v codersdk.TemplateVersion) (*aggregationv1alpha1.CoderTemplateVersion, error) {
 	if namespace == "" {
 		panic("assertion failed: namespace must not be empty")
 	}
 	if v.TemplateID == nil || *v.TemplateID != tpl.ID {
 		panic(fmt.Sprintf("assertion failed: template version %s must belong to template %s", v.ID, tpl.ID))
 	}
+	if err := requireNameFields("template version",
+		nameField{"organization", tpl.OrganizationName}, nameField{"template", tpl.Name}); err != nil {
+		return nil, err
+	}
+	if v.Name == "" {
+		return nil, fmt.Errorf("the Coder API answered a template version without a valid name: version must not be empty")
+	}
 	for _, value := range []string{tpl.OrganizationName, tpl.Name} {
 		if problems := validation.IsValidLabelValue(value); len(problems) > 0 {
-			panic(fmt.Sprintf("assertion failed: %q must be a valid label value: %s", value, strings.Join(problems, "; ")))
+			return nil, fmt.Errorf("the Coder API answered a template version whose %q is not a valid label value: %s", value, strings.Join(problems, "; "))
 		}
 	}
 
@@ -87,7 +96,7 @@ func TemplateVersionToK8s(namespace string, tpl codersdk.Template, v codersdk.Te
 	sum := sha256.Sum256(serialized)
 	obj.ResourceVersion = hex.EncodeToString(sum[:])
 
-	return obj
+	return obj, nil
 }
 
 func optionalTime(value *time.Time) *metav1.Time {

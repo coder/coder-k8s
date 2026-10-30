@@ -209,7 +209,11 @@ func (s *TemplateVersionStorage) listNamespace(ctx context.Context, namespace st
 			if version.TemplateID == nil || *version.TemplateID != template.ID {
 				return nil, fmt.Errorf("assertion failed: listed version %s must belong to template %s", version.ID, template.ID)
 			}
-			items = append(items, *convert.TemplateVersionToK8s(namespace, template, version))
+			item, err := convert.TemplateVersionToK8s(namespace, template, version)
+			if err != nil {
+				return nil, apierrors.NewInternalError(err)
+			}
+			items = append(items, *item)
 		}
 	}
 
@@ -375,7 +379,11 @@ func (s *TemplateVersionStorage) get(ctx context.Context, name string, _ *metav1
 		return nil, err
 	}
 
-	return convert.TemplateVersionToK8s(namespace, template, version), nil
+	obj, err := convert.TemplateVersionToK8s(namespace, template, version)
+	if err != nil {
+		return nil, apierrors.NewInternalError(err)
+	}
+	return obj, nil
 }
 
 // requirePathSafeSegment rejects a name segment that could change the Coder request path or query.

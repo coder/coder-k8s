@@ -40,7 +40,7 @@ func TestWorkspaceToK8s(t *testing.T) {
 		},
 	}
 
-	converted := WorkspaceToK8s("control-plane", workspace)
+	converted := mustWorkspaceToK8s(t, "control-plane", workspace)
 	if converted == nil {
 		t.Fatal("expected non-nil converted workspace")
 	}
@@ -166,7 +166,7 @@ func TestWorkspaceToK8sRunningStateFromTransitionAndStatus(t *testing.T) {
 				},
 			}
 
-			converted := WorkspaceToK8s("control-plane", workspace)
+			converted := mustWorkspaceToK8s(t, "control-plane", workspace)
 			if converted.Spec.Running != testCase.running {
 				t.Fatalf(
 					"expected running=%t for transition=%q status=%q, got %t",

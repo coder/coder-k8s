@@ -153,7 +153,7 @@ func (s *WorkspaceTransitionStorage) Create(
 	switch {
 	case isCoderErr && coderErr.StatusCode() == http.StatusConflict:
 		return s.afterConflict(callCtx, sdk, namespace, name, workspace.ID, coderErr)
-	case !isCoderErr || isUncertainStatus(coderErr.StatusCode()):
+	case !isCoderErr || coder.IsUncertainStatus(coderErr.StatusCode()):
 		// A timeout, a transport error, or a gateway error leaves it open whether Coder queued
 		// the build: a proxy in front of Coder can fail after Coder accepted it. Never
 		// POST again: one confirming re-read either finds the new build or reports the doubt.
@@ -186,15 +186,6 @@ func confirmsPost(ctx context.Context, sdk *codersdk.Client, previousID uuid.UUI
 	return err == nil && me.ID != uuid.Nil && found.InitiatorID == me.ID
 }
 
-// isUncertainStatus reports whether a Coder or proxy status leaves it open whether the build
-// was queued. A 2xx status means the POST got through, but the answer names no build: Coder
-// answers 201, so the SDK returns a *codersdk.Error for any other 2xx, and since codersdk v2.37
-// also for a 201 whose body is not the build's JSON (for example a proxy page).
-func isUncertainStatus(status int) bool {
-	return (status >= http.StatusOK && status < http.StatusMultipleChoices) ||
-		status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
-}
-
 // afterConflict handles a Coder 409 on the build POST: another build became active after the
 // lookup. One re-read decides whether that build already does what was requested.
 func (s *WorkspaceTransitionStorage) afterConflict(
@@ -223,9 +214,9 @@ func (s *WorkspaceTransitionStorage) afterConflict(
 // sends a Modified watch event for the workspace with that build as the latest build.
 func (s *WorkspaceTransitionStorage) queued(namespace, name string, workspace codersdk.Workspace, build codersdk.WorkspaceBuild) (runtime.Object, error) {
 	workspace.LatestBuild = build
-	obj := convert.WorkspaceToK8s(namespace, workspace)
-	if obj == nil {
-		return nil, fmt.Errorf("assertion failed: converted workspace must not be nil")
+	obj, err := convert.WorkspaceToK8s(namespace, workspace)
+	if err != nil {
+		return nil, apierrors.NewInternalError(err)
 	}
 	s.workspaces.enqueueWatchEvent(watch.Modified, obj)
 	return s.result(namespace, name, transitionOutcomeQueued, false, &build), nil
