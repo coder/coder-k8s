@@ -40,6 +40,7 @@
 | `tagsHash` | string | TagsHash is a deterministic hash of spec.tags last applied to the provisioner key. |
 | `controlPlaneRefName` | string | ControlPlaneRefName is the control plane ref name last applied to the provisioner key. |
 | `controlPlaneURL` | string | ControlPlaneURL is the control plane URL last applied to the provisioner key. |
+| `controlPlaneUID` | string | ControlPlaneUID is the UID of the control plane last applied to the provisioner key. The operator sends the operator token of the control plane with controlPlaneRefName for this key only while that control plane has this UID, and rotates the key when it has another UID. When it is empty, it sends that token only to the current Coder API URL of that control plane, and the next reconcile looks the key up there by organizationID and provisionerKeyID: it sets this field when Coder holds the key, and creates a new key when Coder answers that it has none. |
 | `secretRef` | [SecretKeySelector](#secretkeyselector) | SecretRef references the provisioner key secret data currently in use. |
 | `pendingKeys` | [CoderProvisionerKeyRecord](#coderprovisionerkeyrecord) array | PendingKeys lists the provisioner keys that can exist in Coder besides the key in provisionerKeyID: a key that the operator is about to create or has not yet written to the provisioner key Secret, and replaced keys whose deletion Coder has not confirmed. The operator deletes the key of each entry with organizationID and keyID at its coderURL with the operator token of its control plane, and removes the entry when Coder confirms that the key is gone. |
 
@@ -53,6 +54,7 @@ or was about to create, at one Coder endpoint.
 | Field | Type | Description |
 | --- | --- | --- |
 | `controlPlaneRefName` | string | ControlPlaneRefName is the CoderControlPlane whose operator token the operator used for the key. |
+| `controlPlaneUID` | string | ControlPlaneUID is the UID of that CoderControlPlane. The operator sends its operator token for this entry only while the control plane with controlPlaneRefName has this UID. When it is empty, it sends that token only when coderURL is the current Coder API URL of that control plane. Otherwise it keeps the entry and sets the condition ControlPlaneChangedKeyKept. When a rotation replaces the key of status without status.controlPlaneUID, the entry of that key records the UID while coderURL is the current Coder API URL of that control plane. |
 | `coderURL` | string | CoderURL is the Coder API URL that the operator sent the key request to. |
 | `organizationName` | string | OrganizationName is the Coder organization of the key. |
 | `keyName` | string | KeyName is the provisioner key name in Coder. |

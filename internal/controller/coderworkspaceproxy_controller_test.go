@@ -29,27 +29,20 @@ type fakeBootstrapClient struct {
 	provisionerKeyErr       error
 	provisionerKeyCalls     int
 	provisionerKeyRequests  []coderbootstrap.EnsureProvisionerKeyRequest
-	deleteKeyErr            error
-	deleteKeyCalls          int
-	deleteKeyRequests       []deleteKeyRequest
 	deleteKeyByIDErr        error
 	deleteKeyByIDRequests   []coderbootstrap.DeleteProvisionerKeyByIDRequest
 	// provisionerKeyByName answers ProvisionerKeyByName. When it is nil,
 	// Coder has no key with the name.
 	provisionerKeyByName func(coderbootstrap.ProvisionerKeyByNameRequest) *codersdk.ProvisionerKey
+	// provisionerKeyByID answers ProvisionerKeyByID. When it is nil, Coder
+	// has no key with the ID.
+	provisionerKeyByID func(coderbootstrap.ProvisionerKeyByIDRequest) *codersdk.ProvisionerKey
 
 	// Entitlements support.
 	entitlementsResponse codersdk.Entitlements
 	entitlementsErr      error
 	entitlementsCalls    int
 	entitlementsRequests []entitlementsRequest
-}
-
-type deleteKeyRequest struct {
-	CoderURL         string
-	SessionToken     string
-	OrganizationName string
-	KeyName          string
 }
 
 type entitlementsRequest struct {
@@ -80,17 +73,6 @@ func (f *fakeBootstrapClient) EnsureProvisionerKey(_ context.Context, req coderb
 	return f.provisionerKeyResponses[idx], nil
 }
 
-func (f *fakeBootstrapClient) DeleteProvisionerKey(_ context.Context, coderURL, sessionToken, orgName, keyName string) error {
-	f.deleteKeyCalls++
-	f.deleteKeyRequests = append(f.deleteKeyRequests, deleteKeyRequest{
-		CoderURL:         coderURL,
-		SessionToken:     sessionToken,
-		OrganizationName: orgName,
-		KeyName:          keyName,
-	})
-	return f.deleteKeyErr
-}
-
 func (f *fakeBootstrapClient) DeleteProvisionerKeyByID(_ context.Context, req coderbootstrap.DeleteProvisionerKeyByIDRequest) error {
 	f.deleteKeyByIDRequests = append(f.deleteKeyByIDRequests, req)
 	return f.deleteKeyByIDErr
@@ -101,6 +83,13 @@ func (f *fakeBootstrapClient) ProvisionerKeyByName(_ context.Context, req coderb
 		return nil, nil
 	}
 	return f.provisionerKeyByName(req), nil
+}
+
+func (f *fakeBootstrapClient) ProvisionerKeyByID(_ context.Context, req coderbootstrap.ProvisionerKeyByIDRequest) (*codersdk.ProvisionerKey, error) {
+	if f.provisionerKeyByID == nil {
+		return nil, nil
+	}
+	return f.provisionerKeyByID(req), nil
 }
 
 func (f *fakeBootstrapClient) Entitlements(_ context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error) {

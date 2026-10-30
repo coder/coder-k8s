@@ -452,7 +452,6 @@ func TestCoderProvisionerReconciler_BasicCreate(t *testing.T) {
 	require.Equal(t, 1, bootstrapClient.provisionerKeyCalls)
 	require.Len(t, bootstrapClient.provisionerKeyRequests, 1)
 	require.Equal(t, "operator-session-token", bootstrapClient.provisionerKeyRequests[0].SessionToken)
-	require.Equal(t, 0, bootstrapClient.deleteKeyCalls)
 
 	keySecret := &corev1.Secret{}
 	keySecretName := types.NamespacedName{Name: provisioner.Spec.Key.SecretName, Namespace: provisioner.Namespace}
@@ -581,7 +580,6 @@ func TestCoderProvisionerReconciler_Deletion(t *testing.T) {
 	require.False(t, markedForDeletion.DeletionTimestamp.IsZero())
 
 	reconcileProvisioner(ctx, t, reconciler, namespacedName)
-	require.Zero(t, bootstrapClient.deleteKeyCalls)
 	require.Len(t, bootstrapClient.deleteKeyByIDRequests, 1)
 	require.Equal(t, bootstrapClient.provisionerKeyResponses[0].KeyID, bootstrapClient.deleteKeyByIDRequests[0].KeyID)
 
@@ -636,9 +634,8 @@ func TestCoderProvisionerReconciler_DeletionControlPlaneGone(t *testing.T) {
 
 	reconcileProvisioner(ctx, t, reconciler, namespacedName)
 
-	// DeleteProvisionerKey cannot run once operator token source is gone with the
+	// No key delete can run once the operator token source is gone with the
 	// deleted control plane, but finalizer cleanup must still complete.
-	require.Equal(t, 0, bootstrapClient.deleteKeyCalls)
 	require.Empty(t, bootstrapClient.deleteKeyByIDRequests)
 
 	// The finalizer should still be removed.
@@ -771,11 +768,11 @@ func TestCoderProvisionerReconciler_RotationOnSecretLoss(t *testing.T) {
 		_ = k8sClient.Delete(context.Background(), provisioner)
 	})
 
+	initial := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "rotation-key", Key: "initial-key-material"}
 	bootstrapClient := &fakeBootstrapClient{
 		provisionerKeyResponses: []coderbootstrap.EnsureProvisionerKeyResponse{
-			{KeyName: "rotation-key", Key: ""},
-			{KeyName: "rotation-key", Key: "rotated-key-material"},
-			{KeyName: "rotation-key", Key: "rotated-key-material"},
+			initial,
+			{OrganizationID: initial.OrganizationID, KeyID: uuid.New(), KeyName: "rotation-key", Key: "rotated-key-material"},
 		},
 	}
 	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
@@ -783,15 +780,22 @@ func TestCoderProvisionerReconciler_RotationOnSecretLoss(t *testing.T) {
 
 	reconcileProvisioner(ctx, t, reconciler, request)
 	reconcileProvisioner(ctx, t, reconciler, request)
+
+	// The Secret is lost, and Coder still holds the key, which it returns
+	// without plaintext.
+	bootstrapClient.provisionerKeyByName = func(coderbootstrap.ProvisionerKeyByNameRequest) *codersdk.ProvisionerKey {
+		return &codersdk.ProvisionerKey{ID: initial.KeyID, OrganizationID: initial.OrganizationID, Name: initial.KeyName}
+	}
+	keySecretName := types.NamespacedName{Name: provisioner.Spec.Key.SecretName, Namespace: provisioner.Namespace}
+	require.NoError(t, k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: keySecretName.Name, Namespace: keySecretName.Namespace}}))
 	reconcileProvisioner(ctx, t, reconciler, request)
 
 	require.Equal(t, 2, bootstrapClient.provisionerKeyCalls)
-	require.Equal(t, 1, bootstrapClient.deleteKeyCalls)
-	require.Len(t, bootstrapClient.deleteKeyRequests, 1)
-	require.Equal(t, "rotation-key", bootstrapClient.deleteKeyRequests[0].KeyName)
+	require.Len(t, bootstrapClient.deleteKeyByIDRequests, 1)
+	require.Equal(t, initial.KeyID, bootstrapClient.deleteKeyByIDRequests[0].KeyID, "the rotation must delete the recorded key by its ID")
 
 	keySecret := &corev1.Secret{}
-	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: provisioner.Spec.Key.SecretName, Namespace: provisioner.Namespace}, keySecret))
+	require.NoError(t, k8sClient.Get(ctx, keySecretName, keySecret))
 	require.Equal(t, "rotated-key-material", string(keySecret.Data[provisioner.Spec.Key.SecretKey]))
 }
 
@@ -815,11 +819,11 @@ func TestCoderProvisionerReconciler_TagsDrift(t *testing.T) {
 		_ = k8sClient.Delete(context.Background(), provisioner)
 	})
 
+	initial := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "tags-drift-key", Key: "initial-key-material"}
 	bootstrapClient := &fakeBootstrapClient{
 		provisionerKeyResponses: []coderbootstrap.EnsureProvisionerKeyResponse{
-			{KeyName: "tags-drift-key", Key: "initial-key-material"},
-			{KeyName: "tags-drift-key", Key: ""},
-			{KeyName: "tags-drift-key", Key: "rotated-key-material"},
+			initial,
+			{OrganizationID: initial.OrganizationID, KeyID: uuid.New(), KeyName: "tags-drift-key", Key: "rotated-key-material"},
 		},
 	}
 	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
@@ -835,14 +839,15 @@ func TestCoderProvisionerReconciler_TagsDrift(t *testing.T) {
 
 	before.Spec.Tags = map[string]string{"region": "eu-west"}
 	require.NoError(t, k8sClient.Update(ctx, before))
+	bootstrapClient.provisionerKeyByName = func(coderbootstrap.ProvisionerKeyByNameRequest) *codersdk.ProvisionerKey {
+		return &codersdk.ProvisionerKey{ID: initial.KeyID, OrganizationID: initial.OrganizationID, Name: initial.KeyName}
+	}
 
 	reconcileProvisioner(ctx, t, reconciler, request)
 
-	require.Equal(t, 3, bootstrapClient.provisionerKeyCalls)
-	require.Equal(t, 2, bootstrapClient.deleteKeyCalls)
-	require.Len(t, bootstrapClient.deleteKeyRequests, 2)
-	require.Equal(t, "tags-drift-key", bootstrapClient.deleteKeyRequests[0].KeyName)
-	require.Equal(t, "tags-drift-key", bootstrapClient.deleteKeyRequests[1].KeyName)
+	require.Equal(t, 2, bootstrapClient.provisionerKeyCalls)
+	require.Len(t, bootstrapClient.deleteKeyByIDRequests, 1)
+	require.Equal(t, initial.KeyID, bootstrapClient.deleteKeyByIDRequests[0].KeyID, "the rotation must delete the old key by its ID")
 
 	keySecret := &corev1.Secret{}
 	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: fmt.Sprintf("%s-provisioner-key", provisioner.Name), Namespace: provisioner.Namespace}, keySecret))

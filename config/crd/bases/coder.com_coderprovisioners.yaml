@@ -417,6 +417,17 @@ spec:
                 description: ControlPlaneRefName is the control plane ref name last
                   applied to the provisioner key.
                 type: string
+              controlPlaneUID:
+                description: |-
+                  ControlPlaneUID is the UID of the control plane last applied to the
+                  provisioner key. The operator sends the operator token of the control
+                  plane with controlPlaneRefName for this key only while that control
+                  plane has this UID, and rotates the key when it has another UID. When it
+                  is empty, it sends that token only to the current Coder API URL of that
+                  control plane, and the next reconcile looks the key up there by
+                  organizationID and provisionerKeyID: it sets this field when Coder holds
+                  the key, and creates a new key when Coder answers that it has none.
+                type: string
               controlPlaneURL:
                 description: ControlPlaneURL is the control plane URL last applied
                   to the provisioner key.
@@ -456,6 +467,17 @@ spec:
                       description: |-
                         ControlPlaneRefName is the CoderControlPlane whose operator token the
                         operator used for the key.
+                      type: string
+                    controlPlaneUID:
+                      description: |-
+                        ControlPlaneUID is the UID of that CoderControlPlane. The operator
+                        sends its operator token for this entry only while the control plane
+                        with controlPlaneRefName has this UID. When it is empty, it sends that
+                        token only when coderURL is the current Coder API URL of that control
+                        plane. Otherwise it keeps the entry and sets the condition
+                        ControlPlaneChangedKeyKept. When a rotation replaces the key of status
+                        without status.controlPlaneUID, the entry of that key records the UID
+                        while coderURL is the current Coder API URL of that control plane.
                       type: string
                     keyID:
                       description: KeyID is the provisioner key ID that Coder returned.

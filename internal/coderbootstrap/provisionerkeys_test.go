@@ -226,49 +226,6 @@ func TestEnsureProvisionerKey_FallsBackWhenRateLimitBypassRejected(t *testing.T)
 	require.Equal(t, "plaintext-provisioner-key", resp.Key)
 }
 
-func TestDeleteProvisionerKey_FallsBackWhenRateLimitBypassRejected(t *testing.T) {
-	t.Parallel()
-
-	const keyName = "delete-me"
-	orgID := uuid.New()
-	now := time.Now().UTC().Format(time.RFC3339)
-	deleteCalls := 0
-	bypassRejectedCalls := 0
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get(codersdk.BypassRatelimitHeader) == "true" {
-			bypassRejectedCalls++
-			writeJSONResponse(t, w, http.StatusPreconditionRequired, map[string]any{"message": "bypass is not allowed"})
-			return
-		}
-
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/organizations/default":
-			writeJSONResponse(t, w, http.StatusOK, map[string]any{
-				"id":         orgID.String(),
-				"name":       "default",
-				"created_at": now,
-				"updated_at": now,
-			})
-			return
-		case r.Method == http.MethodDelete && r.URL.Path == "/api/v2/organizations/"+orgID.String()+"/provisionerkeys/"+keyName:
-			deleteCalls++
-			w.WriteHeader(http.StatusNoContent)
-			return
-		default:
-			writeJSONResponse(t, w, http.StatusNotFound, map[string]any{"message": "unexpected route"})
-			return
-		}
-	}))
-	defer server.Close()
-
-	client := coderbootstrap.NewSDKClient()
-	err := client.DeleteProvisionerKey(context.Background(), server.URL, "session-token", "", keyName)
-	require.NoError(t, err)
-	require.Equal(t, 1, deleteCalls)
-	require.Equal(t, 1, bypassRejectedCalls)
-}
-
 func TestEnsureProvisionerKey_ValidationErrors(t *testing.T) {
 	t.Parallel()
 
@@ -408,78 +365,6 @@ func TestEntitlements_ValidationErrors(t *testing.T) {
 	_, err = client.Entitlements(context.Background(), "https://coder.example.com", "")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "session token is required")
-}
-
-func TestDeleteProvisionerKey_Success(t *testing.T) {
-	t.Parallel()
-
-	const keyName = "delete-me"
-	orgID := uuid.New()
-	now := time.Now().UTC().Format(time.RFC3339)
-	deleteCalls := 0
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/organizations/default":
-			writeJSONResponse(t, w, http.StatusOK, map[string]any{
-				"id":         orgID.String(),
-				"name":       "default",
-				"created_at": now,
-				"updated_at": now,
-			})
-			return
-		case r.Method == http.MethodDelete && r.URL.Path == "/api/v2/organizations/"+orgID.String()+"/provisionerkeys/"+keyName:
-			deleteCalls++
-			w.WriteHeader(http.StatusNoContent)
-			return
-		default:
-			writeJSONResponse(t, w, http.StatusNotFound, map[string]any{"message": "unexpected route"})
-			return
-		}
-	}))
-	defer server.Close()
-
-	client := coderbootstrap.NewSDKClient()
-	err := client.DeleteProvisionerKey(context.Background(), server.URL, "session-token", "", keyName)
-	require.NoError(t, err)
-	require.Equal(t, 1, deleteCalls)
-}
-
-func TestDeleteProvisionerKey_NotFound(t *testing.T) {
-	t.Parallel()
-
-	const keyName = "already-deleted"
-	orgID := uuid.New()
-	now := time.Now().UTC().Format(time.RFC3339)
-	deleteCalls := 0
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/organizations/default":
-			writeJSONResponse(t, w, http.StatusOK, map[string]any{
-				"id":         orgID.String(),
-				"name":       "default",
-				"created_at": now,
-				"updated_at": now,
-			})
-			return
-		case r.Method == http.MethodDelete && r.URL.Path == "/api/v2/organizations/"+orgID.String()+"/provisionerkeys/"+keyName:
-			deleteCalls++
-			writeJSONResponse(t, w, http.StatusNotFound, map[string]any{
-				"message": "provisioner key not found",
-			})
-			return
-		default:
-			writeJSONResponse(t, w, http.StatusNotFound, map[string]any{"message": "unexpected route"})
-			return
-		}
-	}))
-	defer server.Close()
-
-	client := coderbootstrap.NewSDKClient()
-	err := client.DeleteProvisionerKey(context.Background(), server.URL, "session-token", "", keyName)
-	require.NoError(t, err)
-	require.Equal(t, 1, deleteCalls)
 }
 
 func writeJSONResponse(t *testing.T, w http.ResponseWriter, statusCode int, payload any) {

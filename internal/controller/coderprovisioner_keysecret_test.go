@@ -101,10 +101,9 @@ func TestCoderProvisionerKeySecret_OwnedIsReused(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	f := newProvisionerCredentialFixture(ctx, t, "cprov-key-owned")
-	// The key exists in coderd, so coderd returns no plaintext and the
-	// controller rotates it into the Secret that this provisioner owns.
+	// Status records no key, so the controller creates one and writes it
+	// into the Secret that this provisioner owns.
 	f.bootstrapClient.provisionerKeyResponses = []coderbootstrap.EnsureProvisionerKeyResponse{
-		{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "provisioner", Key: ""},
 		{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "provisioner", Key: testRotatedKeyValue},
 	}
 	provisioner := f.createKeyProvisioner(ctx, t, "provisioner", "")
@@ -119,8 +118,7 @@ func TestCoderProvisionerKeySecret_OwnedIsReused(t *testing.T) {
 
 	latest := f.get(ctx, t, provisioner)
 	requireCredentialsReady(t, latest.Status.Conditions, metav1.ConditionTrue, "CredentialsAccepted")
-	require.Equal(t, 2, f.bootstrapClient.provisionerKeyCalls)
-	require.Equal(t, 1, f.bootstrapClient.deleteKeyCalls)
+	require.Equal(t, 1, f.bootstrapClient.provisionerKeyCalls)
 
 	after := &corev1.Secret{}
 	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(secret), after))
