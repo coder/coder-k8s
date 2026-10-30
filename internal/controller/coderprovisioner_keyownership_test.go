@@ -3,7 +3,13 @@ package controller_test
 import (
 	"cmp"
 	"context"
+	"encoding/json"
+	"maps"
+	"net/http"
+	"net/http/httptest"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/coder/coder/v2/codersdk"
@@ -353,4 +359,113 @@ func TestCoderProvisionerKey_ControlPlaneRecreated(t *testing.T) {
 			}
 		})
 	}
+}
+
+// renamedOrgCoder is a Coder at an httptest server, reached through the real
+// SDK client, with one organization named team. Key creates answer from the
+// fake and add the key to the server.
+type renamedOrgCoder struct {
+	*coderbootstrap.SDKClient
+	fake *fakeBootstrapClient
+	mu   sync.Mutex
+	keys map[uuid.UUID]codersdk.ProvisionerKey
+	// team is the ID of the organization named team.
+	team uuid.UUID
+}
+
+func (c *renamedOrgCoder) EnsureProvisionerKey(ctx context.Context, req coderbootstrap.EnsureProvisionerKeyRequest) (coderbootstrap.EnsureProvisionerKeyResponse, error) {
+	response, err := c.fake.EnsureProvisionerKey(ctx, req)
+	if err == nil {
+		c.mu.Lock()
+		c.keys[response.KeyID] = codersdk.ProvisionerKey{ID: response.KeyID, OrganizationID: response.OrganizationID, Name: response.KeyName}
+		c.mu.Unlock()
+	}
+	return response, err
+}
+
+func (c *renamedOrgCoder) Entitlements(ctx context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error) {
+	return c.fake.Entitlements(ctx, coderURL, sessionToken)
+}
+
+func (c *renamedOrgCoder) serveHTTP(t *testing.T, w http.ResponseWriter, r *http.Request) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method == http.MethodGet && r.URL.Path == "/api/v2/organizations/team" {
+		_ = json.NewEncoder(w).Encode(codersdk.Organization{MinimalOrganization: codersdk.MinimalOrganization{ID: c.team, Name: "team"}})
+		return
+	}
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) >= 5 && parts[0] == "api" && parts[1] == "v2" && parts[2] == "organizations" && parts[4] == "provisionerkeys" {
+		if orgID, err := uuid.Parse(parts[3]); err == nil {
+			if r.Method == http.MethodGet && len(parts) == 5 {
+				keys := []codersdk.ProvisionerKey{}
+				for _, key := range c.keys {
+					if key.OrganizationID == orgID {
+						keys = append(keys, key)
+					}
+				}
+				_ = json.NewEncoder(w).Encode(keys)
+				return
+			}
+			if r.Method == http.MethodDelete && len(parts) == 6 {
+				maps.DeleteFunc(c.keys, func(_ uuid.UUID, key codersdk.ProvisionerKey) bool {
+					return key.OrganizationID == orgID && key.Name == parts[5]
+				})
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+	}
+	t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+	w.WriteHeader(http.StatusNotFound)
+}
+
+// TestCoderProvisionerKey_StatusWithoutUIDOrganizationRenamed checks status
+// without a control plane UID whose applied key is in organization A, named
+// team. A is renamed, and another organization takes the name team, at the
+// same control plane. Coder still holds the key in A, so the deletion of the
+// provisioner must delete it there by its recorded IDs.
+func TestCoderProvisionerKey_StatusWithoutUIDOrganizationRenamed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newProvisionerCredentialFixture(ctx, t, "cprov-orgrename")
+	orgA, orgB := uuid.New(), uuid.New()
+	keyA, keyB := uuid.New(), uuid.New()
+	coder := &renamedOrgCoder{
+		SDKClient: coderbootstrap.NewSDKClient(),
+		fake:      f.bootstrapClient,
+		keys:      map[uuid.UUID]codersdk.ProvisionerKey{},
+		team:      orgA,
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { coder.serveHTTP(t, w, r) }))
+	t.Cleanup(server.Close)
+	setControlPlaneURL(ctx, t, f, server.URL)
+	f.bootstrapClient.provisionerKeyResponses = []coderbootstrap.EnsureProvisionerKeyResponse{
+		{OrganizationID: orgA, KeyID: keyA, KeyName: "provisioner", Key: "material-a"},
+		{OrganizationID: orgB, KeyID: keyB, KeyName: "provisioner", Key: "material-b"},
+	}
+	f.reconciler.BootstrapClient = coder
+
+	p := f.createProvisioner(ctx, t, nil, nil)
+	p.Spec.OrganizationName = "team"
+	require.NoError(t, k8sClient.Update(ctx, p))
+	f.reconcile(ctx, t, p)
+	f.reconcile(ctx, t, p)
+	require.Equal(t, keyA.String(), f.get(ctx, t, p).Status.ProvisionerKeyID)
+	require.NoError(t, k8sClient.Status().Patch(ctx, f.get(ctx, t, p),
+		ctrlclient.RawPatch(types.MergePatchType, []byte(`{"status":{"controlPlaneUID":null}}`))))
+
+	coder.mu.Lock()
+	coder.team = orgB
+	coder.mu.Unlock()
+	f.reconcile(ctx, t, p)
+	require.NoError(t, k8sClient.Delete(ctx, f.get(ctx, t, p)))
+	f.reconcile(ctx, t, p)
+	requireProvisionerGone(ctx, t, types.NamespacedName{Name: p.Name, Namespace: p.Namespace})
+
+	coder.mu.Lock()
+	defer coder.mu.Unlock()
+	require.NotContains(t, coder.keys, keyA, "deleting the provisioner must revoke its recorded key in the renamed organization by ID")
+	require.Empty(t, coder.keys, "deleting the provisioner must leave none of its keys in Coder")
 }
