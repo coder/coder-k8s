@@ -144,7 +144,7 @@ The controller stores the API token of the `coder-k8s-operator` user in a Secret
 
 When `status.operatorTokenSecretRef` still names a Secret at that point, the controller provisioned an operator token for this control plane that can still work in Coder. The controller then deletes that token in Coder, so that a copy of the old Secret value stops working. Until the delete succeeds, for example while the Coder PostgreSQL database is not reachable, `status.operatorTokenSecretRef` stays set as the record of the pending delete, `operatorAccessReady` stays `false`, and the condition message says that the delete is pending. When the status names no Secret, the controller deletes no token, because it cannot prove that the token in Coder is its own.
 
-Provisioners, template tests and the aggregated API server read the Secret in `status.operatorTokenSecretRef` only when the control plane is its controller owner. So they do not use a Secret that someone replaced after the last reconcile of the control plane.
+Every component that sends the operator token to Coder reads the Secret in `status.operatorTokenSecretRef` only when the control plane is its controller owner: the license and entitlements calls of the controller, provisioners, template tests and the aggregated API server. So none of them uses a Secret that someone replaced after the controller last checked it.
 
 The controller reports the `OperatorTokenSecretOwned` condition while operator access is on:
 

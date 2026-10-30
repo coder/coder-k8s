@@ -1904,26 +1904,21 @@ func (r *CoderControlPlaneReconciler) reconcileLicense(
 		return ctrl.Result{}, fmt.Errorf("assertion failed: control plane SDK URL must not be empty when licenseSecretRef is configured")
 	}
 
-	operatorTokenSecretName := strings.TrimSpace(nextStatus.OperatorTokenSecretRef.Name)
-	if operatorTokenSecretName == "" {
+	if strings.TrimSpace(nextStatus.OperatorTokenSecretRef.Name) == "" {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: operator token secret name must not be empty when operator access is ready")
 	}
-	operatorTokenSecretKey := strings.TrimSpace(nextStatus.OperatorTokenSecretRef.Key)
-	if operatorTokenSecretKey == "" {
-		operatorTokenSecretKey = coderv1alpha1.DefaultTokenSecretKey
-	}
 
-	operatorToken, err := r.readSecretValue(ctx, coderControlPlane.Namespace, operatorTokenSecretName, operatorTokenSecretKey)
+	operatorToken, err := r.readPublishedOperatorToken(ctx, coderControlPlane, nextStatus)
 	switch {
 	case err == nil:
-	case apierrors.IsNotFound(err), errors.Is(err, errSecretValueMissing), errors.Is(err, errSecretValueEmpty):
+	case errors.Is(err, operatortoken.ErrUnavailable):
 		if err := setControlPlaneCondition(
 			nextStatus,
 			coderControlPlane.Generation,
 			coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
 			metav1.ConditionFalse,
 			licenseConditionReasonSecretMissing,
-			"Operator token Secret is missing or incomplete; retrying license upload.",
+			"Operator token Secret is missing, incomplete or not owned by this control plane; retrying license upload.",
 		); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -2168,19 +2163,14 @@ func (r *CoderControlPlaneReconciler) reconcileEntitlements(
 		return ctrl.Result{}, nil
 	}
 
-	operatorTokenSecretName := strings.TrimSpace(nextStatus.OperatorTokenSecretRef.Name)
-	if operatorTokenSecretName == "" {
+	if strings.TrimSpace(nextStatus.OperatorTokenSecretRef.Name) == "" {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: operator token secret name must not be empty when querying entitlements")
 	}
-	operatorTokenSecretKey := strings.TrimSpace(nextStatus.OperatorTokenSecretRef.Key)
-	if operatorTokenSecretKey == "" {
-		operatorTokenSecretKey = coderv1alpha1.DefaultTokenSecretKey
-	}
 
-	operatorToken, err := r.readSecretValue(ctx, coderControlPlane.Namespace, operatorTokenSecretName, operatorTokenSecretKey)
+	operatorToken, err := r.readPublishedOperatorToken(ctx, coderControlPlane, nextStatus)
 	switch {
 	case err == nil:
-	case apierrors.IsNotFound(err), errors.Is(err, errSecretValueMissing), errors.Is(err, errSecretValueEmpty):
+	case errors.Is(err, operatortoken.ErrUnavailable):
 		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
 	default:
 		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
@@ -2333,6 +2323,19 @@ func (r *CoderControlPlaneReconciler) cleanupDisabledOperatorAccess(
 	}
 
 	return nil
+}
+
+// readPublishedOperatorToken reads the operator token that nextStatus
+// publishes. It checks the owner again, like every other reader, because the
+// Secret can change after reconcileOperatorAccess checked it.
+func (r *CoderControlPlaneReconciler) readPublishedOperatorToken(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+	nextStatus *coderv1alpha1.CoderControlPlaneStatus,
+) (string, error) {
+	published := *coderControlPlane
+	published.Status = *nextStatus
+	return operatortoken.Read(ctx, r.Client, &published)
 }
 
 func isManagedOperatorTokenSecret(secret *corev1.Secret, coderControlPlane *coderv1alpha1.CoderControlPlane) bool {

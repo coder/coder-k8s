@@ -392,3 +392,83 @@ func TestReconcile_OperatorAccess_TokenSecretLosesOwner_RetriesRevoke(t *testing
 	require.NoError(t, err)
 	require.Equal(t, 2, provisioner.revokeCalls, "the operator stops once the delete succeeded")
 }
+
+// TestReconcile_OperatorAccess_TokenSecretReplacedDuringReconcile checks that
+// the license upload and the entitlements check do not send the value of an
+// operator token Secret that someone replaced after the ownership check of the
+// same reconcile.
+func TestReconcile_OperatorAccess_TokenSecretReplacedDuringReconcile(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+	namespace := createTestNamespace(ctx, t, "operator-token-replaced-mid-reconcile")
+
+	license := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-license", Namespace: namespace},
+		Data:       map[string][]byte{coderv1alpha1.DefaultLicenseSecretKey: []byte("license-jwt")},
+	}
+	require.NoError(t, k8sClient.Create(ctx, license))
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: namespace},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			ExtraEnv:         []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: "postgres://example.replaced-mid-reconcile/coder"}},
+			LicenseSecretRef: &coderv1alpha1.SecretKeySelector{Name: license.Name},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, cp))
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), cp) })
+
+	replaceAfterFirstRead, tokenReads := false, 0
+	base, err := ctrlclient.NewWithWatch(cfg, ctrlclient.Options{Scheme: scheme})
+	require.NoError(t, err)
+	racing := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, c ctrlclient.WithWatch, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			secret, ok := obj.(*corev1.Secret)
+			if !ok || key.Name != cp.Name+"-operator-token" || !replaceAfterFirstRead {
+				return nil
+			}
+			if tokenReads++; tokenReads > 1 {
+				secret.OwnerReferences = nil
+				secret.Data = map[string][]byte{coderv1alpha1.DefaultTokenSecretKey: []byte("foreign-token")}
+			}
+			return nil
+		},
+	})
+	uploader := &fakeLicenseUploader{}
+	inspector := &fakeEntitlementsInspector{}
+	r := &controller.CoderControlPlaneReconciler{
+		Client:                    racing,
+		Scheme:                    scheme,
+		OperatorAccessProvisioner: &fakeOperatorAccessProvisioner{token: "operator-token-published"},
+		LicenseUploader:           uploader,
+		EntitlementsInspector:     inspector,
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}
+	_, err = r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	deployment := getControlPlaneDeployment(t, cp)
+	deployment.Status.Replicas, deployment.Status.ReadyReplicas = 1, 1
+	require.NoError(t, k8sClient.Status().Update(ctx, deployment))
+
+	replaceAfterFirstRead = true
+	_, err = r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.Greater(t, tokenReads, 1, "the test must replace the Secret before a later read")
+	require.Empty(t, uploader.calls, "the license upload must not use the replaced Secret")
+	require.Empty(t, inspector.requests, "the entitlements check must not use the replaced Secret")
+	condition := apimeta.FindStatusCondition(getControlPlane(t, cp).Status.Conditions, coderv1alpha1.CoderControlPlaneConditionLicenseApplied)
+	require.NotNil(t, condition)
+	require.Equal(t, "SecretMissing", condition.Reason)
+
+	replaceAfterFirstRead = false
+	_, err = r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.Len(t, uploader.calls, 1)
+	require.Equal(t, "operator-token-published", uploader.calls[0].sessionToken)
+	require.NotEmpty(t, inspector.requests)
+	for _, call := range inspector.requests {
+		require.Equal(t, "operator-token-published", call.sessionToken)
+	}
+}
