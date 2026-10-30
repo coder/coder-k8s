@@ -288,3 +288,35 @@ func TestCoderAIProviderDeploymentSwitchKeepsRecord(t *testing.T) {
 	require.Zero(t, env.fake.requestCount(routeDeleteAIProvider), "no delete in the new deployment")
 	require.Equal(t, before, cleanupRecord(ctx, t, env.namespace, provider.UID), "the record stays for a sweep")
 }
+
+// #353 (#362 follow-up 7): a create whose answer was lost leaves a record
+// without a provider ID. When the control plane then reaches another Coder
+// deployment, where someone else's provider has the same name, that name
+// conflict proves nothing about the old deployment. The controller keeps the
+// marker and the record, so a delete keeps the record for a sweep.
+func TestCoderAIProviderPendingCreateAfterDeploymentSwitch(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newAIProviderCreateEnv(ctx, t)
+	env.fake.failNext(routeCreateAIProvider, fakeFault{AfterCommit: true, Reset: true})
+	got, _ := env.reconcile(ctx, t, provider)
+	requireAIProviderStep(t, got, false, "ConfirmingCreate")
+	before := cleanupRecord(ctx, t, env.namespace, provider.UID)
+	require.Empty(t, before["coderID"], "the create answer was lost")
+
+	env.fake.mu.Lock()
+	env.fake.deploymentID = uuid.NewString() // A new database behind the same control plane.
+	for _, p := range env.fake.aiProviders {
+		p.displayName = "Someone else's provider"
+	}
+	env.fake.mu.Unlock()
+	got, _ = env.reconcile(ctx, t, got)
+	require.Contains(t, requireAIProviderStep(t, got, true, "CoderDeploymentChanged"), before["deploymentID"])
+	require.NotNil(t, got.Status.CreateAttemptTime, "the marker stays")
+	require.Equal(t, before, cleanupRecord(ctx, t, env.namespace, provider.UID))
+
+	gone, _ := env.deleteAIProvider(ctx, t, got)
+	require.Nil(t, gone, "the finalizer goes without a delete")
+	require.Zero(t, env.fake.requestCount(routeDeleteAIProvider), "no delete in the new deployment")
+	require.Equal(t, before, cleanupRecord(ctx, t, env.namespace, provider.UID), "the record stays for a sweep")
+}
