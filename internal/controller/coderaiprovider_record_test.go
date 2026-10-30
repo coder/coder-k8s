@@ -228,6 +228,30 @@ func TestCoderAIProviderDeleteUsesRecordedID(t *testing.T) {
 	require.Nil(t, cleanupRecord(ctx, t, env.namespace, provider.UID))
 }
 
+// #410 review (r4426047301): a status without the provider ID, but with a
+// create marker, must not drop the recorded ID. After the sync the display
+// name is no longer the nonce, so only the recorded ID still finds the
+// provider for a delete or a sweep.
+func TestCoderAIProviderKeepsRecordedIDWithoutStatusID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newReadyAIProvider(ctx, t)
+	recordedID := provider.Status.ProviderID
+	provider.Status.ProviderID = ""
+	provider.Status.CreateAttemptTime = &metav1.Time{Time: time.Now().Add(-time.Hour)}
+	require.NoError(t, k8sClient.Status().Update(ctx, provider))
+
+	got, _ := env.reconcile(ctx, t, provider)
+	requireAIProviderStep(t, got, true, "NameConflict")
+	require.Equal(t, recordedID, cleanupRecord(ctx, t, env.namespace, got.UID)["coderID"], "the record keeps the provider ID")
+
+	gone, _ := env.deleteAIProvider(ctx, t, got)
+	require.Nil(t, gone)
+	_, ok := env.fake.aiProvider("openai")
+	require.False(t, ok, "the delete used the recorded ID")
+	require.Nil(t, cleanupRecord(ctx, t, env.namespace, got.UID))
+}
+
 // #374 review round 2: when the control plane now reaches another Coder
 // deployment (a new database), a delete there proves nothing. The finalizer
 // goes without a delete, and the record stays for a sweep.
