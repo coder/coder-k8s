@@ -80,6 +80,10 @@ type CoderProvisionerReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
 	BootstrapClient coderbootstrap.Client
+
+	// earlierKeyRetryAt maps a provisioner UID to the time.Time before which
+	// revokeEarlierTargetKeys does not try again.
+	earlierKeyRetryAt sync.Map
 }
 
 // +kubebuilder:rbac:groups=coder.com,resources=coderprovisioners,verbs=get;list;watch;create;update;patch;delete
@@ -205,6 +209,38 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	organizationName := provisionerOrganizationName(provisioner.Spec.OrganizationName)
 	keyName, keySecretName, keySecretKey := provisionerKeyConfig(provisioner)
+	desiredControlPlaneRefName := provisioner.Spec.ControlPlaneRef.Name
+
+	coderURL, err := coderAPIURL(controlPlane)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Every key that can exist in Coder has a record in status: the applied
+	// fields for the key in the Secret, status.pendingKeys for the others. A
+	// key to create is recorded by name before the create, because Coder
+	// returns its ID only in the create response. Keys recorded with IDs in
+	// another slot than the target are deleted here.
+	target := coderv1alpha1.CoderProvisionerKeyRecord{
+		ControlPlaneRefName: desiredControlPlaneRefName,
+		ControlPlaneUID:     string(controlPlane.UID),
+		CoderURL:            coderURL,
+		OrganizationName:    organizationName,
+		KeyName:             keyName,
+		Unpublished:         true,
+	}
+	// Each earlier target record names its own URL and control plane, so its
+	// cleanup does not wait for the checks of the current target below.
+	earlierKeysUpdated, err := r.revokeEarlierTargetKeys(ctx, provisioner, target)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if earlierKeysUpdated {
+		statusSnapshot = provisioner.Status.DeepCopy()
+		if statusSnapshot == nil {
+			return ctrl.Result{}, fmt.Errorf("assertion failed: status snapshot must not be nil after earlier target key status update")
+		}
+	}
 
 	sessionToken, operatorAccessResult, operatorAccessReason, operatorAccessMessage, err := r.readOperatorSessionToken(ctx, provisioner, controlPlane)
 	if err != nil {
@@ -229,11 +265,6 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		operatorAccessMessage,
 	)
 
-	coderURL, err := coderAPIURL(controlPlane)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
 	entitlementResult, entitlementErr := r.reconcileExternalProvisionerEntitlement(ctx, provisioner, controlPlane, sessionToken)
 	if entitlementErr != nil {
 		if statusSnapshot == nil {
@@ -255,7 +286,6 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	desiredTagsHash := hashProvisionerTags(provisioner.Spec.Tags)
-	desiredControlPlaneRefName := provisioner.Spec.ControlPlaneRef.Name
 	status := provisioner.Status
 	orgDrift := status.OrganizationName != "" && status.OrganizationName != organizationName
 	keyNameDrift := status.ProvisionerKeyName != "" && status.ProvisionerKeyName != keyName
@@ -295,19 +325,6 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	metadataMissing := status.OrganizationName == "" || status.TagsHash == "" || status.ControlPlaneRefName == "" || status.ControlPlaneURL == ""
 
-	// Every key that can exist in Coder has a record in status: the applied
-	// fields for the key in the Secret, status.pendingKeys for the others. A
-	// key to create is recorded by name before the create, because Coder
-	// returns its ID only in the create response. Keys recorded with IDs in
-	// another slot than the target are deleted here.
-	target := coderv1alpha1.CoderProvisionerKeyRecord{
-		ControlPlaneRefName: desiredControlPlaneRefName,
-		ControlPlaneUID:     string(controlPlane.UID),
-		CoderURL:            coderURL,
-		OrganizationName:    organizationName,
-		KeyName:             keyName,
-		Unpublished:         true,
-	}
 	// An unpublished record names a key that an earlier reconcile created, or
 	// started to create, for the Secret and did not record as applied. The
 	// Secret can hold that key, or a key that the rotation already deleted,
@@ -369,15 +386,6 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return ctrl.Result{}, fmt.Errorf("look up provisioner key %q: %w", keyName, err)
 		}
 		if existingKey != nil && !recordsKeyID(provisioner.Status, existingKey.ID) {
-			// Keys recorded at earlier targets do not wait for this name.
-			// Unpublished records stay, because the Secret can hold their key.
-			kept, _, revokeErr := r.revokePendingKeys(ctx, provisioner, provisioner.Status.PendingKeys, target, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
-				return record.Unpublished
-			})
-			if revokeErr != nil {
-				return ctrl.Result{}, revokeErr
-			}
-			provisioner.Status.PendingKeys = kept
 			return r.refuseKeyNameInUse(ctx, provisioner, coderURL, organizationName, keyName, existingKey.ID)
 		}
 	}
@@ -405,22 +413,24 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return sameKeySlot(record, target) && record.KeyID == ""
 		})
 		pending = append(pending, target)
-	}
-	// The replacement below deletes the key that the target holds.
-	kept, conditionChanged, err := r.revokePendingKeys(ctx, provisioner, pending, target, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
-		return existingKey != nil && isKeyID(record.KeyID, existingKey.ID)
-	})
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if conditionChanged || !slices.Equal(kept, provisioner.Status.PendingKeys) {
-		provisioner.Status.PendingKeys = kept
-		if err := r.Status().Update(ctx, provisioner); err != nil {
-			return ctrl.Result{}, fmt.Errorf("record pending provisioner keys in status: %w", err)
+		// Without a replacement, revokeEarlierTargetKeys above handles every
+		// record here. The replacement below deletes the key that the target
+		// holds.
+		kept, conditionChanged, err := r.revokePendingKeys(ctx, provisioner, pending, target, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
+			return existingKey != nil && isKeyID(record.KeyID, existingKey.ID)
+		})
+		if err != nil {
+			return ctrl.Result{}, err
 		}
-		statusSnapshot = provisioner.Status.DeepCopy()
-		if statusSnapshot == nil {
-			return ctrl.Result{}, fmt.Errorf("assertion failed: status snapshot must not be nil after pending key status update")
+		if conditionChanged || !slices.Equal(kept, provisioner.Status.PendingKeys) {
+			provisioner.Status.PendingKeys = kept
+			if err := r.Status().Update(ctx, provisioner); err != nil {
+				return ctrl.Result{}, fmt.Errorf("record pending provisioner keys in status: %w", err)
+			}
+			statusSnapshot = provisioner.Status.DeepCopy()
+			if statusSnapshot == nil {
+				return ctrl.Result{}, fmt.Errorf("assertion failed: status snapshot must not be nil after pending key status update")
+			}
 		}
 	}
 
@@ -652,6 +662,7 @@ func (r *CoderProvisionerReconciler) reconcileDeletion(ctx context.Context, prov
 	}
 
 	log := ctrl.LoggerFrom(ctx)
+	r.earlierKeyRetryAt.Delete(provisioner.UID)
 
 	// Delete only the keys that status records for this resource. A
 	// provisioner that never sent a key create (refused, not entitled, never
@@ -1019,7 +1030,9 @@ func (r *CoderProvisionerReconciler) revokeKey(
 // target slot, and returns the records to keep: the target slot, the records
 // that keep reports, and the records whose key Coder did not confirm gone. It
 // sets the UnverifiedKeyKept and ControlPlaneChangedKeyKept conditions for the
-// records it tried, and reports whether the conditions changed.
+// records it tried, and reports whether the conditions changed. When keep
+// holds back a record outside the target slot, the conditions could not name
+// that record, so they stay as they are.
 func (r *CoderProvisionerReconciler) revokePendingKeys(
 	ctx context.Context,
 	provisioner *coderv1alpha1.CoderProvisioner,
@@ -1029,9 +1042,15 @@ func (r *CoderProvisionerReconciler) revokePendingKeys(
 ) ([]coderv1alpha1.CoderProvisionerKeyRecord, bool, error) {
 	var kept []coderv1alpha1.CoderProvisionerKeyRecord
 	var unverified, controlPlaneChanged []string
+	heldBack := false
 	for _, record := range pending {
-		if sameKeySlot(record, target) || keep(record) {
+		if sameKeySlot(record, target) {
 			kept = append(kept, record)
+			continue
+		}
+		if keep(record) {
+			kept = append(kept, record)
+			heldBack = true
 			continue
 		}
 		cleanup, err := r.revokeKey(ctx, provisioner, record)
@@ -1055,9 +1074,59 @@ func (r *CoderProvisionerReconciler) revokePendingKeys(
 			unverified = append(unverified, fmt.Sprintf("key %q in organization %q at %s: %s", record.KeyName, record.OrganizationName, record.CoderURL, note))
 		}
 	}
+	if heldBack {
+		return kept, false, nil
+	}
 	conditionChanged := setUnverifiedKeyCondition(provisioner, unverified)
 	conditionChanged = setControlPlaneChangedKeyCondition(provisioner, controlPlaneChanged) || conditionChanged
 	return kept, conditionChanged, nil
+}
+
+// revokeEarlierTargetKeys deletes the keys of the status.pendingKeys records
+// outside target, each with the operator token of its own control plane (see
+// revokeKey), and writes the result to status. It keeps the records of the
+// key in the Secret and of unpublished keys, which the Secret can hold,
+// because the running Deployment can still use them. After a try that leaves
+// a key that Coder did not confirm gone, it does not try again for
+// provisionerPendingKeyRetryInterval, so an unreachable earlier endpoint does
+// not get a request on every reconcile. It reports whether it updated status.
+func (r *CoderProvisionerReconciler) revokeEarlierTargetKeys(
+	ctx context.Context,
+	provisioner *coderv1alpha1.CoderProvisioner,
+	target coderv1alpha1.CoderProvisionerKeyRecord,
+) (bool, error) {
+	if value, ok := r.earlierKeyRetryAt.Load(provisioner.UID); ok {
+		retryAt, ok := value.(time.Time)
+		if !ok {
+			return false, fmt.Errorf("assertion failed: earlier key retry time of provisioner %s is %T, not time.Time", provisioner.UID, value)
+		}
+		if time.Now().Before(retryAt) {
+			return false, nil
+		}
+	}
+	appliedKeyID := provisioner.Status.ProvisionerKeyID
+	inUse := func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
+		return record.Unpublished || (record.KeyID != "" && record.KeyID == appliedKeyID)
+	}
+	kept, conditionChanged, err := r.revokePendingKeys(ctx, provisioner, provisioner.Status.PendingKeys, target, inUse)
+	if err != nil {
+		return false, err
+	}
+	if slices.ContainsFunc(kept, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
+		return !sameKeySlot(record, target) && !inUse(record)
+	}) {
+		r.earlierKeyRetryAt.Store(provisioner.UID, time.Now().Add(provisionerPendingKeyRetryInterval))
+	} else {
+		r.earlierKeyRetryAt.Delete(provisioner.UID)
+	}
+	if !conditionChanged && slices.Equal(kept, provisioner.Status.PendingKeys) {
+		return false, nil
+	}
+	provisioner.Status.PendingKeys = kept
+	if err := r.Status().Update(ctx, provisioner); err != nil {
+		return false, fmt.Errorf("record deleted provisioner keys of earlier targets in status: %w", err)
+	}
+	return true, nil
 }
 
 // setUnverifiedKeyCondition sets the UnverifiedKeyKept condition for the
