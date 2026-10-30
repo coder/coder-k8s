@@ -1,0 +1,29 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - rbac.yaml
+  - codertemplatetest.json
+  - promote-job.yaml
+# The Job reads the test manifest from Git, not from the cluster, and compares
+# it with the test in the cluster.
+configMapGenerator:
+  - name: docker-promote
+    namespace: coder
+    files:
+      - promote.sh
+      - codertemplatetest.json
+# codertemplatetest.json is the only file to change for a new version. These
+# copy its name to the Job and to the Role.
+replacements:
+  - source:
+      kind: CoderTemplateTest
+      fieldPath: metadata.name
+    targets:
+      - select:
+          kind: Job
+        fieldPaths:
+          - metadata.name
+      - select:
+          kind: Role
+        fieldPaths:
+          - rules.0.resourceNames.0
