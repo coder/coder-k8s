@@ -227,6 +227,7 @@ func (r *CoderMCPServerReconciler) check(
 		// operator token Secret that appears later.
 		return mcpServerWait(mcpServerRetry, wait.reason, "%s", wait.message), nil
 	}
+	r.backfillMCPServerRecord(ctx, sdk, server)
 	org, step, err := resolveMCPServerOrganization(ctx, sdk, server.Spec.Organization)
 	if err != nil {
 		return nil, err

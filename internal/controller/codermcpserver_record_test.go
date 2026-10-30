@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/controller"
 )
 
@@ -206,6 +207,126 @@ func TestCoderMCPServerRecordBackfill(t *testing.T) {
 	record := env.mcpServerRecord(ctx, t, got.UID)
 	require.Equal(t, id.String(), record["coderID"])
 	require.Equal(t, env.fake.deploymentID, record["deploymentID"])
+}
+
+// #353: a config from before records gets one also while the controller
+// disables it because the control plane withdrew its opt-in.
+func TestCoderMCPServerRecordBackfillOnDisable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	got, id := env.applied(ctx, t, nil)
+	require.NoError(t, k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: env.namespace, Name: "ck8s-cleanup-" + string(got.UID)}}))
+	env.setOptIn(ctx, t, nil)
+
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerStep(t, got, true, "MCPServersNotAllowed")
+	require.False(t, env.stored(t, got).view.Enabled, "the disable still runs")
+	require.Equal(t, id.String(), env.mcpServerRecord(ctx, t, got.UID)["coderID"])
+}
+
+// #353: a create answer that was lost is confirmed by the next reconcile,
+// which records the config ID before the sync replaces the nonce.
+func TestCoderMCPServerRecordAfterLostCreateAnswer(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	env.fake.failNext(routeCreateMCPServer, fakeFault{AfterCommit: true, Reset: true})
+	got, _ := env.reconcile(ctx, t, env.create(ctx, t, nil))
+	requireMCPServerStep(t, got, false, "ConfirmingCreate")
+
+	env.fake.failNext(routeUpdateMCPServer, fakeFault{Status: http.StatusBadGateway})
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerStep(t, got, false, "CoderUnavailable")
+	require.Equal(t, env.requireCreated(t, got).view.ID.String(), env.mcpServerRecord(ctx, t, got.UID)["coderID"])
+}
+
+// #353: a config that is gone before a full apply is created again. The
+// record write before that create drops the old ID, so a delete finds the new
+// config by its nonce instead of trusting the 404 of the old ID.
+func TestCoderMCPServerRecreateDropsGoneID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	got, old := env.applied(ctx, t, nil)
+	got.Spec.Description = "pending"
+	require.NoError(t, k8sClient.Update(ctx, got))
+	require.NoError(t, env.dashboard(t).DeleteMCPServerConfig(ctx, env.orgID, old))
+
+	env.fake.failNext(routeCreateMCPServer, fakeFault{AfterCommit: true, Reset: true})
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerStep(t, got, false, "ConfirmingCreate")
+	require.Len(t, env.fake.mcpServers(), 1, "the create committed")
+	require.Empty(t, env.mcpServerRecord(ctx, t, got.UID)["coderID"], "the gone ID left the record")
+
+	gone, _ := env.deleteMCPServer(ctx, t, got)
+	require.Nil(t, gone)
+	require.Empty(t, env.fake.mcpServers(), "the delete found the new config by its nonce")
+	require.Nil(t, env.mcpServerRecord(ctx, t, got.UID))
+}
+
+// #353: when the control plane reaches another Coder deployment while the
+// object lives, the config looks gone, but the record still locates it in
+// the old deployment. The controller keeps the record and creates nothing in
+// the new deployment, and a delete keeps the record too.
+func TestCoderMCPServerDeploymentSwitchKeepsRecord(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	got, _ := env.applied(ctx, t, nil)
+	before := env.mcpServerRecord(ctx, t, got.UID)
+	env.fake.mu.Lock()
+	env.fake.deploymentID = uuid.NewString() // A new database behind the same control plane.
+	env.fake.mcp.servers = nil
+	env.fake.mu.Unlock()
+	got.Spec.Description = "pending"
+	require.NoError(t, k8sClient.Update(ctx, got))
+
+	got, _ = env.reconcile(ctx, t, got)
+	require.Contains(t, requireMCPServerStep(t, got, true, "CoderDeploymentChanged"), before["deploymentID"])
+	require.Equal(t, 1, env.posts(), "no create in the new deployment")
+	require.Equal(t, before, env.mcpServerRecord(ctx, t, got.UID), "the record keeps the old locator")
+
+	gone, _ := env.deleteMCPServer(ctx, t, got)
+	require.Nil(t, gone, "the finalizer goes without a delete")
+	require.Zero(t, env.fake.requestCount(routeDeleteMCPServer), "no delete in the new deployment")
+	require.Equal(t, before, env.mcpServerRecord(ctx, t, got.UID), "the record stays for a sweep")
+}
+
+// #353: a delete never removes a ConfigMap of the record's name that is not
+// this object's record. With a status that lost everything, the record still
+// names the organization, so the delete of the recorded config finishes.
+func TestCoderMCPServerDeleteRecordEdgeCases(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	t.Run("foreign ConfigMap", func(t *testing.T) {
+		t.Parallel()
+		env := newMCPServerEnv(ctx, t, true)
+		server := env.create(ctx, t, nil)
+		server.Finalizers = []string{coderv1alpha1.CoderMCPServerCleanupFinalizer}
+		require.NoError(t, k8sClient.Update(ctx, server))
+		foreign := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: env.namespace, Name: "ck8s-cleanup-" + string(server.UID)}, Data: map[string]string{"owner": "someone else"}}
+		require.NoError(t, k8sClient.Create(ctx, foreign))
+		gone, _ := env.deleteMCPServer(ctx, t, server)
+		require.Nil(t, gone, "nothing of the object exists in Coder, so the finalizer goes")
+		require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(foreign), foreign), "the foreign ConfigMap stays")
+	})
+	t.Run("status lost everything", func(t *testing.T) {
+		t.Parallel()
+		env := newMCPServerEnv(ctx, t, true)
+		env.keySecret(ctx, t, testMCPKey)
+		got, _ := env.applied(ctx, t, nil)
+		got.Status = coderv1alpha1.CoderMCPServerStatus{}
+		require.NoError(t, k8sClient.Status().Update(ctx, got))
+		gone, _ := env.deleteMCPServer(ctx, t, got)
+		require.Nil(t, gone)
+		require.Empty(t, env.fake.mcpServers(), "the delete used the recorded ID and organization")
+		require.Nil(t, env.mcpServerRecord(ctx, t, got.UID))
+	})
 }
 
 // The reconciler refuses to start without its cleanup record dependencies.

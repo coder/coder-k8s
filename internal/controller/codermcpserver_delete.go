@@ -45,7 +45,11 @@ func (r *CoderMCPServerReconciler) deleteStep(ctx context.Context, server *coder
 		// ID still locates a config, for example after a lost status write.
 		return true, nil, deleteCleanupRecord(ctx, r.Client, r.APIReader, r.OperatorNamespace, server.UID)
 	}
-	orgID, err := uuid.Parse(server.Status.OrganizationID)
+	orgText := server.Status.OrganizationID
+	if orgText == "" && record != nil {
+		orgText = record.Organization // A status edit cannot strand the recorded config.
+	}
+	orgID, err := uuid.Parse(orgText)
 	if err != nil || orgID == uuid.Nil {
 		// The organization is pinned before the first MCP write.
 		return false, nil, fmt.Errorf("assertion failed: MCP server %s/%s can exist in Coder but has status.organizationID %q", server.Namespace, server.Name, server.Status.OrganizationID)

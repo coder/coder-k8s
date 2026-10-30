@@ -7,6 +7,7 @@ import (
 
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 )
@@ -70,6 +71,19 @@ func (r *CoderMCPServerReconciler) writeMCPServerRecord(
 		record.CreateAttemptTime = previous.CreateAttemptTime
 	}
 	return nil, writeCleanupRecord(ctx, r.Client, r.OperatorNamespace, existing, record)
+}
+
+// backfillMCPServerRecord writes the missing record of a config that exists
+// in Coder from before records existed. It runs before every other check, so
+// an object that a check stalls or disables gets its record too. It never
+// stops the reconcile: a failure is logged and retried.
+func (r *CoderMCPServerReconciler) backfillMCPServerRecord(ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer) {
+	if server.Status.ConfigID == "" {
+		return // The create path writes the record.
+	}
+	if step, err := r.ensureMCPServerRecord(ctx, sdk, server); err != nil || step != nil {
+		log.FromContext(ctx).Info("Cannot write the cleanup record of an MCP server config that exists in Coder", "error", err, "step", step)
+	}
 }
 
 // ensureMCPServerRecord makes sure that a server which can exist in Coder has
