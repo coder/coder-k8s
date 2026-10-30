@@ -164,11 +164,13 @@ func sentTokens(client *fakeBootstrapClient, lookups []urlToken) []urlToken {
 }
 
 // TestCoderProvisionerKey_ControlPlaneRecreated checks a control plane that is
-// deleted and created again under the same name with another URL and another
-// operator token. The new token must never reach the URL of the old control
-// plane: the record of the old key stays, and the provisioner reports it. A
-// record from an operator that did not record control plane UIDs may use the
-// token of its control plane only at that control plane's current URL.
+// deleted and created again under the same name with another operator token,
+// at another URL or at the same URL with another Coder backend. The new token
+// must never reach the URL of the old control plane, and must never be used
+// for the key of the old one: the record of the old key stays, and the
+// provisioner reports it. The provisioner must create a new key. A record
+// from an operator that did not record control plane UIDs may use the token
+// of its control plane only at that control plane's current URL.
 func TestCoderProvisionerKey_ControlPlaneRecreated(t *testing.T) {
 	t.Parallel()
 
@@ -183,11 +185,19 @@ func TestCoderProvisionerKey_ControlPlaneRecreated(t *testing.T) {
 		// before UID records wrote it.
 		legacy bool
 		// keep keeps the control plane and moves P to another one instead.
-		keep    bool
-		deleteP bool
+		keep bool
+		// sameURL creates the control plane again at its old URL.
+		sameURL bool
+		// sameBackend: the new control plane serves the Coder backend of the
+		// old one, which still holds the old key.
+		sameBackend bool
+		deleteP     bool
 	}{
 		{name: "rotation after the recreate"},
 		{name: "deletion after the recreate", deleteP: true},
+		{name: "rotation after the recreate at the same URL", sameURL: true},
+		{name: "deletion after the recreate at the same URL", sameURL: true, deleteP: true},
+		{name: "rotation after the recreate at the same URL and backend", sameURL: true, sameBackend: true},
 		{name: "status without control plane UID, rotation after the recreate", legacy: true},
 		{name: "status without control plane UID, deletion after the recreate", legacy: true, deleteP: true},
 		{name: "status without control plane UID, control plane kept", legacy: true, keep: true},
@@ -203,9 +213,13 @@ func TestCoderProvisionerKey_ControlPlaneRecreated(t *testing.T) {
 			keyNew := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "provisioner", Key: "material-new"}
 			f.bootstrapClient.provisionerKeyResponses = []coderbootstrap.EnsureProvisionerKeyResponse{keyOld, keyNew}
 			var lookups []urlToken
+			var recreated bool
 			f.bootstrapClient.provisionerKeyByName = func(req coderbootstrap.ProvisionerKeyByNameRequest) *codersdk.ProvisionerKey {
 				lookups = append(lookups, urlToken{req.CoderURL, req.SessionToken})
-				return nil
+				if !tt.sameBackend || !recreated || req.CoderURL != oldURL || len(f.bootstrapClient.deleteKeyByIDRequests) > 0 {
+					return nil
+				}
+				return &codersdk.ProvisionerKey{ID: keyOld.KeyID, OrganizationID: keyOld.OrganizationID, Name: keyOld.KeyName}
 			}
 
 			p := f.createProvisioner(ctx, t, nil, nil)
@@ -218,6 +232,10 @@ func TestCoderProvisionerKey_ControlPlaneRecreated(t *testing.T) {
 					ctrlclient.RawPatch(types.MergePatchType, []byte(`{"status":{"controlPlaneUID":null}}`))))
 			}
 
+			currentURL := newURL
+			if tt.sameURL {
+				currentURL = oldURL
+			}
 			if tt.keep {
 				createControlPlaneWithToken(ctx, t, f.namespace, "coder-b", newURL, newToken)
 				latest := f.get(ctx, t, p)
@@ -226,11 +244,20 @@ func TestCoderProvisionerKey_ControlPlaneRecreated(t *testing.T) {
 			} else {
 				require.NoError(t, k8sClient.Delete(ctx, &coderv1alpha1.CoderControlPlane{ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: f.namespace}}))
 				require.NoError(t, k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "coder-operator-token", Namespace: f.namespace}}))
-				createControlPlaneWithToken(ctx, t, f.namespace, "coder", newURL, newToken)
+				createControlPlaneWithToken(ctx, t, f.namespace, "coder", currentURL, newToken)
 			}
+			recreated = true
 
 			requireNoLeak := func() {
 				t.Helper()
+				// A record without a UID is bound at the current URL, so
+				// only a recorded UID keeps the new token from the old key.
+				for _, d := range keyDeletes(f.bootstrapClient) {
+					require.False(t, !tt.legacy && !tt.sameBackend && d.keyID == keyOld.KeyID.String() && d.token == newToken, "the new control plane's token must not be used for the old key, sent %+v", keyDeletes(f.bootstrapClient))
+				}
+				if tt.sameURL {
+					return
+				}
 				sent := sentTokens(f.bootstrapClient, lookups)
 				for _, s := range sent {
 					require.False(t, s.coderURL == oldURL && s.token == newToken, "the new control plane's token must not reach %s, sent %+v", oldURL, sent)
@@ -246,16 +273,22 @@ func TestCoderProvisionerKey_ControlPlaneRecreated(t *testing.T) {
 				require.NoError(t, err)
 				requireNoLeak()
 				latest := f.get(ctx, t, p)
-				require.Equal(t, keyNew.KeyID.String(), latest.Status.ProvisionerKeyID)
-				require.Equal(t, newURL, latest.Status.ControlPlaneURL)
+				require.Equal(t, keyNew.KeyID.String(), latest.Status.ProvisionerKeyID, "P must create a new key")
+				require.Equal(t, currentURL, latest.Status.ControlPlaneURL)
 				kept := slices.ContainsFunc(latest.Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
 					return record.KeyID == keyOld.KeyID.String() && record.CoderURL == oldURL
 				})
 				report := meta.FindStatusCondition(latest.Status.Conditions, coderv1alpha1.CoderProvisionerConditionControlPlaneChangedKeyKept)
-				if tt.keep {
+				switch {
+				case tt.sameBackend:
+					require.Contains(t, keyDeletes(f.bootstrapClient), keyDelete{coderURL: oldURL, token: newToken, keyID: keyOld.KeyID.String()},
+						"the rotation must delete the old key that the current backend holds")
+					require.False(t, kept, "a key that the current backend deleted must not stay recorded")
+					require.Nil(t, report)
+				case tt.keep:
 					require.False(t, kept, "the old key must be deleted at its URL")
 					require.Nil(t, report)
-				} else {
+				default:
 					require.True(t, kept, "the record of the old key must stay")
 					require.Positive(t, result.RequeueAfter, "P must check the kept record again")
 					require.NotNil(t, report, "P must report the record that it keeps")

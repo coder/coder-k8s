@@ -262,7 +262,10 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	tagsDrift := status.TagsHash != "" && status.TagsHash != desiredTagsHash
 	controlPlaneRefDrift := status.ControlPlaneRefName != "" && status.ControlPlaneRefName != desiredControlPlaneRefName
 	controlPlaneURLDrift := status.ControlPlaneURL != "" && status.ControlPlaneURL != controlPlane.Status.URL
-	driftDetected := orgDrift || keyNameDrift || tagsDrift || controlPlaneRefDrift || controlPlaneURLDrift
+	// A control plane deleted and created again under the same name can run
+	// another Coder backend at the same URL, where the applied key is unknown.
+	controlPlaneUIDDrift := status.ControlPlaneUID != "" && status.ControlPlaneUID != string(controlPlane.UID)
+	driftDetected := orgDrift || keyNameDrift || tagsDrift || controlPlaneRefDrift || controlPlaneURLDrift || controlPlaneUIDDrift
 	appliedOrgName := provisioner.Status.OrganizationName
 	appliedTagsHash := provisioner.Status.TagsHash
 	appliedControlPlaneRefName := provisioner.Status.ControlPlaneRefName
@@ -368,7 +371,8 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	var kept []coderv1alpha1.CoderProvisionerKeyRecord
 	var unverified, controlPlaneChanged []string
 	for _, record := range pending {
-		if sameKeySlot(record, target) {
+		// The replacement below deletes the key that the target holds.
+		if sameKeySlot(record, target) || (existingKey != nil && isKeyID(record.KeyID, existingKey.ID)) {
 			kept = append(kept, record)
 			continue
 		}
@@ -411,7 +415,8 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if driftDetected {
 			ctrl.LoggerFrom(ctx).Info("spec drift detected, rotating provisioner key",
 				"orgDrift", orgDrift, "keyNameDrift", keyNameDrift, "tagsDrift", tagsDrift,
-				"controlPlaneRefDrift", controlPlaneRefDrift, "controlPlaneURLDrift", controlPlaneURLDrift)
+				"controlPlaneRefDrift", controlPlaneRefDrift, "controlPlaneURLDrift", controlPlaneURLDrift,
+				"controlPlaneUIDDrift", controlPlaneUIDDrift)
 		}
 		// Coder returns the plaintext of a key only in the create response,
 		// so a key recorded in status is replaced: deleted by its ID, then
@@ -531,10 +536,11 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 	// The Secret holds the key at the target, so the applied fields take over
 	// its record. Coder allows one key per name, so the create also proved
-	// that the keys of the other target records are gone. No other key is in
-	// the Secret now.
+	// that the keys of the other target records are gone, and so did the
+	// delete of the key that the create replaced, wherever it was recorded.
+	// No other key is in the Secret now.
 	provisioner.Status.PendingKeys = slices.DeleteFunc(provisioner.Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
-		return sameKeySlot(record, target)
+		return sameKeySlot(record, target) || (existingKey != nil && isKeyID(record.KeyID, existingKey.ID))
 	})
 	for i := range provisioner.Status.PendingKeys {
 		provisioner.Status.PendingKeys[i].Unpublished = false
@@ -689,16 +695,15 @@ func recordAppliedKeyStatus(
 // recordsKeyID reports whether status records keyID as a key of this
 // provisioner: the applied key or a pending entry.
 func recordsKeyID(status coderv1alpha1.CoderProvisionerStatus, keyID uuid.UUID) bool {
-	if keyID == uuid.Nil {
-		return false
-	}
-	recorded := func(rawKeyID string) bool {
-		parsed, err := uuid.Parse(rawKeyID)
-		return err == nil && parsed == keyID
-	}
-	return recorded(status.ProvisionerKeyID) || slices.ContainsFunc(status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
-		return recorded(record.KeyID)
+	return isKeyID(status.ProvisionerKeyID, keyID) || slices.ContainsFunc(status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
+		return isKeyID(record.KeyID, keyID)
 	})
+}
+
+// isKeyID reports whether rawKeyID is the key ID keyID.
+func isKeyID(rawKeyID string, keyID uuid.UUID) bool {
+	parsed, err := uuid.Parse(rawKeyID)
+	return err == nil && keyID != uuid.Nil && parsed == keyID
 }
 
 // refuseKeyNameInUse reports that Coder holds a key with the target name that
@@ -770,10 +775,15 @@ func parseKeyIDs(rawOrganizationID, rawKeyID string) (organizationID, keyID uuid
 }
 
 // sameKeySlot reports whether two records name the same key name in the same
-// organization at the same Coder URL. Coder allows one key per name in an
-// organization, so both records refer to the same key.
+// organization at the same Coder URL of the same control plane. Coder allows
+// one key per name in an organization, so both records refer to the same key.
+// A control plane created again under the same name can serve another Coder
+// backend at the same URL, so records with different control plane UIDs name
+// different slots. A record without a UID is from an operator that did not
+// record it, and matches any UID.
 func sameKeySlot(a, b coderv1alpha1.CoderProvisionerKeyRecord) bool {
-	return a.CoderURL == b.CoderURL && a.OrganizationName == b.OrganizationName && a.KeyName == b.KeyName
+	sameControlPlane := a.ControlPlaneUID == "" || b.ControlPlaneUID == "" || a.ControlPlaneUID == b.ControlPlaneUID
+	return sameControlPlane && a.CoderURL == b.CoderURL && a.OrganizationName == b.OrganizationName && a.KeyName == b.KeyName
 }
 
 // appliedKeyRecord returns a record of the key that the applied status fields
@@ -869,16 +879,18 @@ const (
 )
 
 // tokenBoundTo reports whether the operator may send the operator token of
-// controlPlane for record. It may always send it to the current Coder API URL
-// of controlPlane. It sends it to another URL that record names only while
-// controlPlane has the UID that record names: a control plane deleted and
-// created again under the same name must not send its token to the URL of
-// the old one.
+// controlPlane for record: only while controlPlane has the UID that record
+// names. A control plane deleted and created again under the same name must
+// not get its token sent to the URL of the old one, and its answer does not
+// show whether the key of the old one is gone, also at the same URL. A record
+// without a UID, from an operator that did not record it, is bound only at
+// the current Coder API URL of controlPlane.
 func tokenBoundTo(record coderv1alpha1.CoderProvisionerKeyRecord, controlPlane *coderv1alpha1.CoderControlPlane) bool {
-	if current, err := coderAPIURL(controlPlane); err == nil && current == record.CoderURL {
-		return true
+	if record.ControlPlaneUID != "" {
+		return record.ControlPlaneUID == string(controlPlane.UID)
 	}
-	return record.ControlPlaneUID != "" && record.ControlPlaneUID == string(controlPlane.UID)
+	current, err := coderAPIURL(controlPlane)
+	return err == nil && current == record.CoderURL
 }
 
 // revokeKey deletes the key that record names, at record.CoderURL with the
