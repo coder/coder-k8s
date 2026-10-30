@@ -207,8 +207,9 @@ type CoderControlPlaneStatus struct {
 	// token in OperatorTokenSecretRef. A key=value connection string has the
 	// hash of the postgres:// URL with the same parts. The operator deletes
 	// that token only while the control plane uses a URL with the same hash.
-	// It is empty when that URL is neither a postgres:// or postgresql:// URL
-	// nor a key=value connection string.
+	// It is empty when the operator cannot hash that URL, for example when it
+	// is neither a postgres:// or postgresql:// URL nor a key=value
+	// connection string.
 	// +optional
 	OperatorTokenDatabaseHash string `json:"operatorTokenDatabaseHash,omitempty"`
 	// OperatorAccessReady reports whether operator API access bootstrap succeeded.
