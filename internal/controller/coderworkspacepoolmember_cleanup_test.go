@@ -117,12 +117,52 @@ func TestPoolMemberCleanupLastUseCheck(t *testing.T) {
 	require.Nil(t, e.reconcileMember(t, key, 1))
 	require.Zero(t, e.coderWrites(), "a used workspace is never deleted")
 
-	// A template-wide write is not use: the workspace is deleted.
+	// A template-wide write counts as use too (#349): the workspace stays.
 	key, _ = e.readyMember(t)
 	e.clock.SetTime(e.clock.Now().Add(2 * time.Minute))
 	e.fake.touchTemplateWorkspaces(e.tplID, e.clock.Now())
 	e.deleteMember(t, key)
-	requireMember(t, e.reconcileMember(t, key, 1), coderv1alpha1.CoderWorkspacePoolMemberPhaseDeleting, "Deleting", "started a delete build")
+	require.Nil(t, e.reconcileMember(t, key, 1))
+	require.Zero(t, e.coderWrites(), "a used workspace is never deleted")
+}
+
+// TestPoolMemberCleanupUseNearTemplateEdit (#349): every template edit, for
+// example a version promote, moves the template's updated_at. Use half a
+// second after an edit is still use, so cleanup sends no delete build.
+func TestPoolMemberCleanupUseNearTemplateEdit(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	key, workspaceID := e.readyMember(t)
+	edited := e.clock.Now().Add(10 * time.Minute)
+	e.fake.editTemplate(e.tplID, edited)
+	e.fake.markUsed(workspaceID, edited.Add(500*time.Millisecond))
+	e.clock.SetTime(edited.Add(2 * time.Second))
+	e.deleteMember(t, key)
+	require.Nil(t, e.reconcileMember(t, key, 1), "the member goes without deleting its workspace")
+	require.Zero(t, e.fake.requestCount(routeCreateBuild), "no delete build")
+}
+
+// TestPoolMemberCleanupUseSharedWithReadySibling (#349): Coder's usage
+// tracker writes one value to every workspace used since its last flush. A
+// sibling that becomes ready after the flush takes that value as its
+// baseline. That is no sign of a template-wide write, so cleanup sends no
+// delete build.
+func TestPoolMemberCleanupUseSharedWithReadySibling(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	key, workspaceID := e.readyMember(t)
+	siblingKey, siblingID, siblingBuild := e.createdMember(t, nil)
+	flush := e.clock.Now().Add(10*time.Minute + 300*time.Millisecond)
+	e.fake.markUsed(workspaceID, flush)
+	e.fake.markUsed(siblingID, flush)
+	e.fake.setBuildJob(siblingBuild, codersdk.ProvisionerJobSucceeded)
+	e.fake.setAgents(siblingBuild, agent("main", codersdk.WorkspaceAgentConnected, codersdk.WorkspaceAgentLifecycleReady))
+	e.clock.SetTime(flush.Add(10 * time.Second))
+	sibling := e.reconcileMember(t, siblingKey, 1)
+	require.True(t, sibling.Status.ReadyLastUsedAt.Time.Equal(flush.Truncate(time.Second)), "the sibling's baseline is the flush")
+	e.deleteMember(t, key)
+	require.Nil(t, e.reconcileMember(t, key, 1), "the member goes without deleting its workspace")
+	require.Zero(t, e.fake.requestCount(routeCreateBuild), "no delete build")
 }
 
 // TestPoolMemberCleanupWithoutWorkspaceID: a member deleted while its create

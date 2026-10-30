@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 )
@@ -51,29 +52,52 @@ func TestPoolMemberWatchesUse(t *testing.T) {
 	require.Zero(t, e.fake.requestCount(routeExtendWorkspace))
 }
 
-// TestPoolMemberTemplateWideWrite is mutation check 10: a template schedule
-// update sets one last_used_at on every workspace of the template. That is
-// not use, even after the template changed again.
+// TestPoolMemberTemplateWideWrite (#349): a template schedule update with
+// update_workspace_last_used_at writes one last_used_at to every workspace of
+// the template. Coder shows nothing that tells it apart from a usage flush
+// that reached every workspace of the template, so it counts as use: every
+// unclaimed member becomes Used.
 func TestPoolMemberTemplateWideWrite(t *testing.T) {
 	t.Parallel()
 	e := newPoolMemberEnv(t)
 	started := e.clock.Now()
 	first, _ := e.readyMember(t)
-	second, secondWorkspace := e.readyMember(t)
+	second, _ := e.readyMember(t)
 	e.clock.SetTime(started.Add(10 * time.Minute))
 	e.fake.touchTemplateWorkspaces(e.tplID, e.clock.Now())
-	member := e.reconcileMember(t, first, 1)
-	requireUsed(t, member, false)
-	require.True(t, member.Status.ReadyLastUsedAt.Time.Equal(e.clock.Now()), "the baseline moves to the template-wide value")
+	for _, key := range []types.NamespacedName{first, second} {
+		member := e.reconcileMember(t, key, 1)
+		requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "Used", "without a claim")
+		requireUsed(t, member, true)
+	}
+}
 
-	// The template changes again: the other member's baseline shows the write.
-	e.fake.editTemplate(e.tplID, started.Add(time.Hour))
-	requireUsed(t, e.reconcileMember(t, second, 1), false)
-
-	// Real use is still use.
-	e.fake.markUsed(secondWorkspace, started.Add(12*time.Minute))
-	requireUsed(t, e.reconcileMember(t, second, 1), true)
-	requireUsed(t, e.reconcileMember(t, first, 1), false)
+// TestPoolMemberUseWithNewReadySiblings (#349): after each usage flush, a new
+// sibling becomes ready with that flush's value as its baseline. The member
+// is Used from the first flush on, and its workspace is never deleted.
+func TestPoolMemberUseWithNewReadySiblings(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	started := e.clock.Now()
+	key, workspaceID := e.readyMember(t)
+	used := []uuid.UUID{workspaceID}
+	for tick := range 3 {
+		siblingKey, siblingID, siblingBuild := e.createdMember(t, nil)
+		used = append(used, siblingID)
+		flush := started.Add(time.Duration(10+tick)*time.Minute + 300*time.Millisecond)
+		for _, id := range used {
+			e.fake.markUsed(id, flush)
+		}
+		e.fake.setBuildJob(siblingBuild, codersdk.ProvisionerJobSucceeded)
+		e.fake.setAgents(siblingBuild, agent("main", codersdk.WorkspaceAgentConnected, codersdk.WorkspaceAgentLifecycleReady))
+		e.clock.SetTime(flush.Add(10 * time.Second))
+		sibling := e.reconcileMember(t, siblingKey, 1)
+		require.True(t, sibling.Status.ReadyLastUsedAt.Time.Equal(flush.Truncate(time.Second)), "the sibling's baseline is the flush")
+		requireUsed(t, e.reconcileMember(t, key, 1), true)
+	}
+	e.deleteMember(t, key)
+	require.Nil(t, e.reconcileMember(t, key, 1), "the member goes without deleting its workspace")
+	require.Zero(t, e.fake.requestCount(routeCreateBuild), "no delete build")
 }
 
 // TestPoolMemberTemplateWideWriteNeedsWholeList (#349): no workspace below
