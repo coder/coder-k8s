@@ -308,6 +308,11 @@ type CoderMCPServerStatus struct {
 	// ConfigID is the Coder MCP server config ID.
 	// +optional
 	ConfigID string `json:"configID,omitempty"`
+	// Enabled is the enabled flag of the Coder MCP server config at the
+	// controller's last read or update of it. It is empty while Coder holds no
+	// config of this object, or before the first read.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
 	// CreateAttemptTime is set before every create request. While it is set
 	// and ConfigID is empty, a create request can be in flight or already
 	// committed in Coder.
@@ -332,7 +337,7 @@ type CoderMCPServerStatus struct {
 // +kubebuilder:printcolumn:name="Organization",type=string,JSONPath=`.spec.organization`
 // +kubebuilder:printcolumn:name="Slug",type=string,JSONPath=`.spec.slug`
 // +kubebuilder:printcolumn:name="Auth",type=string,JSONPath=`.spec.auth.type`
-// +kubebuilder:printcolumn:name="Enabled",type=boolean,JSONPath=`.spec.enabled`
+// +kubebuilder:printcolumn:name="Enabled",type=boolean,JSONPath=`.status.enabled`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 

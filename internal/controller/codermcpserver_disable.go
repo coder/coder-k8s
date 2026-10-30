@@ -87,7 +87,7 @@ func readMCPServerToDisable(
 		// The kill switch holds a gone config too: a pending generation must
 		// not create an enabled config again once consent or the opt-in comes
 		// back, before a spec edit.
-		server.Status.AppliedGeneration = server.Generation
+		server.Status.AppliedGeneration, server.Status.Enabled = server.Generation, nil
 		return found, stalled("MCP server config %s does not exist in Coder.", id)
 	case err != nil:
 		return found, unchecked("get MCP server config: %s", coderErrorSummary(err))
@@ -96,6 +96,7 @@ func readMCPServerToDisable(
 		return found, mcpServerStalled(mcpServerResync, "CoderAnswerMismatch",
 			"assertion failed: Coder answered MCP server config %s with slug %s in organization %s when asked for %s", found.ID, found.Slug, found.OrganizationID, id)
 	}
+	server.Status.Enabled = &found.Enabled
 	if !found.Enabled {
 		// The disable answer can be lost after Coder committed it. Whoever
 		// disabled the config, the kill switch now holds this generation too,
@@ -156,6 +157,7 @@ func (r *CoderMCPServerReconciler) sendMCPServerDisable(
 		return mcpServerWait(mcpServerRetry, "CoderAnswerMismatch",
 			"Coder answered the disable of MCP server config %s with another or an enabled config. The controller disables it again.", id), nil
 	}
+	server.Status.Enabled = &updated.Enabled
 	return nil, nil
 }
 

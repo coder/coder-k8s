@@ -295,6 +295,8 @@ type integrationMockCoderServer struct {
 	holdLogs atomic.Pointer[chan struct{}]
 	// heldLogs counts build-log requests currently blocked by holdLogs.
 	heldLogs atomic.Int32
+	// override, when set, answers every request for which it returns true.
+	override atomic.Pointer[func(http.ResponseWriter, *http.Request) bool]
 }
 
 // integrationMockBuildLog is the latest build's log served by the integration mock.
@@ -407,6 +409,10 @@ func newIntegrationMockCoderServer(expectedSessionToken string) *integrationMock
 
 		if token := r.Header.Get(codersdk.SessionTokenHeader); token != expectedSessionToken {
 			writeCoderError(w, http.StatusUnauthorized, fmt.Sprintf("unexpected session token %q", token))
+			return
+		}
+
+		if override := mock.override.Load(); override != nil && (*override)(w, r) {
 			return
 		}
 

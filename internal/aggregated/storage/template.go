@@ -170,7 +170,10 @@ func (s *TemplateStorage) Get(ctx context.Context, name string, _ *metav1.GetOpt
 		return nil, err
 	}
 
-	obj := convert.TemplateToK8s(namespace, template)
+	obj, err := convert.TemplateToK8s(namespace, template)
+	if err != nil {
+		return nil, apierrors.NewInternalError(err)
+	}
 
 	files, err := fetchTemplateSourceFiles(ctx, sdk, template.ActiveVersionID)
 	if err != nil {
@@ -242,7 +245,11 @@ func (s *TemplateStorage) List(ctx context.Context, opts *metainternalversion.Li
 				}
 
 				for _, template := range templates {
-					if item := convert.TemplateToK8s(eligibleNamespace, template); keep(item) {
+					item, err := convert.TemplateToK8s(eligibleNamespace, template)
+					if err != nil {
+						return nil, apierrors.NewInternalError(err)
+					}
+					if keep(item) {
 						list.Items = append(list.Items, *item)
 					}
 				}
@@ -292,7 +299,11 @@ func (s *TemplateStorage) List(ctx context.Context, opts *metainternalversion.Li
 	}
 
 	for _, template := range templates {
-		if item := convert.TemplateToK8s(responseNamespace, template); keep(item) {
+		item, err := convert.TemplateToK8s(responseNamespace, template)
+		if err != nil {
+			return nil, apierrors.NewInternalError(err)
+		}
+		if keep(item) {
 			list.Items = append(list.Items, *item)
 		}
 	}
@@ -456,7 +467,11 @@ func (s *TemplateStorage) Create(
 			Provisioner:   codersdk.ProvisionerTypeTerraform,
 		})
 		if err != nil {
-			return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
+			return nil, coder.MapCoderWriteError(err, coder.WriteCreate, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
+		}
+		if templateVersion.ID == uuid.Nil {
+			return nil, coder.UncertainWriteError(coder.WriteCreate, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name,
+				"an answer from the Coder API without the ID of the template version")
 		}
 
 		// Create the template only after its first version imports: until then Coder rejects workspace builds
@@ -473,12 +488,12 @@ func (s *TemplateStorage) Create(
 			Icon:        templateObj.Spec.Icon,
 		})
 		if err != nil {
-			return nil, coder.MapCoderCreateError(err, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
+			return nil, coder.MapCoderWriteError(err, coder.WriteCreate, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
 		}
 
-		result := convert.TemplateToK8s(namespace, createdTemplate)
-		if result == nil {
-			return nil, fmt.Errorf("assertion failed: converted template must not be nil")
+		result, err := convert.TemplateToK8s(namespace, createdTemplate)
+		if err != nil {
+			return nil, uncertainCreateAnswer(aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
 		}
 
 		s.enqueueWatchEvent(watch.Added, result.DeepCopy())
@@ -493,12 +508,12 @@ func (s *TemplateStorage) Create(
 
 	createdTemplate, err := sdk.CreateTemplate(ctx, org.ID, request)
 	if err != nil {
-		return nil, coder.MapCoderCreateError(err, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
+		return nil, coder.MapCoderWriteError(err, coder.WriteCreate, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
 	}
 
-	result := convert.TemplateToK8s(namespace, createdTemplate)
-	if result == nil {
-		return nil, fmt.Errorf("assertion failed: converted template must not be nil")
+	result, err := convert.TemplateToK8s(namespace, createdTemplate)
+	if err != nil {
+		return nil, uncertainCreateAnswer(aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
 	}
 
 	s.enqueueWatchEvent(watch.Added, result.DeepCopy())
@@ -694,6 +709,8 @@ func (s *TemplateStorage) Update(
 		updatedTemplate.Spec.Description != currentTemplate.Spec.Description ||
 		updatedTemplate.Spec.Icon != currentTemplate.Spec.Icon
 
+	// changed records a Coder change that this update applied.
+	changed := false
 	if updatedTemplate.Spec.Files != nil {
 		if normalizedDesiredFiles == nil {
 			return nil, false, fmt.Errorf("assertion failed: normalized desired template files must not be nil when spec.files is provided")
@@ -744,10 +761,11 @@ func (s *TemplateStorage) Update(
 				Provisioner:   codersdk.ProvisionerTypeTerraform,
 			})
 			if err != nil {
-				return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
+				return nil, false, coder.MapCoderWriteError(err, coder.WriteUpdate, aggregationv1alpha1.Resource("codertemplates"), name)
 			}
 			if newVersion.ID == uuid.Nil {
-				return nil, false, fmt.Errorf("assertion failed: new template version ID must not be nil")
+				return nil, false, coder.UncertainWriteError(coder.WriteUpdate, aggregationv1alpha1.Resource("codertemplates"), name,
+					"an answer from the Coder API without the ID of the template version")
 			}
 
 			if waitErr := waitForTemplateVersionBuild(ctx, sdk, newVersion.ID); waitErr != nil {
@@ -760,24 +778,23 @@ func (s *TemplateStorage) Update(
 				return nil, false, err
 			}
 
-			if err := sdk.UpdateActiveTemplateVersion(ctx, templateID, codersdk.UpdateActiveTemplateVersion{ID: newVersion.ID}); err != nil {
-				return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
+			if err := patchActiveTemplateVersion(ctx, sdk, templateID, newVersion.ID); err != nil {
+				return nil, false, coder.MapCoderWriteError(err, coder.WriteUpdate, aggregationv1alpha1.Resource("codertemplates"), name)
 			}
 
-			// Post-condition: verify promotion succeeded. The vendored SDK silently
-			// swallows transport errors in UpdateActiveTemplateVersion, so we must
-			// confirm the active version actually changed.
+			// Post-condition: verify that the active version changed. Coder accepted the activation,
+			// so a re-read that fails or shows another version leaves the result open.
 			verifyTemplate, err := sdk.Template(ctx, templateID)
 			if err != nil {
-				return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
+				return nil, false, coder.UncertainWriteError(coder.WriteUpdate, aggregationv1alpha1.Resource("codertemplates"), name,
+					"no re-read of the template from the Coder API after the activation")
 			}
 			if verifyTemplate.ActiveVersionID != newVersion.ID {
-				return nil, false, fmt.Errorf(
-					"assertion failed: active version promotion did not take effect: expected %q, got %q",
-					newVersion.ID.String(),
-					verifyTemplate.ActiveVersionID.String(),
-				)
+				return nil, false, coder.UncertainWriteError(coder.WriteUpdate, aggregationv1alpha1.Resource("codertemplates"), name,
+					fmt.Sprintf("a re-read from the Coder API with active version %s instead of %s after the activation",
+						verifyTemplate.ActiveVersionID, newVersion.ID))
 			}
+			changed = true
 		}
 	}
 
@@ -785,14 +802,23 @@ func (s *TemplateStorage) Update(
 	// the template unchanged (#117). The Coder calls are not atomic: if this call fails after a promotion,
 	// the new source stays active with the old metadata.
 	if metadataChanged {
-		_, err := sdk.UpdateTemplateMeta(ctx, templateID, convert.TemplateUpdateMetaRequestFromK8s(updatedTemplate))
+		updatedMeta, err := sdk.UpdateTemplateMeta(ctx, templateID, convert.TemplateUpdateMetaRequestFromK8s(updatedTemplate))
 		if err != nil {
-			return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
+			return nil, false, coder.MapCoderWriteError(err, coder.WriteUpdate, aggregationv1alpha1.Resource("codertemplates"), name)
 		}
+		if updatedMeta.ID != templateID {
+			return nil, false, coder.UncertainWriteError(coder.WriteUpdate, aggregationv1alpha1.Resource("codertemplates"), name,
+				"an answer from the Coder API without the updated template")
+		}
+		changed = true
 	}
 
 	refreshedObj, err := s.Get(ctx, name, nil)
 	if err != nil {
+		if changed {
+			return nil, false, coder.UncertainWriteError(coder.WriteUpdate, aggregationv1alpha1.Resource("codertemplates"), name,
+				"no re-read of the template from the Coder API after the update")
+		}
 		return nil, false, err
 	}
 
@@ -909,9 +935,9 @@ func (s *TemplateStorage) Delete(
 		return nil, false, err
 	}
 
-	templateObj := convert.TemplateToK8s(namespace, template)
-	if templateObj == nil {
-		return nil, false, fmt.Errorf("assertion failed: converted template must not be nil")
+	templateObj, err := convert.TemplateToK8s(namespace, template)
+	if err != nil {
+		return nil, false, apierrors.NewInternalError(err)
 	}
 
 	// Preconditions and admission see the fetched snapshot; the mutation below targets that same template ID.
@@ -925,7 +951,7 @@ func (s *TemplateStorage) Delete(
 	}
 
 	if err := sdk.DeleteTemplate(ctx, template.ID); err != nil {
-		return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
+		return nil, false, coder.MapCoderWriteError(err, coder.WriteDelete, aggregationv1alpha1.Resource("codertemplates"), name)
 	}
 
 	// Emit a Deleted event with the last-known template state.

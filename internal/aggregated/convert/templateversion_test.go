@@ -39,7 +39,7 @@ func TestTemplateVersionToK8s(t *testing.T) {
 	t.Parallel()
 
 	tpl, v := templateVersionFixture()
-	obj := TemplateVersionToK8s("coder", tpl, v)
+	obj := mustTemplateVersionToK8s(t, "coder", tpl, v)
 
 	if obj.Name != "acme.docker.v1.2.3" || obj.Namespace != "coder" || string(obj.UID) != v.ID.String() {
 		t.Fatalf("unexpected identity: name=%q namespace=%q uid=%q", obj.Name, obj.Namespace, obj.UID)
@@ -77,14 +77,14 @@ func TestTemplateVersionToK8sFingerprint(t *testing.T) {
 	t.Parallel()
 
 	tpl, v := templateVersionFixture()
-	base := TemplateVersionToK8s("coder", tpl, v).ResourceVersion
-	if again := TemplateVersionToK8s("coder", tpl, v).ResourceVersion; again != base {
+	base := mustTemplateVersionToK8s(t, "coder", tpl, v).ResourceVersion
+	if again := mustTemplateVersionToK8s(t, "coder", tpl, v).ResourceVersion; again != base {
 		t.Fatalf("fingerprint is not stable: %q != %q", again, base)
 	}
 
 	activeTemplate := tpl
 	activeTemplate.ActiveVersionID = v.ID
-	active := TemplateVersionToK8s("coder", activeTemplate, v)
+	active := mustTemplateVersionToK8s(t, "coder", activeTemplate, v)
 	if !active.Status.Active {
 		t.Fatal("expected the active version to report active=true")
 	}
@@ -99,9 +99,9 @@ func TestTemplateVersionToK8sFingerprint(t *testing.T) {
 	seen := map[string]string{base: "base"}
 	for label, rv := range map[string]string{
 		"active":    active.ResourceVersion,
-		"archived":  TemplateVersionToK8s("coder", tpl, archived).ResourceVersion,
-		"succeeded": TemplateVersionToK8s("coder", tpl, succeeded).ResourceVersion,
-		"renamed":   TemplateVersionToK8s("coder", tpl, renamed).ResourceVersion,
+		"archived":  mustTemplateVersionToK8s(t, "coder", tpl, archived).ResourceVersion,
+		"succeeded": mustTemplateVersionToK8s(t, "coder", tpl, succeeded).ResourceVersion,
+		"renamed":   mustTemplateVersionToK8s(t, "coder", tpl, renamed).ResourceVersion,
 	} {
 		if previous, ok := seen[rv]; ok {
 			t.Fatalf("fingerprint for %s equals the one for %s", label, previous)
@@ -122,5 +122,5 @@ func TestTemplateVersionToK8sPanicsOnForeignVersion(t *testing.T) {
 			t.Fatalf("expected an assertion panic, got %v", recovered)
 		}
 	}()
-	TemplateVersionToK8s("coder", tpl, v)
+	_, _ = TemplateVersionToK8s("coder", tpl, v)
 }

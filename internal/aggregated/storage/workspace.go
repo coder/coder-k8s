@@ -123,7 +123,11 @@ func (s *WorkspaceStorage) Get(ctx context.Context, name string, _ *metav1.GetOp
 		return nil, err
 	}
 
-	return convert.WorkspaceToK8s(namespace, workspace), nil
+	obj, err := convert.WorkspaceToK8s(namespace, workspace)
+	if err != nil {
+		return nil, apierrors.NewInternalError(err)
+	}
+	return obj, nil
 }
 
 // resolveWorkspace parses name, looks the workspace up in the Coder
@@ -207,7 +211,11 @@ func (s *WorkspaceStorage) List(ctx context.Context, _ *metainternalversion.List
 				}
 
 				for _, workspace := range workspacesResponse.Workspaces {
-					list.Items = append(list.Items, *convert.WorkspaceToK8s(eligibleNamespace, workspace))
+					item, err := convert.WorkspaceToK8s(eligibleNamespace, workspace)
+					if err != nil {
+						return nil, apierrors.NewInternalError(err)
+					}
+					list.Items = append(list.Items, *item)
 				}
 			}
 
@@ -255,7 +263,11 @@ func (s *WorkspaceStorage) List(ctx context.Context, _ *metainternalversion.List
 	}
 
 	for _, workspace := range workspacesResponse.Workspaces {
-		list.Items = append(list.Items, *convert.WorkspaceToK8s(responseNamespace, workspace))
+		item, err := convert.WorkspaceToK8s(responseNamespace, workspace)
+		if err != nil {
+			return nil, apierrors.NewInternalError(err)
+		}
+		list.Items = append(list.Items, *item)
 	}
 
 	return list, nil
@@ -458,7 +470,11 @@ func (s *WorkspaceStorage) Create(
 
 	createdWorkspace, err := sdk.CreateUserWorkspace(ctx, userName, request)
 	if err != nil {
-		return nil, coder.MapCoderCreateError(err, aggregationv1alpha1.Resource("coderworkspaces"), workspaceObj.Name)
+		return nil, coder.MapCoderWriteError(err, coder.WriteCreate, aggregationv1alpha1.Resource("coderworkspaces"), workspaceObj.Name)
+	}
+	// Check the answer before the stop build, which needs its workspace ID.
+	if _, err := convert.WorkspaceToK8s(namespace, createdWorkspace); err != nil {
+		return nil, uncertainCreateAnswer(aggregationv1alpha1.Resource("coderworkspaces"), workspaceObj.Name)
 	}
 
 	if !workspaceObj.Spec.Running {
@@ -473,9 +489,9 @@ func (s *WorkspaceStorage) Create(
 		// transition can be retried safely via a subsequent Update.
 	}
 
-	result := convert.WorkspaceToK8s(namespace, createdWorkspace)
-	if result == nil {
-		return nil, fmt.Errorf("assertion failed: converted workspace must not be nil")
+	result, err := convert.WorkspaceToK8s(namespace, createdWorkspace)
+	if err != nil {
+		return nil, fmt.Errorf("assertion failed: the checked workspace must convert: %w", err)
 	}
 
 	s.enqueueWatchEvent(watch.Added, result.DeepCopy())
@@ -593,7 +609,10 @@ func (s *WorkspaceStorage) Update(
 		return nil, false, err
 	}
 
-	currentK8sObj := convert.WorkspaceToK8s(namespace, currentWorkspace)
+	currentK8sObj, err := convert.WorkspaceToK8s(namespace, currentWorkspace)
+	if err != nil {
+		return nil, false, apierrors.NewInternalError(err)
+	}
 	desiredObjRuntime, err := objInfo.UpdatedObject(ctx, currentK8sObj.DeepCopy())
 	if err != nil {
 		return nil, false, err
@@ -671,14 +690,17 @@ func (s *WorkspaceStorage) Update(
 
 	build, err := sdk.CreateWorkspaceBuild(ctx, currentWorkspace.ID, req)
 	if err != nil {
-		return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), name)
+		return nil, false, coder.MapCoderWriteError(err, coder.WriteUpdate, aggregationv1alpha1.Resource("coderworkspaces"), name)
+	}
+	if build.ID == uuid.Nil {
+		return nil, false, uncertainBuildAnswer(coder.WriteUpdate, name)
 	}
 
 	currentWorkspace.LatestBuild = build
 
-	result := convert.WorkspaceToK8s(namespace, currentWorkspace)
-	if result == nil {
-		return nil, false, fmt.Errorf("assertion failed: converted workspace must not be nil")
+	result, err := convert.WorkspaceToK8s(namespace, currentWorkspace)
+	if err != nil {
+		return nil, false, fmt.Errorf("assertion failed: the converted workspace must convert again: %w", err)
 	}
 
 	s.enqueueWatchEvent(watch.Modified, result.DeepCopy())
@@ -734,9 +756,9 @@ func (s *WorkspaceStorage) Delete(
 		return nil, false, err
 	}
 
-	currentObj := convert.WorkspaceToK8s(namespace, workspace)
-	if currentObj == nil {
-		return nil, false, fmt.Errorf("assertion failed: converted workspace must not be nil")
+	currentObj, err := convert.WorkspaceToK8s(namespace, workspace)
+	if err != nil {
+		return nil, false, apierrors.NewInternalError(err)
 	}
 
 	// Preconditions and admission see the fetched snapshot; the delete build below targets that same workspace ID.
@@ -753,16 +775,19 @@ func (s *WorkspaceStorage) Delete(
 		Transition: codersdk.WorkspaceTransitionDelete,
 	})
 	if err != nil {
-		return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), name)
+		return nil, false, coder.MapCoderWriteError(err, coder.WriteDelete, aggregationv1alpha1.Resource("coderworkspaces"), name)
+	}
+	if deleteBuild.ID == uuid.Nil {
+		return nil, false, uncertainBuildAnswer(coder.WriteDelete, name)
 	}
 
 	// Update the workspace snapshot with the delete-transition build so
 	// the watch event reflects the latest build state, not the pre-delete snapshot.
 	workspace.LatestBuild = deleteBuild
 
-	workspaceObj := convert.WorkspaceToK8s(namespace, workspace)
-	if workspaceObj == nil {
-		return nil, false, fmt.Errorf("assertion failed: converted workspace must not be nil")
+	workspaceObj, err := convert.WorkspaceToK8s(namespace, workspace)
+	if err != nil {
+		return nil, false, fmt.Errorf("assertion failed: the converted workspace must convert again: %w", err)
 	}
 
 	// Workspace deletion is asynchronous in Coder. Emit a Modified event

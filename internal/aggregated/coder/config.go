@@ -2,12 +2,16 @@
 package coder
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
@@ -227,8 +231,73 @@ func newCoderTransport() (*http.Transport, error) {
 	transport.MaxConnsPerHost = maxConnsPerCoderHost
 	transport.MaxIdleConnsPerHost = maxConnsPerCoderHost
 	transport.MaxIdleConns = maxConnsPerCoderHost
+	transport.OnProxyConnectResponse = refuseFailedProxyConnect
 
 	return transport, nil
+}
+
+// errProxyConnectRefused marks a proxy answer other than 200 to the CONNECT for Coder. Go reports
+// that answer with an untyped error, and without this mark notSent cannot tell it apart from a
+// connection that broke after the request.
+var errProxyConnectRefused = errors.New("the proxy refused the CONNECT tunnel")
+
+func refuseFailedProxyConnect(_ context.Context, _ *url.URL, _ *http.Request, resp *http.Response) error {
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%w: %s", errProxyConnectRefused, resp.Status)
+	}
+	return nil
+}
+
+// newCoderHTTPClient returns the HTTP client of NewSDKClient for the Coder origin coderURL.
+func newCoderHTTPClient(coderURL *url.URL, transport http.RoundTripper, timeout time.Duration) *http.Client {
+	return &http.Client{
+		// codersdk dials websockets (WorkspaceBuildLogsAfter for ?follow=true)
+		// with a new http.Client that keeps only this Transport, not
+		// CheckRedirect, so the Transport also refuses other origins.
+		Transport: markMaybeSent{next: sameorigin.RoundTripper(coderURL, transport)},
+		Timeout:   timeout,
+		// net/http copies Coder-Session-Token to every redirect target, so refuse
+		// redirects that leave the Coder origin.
+		CheckRedirect: sameorigin.RedirectPolicy(coderURL),
+	}
+}
+
+// errAfterRedirect marks the error of a request that follows a redirect. The server that answered
+// with the redirect got the write, so a follow-up that fails before its own send does not make
+// the write certain.
+var errAfterRedirect = errors.New("the request after a redirect failed")
+
+// errAfterWrite marks the error of a request whose headers net/http wrote. A later error of a new
+// connection does not make the write certain: the HTTP/2 client sends a request again on a new
+// connection after the server reset its stream with PROTOCOL_ERROR, which it can do after it read
+// the request.
+var errAfterWrite = errors.New("the request failed after net/http wrote it")
+
+// markMaybeSent marks the errors of requests that can have reached Coder with errAfterRedirect or
+// errAfterWrite.
+type markMaybeSent struct{ next http.RoundTripper }
+
+func (m markMaybeSent) RoundTrip(req *http.Request) (*http.Response, error) {
+	var wrote atomic.Bool
+	traced := req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		WroteHeaders: func() { wrote.Store(true) },
+	}))
+	resp, err := m.next.RoundTrip(traced)
+	switch {
+	case err == nil:
+		return resp, nil
+	case req.Response != nil:
+		return nil, fmt.Errorf("%w: %w", errAfterRedirect, err)
+	case wrote.Load():
+		return nil, fmt.Errorf("%w: %w", errAfterWrite, err)
+	}
+	return nil, err
+}
+
+func (m markMaybeSent) CloseIdleConnections() {
+	if closer, ok := m.next.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
 }
 
 // Config describes how to construct a Coder SDK client.
@@ -261,16 +330,7 @@ func NewSDKClient(cfg Config) (*codersdk.Client, error) {
 		return nil, fmt.Errorf("get Coder transport: %w", err)
 	}
 
-	client := codersdk.New(&coderURL, codersdk.WithHTTPClient(&http.Client{
-		// codersdk dials websockets (WorkspaceBuildLogsAfter for ?follow=true)
-		// with a new http.Client that keeps only this Transport, not
-		// CheckRedirect, so the Transport also refuses other origins.
-		Transport: sameorigin.RoundTripper(&coderURL, connectionWaitRoundTripper{base: transport}),
-		Timeout:   requestTimeout,
-		// net/http copies Coder-Session-Token to every redirect target, so refuse
-		// redirects that leave the Coder origin.
-		CheckRedirect: sameorigin.RedirectPolicy(&coderURL),
-	}))
+	client := codersdk.New(&coderURL, codersdk.WithHTTPClient(newCoderHTTPClient(&coderURL, connectionWaitRoundTripper{base: transport}, requestTimeout)))
 	if client == nil {
 		return nil, fmt.Errorf("assertion failed: coder SDK client is nil after successful construction")
 	}

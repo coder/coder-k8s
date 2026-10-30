@@ -229,8 +229,8 @@ func TestTemplateStorageUpdateLeavesMetadataUnchangedWhenNewSourceIsNotActivated
 		{
 			name:        "promotion does not take effect",
 			setup:       func(state *mockCoderServerState) { state.setFailActiveVersionPromotion(true) },
-			wantErr:     func(err error) bool { return err != nil },
-			wantMessage: "active version promotion did not take effect",
+			wantErr:     apierrors.IsTimeout,
+			wantMessage: "the result is uncertain",
 		},
 	}
 
