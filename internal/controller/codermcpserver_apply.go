@@ -51,10 +51,11 @@ func (r *CoderMCPServerReconciler) syncMCPServer(
 	// Only Coder's own 404 proves that the config is gone. A proxy page or
 	// "Route not found." waits below and changes nothing (#337).
 	case isCoderResourceNotFound(err) && applied:
+		server.Status.Enabled = nil
 		return mcpServerStalled(mcpServerResync, "DeletedExternally",
 			"MCP server config %s was deleted in Coder. The controller does not create it again until the spec changes.", id), false, nil
 	case isCoderResourceNotFound(err):
-		server.Status.ConfigID, server.Status.Credentials = "", nil
+		server.Status.ConfigID, server.Status.Credentials, server.Status.Enabled = "", nil, nil
 		r.sentCredentials.Delete(client.ObjectKeyFromObject(server))
 		return nil, true, nil
 	case err != nil:
@@ -64,6 +65,7 @@ func (r *CoderMCPServerReconciler) syncMCPServer(
 		return mcpServerStalled(mcpServerResync, "CoderAnswerMismatch",
 			"assertion failed: Coder answered MCP server config %s with slug %s in organization %s when asked for %s", found.ID, found.Slug, found.OrganizationID, id), false, nil
 	}
+	server.Status.Enabled = &found.Enabled
 
 	// user_oidc sends each chat user's login token to url (plan F14), so it is
 	// set back even when a kill switch holds every other write.
@@ -127,6 +129,7 @@ func (r *CoderMCPServerReconciler) syncMCPServer(
 		if field := mcpServerMismatch(server.Spec.Auth, check, updated); field != "" || updated.ID != id {
 			return mcpServerStalled(mcpServerResync, "CoderAnswerMismatch", "assertion failed: Coder answered the update of MCP server config %s with another %s", id, cmp.Or(field, "ID")), false, nil
 		}
+		server.Status.Enabled = &updated.Enabled
 		r.rememberSentCredentials(server, sent, values)
 	} else if field := mcpServerMismatch(server.Spec.Auth, full, found); field != "" {
 		return nil, false, fmt.Errorf("assertion failed: MCP server %s/%s differs in %s, but the sync request is empty", server.Namespace, server.Name, field)
@@ -160,6 +163,7 @@ func (r *CoderMCPServerReconciler) disableForMissingGroup(
 		return mcpServerWait(mcpServerRetry, "CoderAnswerMismatch",
 			"Coder answered the disable of MCP server config %s with another or an enabled config. The controller disables it again.", id)
 	}
+	server.Status.Enabled = &updated.Enabled
 	return missing
 }
 
