@@ -555,3 +555,51 @@ func TestTransportRegistryRoutesEvictedTransportToCurrentEntry(t *testing.T) {
 		t.Fatal("expected a held transport to become the entry of a deployment without one")
 	}
 }
+
+func TestTransportRegistryClosesIdleConnectionsOfCurrentEntry(t *testing.T) {
+	t.Parallel()
+
+	closed := make(chan struct{}, 1)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			closed <- struct{}{}
+		}
+	}
+	server.Start()
+	t.Cleanup(server.Close)
+
+	now := time.Unix(0, 0)
+	registry := newTransportRegistry(newCoderTransport)
+	registry.now = func() time.Time { return now }
+	forURL := func(rawURL string) *registeredTransport {
+		transport, err := registry.forURL(mustParseURL(t, rawURL))
+		if err != nil {
+			t.Fatalf("forURL(%q): %v", rawURL, err)
+		}
+		return transport
+	}
+
+	held := forURL(server.URL)
+	now = now.Add(transportIdleEviction + time.Second)
+	forURL("http://other.invalid")
+	current := forURL(server.URL)
+	if current == held {
+		t.Fatal("expected the unused deployment to get a new transport")
+	}
+	res, err := (&http.Client{Transport: current}).Get(server.URL)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, res.Body)
+	_ = res.Body.Close()
+
+	held.CloseIdleConnections()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected CloseIdleConnections on a held transport to close the current pool's idle connection")
+	}
+}

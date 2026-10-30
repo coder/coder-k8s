@@ -128,7 +128,18 @@ func (t *registeredTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	return res, nil
 }
 
-func (t *registeredTransport) CloseIdleConnections() { t.transport.CloseIdleConnections() }
+// CloseIdleConnections closes the idle connections of the deployment's current entry,
+// the pool that RoundTrip uses. An evicted entry has none left.
+func (t *registeredTransport) CloseIdleConnections() {
+	r := t.registry
+	r.mu.Lock()
+	current, ok := r.byDeployment[t.key]
+	r.mu.Unlock()
+	if !ok {
+		current = t
+	}
+	current.transport.CloseIdleConnections()
+}
 
 // begin returns the registry's entry for t's deployment, with the request counted. It
 // puts t back when the deployment has no entry.
