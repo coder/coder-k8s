@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/google/uuid"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/registry/rest"
@@ -320,6 +322,67 @@ func TestWriteOutcomes(t *testing.T) {
 			if !apierrors.IsInternalError(err) || !strings.Contains(err.Error(), "could not be reached") ||
 				strings.Contains(err.Error(), closedAddr) {
 				t.Fatalf("expected the 500 that says Coder could not be reached, got %v", err)
+			}
+		})
+	}
+}
+
+// TestTemplateFilesUpdateReReadAfterActivation checks the re-read of the template after Coder
+// accepted the activation of new files. When it fails or shows another active version, the new
+// files can be active, so the update returns the uncertain 504.
+func TestTemplateFilesUpdateReReadAfterActivation(t *testing.T) {
+	t.Parallel()
+
+	otherActiveVersion := func(t *testing.T, w http.ResponseWriter, coderAnswer *httptest.ResponseRecorder) {
+		var object map[string]any
+		if err := json.Unmarshal(coderAnswer.Body.Bytes(), &object); err != nil {
+			t.Fatalf("decode Coder answer: %v", err)
+		}
+		object["active_version_id"] = uuid.NewString()
+		body, err := json.Marshal(object)
+		if err != nil {
+			t.Fatal(err)
+		}
+		jsonAnswer(coderAnswer.Code, string(body))(t, w, coderAnswer)
+	}
+	for _, tc := range []struct {
+		name   string
+		answer brokenAnswer
+		// refused sends the re-read to a closed port instead of answer.
+		refused bool
+	}{
+		{name: "proxy 502", answer: gatewayPage(http.StatusBadGateway)},
+		{name: "connection closed without an answer", answer: closedWithoutAnswer},
+		{name: "another active version", answer: otherActiveVersion},
+		{name: "connection refused", refused: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			coderServer, _ := newMockCoderServer(t)
+			t.Cleanup(coderServer.Close)
+
+			var activated, reRead atomic.Bool
+			isReRead := func(r *http.Request) bool {
+				if r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/versions") {
+					activated.Store(true)
+					return false
+				}
+				return activated.Load() && r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v2/templates/") &&
+					reRead.CompareAndSwap(false, true)
+			}
+			provider := newTestClientProvider(t, writeOutcomeServer(t, coderServer, isReRead, tc.answer).URL)
+			if tc.refused {
+				client := newTestSDKClient(t, coderServer.URL)
+				client.HTTPClient = &http.Client{Transport: refusingWrites{isWrite: isReRead, closedAddr: closedAddress(t)}}
+				provider = &coder.StaticClientProvider{Client: client, Namespace: "control-plane"}
+			}
+
+			err := updateTemplateFiles(t, provider)
+			if !reRead.Load() {
+				t.Fatal("the update did not re-read the template after the activation")
+			}
+			if !apierrors.IsTimeout(err) || !strings.Contains(err.Error(), "uncertain") {
+				t.Fatalf("expected the uncertain 504, got %v", err)
 			}
 		})
 	}
