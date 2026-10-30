@@ -120,67 +120,49 @@ func TestDeleteProvisionerKeyByID_ValidationErrors(t *testing.T) {
 	}
 }
 
-func TestDeleteProvisionerKeyByName(t *testing.T) {
+func TestProvisionerKeyByName(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
-	keptKeyID := uuid.New()
+	listedID := uuid.New()
 	now := time.Now().UTC().Format(time.RFC3339)
 	keysPath := "/api/v2/organizations/" + orgID.String() + "/provisionerkeys"
 
 	tests := []struct {
-		name        string
-		orgGone     bool
-		listGone    bool
-		listedID    uuid.UUID
-		listedName  string
-		deleteBody  map[string]any
-		wantDeletes []string
-		wantErr     bool
+		name       string
+		orgGone    bool
+		listBody   map[string]any
+		listedName string
+		wantKeyID  uuid.UUID
+		wantErr    bool
 	}{
 		{name: "organization gone", orgGone: true},
-		{name: "organization gone before the list", listGone: true},
-		{name: "key exists", listedID: uuid.New(), listedName: "provisioner", wantDeletes: []string{keysPath + "/provisioner"}},
-		{name: "no key with the name", listedID: uuid.New(), listedName: "other"},
-		{name: "key is the one to keep", listedID: keptKeyID, listedName: "provisioner"},
-		{name: "key gone before the delete", listedID: uuid.New(), listedName: "provisioner", deleteBody: coderNotFound, wantDeletes: []string{keysPath + "/provisioner"}},
-		{
-			name: "404 not from Coder", listedID: uuid.New(), listedName: "provisioner",
-			deleteBody: map[string]any{"message": "Route not found."}, wantDeletes: []string{keysPath + "/provisioner"}, wantErr: true,
-		},
+		{name: "organization gone before the list", listBody: coderNotFound},
+		{name: "key exists", listedName: "provisioner", wantKeyID: listedID},
+		{name: "no key with the name", listedName: "other"},
+		{name: "404 not from Coder", listBody: map[string]any{"message": "Route not found."}, wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			var mu sync.Mutex
-			var deletes []string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.Method == http.MethodGet && r.URL.Path == "/api/v2/organizations/default" && tt.orgGone:
 					writeJSONResponse(t, w, http.StatusNotFound, coderNotFound)
 				case r.Method == http.MethodGet && r.URL.Path == "/api/v2/organizations/default":
 					writeJSONResponse(t, w, http.StatusOK, map[string]any{"id": orgID.String(), "name": "default", "created_at": now, "updated_at": now})
-				case r.Method == http.MethodGet && r.URL.Path == keysPath && tt.listGone:
-					writeJSONResponse(t, w, http.StatusNotFound, coderNotFound)
+				case r.Method == http.MethodGet && r.URL.Path == keysPath && tt.listBody != nil:
+					writeJSONResponse(t, w, http.StatusNotFound, tt.listBody)
 				case r.Method == http.MethodGet && r.URL.Path == keysPath:
 					writeJSONResponse(t, w, http.StatusOK, []map[string]any{{
-						"id":           tt.listedID.String(),
+						"id":           listedID.String(),
 						"created_at":   now,
 						"organization": orgID.String(),
 						"name":         tt.listedName,
 						"tags":         map[string]string{},
 					}})
-				case r.Method == http.MethodDelete:
-					mu.Lock()
-					deletes = append(deletes, r.URL.Path)
-					mu.Unlock()
-					if tt.deleteBody != nil {
-						writeJSONResponse(t, w, http.StatusNotFound, tt.deleteBody)
-						return
-					}
-					w.WriteHeader(http.StatusNoContent)
 				default:
 					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 					w.WriteHeader(http.StatusNotFound)
@@ -188,20 +170,22 @@ func TestDeleteProvisionerKeyByName(t *testing.T) {
 			}))
 			defer server.Close()
 
-			err := coderbootstrap.NewSDKClient().DeleteProvisionerKeyByName(context.Background(), coderbootstrap.DeleteProvisionerKeyByNameRequest{
+			key, err := coderbootstrap.NewSDKClient().ProvisionerKeyByName(context.Background(), coderbootstrap.ProvisionerKeyByNameRequest{
 				CoderURL:     server.URL,
 				SessionToken: "session-token",
 				KeyName:      "provisioner",
-				KeepKeyID:    keptKeyID,
 			})
 			if tt.wantErr {
 				require.Error(t, err, "only Coder's own 404 proves that the key is gone")
-			} else {
-				require.NoError(t, err)
+				return
 			}
-			mu.Lock()
-			defer mu.Unlock()
-			require.Equal(t, tt.wantDeletes, deletes)
+			require.NoError(t, err)
+			if tt.wantKeyID == uuid.Nil {
+				require.Nil(t, key)
+				return
+			}
+			require.NotNil(t, key)
+			require.Equal(t, tt.wantKeyID, key.ID)
 		})
 	}
 }

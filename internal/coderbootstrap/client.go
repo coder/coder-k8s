@@ -96,7 +96,7 @@ type Client interface {
 	EnsureProvisionerKey(context.Context, EnsureProvisionerKeyRequest) (EnsureProvisionerKeyResponse, error)
 	DeleteProvisionerKey(ctx context.Context, coderURL, sessionToken, orgName, keyName string) error
 	DeleteProvisionerKeyByID(context.Context, DeleteProvisionerKeyByIDRequest) error
-	DeleteProvisionerKeyByName(context.Context, DeleteProvisionerKeyByNameRequest) error
+	ProvisionerKeyByName(context.Context, ProvisionerKeyByNameRequest) (*codersdk.ProvisionerKey, error)
 	Entitlements(ctx context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error)
 }
 

@@ -141,60 +141,48 @@ func (c *SDKClient) DeleteProvisionerKey(ctx context.Context, coderURL, sessionT
 	return xerrors.Errorf("delete provisioner key %q: %w", keyName, err)
 }
 
-// DeleteProvisionerKeyByNameRequest identifies a provisioner key by the name
-// that the caller recorded before it sent the create, when Coder had not yet
-// returned the key ID.
-type DeleteProvisionerKeyByNameRequest struct {
+// ProvisionerKeyByNameRequest identifies a provisioner key by its name.
+type ProvisionerKeyByNameRequest struct {
 	CoderURL         string
 	SessionToken     string
 	OrganizationName string
 	KeyName          string
-	// KeepKeyID is the ID of a key that the delete leaves in place, for
-	// example the key that the caller uses now.
-	KeepKeyID uuid.UUID
 }
 
-// DeleteProvisionerKeyByName deletes the provisioner key named req.KeyName in
-// the organization req.OrganizationName, unless its ID is req.KeepKeyID. It
-// does nothing when the organization or a key with that name does not exist.
-func (c *SDKClient) DeleteProvisionerKeyByName(ctx context.Context, req DeleteProvisionerKeyByNameRequest) error {
+// ProvisionerKeyByName returns the provisioner key named req.KeyName in the
+// organization req.OrganizationName. It returns nil when Coder answers that
+// the organization or a key with that name does not exist.
+func (c *SDKClient) ProvisionerKeyByName(ctx context.Context, req ProvisionerKeyByNameRequest) (*codersdk.ProvisionerKey, error) {
 	if err := validateProvisionerKeyInputs(req.CoderURL, req.SessionToken, req.KeyName); err != nil {
-		return err
+		return nil, err
 	}
 
 	client, err := newAuthenticatedClient(req.CoderURL, req.SessionToken)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	organization, err := resolveOrganizationByName(ctx, client, cmp.Or(req.OrganizationName, codersdk.DefaultOrganization))
 	if isNotFound(err) {
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	key, err := withOptionalRateLimitBypass(ctx, func(requestCtx context.Context) (*codersdk.ProvisionerKey, error) {
 		return findOrganizationProvisionerKey(requestCtx, client, organization.ID, req.KeyName)
 	})
 	if isNotFound(err) {
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if key == nil || (req.KeepKeyID != uuid.Nil && key.ID == req.KeepKeyID) {
-		return nil
-	}
-
-	_, err = withOptionalRateLimitBypass(ctx, func(requestCtx context.Context) (struct{}, error) {
-		return struct{}{}, client.DeleteProvisionerKey(requestCtx, organization.ID, key.Name)
-	})
-	if err != nil && !isNotFound(err) {
-		return xerrors.Errorf("delete provisioner key %q: %w", key.Name, err)
+	if key != nil && key.ID == uuid.Nil {
+		return nil, xerrors.Errorf("assertion failed: provisioner key %q returned an empty ID", req.KeyName)
 	}
 
-	return nil
+	return key, nil
 }
 
 // DeleteProvisionerKeyByIDRequest identifies one provisioner key by the IDs

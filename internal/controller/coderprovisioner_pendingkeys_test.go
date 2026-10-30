@@ -8,10 +8,12 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -67,9 +69,6 @@ func keyDeletes(client *fakeBootstrapClient) []keyDelete {
 	for _, req := range client.deleteKeyRequests {
 		deletes = append(deletes, keyDelete{coderURL: req.CoderURL, token: req.SessionToken, keyName: req.KeyName})
 	}
-	for _, req := range client.deleteKeyByNameRequests {
-		deletes = append(deletes, keyDelete{coderURL: req.CoderURL, token: req.SessionToken, keyName: req.KeyName})
-	}
 	for _, req := range client.deleteKeyByIDRequests {
 		deletes = append(deletes, keyDelete{coderURL: req.CoderURL, token: req.SessionToken, keyID: req.KeyID.String()})
 	}
@@ -87,9 +86,11 @@ func createControlPlaneWithToken(ctx context.Context, t *testing.T, namespace, n
 
 // TestCoderProvisionerKey_IntermediateEndpointRevoked checks a control plane
 // target that changes twice, A to B to C, while the attempt at B fails after
-// Coder created the key at B. Both the next rotation and deletion must delete
-// the key at B, with the operator token of control plane B, and must send no
-// token to the endpoint of another control plane.
+// Coder created the key at B. When status recorded the ID of key B, both the
+// next rotation and deletion must delete key B at B, with the operator token
+// of control plane B. When it did not, nothing shows that this provisioner
+// created the key at B, so key B must stay and the provisioner must report
+// it. No delete may send a token to the endpoint of another control plane.
 func TestCoderProvisionerKey_IntermediateEndpointRevoked(t *testing.T) {
 	t.Parallel()
 
@@ -97,7 +98,8 @@ func TestCoderProvisionerKey_IntermediateEndpointRevoked(t *testing.T) {
 		name string
 		// statusWriteFails makes the status write that records key B fail,
 		// and the revoke of the unpublished key B fail too, as after a crash
-		// right after the create. Otherwise the Secret write fails.
+		// right after the create, so status never holds the ID of key B.
+		// Otherwise the Secret write fails.
 		statusWriteFails bool
 		// deleteAtC deletes the provisioner instead of reconciling at C.
 		deleteAtC bool
@@ -131,6 +133,14 @@ func TestCoderProvisionerKey_IntermediateEndpointRevoked(t *testing.T) {
 			keyB := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "provisioner", Key: "material-b"}
 			keyC := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "provisioner", Key: "material-c"}
 			f.bootstrapClient.provisionerKeyResponses = []coderbootstrap.EnsureProvisionerKeyResponse{keyA, keyB, keyC}
+			if tt.statusWriteFails {
+				f.bootstrapClient.provisionerKeyByName = func(req coderbootstrap.ProvisionerKeyByNameRequest) *codersdk.ProvisionerKey {
+					if req.CoderURL != apiURL("coder-b") {
+						return nil
+					}
+					return &codersdk.ProvisionerKey{ID: keyB.KeyID, OrganizationID: keyB.OrganizationID, Name: keyB.KeyName}
+				}
+			}
 
 			provisioner := f.createProvisioner(ctx, t, nil, nil)
 			name := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
@@ -193,14 +203,17 @@ func TestCoderProvisionerKey_IntermediateEndpointRevoked(t *testing.T) {
 				require.True(t, pendingKeyRecorded(f.get(ctx, t, provisioner), keyB.KeyID), "a failed delete must keep the record of key B")
 				client.failRevoke = uuid.Nil
 			}
-			f.reconcile(ctx, t, provisioner)
+			_, err = f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			require.NoError(t, err)
 
 			deletes := keyDeletes(f.bootstrapClient)
-			revokedAtB := slices.ContainsFunc(deletes, func(d keyDelete) bool {
-				return d.coderURL == apiURL("coder-b") && d.token == "operator-token-b" &&
-					(d.keyID == keyB.KeyID.String() || (d.keyID == "" && d.keyName == keyB.KeyName))
-			})
-			require.True(t, revokedAtB, "key B must be deleted at B with the operator token of B, got %+v", deletes)
+			if tt.statusWriteFails {
+				require.False(t, slices.ContainsFunc(deletes, func(d keyDelete) bool { return d.coderURL == apiURL("coder-b") }),
+					"a key whose ID status never held must not be deleted, got %+v", deletes)
+			} else {
+				require.Contains(t, deletes, keyDelete{coderURL: apiURL("coder-b"), token: "operator-token-b", keyID: keyB.KeyID.String()},
+					"key B must be deleted at B with the operator token of B")
+			}
 			require.Contains(t, deletes, keyDelete{coderURL: apiURL("coder"), token: testOperatorToken, keyID: keyA.KeyID.String()},
 				"key A must be deleted at A with the operator token of A")
 			for _, d := range deletes {
@@ -218,7 +231,17 @@ func TestCoderProvisionerKey_IntermediateEndpointRevoked(t *testing.T) {
 			final := f.get(ctx, t, provisioner)
 			require.Equal(t, keyC.KeyID.String(), final.Status.ProvisionerKeyID)
 			require.Equal(t, "https://coder-c.example.com", final.Status.ControlPlaneURL)
+			unverified := meta.FindStatusCondition(final.Status.Conditions, coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept)
+			if tt.statusWriteFails {
+				require.Len(t, final.Status.PendingKeys, 1)
+				require.Equal(t, apiURL("coder-b"), final.Status.PendingKeys[0].CoderURL, "the record of key B must stay")
+				require.Empty(t, final.Status.PendingKeys[0].KeyID)
+				require.NotNil(t, unverified, "the provisioner must report the key that it left at B")
+				require.Equal(t, metav1.ConditionTrue, unverified.Status)
+				return
+			}
 			require.Empty(t, final.Status.PendingKeys, "every replaced key must be confirmed deleted")
+			require.Nil(t, unverified)
 		})
 	}
 }
@@ -476,12 +499,13 @@ func (c *keyStoreClient) DeleteProvisionerKeyByID(_ context.Context, req coderbo
 	return nil
 }
 
-func (c *keyStoreClient) DeleteProvisionerKeyByName(_ context.Context, req coderbootstrap.DeleteProvisionerKeyByNameRequest) error {
+func (c *keyStoreClient) ProvisionerKeyByName(_ context.Context, req coderbootstrap.ProvisionerKeyByNameRequest) (*codersdk.ProvisionerKey, error) {
 	slot := newKeySlot(req.CoderURL, req.OrganizationName, req.KeyName)
-	if keyID, ok := c.keys[slot]; ok && keyID != req.KeepKeyID {
-		delete(c.keys, slot)
+	keyID, ok := c.keys[slot]
+	if !ok {
+		return nil, nil
 	}
-	return nil
+	return &codersdk.ProvisionerKey{ID: keyID, OrganizationID: slot.organizationID(), Name: slot.keyName}, nil
 }
 
 // TestCoderProvisionerKey_IDLessRecordKeepsOtherProvisionersKey checks a
@@ -538,13 +562,27 @@ func TestCoderProvisionerKey_IDLessRecordKeepsOtherProvisionersKey(t *testing.T)
 				require.NoError(t, k8sClient.Delete(ctx, f.get(ctx, t, p)))
 				f.reconcile(ctx, t, p)
 				requireProvisionerGone(ctx, t, pName)
-			} else {
-				moveTo("coder")
-				_, err = f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: pName})
-				require.NoError(t, err)
+				require.Equal(t, qKeyID, store.keys[slotB].String(), "the key of Q at B must still exist")
+				return
 			}
 
+			moveTo("coder")
+			result, err := f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: pName})
+			require.NoError(t, err)
 			require.Equal(t, qKeyID, store.keys[slotB].String(), "the key of Q at B must still exist")
+			latest := f.get(ctx, t, p)
+			require.Len(t, latest.Status.PendingKeys, 1, "the record at B must stay while Coder holds a key with its name")
+			unverified := meta.FindStatusCondition(latest.Status.Conditions, coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept)
+			require.NotNil(t, unverified, "P must report the key at B that it does not delete")
+			require.Equal(t, metav1.ConditionTrue, unverified.Status)
+			require.Contains(t, unverified.Message, urlB)
+			require.Positive(t, result.RequeueAfter, "P must check the record at B again")
+
+			delete(store.keys, slotB)
+			f.reconcile(ctx, t, p)
+			latest = f.get(ctx, t, p)
+			require.Empty(t, latest.Status.PendingKeys, "the record at B must go once Coder has no key with its name")
+			require.Nil(t, meta.FindStatusCondition(latest.Status.Conditions, coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept))
 		})
 	}
 }

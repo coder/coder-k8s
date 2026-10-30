@@ -41,7 +41,7 @@
 | `controlPlaneRefName` | string | ControlPlaneRefName is the control plane ref name last applied to the provisioner key. |
 | `controlPlaneURL` | string | ControlPlaneURL is the control plane URL last applied to the provisioner key. |
 | `secretRef` | [SecretKeySelector](#secretkeyselector) | SecretRef references the provisioner key secret data currently in use. |
-| `pendingKeys` | [CoderProvisionerKeyRecord](#coderprovisionerkeyrecord) array | PendingKeys lists the provisioner keys that can exist in Coder besides the key in provisionerKeyID: a key that the operator is about to create or has not yet written to the provisioner key Secret, and replaced keys whose deletion Coder has not confirmed. The operator deletes each entry at its coderURL with the operator token of its control plane, and removes the entry when Coder confirms that the key is gone. |
+| `pendingKeys` | [CoderProvisionerKeyRecord](#coderprovisionerkeyrecord) array | PendingKeys lists the provisioner keys that can exist in Coder besides the key in provisionerKeyID: a key that the operator is about to create or has not yet written to the provisioner key Secret, and replaced keys whose deletion Coder has not confirmed. The operator deletes the key of each entry with keyID at its coderURL with the operator token of its control plane, and removes the entry when Coder confirms that the key is gone. |
 
 ## Referenced types
 
@@ -56,7 +56,7 @@ or was about to create, at one Coder endpoint.
 | `coderURL` | string | CoderURL is the Coder API URL that the operator sent the key request to. |
 | `organizationName` | string | OrganizationName is the Coder organization of the key. |
 | `keyName` | string | KeyName is the provisioner key name in Coder. |
-| `organizationID` | string | OrganizationID is the organization ID that Coder returned for the key. Without organizationID and keyID, the operator deletes the key by name, unless that name holds the key in provisionerKeyID. |
+| `organizationID` | string | OrganizationID is the organization ID that Coder returned for the key. Without organizationID and keyID, the operator deletes no key. It removes the entry when Coder has no key with keyName, or when that key is the key in provisionerKeyID. Otherwise it keeps the entry and sets the condition UnverifiedKeyKept. |
 | `keyID` | string | KeyID is the provisioner key ID that Coder returned. |
 | `unpublished` | boolean | Unpublished is true from before the create until the operator records a key as applied. While it is true, the Secret can hold this key, or a key that a rotation deleted, so the operator replaces the key in the Secret. |
 

@@ -6195,9 +6195,10 @@ spec:
                   PendingKeys lists the provisioner keys that can exist in Coder besides
                   the key in provisionerKeyID: a key that the operator is about to create
                   or has not yet written to the provisioner key Secret, and replaced keys
-                  whose deletion Coder has not confirmed. The operator deletes each entry
-                  at its coderURL with the operator token of its control plane, and
-                  removes the entry when Coder confirms that the key is gone.
+                  whose deletion Coder has not confirmed. The operator deletes the key of
+                  each entry with keyID at its coderURL with the operator token of its
+                  control plane, and removes the entry when Coder confirms that the key
+                  is gone.
                 items:
                   description: |-
                     CoderProvisionerKeyRecord names a provisioner key that the operator created,
@@ -6221,8 +6222,10 @@ spec:
                     organizationID:
                       description: |-
                         OrganizationID is the organization ID that Coder returned for the key.
-                        Without organizationID and keyID, the operator deletes the key by name,
-                        unless that name holds the key in provisionerKeyID.
+                        Without organizationID and keyID, the operator deletes no key. It
+                        removes the entry when Coder has no key with keyName, or when that key
+                        is the key in provisionerKeyID. Otherwise it keeps the entry and sets
+                        the condition UnverifiedKeyKept.
                       type: string
                     organizationName:
                       description: OrganizationName is the Coder organization of the

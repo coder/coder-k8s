@@ -293,8 +293,8 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// Every key that can exist in Coder has a record in status: the applied
 	// fields for the key in the Secret, status.pendingKeys for the others. A
 	// key to create is recorded by name before the create, because Coder
-	// returns its ID only in the create response. Keys recorded in another
-	// slot than the target are deleted here.
+	// returns its ID only in the create response. Keys recorded with IDs in
+	// another slot than the target are deleted here.
 	target := coderv1alpha1.CoderProvisionerKeyRecord{
 		ControlPlaneRefName: desiredControlPlaneRefName,
 		CoderURL:            coderURL,
@@ -338,21 +338,25 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		pending = append(next, target)
 	}
-	var kept []coderv1alpha1.CoderProvisionerKeyRecord
+	var kept, unverified []coderv1alpha1.CoderProvisionerKeyRecord
 	for _, record := range pending {
 		if sameKeySlot(record, target) {
 			kept = append(kept, record)
 			continue
 		}
-		revoked, revokeErr := r.revokeKey(ctx, provisioner, record)
+		cleanup, revokeErr := r.revokeKey(ctx, provisioner, record)
 		if revokeErr != nil {
 			return ctrl.Result{}, revokeErr
 		}
-		if !revoked {
+		if cleanup != keyGone {
 			kept = append(kept, record)
 		}
+		if cleanup == keyUnverified {
+			unverified = append(unverified, record)
+		}
 	}
-	if !slices.Equal(kept, provisioner.Status.PendingKeys) {
+	conditionChanged := setUnverifiedKeyCondition(provisioner, unverified)
+	if conditionChanged || !slices.Equal(kept, provisioner.Status.PendingKeys) {
 		provisioner.Status.PendingKeys = kept
 		if err := r.Status().Update(ctx, provisioner); err != nil {
 			return ctrl.Result{}, fmt.Errorf("record pending provisioner keys in status: %w", err)
@@ -809,13 +813,13 @@ func (r *CoderProvisionerReconciler) reconcileDeletion(ctx context.Context, prov
 	// control plane was never ready, or when operator access bootstrap has
 	// not completed.
 	for _, record := range records {
-		revoked, err := r.revokeKey(ctx, provisioner, record)
+		cleanup, err := r.revokeKey(ctx, provisioner, record)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		if !revoked {
-			log.Info("could not delete a recorded provisioner key during deletion, proceeding with finalizer removal",
-				"coderURL", record.CoderURL, "keyName", record.KeyName, "keyID", record.KeyID)
+		if cleanup != keyGone {
+			log.Info("did not delete a recorded provisioner key during deletion, proceeding with finalizer removal",
+				"coderURL", record.CoderURL, "keyName", record.KeyName, "keyID", record.KeyID, "unverified", cleanup == keyUnverified)
 		}
 	}
 
@@ -972,51 +976,98 @@ func (r *CoderProvisionerReconciler) readControlPlane(ctx context.Context, names
 	return controlPlane, true, nil
 }
 
+// keyCleanup is the result of the cleanup of one recorded provisioner key.
+type keyCleanup int
+
+const (
+	// keyKept: Coder did not confirm that the key is gone. The record stays,
+	// and the operator tries again.
+	keyKept keyCleanup = iota
+	// keyGone: no key of the record exists in Coder.
+	keyGone
+	// keyUnverified: the record has no key IDs, and Coder holds a key with
+	// its name that nothing shows this provisioner created. The operator
+	// leaves that key, and the record stays.
+	keyUnverified
+)
+
 // revokeKey deletes the key that record names, at record.CoderURL with the
 // operator token of the control plane record.ControlPlaneRefName. A record
-// without key IDs is deleted by name, unless that name holds the applied key.
-// revoked reports whether Coder confirmed that the key is gone.
+// without key IDs deletes no key.
 func (r *CoderProvisionerReconciler) revokeKey(
 	ctx context.Context,
 	provisioner *coderv1alpha1.CoderProvisioner,
 	record coderv1alpha1.CoderProvisionerKeyRecord,
-) (revoked bool, err error) {
+) (keyCleanup, error) {
 	log := ctrl.LoggerFrom(ctx).WithValues("coderURL", record.CoderURL, "controlPlaneRef", record.ControlPlaneRefName,
 		"keyName", record.KeyName, "keyID", record.KeyID)
 	controlPlane, ok, err := r.readControlPlane(ctx, provisioner.Namespace, record.ControlPlaneRefName)
 	if err != nil || !ok {
-		return false, err
+		return keyKept, err
 	}
 	sessionToken, tokenResult, tokenReason, tokenMessage, tokenErr := r.readOperatorSessionToken(ctx, provisioner, controlPlane)
 	if tokenErr != nil || tokenResult.RequeueAfter > 0 {
 		log.Info("operator access is not available, keeping the provisioner key record",
 			"reason", tokenReason, "message", tokenMessage, "error", tokenErr)
-		return false, nil
+		return keyKept, nil
 	}
 
 	if organizationID, keyID, ok := parseKeyIDs(record.OrganizationID, record.KeyID); ok {
-		err = r.BootstrapClient.DeleteProvisionerKeyByID(ctx, coderbootstrap.DeleteProvisionerKeyByIDRequest{
+		if err := r.BootstrapClient.DeleteProvisionerKeyByID(ctx, coderbootstrap.DeleteProvisionerKeyByIDRequest{
 			CoderURL:       record.CoderURL,
 			SessionToken:   sessionToken,
 			OrganizationID: organizationID,
 			KeyID:          keyID,
-		})
-	} else {
-		// Keep the applied key: another URL can reach the same Coder.
-		_, appliedKeyID, _ := parseKeyIDs(provisioner.Status.OrganizationID, provisioner.Status.ProvisionerKeyID)
-		err = r.BootstrapClient.DeleteProvisionerKeyByName(ctx, coderbootstrap.DeleteProvisionerKeyByNameRequest{
-			CoderURL:         record.CoderURL,
-			SessionToken:     sessionToken,
-			OrganizationName: record.OrganizationName,
-			KeyName:          record.KeyName,
-			KeepKeyID:        appliedKeyID,
-		})
+		}); err != nil {
+			log.Info("failed to delete the recorded provisioner key, keeping its record", "error", err)
+			return keyKept, nil
+		}
+		return keyGone, nil
 	}
+
+	key, err := r.BootstrapClient.ProvisionerKeyByName(ctx, coderbootstrap.ProvisionerKeyByNameRequest{
+		CoderURL:         record.CoderURL,
+		SessionToken:     sessionToken,
+		OrganizationName: record.OrganizationName,
+		KeyName:          record.KeyName,
+	})
 	if err != nil {
-		log.Info("failed to delete the recorded provisioner key, keeping its record", "error", err)
-		return false, nil
+		log.Info("failed to look up the recorded provisioner key, keeping its record", "error", err)
+		return keyKept, nil
 	}
-	return true, nil
+	// Coder allows one key per name in an organization, so no other key of
+	// this record exists when no key or the applied key holds the name. The
+	// applied key holds it when record.CoderURL reaches the same Coder.
+	_, appliedKeyID, _ := parseKeyIDs(provisioner.Status.OrganizationID, provisioner.Status.ProvisionerKeyID)
+	if key == nil || (appliedKeyID != uuid.Nil && key.ID == appliedKeyID) {
+		return keyGone, nil
+	}
+	// Without the key ID that the create returned, nothing ties this key to
+	// this provisioner: another provisioner or a person can use the name.
+	log.Info("leaving a provisioner key that this provisioner cannot show it created", "foundKeyID", key.ID)
+	return keyUnverified, nil
+}
+
+// setUnverifiedKeyCondition sets the UnverifiedKeyKept condition for the
+// records in unverified, or removes it when there are none. It reports
+// whether the conditions changed.
+func setUnverifiedKeyCondition(provisioner *coderv1alpha1.CoderProvisioner, unverified []coderv1alpha1.CoderProvisionerKeyRecord) bool {
+	if len(unverified) == 0 {
+		return meta.RemoveStatusCondition(&provisioner.Status.Conditions, coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept)
+	}
+	keys := make([]string, 0, len(unverified))
+	for _, record := range unverified {
+		keys = append(keys, fmt.Sprintf("%q in organization %q at %s", record.KeyName, record.OrganizationName, record.CoderURL))
+	}
+	return meta.SetStatusCondition(&provisioner.Status.Conditions, metav1.Condition{
+		Type:               coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: provisioner.Generation,
+		Reason:             "KeyIDUnknown",
+		Message: fmt.Sprintf("Coder holds provisioner key %s, and status.pendingKeys has no key ID for it, so nothing shows that this provisioner created it. "+
+			"The operator does not delete it, because another provisioner or a person can use the same name. Delete it in Coder if nothing uses it.",
+			strings.Join(keys, ", ")),
+	})
 }
 
 func (r *CoderProvisionerReconciler) ensureCleanupFinalizer(ctx context.Context, provisioner *coderv1alpha1.CoderProvisioner) (bool, error) {
