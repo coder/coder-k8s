@@ -1,6 +1,6 @@
-// Package gitops_test checks the GitOps health rules for CoderTemplateTest
-// and CoderMCPServer. The rules are data files, so this package has no
-// production code.
+// Package gitops_test checks the GitOps health rules for CoderTemplateTest,
+// CoderMCPServer and CoderAIProvider. The rules are data files, so this
+// package has no production code.
 package gitops_test
 
 import (
@@ -29,6 +29,7 @@ type ruleSet struct {
 var ruleSets = []ruleSet{
 	{"CoderTemplateTest", "argocd-health-codertemplatetest.lua", "flux-healthcheck-codertemplatetest.yaml", "../../docs/how-to/gitops.md", healthCases},
 	{"CoderMCPServer", "argocd-health-codermcpserver.lua", "flux-healthcheck-codermcpserver.yaml", "../../docs/how-to/manage-mcp-servers.md", mcpServerCases},
+	{"CoderAIProvider", "argocd-health-coderaiprovider.lua", "flux-healthcheck-coderaiprovider.yaml", "../../docs/how-to/gitops.md", aiProviderCases},
 }
 
 // fluxHealthCheck is one entry of a Flux Kustomization spec.healthCheckExprs.
@@ -128,10 +129,10 @@ func mcpServerObject(status map[string]any) map[string]any {
 	return obj
 }
 
-// mcpServerStatus returns the three conditions that the controller always
-// writes together, with one reason and message: ready, reconciling (neither
-// ready nor stalled), or stalled.
-func mcpServerStatus(state, reason string) map[string]any {
+// readyReconcilingStalled returns the three conditions that the CoderMCPServer
+// and CoderAIProvider controllers always write together, with one reason and
+// message: ready, reconciling (neither ready nor stalled), or stalled.
+func readyReconcilingStalled(state, reason string) map[string]any {
 	ready, reconciling, stalled := "False", "True", "False"
 	switch state {
 	case "ready":
@@ -140,7 +141,7 @@ func mcpServerStatus(state, reason string) map[string]any {
 		reconciling, stalled = "False", "True"
 	case "reconciling":
 	default:
-		panic("assertion failed: unknown MCP server fixture state " + state)
+		panic("assertion failed: unknown condition fixture state " + state)
 	}
 	condition := func(conditionType, status string) any {
 		return map[string]any{"type": conditionType, "status": status, "reason": reason, "message": "details", "observedGeneration": int64(2)}
@@ -152,28 +153,70 @@ func mcpServerStatus(state, reason string) map[string]any {
 }
 
 func mcpServerCases() []healthCase {
-	stale := mcpServerStatus("ready", "Applied")
+	stale := readyReconcilingStalled("ready", "Applied")
 	stale["observedGeneration"] = int64(1)
 	noConditions := map[string]any{"observedGeneration": int64(2)}
-	deleting := mcpServerObject(mcpServerStatus("ready", "Applied"))
+	deleting := mcpServerObject(readyReconcilingStalled("ready", "Applied"))
 	deleting["metadata"].(map[string]any)["deletionTimestamp"] = "2026-10-14T10:00:00Z"
-	deletingWait := mcpServerObject(mcpServerStatus("reconciling", "CoderUnavailable"))
+	deletingWait := mcpServerObject(readyReconcilingStalled("reconciling", "CoderUnavailable"))
 	deletingWait["metadata"].(map[string]any)["deletionTimestamp"] = "2026-10-14T10:00:00Z"
 	return []healthCase{
 		{"no status", mcpServerObject(nil), "Progressing", "Waiting for the controller", "Unknown", ""},
 		{"stale observedGeneration", mcpServerObject(stale), "Progressing", "Waiting for the controller", "InProgress", ""},
 		{"no conditions", mcpServerObject(noConditions), "Progressing", "Waiting for the controller", "InProgress", ""},
-		{"applied", mcpServerObject(mcpServerStatus("ready", "Applied")), "Healthy", "Applied: details", "Current", ""},
-		{"control plane not ready", mcpServerObject(mcpServerStatus("reconciling", "ControlPlaneNotReady")), "Progressing", "ControlPlaneNotReady: details", "InProgress", ""},
-		{"Coder unavailable", mcpServerObject(mcpServerStatus("reconciling", "CoderUnavailable")), "Progressing", "CoderUnavailable: details", "InProgress", ""},
-		{"group not found", mcpServerObject(mcpServerStatus("stalled", "GroupNotFound")), "Degraded", "GroupNotFound: details", "Failed", ""},
-		{"not allowed", mcpServerObject(mcpServerStatus("stalled", "MCPServersNotAllowed")), "Degraded", "MCPServersNotAllowed: details", "Failed", ""},
-		{"disabled externally", mcpServerObject(mcpServerStatus("stalled", "DisabledExternally")), "Degraded", "DisabledExternally: details", "Failed", ""},
-		{"credential not opted in", mcpServerObject(mcpServerStatus("stalled", "CredentialNotOptedIn")), "Degraded", "CredentialNotOptedIn: details", "Failed", ""},
-		{"slug conflict", mcpServerObject(mcpServerStatus("stalled", "SlugConflict")), "Degraded", "SlugConflict: details", "Failed", ""},
+		{"applied", mcpServerObject(readyReconcilingStalled("ready", "Applied")), "Healthy", "Applied: details", "Current", ""},
+		{"control plane not ready", mcpServerObject(readyReconcilingStalled("reconciling", "ControlPlaneNotReady")), "Progressing", "ControlPlaneNotReady: details", "InProgress", ""},
+		{"Coder unavailable", mcpServerObject(readyReconcilingStalled("reconciling", "CoderUnavailable")), "Progressing", "CoderUnavailable: details", "InProgress", ""},
+		{"group not found", mcpServerObject(readyReconcilingStalled("stalled", "GroupNotFound")), "Degraded", "GroupNotFound: details", "Failed", ""},
+		{"not allowed", mcpServerObject(readyReconcilingStalled("stalled", "MCPServersNotAllowed")), "Degraded", "MCPServersNotAllowed: details", "Failed", ""},
+		{"disabled externally", mcpServerObject(readyReconcilingStalled("stalled", "DisabledExternally")), "Degraded", "DisabledExternally: details", "Failed", ""},
+		{"credential not opted in", mcpServerObject(readyReconcilingStalled("stalled", "CredentialNotOptedIn")), "Degraded", "CredentialNotOptedIn: details", "Failed", ""},
+		{"slug conflict", mcpServerObject(readyReconcilingStalled("stalled", "SlugConflict")), "Degraded", "SlugConflict: details", "Failed", ""},
 		// Flux has no deletion rule: it waits for pruned objects separately.
 		{"being deleted", deleting, "Progressing", "Deleting the Coder MCP server config", "Current", "Deleting the Coder MCP server config"},
 		{"being deleted while Coder is down", deletingWait, "Progressing", "Deleting the Coder MCP server config", "InProgress", "Deleting the Coder MCP server config"},
+	}
+}
+
+// aiProviderObject returns a CoderAIProvider at generation 2 with the given
+// status.
+func aiProviderObject(status map[string]any) map[string]any {
+	obj := map[string]any{
+		"apiVersion": "coder.com/v1alpha1",
+		"kind":       "CoderAIProvider",
+		"metadata":   map[string]any{"name": "openai", "namespace": "coder", "generation": int64(2)},
+		"spec":       map[string]any{"type": "openai", "baseURL": "https://api.openai.com/v1"},
+	}
+	if status != nil {
+		obj["status"] = status
+	}
+	return obj
+}
+
+func aiProviderCases() []healthCase {
+	stale := readyReconcilingStalled("ready", "Applied")
+	stale["observedGeneration"] = int64(1)
+	noConditions := map[string]any{"observedGeneration": int64(2)}
+	deleting := aiProviderObject(readyReconcilingStalled("ready", "Applied"))
+	deleting["metadata"].(map[string]any)["deletionTimestamp"] = "2026-10-30T10:00:00Z"
+	deletingWait := aiProviderObject(readyReconcilingStalled("reconciling", "CoderUnavailable"))
+	deletingWait["metadata"].(map[string]any)["deletionTimestamp"] = "2026-10-30T10:00:00Z"
+	return []healthCase{
+		{"no status", aiProviderObject(nil), "Progressing", "Waiting for the controller", "Unknown", ""},
+		{"stale observedGeneration", aiProviderObject(stale), "Progressing", "Waiting for the controller", "InProgress", ""},
+		{"no conditions", aiProviderObject(noConditions), "Progressing", "Waiting for the controller", "InProgress", ""},
+		{"applied", aiProviderObject(readyReconcilingStalled("ready", "Applied")), "Healthy", "Applied: details", "Current", ""},
+		{"control plane not ready", aiProviderObject(readyReconcilingStalled("reconciling", "ControlPlaneNotReady")), "Progressing", "ControlPlaneNotReady: details", "InProgress", ""},
+		{"confirming a create", aiProviderObject(readyReconcilingStalled("reconciling", "ConfirmingCreate")), "Progressing", "ConfirmingCreate: details", "InProgress", ""},
+		// A disable that failed retries with the credential reason.
+		{"disable retrying", aiProviderObject(readyReconcilingStalled("reconciling", "CredentialNotOptedIn")), "Progressing", "CredentialNotOptedIn: details", "InProgress", ""},
+		{"credential kill switch", aiProviderObject(readyReconcilingStalled("stalled", "CredentialNotOptedIn")), "Degraded", "CredentialNotOptedIn: details", "Failed", ""},
+		{"name conflict", aiProviderObject(readyReconcilingStalled("stalled", "NameConflict")), "Degraded", "NameConflict: details", "Failed", ""},
+		{"name reserved by env", aiProviderObject(readyReconcilingStalled("stalled", "NameReservedByEnv")), "Degraded", "NameReservedByEnv: details", "Failed", ""},
+		{"disabled externally", aiProviderObject(readyReconcilingStalled("stalled", "DisabledExternally")), "Degraded", "DisabledExternally: details", "Failed", ""},
+		// Flux has no deletion rule: it waits for pruned objects separately.
+		{"being deleted", deleting, "Progressing", "Deleting the Coder AI provider", "Current", "Deleting the Coder AI provider"},
+		{"being deleted while Coder is down", deletingWait, "Progressing", "Deleting the Coder AI provider", "InProgress", "Deleting the Coder AI provider"},
 	}
 }
 

@@ -1,6 +1,6 @@
 # Gate template promotion with GitOps
 
-This guide shows how to make Argo CD or Flux wait for a [`CoderTemplateTest`](test-templates.md) result, and how to promote a template version only after its test passed. The health rules live in `config/gitops/` in this repository. This page copies them, and a unit test keeps the copies equal to the files.
+This guide shows how to make Argo CD or Flux wait for a [`CoderTemplateTest`](test-templates.md) result, and how to promote a template version only after its test passed. The health rules live in `config/gitops/` in this repository. This page copies them, and a unit test keeps the copies equal to the files. The page also holds the [health rules for `CoderAIProvider`](#health-rules-for-coderaiprovider).
 
 ## Why custom health rules are needed
 
@@ -111,6 +111,66 @@ This page has no runnable promotion example yet ([#216](https://github.com/coder
 A `CoderTemplate` update of `spec.files` activates the new version at once, before any test. A test with `spec.version.active: true` in a later wave can still detect breakage, but only after users got the version.
 
 If the import takes longer than the 34-second write budget of the aggregated API ([#117](https://github.com/coder/coder-k8s/issues/117)), the update fails and the previous version stays active, so the test resolves the previous version. `status.templateVersionName` shows which version ran.
+
+## Health rules for CoderAIProvider
+
+Argo CD and Flux also need health rules to wait for a [`CoderAIProvider`](manage-ai-providers.md). Without them, Argo CD has no health check for the kind, and Flux reports a new provider as current before the controller writes its first status. The controller writes the conditions `Ready`, `Reconciling` and `Stalled` together, with one reason and message, and sets `status.observedGeneration` on every status write. Both rules wait until `status.observedGeneration` equals `metadata.generation`. Then they read the conditions:
+
+| Conditions | Argo CD | Flux |
+| --- | --- | --- |
+| no status, or a stale `observedGeneration` | `Progressing` | `InProgress` (`Unknown` before the first status) |
+| `Reconciling=True` | `Progressing` | `InProgress` |
+| `Ready=True` | `Healthy` | `Current` |
+| `Stalled=True` | `Degraded` | `Failed` |
+
+A [kill switch](manage-ai-providers.md#kill-switches) stalls the provider, so it shows `Degraded` or `Failed` until the spec or the key Secret changes. The Argo CD message is `<reason>: <message>` of the `Ready` condition. While the object is being deleted, Argo CD shows `Deleting the Coder AI provider`.
+
+Add the script as the `argocd-cm` key `resource.customizations.health.coder.com_CoderAIProvider` (`config/gitops/argocd-health-coderaiprovider.lua`):
+
+```lua
+-- Argo CD health check for CoderAIProvider (coder.com/v1alpha1).
+-- Install it as the argocd-cm key
+-- resource.customizations.health.coder.com_CoderAIProvider.
+-- docs/how-to/gitops.md copies this file. A test keeps the copy equal.
+local hs = { status = "Progressing", message = "Waiting for the controller" }
+if obj.metadata.deletionTimestamp ~= nil then
+  -- Argo CD shows deletionMessage, not message, for a resource being deleted.
+  hs.deletionMessage = "Deleting the Coder AI provider"
+  hs.message = hs.deletionMessage
+  return hs
+end
+local st = obj.status
+if st == nil or st.observedGeneration == nil or st.observedGeneration ~= obj.metadata.generation then
+  return hs
+end
+for _, c in ipairs(st.conditions or {}) do
+  if c.type == "Ready" and c.reason ~= nil and c.message ~= nil then
+    hs.message = c.reason .. ": " .. c.message
+  end
+end
+for _, c in ipairs(st.conditions or {}) do
+  if c.type == "Ready" and c.status == "True" then
+    hs.status = "Healthy"
+  elseif c.type == "Stalled" and c.status == "True" then
+    hs.status = "Degraded"
+  end
+end
+return hs
+```
+
+Add this entry (`config/gitops/flux-healthcheck-coderaiprovider.yaml`) to `spec.healthCheckExprs` of a Flux v2.5+ Kustomization with `spec.wait: true`:
+
+```yaml
+# Flux health check expressions for CoderAIProvider (coder.com/v1alpha1).
+# Add this entry to spec.healthCheckExprs of a Flux v2.5+ Kustomization
+# with spec.wait: true.
+# docs/how-to/gitops.md copies this file. A test keeps the copy equal.
+- apiVersion: coder.com/v1alpha1
+  kind: CoderAIProvider
+  inProgress: "!has(status.observedGeneration) || status.observedGeneration != metadata.generation || !has(status.conditions) || status.conditions.exists(c, c.type == 'Reconciling' && c.status == 'True')"
+  failed: "status.conditions.exists(c, c.type == 'Stalled' && c.status == 'True')"
+  current: "status.conditions.exists(c, c.type == 'Ready' && c.status == 'True')"
+```
 
 ## What CI covers
 
