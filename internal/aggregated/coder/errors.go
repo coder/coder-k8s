@@ -171,7 +171,8 @@ func UncertainWriteError(write Write, resource schema.GroupResource, name, reaso
 
 // notSent reports whether err proves that the request did not reach Coder: the connection to
 // Coder (or to the proxy in front of it) failed, the TLS handshake failed, or the client refused
-// a request or a redirect to another origin. A redirect answer does not apply a write.
+// a request to another origin. A refused redirect is not in this list: the server that answered
+// with the redirect got the write.
 func notSent(err error) bool {
 	var opErr *net.OpError
 	if errors.As(err, &opErr) && (opErr.Op == "dial" || opErr.Op == "proxyconnect") {
@@ -179,8 +180,7 @@ func notSent(err error) bool {
 	}
 	var certErr *tls.CertificateVerificationError
 	var recordErr tls.RecordHeaderError
-	return errors.As(err, &certErr) || errors.As(err, &recordErr) ||
-		errors.Is(err, sameorigin.ErrCrossOrigin) || errors.Is(err, sameorigin.ErrCrossOriginRequest)
+	return errors.As(err, &certErr) || errors.As(err, &recordErr) || errors.Is(err, sameorigin.ErrCrossOriginRequest)
 }
 
 // coderErrorMessage returns Coder's message for a 4xx answer. Without one, it returns a fixed

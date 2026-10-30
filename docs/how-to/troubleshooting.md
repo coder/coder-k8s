@@ -59,7 +59,7 @@ kubectl get deploy,svc -n <namespace>
 
 Coder answered an operator call with a redirect to another origin. The operator does not follow such redirects, so that the operator token stays on the control plane origin. The usual cause is `CODER_REDIRECT_TO_ACCESS_URL=true` in `spec.extraEnv` of the `CoderControlPlane`. Remove it, and redirect browsers from HTTP to HTTPS in your Ingress, Gateway or load balancer instead. See [Redirects to another origin](deploy-controller.md#redirects-to-another-origin).
 
-Most aggregated API calls then answer the caller with a `500` that says `the Coder API could not be reached`. The `coder-errors` line in the aggregated API server log shows the refusal. When Coder or a proxy redirects only the websocket request of the workspace build log stream (`coderworkspaces/log?follow=true`), that line shows `refusing request to a different origin than the coder URL` instead.
+Most aggregated API reads then answer the caller with a `500` that says `the Coder API could not be reached`. Writes answer with the uncertain `504`, because the server that sent the redirect got the write. Re-read the object before you retry. The `coder-errors` line in the aggregated API server log shows the refusal. When Coder or a proxy redirects only the websocket request of the workspace build log stream (`coderworkspaces/log?follow=true`), that line shows `refusing request to a different origin than the coder URL` instead.
 
 ## APIService is `False` / `Unavailable`
 
