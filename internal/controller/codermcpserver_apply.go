@@ -12,6 +12,8 @@ import (
 
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/credentialsecret"
@@ -53,7 +55,7 @@ func (r *CoderMCPServerReconciler) syncMCPServer(
 			"MCP server config %s was deleted in Coder. The controller does not create it again until the spec changes.", id), false, nil
 	case isCoderResourceNotFound(err):
 		server.Status.ConfigID, server.Status.Credentials = "", nil
-		r.sentCredentials.Delete(server.UID)
+		r.sentCredentials.Delete(client.ObjectKeyFromObject(server))
 		return nil, true, nil
 	case err != nil:
 		return mcpServerWait(mcpServerRetry, "CoderUnavailable", "get MCP server config %s: %s", id, coderErrorSummary(err)), false, nil
@@ -347,9 +349,9 @@ func mcpServerMismatch(auth coderv1alpha1.CoderMCPServerAuth, want codersdk.Upda
 // of the auth type must send them again.
 func (r *CoderMCPServerReconciler) rememberSentCredentials(server *coderv1alpha1.CoderMCPServer, sent []string, values map[string]credentialsecret.Value) {
 	sums := map[string][sha256.Size]byte{}
-	if old, ok := r.sentCredentials.Load(server.UID); ok {
+	if old, ok := r.loadSentCredentials(server); ok {
 		for _, c := range mcpServerCredentialRefs(server.Spec.Auth) {
-			if sum, ok := old.(map[string][sha256.Size]byte)[c.field]; ok {
+			if sum, ok := old[c.field]; ok {
 				sums[c.field] = sum
 			}
 		}
@@ -357,46 +359,70 @@ func (r *CoderMCPServerReconciler) rememberSentCredentials(server *coderv1alpha1
 	for _, field := range sent {
 		sums[field] = sha256.Sum256([]byte(values[field].Reveal()))
 	}
-	r.sentCredentials.Store(server.UID, sums)
+	r.storeSentCredentials(server, sums)
 }
 
 // pruneSentCredentials drops the hashes of fields that the spec's auth type
 // does not use.
 func (r *CoderMCPServerReconciler) pruneSentCredentials(server *coderv1alpha1.CoderMCPServer) {
-	old, ok := r.sentCredentials.Load(server.UID)
+	old, ok := r.loadSentCredentials(server)
 	if !ok {
 		return
 	}
 	sums := map[string][sha256.Size]byte{}
 	for _, c := range mcpServerCredentialRefs(server.Spec.Auth) {
-		if sum, ok := old.(map[string][sha256.Size]byte)[c.field]; ok {
+		if sum, ok := old[c.field]; ok {
 			sums[c.field] = sum
 		}
 	}
-	r.sentCredentials.Store(server.UID, sums)
+	r.storeSentCredentials(server, sums)
 }
 
 // forgetSentCredentials drops the hashes of fields before a write that sends
 // them.
 func (r *CoderMCPServerReconciler) forgetSentCredentials(server *coderv1alpha1.CoderMCPServer, fields []string) {
-	old, ok := r.sentCredentials.Load(server.UID)
+	old, ok := r.loadSentCredentials(server)
 	if !ok || len(fields) == 0 {
 		return
 	}
-	sums := maps.Clone(old.(map[string][sha256.Size]byte))
+	sums := maps.Clone(old)
 	for _, field := range fields {
 		delete(sums, field)
 	}
-	r.sentCredentials.Store(server.UID, sums)
+	r.storeSentCredentials(server, sums)
 }
 
 func (r *CoderMCPServerReconciler) sentCredentialMatches(server *coderv1alpha1.CoderMCPServer, field string, value credentialsecret.Value) bool {
-	sums, ok := r.sentCredentials.Load(server.UID)
+	sums, ok := r.loadSentCredentials(server)
 	if !ok {
 		return false
 	}
-	sum, ok := sums.(map[string][sha256.Size]byte)[field]
+	sum, ok := sums[field]
 	return ok && sum == sha256.Sum256([]byte(value.Reveal()))
+}
+
+// sentCredentialSums is the sentCredentials entry of one object.
+type sentCredentialSums struct {
+	uid  types.UID
+	sums map[string][sha256.Size]byte
+}
+
+// loadSentCredentials returns the hashes of server, never those of an
+// earlier object with the same name.
+func (r *CoderMCPServerReconciler) loadSentCredentials(server *coderv1alpha1.CoderMCPServer) (map[string][sha256.Size]byte, bool) {
+	v, ok := r.sentCredentials.Load(client.ObjectKeyFromObject(server))
+	if !ok {
+		return nil, false
+	}
+	entry := v.(sentCredentialSums)
+	if entry.uid != server.UID {
+		return nil, false
+	}
+	return entry.sums, true
+}
+
+func (r *CoderMCPServerReconciler) storeSentCredentials(server *coderv1alpha1.CoderMCPServer, sums map[string][sha256.Size]byte) {
+	r.sentCredentials.Store(client.ObjectKeyFromObject(server), sentCredentialSums{uid: server.UID, sums: sums})
 }
 
 // mcpServerReady reports a config that matches the spec.

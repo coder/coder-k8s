@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -115,6 +116,28 @@ func TestCoderMCPServerDeleteAnswers(t *testing.T) {
 	}
 }
 
+// #378: without operator access, a delete keeps the finalizer and waits with
+// the delete poll. It sends nothing to Coder.
+func TestCoderMCPServerDeleteWithoutOperatorAccess(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	got, _ := env.applied(ctx, t, nil)
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(env.controlPlane), env.controlPlane))
+	env.controlPlane.Status.OperatorAccessReady = false
+	require.NoError(t, k8sClient.Status().Update(ctx, env.controlPlane))
+	requests := env.fake.totalRequests()
+
+	kept, result := env.deleteMCPServer(ctx, t, got)
+	require.NotNil(t, kept)
+	require.Equal(t, []string{coderv1alpha1.CoderMCPServerCleanupFinalizer}, kept.Finalizers)
+	require.Contains(t, requireMCPServerStep(t, kept, false, "OperatorAccessNotReady"), "once it can call Coder")
+	require.Equal(t, 60*time.Second, result.RequeueAfter)
+	require.Equal(t, requests, env.fake.totalRequests(), "no Coder request")
+	require.Len(t, env.fake.mcpServers(), 1)
+}
+
 // Plan 4.10 item 2: with only a create marker, the slug read decides. A
 // config with this object's nonce is deleted. Someone else's config with the
 // slug is never touched. With no config, the controller waits until a late
@@ -137,19 +160,7 @@ func TestCoderMCPServerDeletePendingCreate(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
 			env := newMCPServerEnv(ctx, t, true)
-			env.keySecret(ctx, t, testMCPKey)
-			server := env.create(ctx, t, nil)
-			server, _ = env.reconcile(ctx, t, server)
-			for _, s := range env.fake.mcpServers() {
-				require.NoError(t, env.dashboard(t).DeleteMCPServerConfig(ctx, env.orgID, s.view.ID))
-			}
-			if tc.create != nil {
-				tc.create(ctx, t, env, server)
-			}
-			require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(server), server))
-			server.Status.ConfigID = ""
-			server.Status.CreateAttemptTime = &metav1.Time{Time: time.Now().Add(-max(tc.age, time.Second))}
-			require.NoError(t, k8sClient.Status().Update(ctx, server))
+			server := env.pendingCreate(ctx, t, max(tc.age, time.Second), tc.create)
 			before, deletes := len(env.fake.mcpServers()), env.fake.requestCount(routeDeleteMCPServer)
 
 			kept, result := env.deleteMCPServer(ctx, t, server)
@@ -163,6 +174,83 @@ func TestCoderMCPServerDeletePendingCreate(t *testing.T) {
 			requireMCPServerStep(t, kept, false, "ConfirmingCreate")
 			require.Positive(t, result.RequeueAfter)
 			require.LessOrEqual(t, result.RequeueAfter, 2*time.Minute)
+		})
+	}
+}
+
+// pendingCreate returns an object with only a create marker of the given age.
+// Coder holds no config of it, except one that create adds.
+func (env mcpServerEnv) pendingCreate(
+	ctx context.Context, t *testing.T, age time.Duration, create func(context.Context, *testing.T, mcpServerEnv, *coderv1alpha1.CoderMCPServer),
+) *coderv1alpha1.CoderMCPServer {
+	t.Helper()
+	env.keySecret(ctx, t, testMCPKey)
+	server, _ := env.reconcile(ctx, t, env.create(ctx, t, nil))
+	for _, s := range env.fake.mcpServers() {
+		require.NoError(t, env.dashboard(t).DeleteMCPServerConfig(ctx, env.orgID, s.view.ID))
+	}
+	if create != nil {
+		create(ctx, t, env, server)
+	}
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(server), server))
+	server.Status.ConfigID = ""
+	server.Status.CreateAttemptTime = &metav1.Time{Time: time.Now().Add(-age)}
+	require.NoError(t, k8sClient.Status().Update(ctx, server))
+	return server
+}
+
+// #378: with only a create marker, the slug read decides, so its answer
+// does too. Coder's own 404 for the organization proves that no config of it
+// can be reached any more, and releases. Any other failed read, and a
+// missing config that the operator cannot prove absent because it is not a
+// site owner, keep the finalizer and retry with the delete poll.
+func TestCoderMCPServerDeletePendingCreateRead(t *testing.T) {
+	t.Parallel()
+	notSiteOwner := func(env mcpServerEnv) {
+		env.fake.updateUser(env.fake.operatorID, func(u *codersdk.User) {
+			u.Roles = []codersdk.SlimRole{{Name: codersdk.RoleOwner, OrganizationID: env.orgID.String()}}
+		})
+	}
+	listFails := func(fault fakeFault) func(mcpServerEnv) {
+		return func(env mcpServerEnv) { env.fake.failNext(routeMCPServers, fault) }
+	}
+	for _, tc := range []struct {
+		name    string
+		prepare func(mcpServerEnv)
+		noNonce bool // No config of this object in Coder.
+		release bool
+		reason  string
+		message string
+	}{
+		{name: "organization gone", release: true, noNonce: true, prepare: listFails(fakeFault{Status: http.StatusNotFound, Message: coderResourceNotFound})},
+		{name: "proxy 404", reason: "CoderUnavailable", prepare: listFails(notCoder404s["HTML page"])},
+		{name: "route not found", reason: "CoderUnavailable", prepare: listFails(notCoder404s["route not found"])},
+		{name: "list fails", reason: "CoderUnavailable", prepare: listFails(fakeFault{Status: http.StatusBadGateway})},
+		{name: "not a site owner", reason: "ConfirmingCreate", message: "not a site owner", prepare: notSiteOwner, noNonce: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			env := newMCPServerEnv(ctx, t, true)
+			create := createWithNonce
+			if tc.noNonce {
+				create = nil
+			}
+			server := env.pendingCreate(ctx, t, 3*time.Minute, create)
+			configs, deletes := len(env.fake.mcpServers()), env.fake.requestCount(routeDeleteMCPServer)
+			tc.prepare(env)
+
+			kept, result := env.deleteMCPServer(ctx, t, server)
+			require.Equal(t, deletes, env.fake.requestCount(routeDeleteMCPServer), "no DELETE")
+			if tc.release {
+				require.Nil(t, kept)
+				return
+			}
+			require.NotNil(t, kept)
+			require.Equal(t, []string{coderv1alpha1.CoderMCPServerCleanupFinalizer}, kept.Finalizers)
+			require.Contains(t, requireMCPServerStep(t, kept, false, tc.reason), tc.message)
+			require.Equal(t, 60*time.Second, result.RequeueAfter)
+			require.Len(t, env.fake.mcpServers(), configs, "nothing changed in Coder")
 		})
 	}
 }
@@ -267,6 +355,24 @@ func TestCoderMCPServerDeleteForgetsSentCredentials(t *testing.T) {
 	got, _ := env.applied(ctx, t, nil)
 	require.True(t, controller.HasSentCredentials(env.r, got.UID))
 	gone, _ := env.deleteMCPServer(ctx, t, got)
+	require.Nil(t, gone)
+	require.False(t, controller.HasSentCredentials(env.r, got.UID))
+}
+
+// #378: a finalizer that someone removes by hand skips the release, so the
+// reconcile that finds the object gone drops its credential hashes.
+func TestCoderMCPServerManualFinalizerRemovalForgetsSentCredentials(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	got, _ := env.applied(ctx, t, nil)
+	require.True(t, controller.HasSentCredentials(env.r, got.UID))
+	got.Finalizers = nil
+	require.NoError(t, k8sClient.Update(ctx, got))
+	require.NoError(t, k8sClient.Delete(ctx, got))
+
+	gone, _ := env.reconcileDeleting(ctx, t, got)
 	require.Nil(t, gone)
 	require.False(t, controller.HasSentCredentials(env.r, got.UID))
 }
