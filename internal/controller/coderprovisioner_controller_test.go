@@ -54,8 +54,12 @@ func createTestControlPlane(ctx context.Context, t *testing.T, namespace, name, 
 	if url != "" {
 		operatorSecretName := fmt.Sprintf("%s-operator-token", name)
 		operatorTokenSecret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: operatorSecretName, Namespace: namespace},
-			Type:       corev1.SecretTypeOpaque,
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            operatorSecretName,
+				Namespace:       namespace,
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(controlPlane, coderv1alpha1.GroupVersion.WithKind("CoderControlPlane"))},
+			},
+			Type: corev1.SecretTypeOpaque,
 			Data: map[string][]byte{
 				coderv1alpha1.DefaultTokenSecretKey: []byte("operator-session-token"),
 			},
@@ -1108,6 +1112,51 @@ func TestCoderProvisionerReconciler_ConditionsOnFailure(t *testing.T) {
 		operatorAccessCondition := findCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionOperatorAccessReady)
 		require.Equal(t, "OperatorTokenSecretRefInvalid", operatorAccessCondition.Reason)
 	})
+}
+
+// TestCoderProvisionerReconciler_ReplacedOperatorTokenSecret checks that a
+// provisioner does not send the value of an operator token Secret that the
+// control plane does not own, while the control plane status still names it.
+func TestCoderProvisionerReconciler_ReplacedOperatorTokenSecret(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	namespace := createTestNamespace(ctx, t, "coderprov-operator-token-replaced")
+	controlPlane := createTestControlPlane(ctx, t, namespace, "controlplane-operator-token-replaced", "https://coder.example.com")
+	secretName := controlPlane.Status.OperatorTokenSecretRef.Name
+	require.NoError(t, k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace}}))
+	replaced := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace},
+		Type:       corev1.SecretTypeOpaque,
+		Data:       map[string][]byte{coderv1alpha1.DefaultTokenSecretKey: []byte("foreign-token")},
+	}
+	require.NoError(t, k8sClient.Create(ctx, replaced))
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), replaced) })
+
+	provisioner := &coderv1alpha1.CoderProvisioner{
+		ObjectMeta: metav1.ObjectMeta{Name: "provisioner-operator-token-replaced", Namespace: namespace},
+		Spec:       coderv1alpha1.CoderProvisionerSpec{ControlPlaneRef: corev1.LocalObjectReference{Name: controlPlane.Name}},
+	}
+	require.NoError(t, k8sClient.Create(ctx, provisioner))
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), provisioner) })
+
+	bootstrapClient := &fakeBootstrapClient{}
+	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
+	request := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
+
+	reconcileProvisioner(ctx, t, reconciler, request)
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: request})
+	require.NoError(t, err)
+	require.Positive(t, result.RequeueAfter)
+	require.Zero(t, bootstrapClient.provisionerKeyCalls, "the provisioner must not call Coder with the replaced Secret's value")
+
+	reconciled := &coderv1alpha1.CoderProvisioner{}
+	require.NoError(t, k8sClient.Get(ctx, request, reconciled))
+	operatorAccessCondition := findCondition(t, reconciled.Status.Conditions, coderv1alpha1.CoderProvisionerConditionOperatorAccessReady)
+	require.Equal(t, metav1.ConditionFalse, operatorAccessCondition.Status)
+	require.Equal(t, "OperatorTokenSecretUnavailable", operatorAccessCondition.Reason)
+	require.Contains(t, operatorAccessCondition.Message, "not the controller owner")
+	require.NotContains(t, operatorAccessCondition.Message, "foreign-token")
 }
 
 func TestCoderProvisionerReconciler_OperatorTokenSecretRefEmptyKeyDefaults(t *testing.T) {
