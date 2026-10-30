@@ -129,10 +129,10 @@ func (r *CoderControlPlaneReconciler) revokeRecordedOperatorToken(
 
 // operatorTokenDatabaseHash returns the SHA-256 hex hash of postgresURL
 // without its password, or "" when postgresURL is neither a postgres:// or
-// postgresql:// URL nor a key=value connection string. A key=value string has
-// the hash of the postgres:// URL with the same parts. The password is left
-// out so that the status reveals nothing about it and a new password keeps the
-// hash.
+// postgresql:// URL nor a key=value connection string that keywordValueAsURL
+// accepts. A key=value string has the hash of the postgres:// URL with the
+// same parts. The password is left out so that the status reveals nothing
+// about it and a new password keeps the hash.
 func operatorTokenDatabaseHash(postgresURL string) string {
 	trimmed := strings.TrimSpace(postgresURL)
 	parsed, err := url.Parse(trimmed)
