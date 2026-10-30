@@ -109,6 +109,27 @@ coder_status() { # <path>: a GET without -f that prints the HTTP status; the bod
   curl -sS --max-time 30 -o "$WORK/coder-raw.json" -w '%{http_code}' -H @"$WORK/coder.hdr" "$CODER_URL$1"
 }
 CODER_NOT_FOUND="Resource not found or you do not have access to this resource" # Coder's own 404 message (#325)
+# coder_ensure <collection path> <key field> <key value> <what> <JSON body>: POSTs the body unless the collection holds an object
+# with that key, which a failed run leaves when it keeps the namespace (#390); prints the object.
+coder_ensure() {
+  local found
+  found=$(coder_api GET "$1" | jq -c --arg k "$2" --arg v "$3" '[.[] | select(.[$k] == $v)] | if length < 2 then .[0] else error("duplicate") end') ||
+    return 1
+  [[ $found == null ]] || { log "$4 $3 exists in Coder from an earlier run: reusing it" >&2 && printf '%s\n' "$found" && return 0; }
+  coder_api POST "$1" "$5"
+}
+# pod_logs <namespace> <selector> <file>: the log of every container of the non-terminating pods. After a restart it adds the log
+# of the previous container, so the checks also see the lines from before the restart (#156).
+pod_logs() {
+  local rows p c n
+  rows=$(k -n "$1" get pods -l "$2" -o json | jq -er '[.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name as $p |
+    .status.containerStatuses[]? | "\($p) \(.name) \(.restartCount)"] | if length > 0 then .[] else error("no containers") end') || return 1
+  : >"$3"
+  while read -r p c n; do
+    if ((n > 0)); then k -n "$1" logs "$p" -c "$c" --previous >>"$3" || return 1; fi
+    k -n "$1" logs "$p" -c "$c" >>"$3" || return 1
+  done <<<"$rows"
+}
 
 # build_done <name> <buildID> <status>: true once the build reached status; fails on terminal failure.
 build_done() {
@@ -596,7 +617,11 @@ new_key() { # <file>: 48 random hex characters
 key_secret() { # <create|replace> <name> <key file> <labels JSON>: an Opaque Secret for $AI_ORIGIN that holds the key file
   jq -n --arg n "$2" --arg ns "$NS" --rawfile v "$WORK/$3" --argjson l "$4" --arg o "$AI_ORIGIN" '{apiVersion: "v1", kind: "Secret",
     metadata: {name: $n, namespace: $ns, labels: $l, annotations: {"coder.com/credential-destinations": $o}}, type: "Opaque",
-    data: {"api-key": ($v | @base64)}}' >"$WORK/secret-$2.json" && k "$1" -f "$WORK/secret-$2.json" >/dev/null
+    data: {"api-key": ($v | @base64)}}' >"$WORK/secret-$2.json" || return 1
+  k "$1" -f "$WORK/secret-$2.json" >/dev/null 2>"$WORK/secret.err" && return 0
+  if [[ $1 != create ]] || ! grep -q '(AlreadyExists)' "$WORK/secret.err"; then cat "$WORK/secret.err" >&2 && return 1; fi
+  log "Secret $2 exists from an earlier run: replacing it" # a failed run keeps its Secrets in a kept namespace (#390)
+  k replace -f "$WORK/secret-$2.json" >/dev/null
 }
 ai_provider() { # <name> <Secret> <key> [baseURL]: kubectl apply of an openai-compat CoderAIProvider
   jq -n --arg n "$1" --arg ns "$NS" --arg s "$2" --arg k "$3" --arg u "${4:-$AI_ORIGIN/v1}" '{apiVersion: "coder.com/v1alpha1",
@@ -656,15 +681,16 @@ rv_recorded() { ai_state "$AI" && jq -e --arg rv "$SECRET_RV" '.status.credentia
 wait_until "AI provider $AI to record Secret resourceVersion $SECRET_RV" rv_recorded
 ai_matches ai-key-2 "E2E $AI" || fail "Coder provider $AI_ID lost the second key: $(ai_coder_seen)"
 [[ $AI_KEY_ID == "$ROTATED_KEY_ID" ]] || fail "a metadata-only Secret change sent a new key ($ROTATED_KEY_ID -> $AI_KEY_ID)"
-k -n "$OP_NS" logs deploy/coder-k8s >"$WORK/operator-ai.txt" || fail "cannot read the operator log"
+pod_logs "$OP_NS" "$OP_SELECTOR" "$WORK/operator-ai.txt" || fail "cannot read the operator log"
 LEAKS=$({ cat "$WORK/ai-key-1" && echo && cat "$WORK/ai-key-2"; } | grep -cFf - "$WORK/operator-ai.txt" || true)
 [[ $LEAKS == 0 ]] || fail "the operator log holds an AI provider key ($LEAKS lines)"
 phase ai-rotation
 
 step "CoderAIProvider refusals: an unlabeled Secret, the operator token, a foreign origin and a taken name write nothing to Coder (plan 8.2 P3)"
 T0=$SECONDS
-coder_api POST /api/v2/ai/providers "$(jq -nc --arg u "$AI_ORIGIN/v1" '{type: "openai-compat", name: "e2e-taken", base_url: $u, enabled: false}')" \
-  >/dev/null || fail "cannot create provider e2e-taken through the Coder API"
+coder_ensure /api/v2/ai/providers name e2e-taken "AI provider" \
+  "$(jq -nc --arg u "$AI_ORIGIN/v1" '{type: "openai-compat", name: "e2e-taken", base_url: $u, enabled: false}')" >/dev/null ||
+  fail "cannot create provider e2e-taken through the Coder API"
 new_key ai-key-3 || fail "cannot generate the third AI provider key"
 key_secret create e2e-ai-key-unlabeled ai-key-3 '{}' || fail "cannot create Secret e2e-ai-key-unlabeled"
 AI_BEFORE=$(ai_list) || fail "cannot list the Coder AI providers"
@@ -793,9 +819,10 @@ phase gw-secret-not-owned
 
 step "CoderAIGatewayKey leak check: no key-shaped value or Secret value in the operator log or the objects (plan 9.5)"
 T0=$SECONDS
-k -n "$OP_NS" logs deploy/coder-k8s >"$WORK/operator-gw.txt" || fail "cannot read the operator log"
+pod_logs "$OP_NS" "$OP_SELECTOR" "$WORK/operator-gw.txt" || fail "cannot read the operator log"
 k -n "$NS" get coderaigatewaykey e2e-gw-off e2e-gw-hijack -o yaml >"$WORK/gw-objects.yaml" || fail "cannot read the AI Gateway key objects"
-# A key is a run of exactly 43 letters and digits. Only the log lines of the key controller are searched for one.
+# A key is a run of exactly 43 letters and digits. Only the log lines of the key controller are searched for one. Kind runs
+# Coder without a license, so no key exists and the shape check is a regression guard only. The exact-value check is the real test.
 LEAKS=$({ grep -i coderaigatewaykey "$WORK/operator-gw.txt" || true; cat "$WORK/gw-objects.yaml"; } |
   grep -cE '(^|[^A-Za-z0-9])[A-Za-z0-9]{43}([^A-Za-z0-9]|$)' || true)
 LEAKS=$((LEAKS + $(cat "$WORK/operator-gw.txt" "$WORK/gw-objects.yaml" | grep -cFf "$WORK/ai-key-gw" || true)))
@@ -816,6 +843,7 @@ phase gw-delete
 # holds only SHA-256 hashes of the headers. Keys are synthetic and stay in 0600 files: never argv or output.
 MCP=e2e-mcp MCP_SECRET=e2e-mcp-key MCP_STUB_IMAGE=${E2E_MCP_STUB_IMAGE:-e2e.local/mcpstub:e2e}
 MCP_HOST=mcp-stub.$NS.svc:8080 MCP_HOST2=mcp-stub-2.$NS.svc:8080 MCPS=/api/v2/organizations/$ORG/mcp-servers
+CODER_SELECTOR=app.kubernetes.io/name=coder-control-plane,app.kubernetes.io/instance=coder # the Coder pods of codercontrolplane coder
 MCP_SEEN="" MCP_S="" MCP_OFF=0 LLM_OFF=0
 mcp_server() { # <name> <Secret> <key> [url] [spec JSON]: kubectl apply of an api_key CoderMCPServer (slug = name) that Everyone can read
   local x=${5:-}
@@ -895,9 +923,10 @@ jq -n --arg ns "$NS" --arg i "$MCP_STUB_IMAGE" '{apiVersion: "v1", kind: "List",
 apply_manifest "$WORK/stub-mcp.json"
 stub_ready() { k -n "$NS" get deploy mcp-stub -o json | jq -e '.status.readyReplicas == 1' >/dev/null; }
 wait_until "deploy/mcp-stub Ready" stub_ready
-PROVIDER_ID=$(coder_api POST /api/v2/ai/providers "$(jq -nc --arg u "http://$MCP_HOST/v1" '{type: "openai-compat", name: "e2e-mcp-llm",
-  display_name: "E2E MCP stub", enabled: true, base_url: $u, api_keys: ["e2e-stub-llm-key"]}')" | jq -er '.id') ||
-  fail "cannot create the stub LLM provider through the Coder API"
+PROVIDER_ID=$(coder_ensure /api/v2/ai/providers name e2e-mcp-llm "AI provider" "$(jq -nc --arg u "http://$MCP_HOST/v1" '{type: "openai-compat",
+  name: "e2e-mcp-llm", display_name: "E2E MCP stub", enabled: true, base_url: $u, api_keys: ["e2e-stub-llm-key"]}')" |
+  jq -er --arg u "http://$MCP_HOST/v1" 'select(.enabled and .base_url == $u) | .id') ||
+  fail "cannot create the stub LLM provider e2e-mcp-llm (enabled, base URL http://$MCP_HOST/v1) through the Coder API"
 MODEL_ID=$(coder_api POST "/api/v2/organizations/$ORG/chats/models" "$(jq -nc --arg p "$PROVIDER_ID" '{ai_provider_id: $p, model: "stub-model",
   context_limit: 100000, display_name: "E2E stub model", enabled: true, is_default: true}')" | jq -er '.id') || fail "cannot create the stub chat model"
 # The chats run as the tester, an organization member with a password login: the operator user does not run chats.
@@ -930,9 +959,10 @@ jq -e --arg s "$MCP" --arg u "http://$MCP_HOST/mcp" '.slug == $s and .url == $u 
   "$WORK/mcp-coder.json" >/dev/null || fail "Coder config $MCP_ID does not match the spec of $MCP: $(mcp_seen)"
 ACL=$(mcp_acl) || fail "cannot read the ACL of MCP server config $MCP_ID"
 [[ $ACL == '{"users":[],"groups":[{"name":"Everyone","role":"read"}]}' ]] || fail "the ACL of $MCP is not Everyone read only: $ACL"
-k -n "$OP_NS" logs deploy/coder-k8s >"$WORK/operator-mcp.txt" || fail "cannot read the operator log"
-LEAKS=$(cat "$WORK/mcp-$MCP.state.json" "$WORK/operator-mcp.txt" | grep -cFf "$WORK/ai-key-mcp-1" || true)
-[[ $LEAKS == 0 ]] || fail "CoderMCPServer $MCP or the operator log holds the MCP server key ($LEAKS lines)"
+pod_logs "$OP_NS" "$OP_SELECTOR" "$WORK/operator-mcp.txt" || fail "cannot read the operator log"
+pod_logs "$NS" "$CODER_SELECTOR" "$WORK/coder-mcp.txt" || fail "cannot read the Coder log"
+LEAKS=$(cat "$WORK/mcp-$MCP.state.json" "$WORK/operator-mcp.txt" "$WORK/coder-mcp.txt" | grep -cFf "$WORK/ai-key-mcp-1" || true)
+[[ $LEAKS == 0 ]] || fail "CoderMCPServer $MCP, the operator log or the Coder log holds the MCP server key ($LEAKS lines)"
 phase mcp-apply
 
 step "CoderMCPServer chat: the tester's chat reaches the stub with the key; the LLM gets the stub tools (plan 7.3 P2)"
@@ -959,8 +989,8 @@ phase mcp-rotation
 
 step "CoderMCPServer refusals: an unlabeled Secret, the operator token, a foreign origin, a taken slug and force_on write nothing (plan 7.3 P4)"
 T0=$SECONDS
-coder_api POST "$MCPS" "$(jq -nc --arg u "http://$MCP_HOST/mcp" '{display_name: "Taken out of band", slug: "e2e-mcp-taken", url: $u,
-  transport: "streamable_http", availability: "default_off", enabled: false, auth_type: "none"}')" >/dev/null ||
+coder_ensure "$MCPS" slug e2e-mcp-taken "MCP server config" "$(jq -nc --arg u "http://$MCP_HOST/mcp" '{display_name: "Taken out of band",
+  slug: "e2e-mcp-taken", url: $u, transport: "streamable_http", availability: "default_off", enabled: false, auth_type: "none"}')" >/dev/null ||
   fail "cannot create MCP server config e2e-mcp-taken through the Coder API"
 new_key ai-key-mcp-3 || fail "cannot generate the third MCP server key"
 AI_ORIGIN=http://$MCP_HOST key_secret create e2e-mcp-unlabeled ai-key-mcp-3 '{}' || fail "cannot create Secret e2e-mcp-unlabeled"
@@ -1072,7 +1102,7 @@ ns_gone() { # the namespace disappears (#209), and with it the test, the provide
 }
 TIMEOUT=$NS_DELETE_TIMEOUT wait_until "test, provider, control plane, and namespace $NS deleted (ControlPlaneGone release)" ns_gone
 NS_DELETE_SECONDS=$((SECONDS - T0))
-k -n "$OP_NS" logs deploy/coder-k8s >"$WORK/operator-ns.txt" || fail "cannot read the operator log after the namespace deletion"
+pod_logs "$OP_NS" "$OP_SELECTOR" "$WORK/operator-ns.txt" || fail "cannot read the operator log after the namespace deletion"
 grep -F 'Releasing the finalizer without a delete in Coder' "$WORK/operator-ns.txt" | grep -F '"ControlPlaneGone"' | grep -qF '"e2e-ns-keep"' ||
   fail "the operator log has no ControlPlaneGone release of AI provider e2e-ns-keep (plan 8.2 P7)"
 grep -F 'Releasing the finalizer without a delete in Coder: the MCP server config' "$WORK/operator-ns.txt" | grep -F '"ControlPlaneGone"' |

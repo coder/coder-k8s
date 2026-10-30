@@ -21,13 +21,14 @@ cat >"$STUBS/kubectl" <<'STUB'
 set -euo pipefail
 S=$STUB_STATE
 echo "kubectl $*" >>"$S/calls.log"
-raw="" file="" patch="" all=$* pos=()
+raw="" file="" patch="" sel="" all=$* pos=()
 while (($#)); do
   case $1 in
     --raw) raw=$2; shift 2 ;;
     -f) file=$2; shift 2 ;;
     -p) patch=$2; shift 2 ;;
-    -n | -o | -l | -c) shift 2 ;;
+    -l) sel=$2; shift 2 ;;
+    -n | -o | -c) shift 2 ;;
     -v=* | --request-timeout=* | --type=* | --wait=*) shift ;;
     *) pos+=("$1"); shift ;;
   esac
@@ -105,6 +106,7 @@ mcp_get() { # <name>: one reconcile of a fake CoderMCPServer controller against 
   c=$S/mcpc/$(jq -r .spec.slug "$cr").json u=$(jq -r .spec.url "$cr") sf=$S/secrets/$(jq -r .spec.auth.apiKey.secretRef.name "$cr").json
   if [[ -f $S/ns-deleted ]]; then ai_json "$cr" ControlPlaneGone; [[ $SCENARIO == mcp-ns-stuck ]] || rm "$cr"; return; fi
   if [[ ,$(cat "$S/mcp-orgs" 2>/dev/null), != *,$(jq -r .spec.organization "$cr"),* ]]; then r=MCPServersNotAllowed
+    [[ $SCENARIO != mcp-unlisted-writes ]] || jq -n --arg s "$(jq -r .spec.slug "$cr")" '{id: ("mcp-" + $s), slug: $s, updated_at: 0}' >"$c"
   elif [[ $(jq -r '.spec.availability // ""' "$cr") == force_on ]]; then r=ForceOnNotAllowed
   elif [[ ! -f $sf ]]; then r=CredentialRefused # only the driver's Secrets are in the store; the operator token is refused
   elif [[ $(jq -r '.metadata.labels["coder.com/credential"] // ""' "$sf") != true ]]; then r=CredentialNotOptedIn
@@ -112,6 +114,7 @@ mcp_get() { # <name>: one reconcile of a fake CoderMCPServer controller against 
     r=CredentialDestinationNotAllowed && [[ $SCENARIO != mcp-wrong-reason ]] || r=CredentialMalformed
     [[ $SCENARIO != mcp-url-early || ! -f $c ]] || ai_set "$c" --arg u "$u" '.url = $u'
   elif [[ -f $c && $(jq -r '.status.configID // ""' "$cr") == "" ]]; then r=SlugConflict
+    [[ $SCENARIO != mcp-conflict-writes ]] || ai_set "$c" '.updated_at += 1'
   elif [[ $SCENARIO == mcp-never-ready ]]; then r=CoderUnavailable
   elif [[ -f $c && ($(jq .enabled "$c") == false || -f $S/mcp-killed) && $(jq .metadata.generation "$cr") == "$(jq .status.appliedGeneration "$cr")" ]]; then
     r=DisabledExternally && [[ $SCENARIO != mcp-kill-undone ]] || { ai_set "$c" '.enabled = true' && touch "$S/mcp-killed"; }
@@ -130,9 +133,12 @@ mcp_get() { # <name>: one reconcile of a fake CoderMCPServer controller against 
   fi
   ai_json "$cr" "$r"
 }
-ai_watch() { local f; for f in "$S"/cr/*.json; do [[ $(jq -r .spec.apiKeySecretRef.name "$f") != "$1" ]] || ai_get "$(basename "$f" .json)" >/dev/null; done; }
+ai_watch() { local f; for f in "$S"/cr/*.json; do [[ ! -f $f || $(jq -r .spec.apiKeySecretRef.name "$f") != "$1" ]] || ai_get "$(basename "$f" .json)" >/dev/null; done; }
 case "${pos[0]}:${pos[1]:-}" in
-  get:pods) cat "$S/pods.json" ;;
+  get:pods) # the operator pods, or the Coder pod of codercontrolplane coder
+    if [[ $sel == app.kubernetes.io/name=coder-control-plane,app.kubernetes.io/instance=coder ]]; then
+      echo '{"items":[{"metadata":{"name":"coder-5f7d8-x2x4q"},"status":{"containerStatuses":[{"name":"coder","restartCount":0}]}}]}'
+    else cat "$S/pods.json"; fi ;;
   get:coderaiprovider) ai_get "${pos[2]}" ;;
   get:codermcpserver) mcp_get "${pos[2]}" ;;
   patch:codermcpserver) ai_set "$S/mcp/${pos[2]}.json" --argjson p "$patch" '. * $p | .metadata.generation += 1'; echo patched ;;
@@ -217,13 +223,22 @@ case "${pos[0]}:${pos[1]:-}" in
     if [[ -f $f ]]; then cat "$f"; elif [[ ${pos[2]} == op-token ]]; then printf '{"data":{"token":"%s"}}\n' "$(printf secret-token-value | base64)"
     else err NotFound "secrets \"${pos[2]}\" not found"; fi ;;
   port-forward:*) echo $$ >"$S/pf.pid"; exec sleep 300 ;;
-  logs:*) echo "I1002 server started"; [[ $SCENARIO != ai-log-leak || ! -f $S/aisent-e2e-openai ]] || { cat "$S/aisent-e2e-openai"; echo; }
+  logs:coder-k8s-* | logs:deploy/coder-k8s) # the operator container restarted once: its earlier lines are only in the previous log (#156)
+    if [[ ${pos[2]:-} == --previous ]]; then
+      [[ ${pos[1]} == coder-k8s-new || ${pos[1]} == deploy/coder-k8s ]] || err BadRequest "previous terminated container \"manager\" in pod \"${pos[1]}\" not found"
+      [[ $SCENARIO != gw-log-leak || ! -f $S/secrets/e2e-gw-hijack.json ]] ||
+        echo "INFO stub {\"controller\": \"coderaigatewaykey\", \"value\": \"$(jq -r '.data["api-key"] | @base64d' "$S/secrets/e2e-gw-hijack.json")\"}"
+      [[ ! -f $S/ns-deleted || $SCENARIO == ai-ns-no-release ]] || echo 'INFO Releasing the finalizer without a delete in Coder: the provider can stay in the Coder database {"controller": "coderaiprovider", "reason": "ControlPlaneGone", "provider": "e2e-ns-keep"}'
+      [[ ! -f $S/ns-deleted || $SCENARIO == mcp-ns-no-release ]] || echo 'INFO Releasing the finalizer without a delete in Coder: the MCP server config can stay in the Coder database {"controller": "codermcpserver", "reason": "ControlPlaneGone", "slug": "e2e-mcp-keep"}'
+      exit 0
+    fi
+    echo "I1002 server started"; [[ $SCENARIO != ai-log-leak || ! -f $S/aisent-e2e-openai ]] || { cat "$S/aisent-e2e-openai"; echo; }
     [[ $SCENARIO != log-leak ]] || echo "2026-10-02T10:00:00Z [info] [provisioner|Planning infrastructure] Terraform 1.14.0 ok"
-    echo 'INFO Starting Controller {"controller": "coderaigatewaykey", "controllerKind": "CoderAIGatewayKey"}'
-    [[ $SCENARIO != gw-log-leak || ! -f $S/secrets/e2e-gw-hijack.json ]] ||
-      echo "INFO stub {\"controller\": \"coderaigatewaykey\", \"value\": \"$(jq -r '.data["api-key"] | @base64d' "$S/secrets/e2e-gw-hijack.json")\"}"
-    [[ ! -f $S/ns-deleted || $SCENARIO == ai-ns-no-release ]] || echo 'INFO Releasing the finalizer without a delete in Coder: the provider can stay in the Coder database {"controller": "coderaiprovider", "reason": "ControlPlaneGone", "provider": "e2e-ns-keep"}'
-    [[ ! -f $S/ns-deleted ]] || echo 'INFO Releasing the finalizer without a delete in Coder: the MCP server config can stay in the Coder database {"controller": "codermcpserver", "reason": "ControlPlaneGone", "slug": "e2e-mcp-keep"}' ;;
+    echo 'INFO Starting Controller {"controller": "coderaigatewaykey", "controllerKind": "CoderAIGatewayKey"}' ;;
+  logs:coder-5f7d8-x2x4q) # the Coder pod, never restarted (mcp-coder-log-leak: it logs the MCP server key)
+    [[ ${pos[2]:-} != --previous ]] || err BadRequest 'previous terminated container "coder" in pod "coder-5f7d8-x2x4q" not found'
+    echo "Started HTTP listener at http://0.0.0.0:8080"
+    [[ $SCENARIO != mcp-coder-log-leak || ! -f $S/mcpc/e2e-mcp.json.key ]] || { cat "$S/mcpc/e2e-mcp.json.key"; echo; } ;;
   get:)
     [[ $raw != /api/v1/namespaces/coder/services/mcp-stub:8080/proxy/report ]] || exec cat "$S/report.json"
     if [[ $raw == */codertemplatetests?watch=1* ]]; then # the e2e-ttl watch: passed (ttl-failed: failed), then deleted
@@ -269,8 +284,9 @@ case "${pos[0]}:${pos[1]:-}" in
   create:)
     if [[ ${file##*/} == tt-*.json ]]; then echo 0 >"$S/tt-$(jq -r .metadata.name "$file")"; echo created; exit 0; fi
     if [[ ${file##*/} == secret-*.json ]]; then # an AI provider key Secret; every key value is kept for the leak checks
+      n=$(jq -r .metadata.name "$file") && f=$S/secrets/$n.json && [[ ! -f $f ]] || err AlreadyExists "secrets \"$n\" already exists"
       jq -r '.data["api-key"] | @base64d' "$file" >>"$S/ai-keys.txt"
-      jq '.metadata.resourceVersion = "1"' "$file" >"$S/secrets/$(jq -r .metadata.name "$file").json"; echo created; exit 0
+      jq '.metadata.resourceVersion = "1"' "$file" >"$f"; echo created; exit 0
     fi
     if [[ $raw == */codertemplates/*/promote* ]]; then # promote-* scenarios break the activation
       read -r id av n st <"$S/template"; v=$(jq -r .spec.versionID "$file")
@@ -411,8 +427,9 @@ case "$method $path" in
   "POST /api/v2/organizations/coder/chats/models") echo '{"id":"model-1"}' ;;
   "POST /api/v2/users/login") echo '{"session_token":"member-token-value"}' ;;
   "GET /api/v2/organizations/coder/mcp-servers") f=("$S"/mcpc/*.json) && if [[ -e ${f[0]} ]]; then jq -s . "${f[@]}"; else echo '[]'; fi ;;
-  "POST /api/v2/organizations/coder/mcp-servers") # a config created out of band
-    jq '{id: ("mcp-" + .slug), slug, url, enabled, display_name, updated_at: 0, groups: ["Everyone"]}' <<<"$data" >"$S/mcpc/$(jq -r .slug <<<"$data").json" ;;
+  "POST /api/v2/organizations/coder/mcp-servers") # a config created out of band; the slug is unique in the organization
+    f=$S/mcpc/$(jq -r .slug <<<"$data").json && [[ ! -f $f ]] || { echo "curl: (22) The requested URL returned error: 409" >&2; exit 22; }
+    jq '{id: ("mcp-" + .slug), slug, url, enabled, display_name, updated_at: 0, groups: ["Everyone"]}' <<<"$data" >"$f" && cat "$f" ;;
   "GET /api/v2/organizations/coder/mcp-servers/mcp-"*/acl) f=${path%/acl} && jq '{users: [], groups: [.groups[] | {name: ., role: "read"}]}' "$S/mcpc/${f##*/mcp-}.json" ;;
   "GET /api/v2/organizations/coder/mcp-servers/mcp-"* | "PATCH /api/v2/organizations/coder/mcp-servers/mcp-"*) # a config by ID; PATCH bumps updated_at
     f=$S/mcpc/${path##*/mcp-}.json
@@ -476,7 +493,21 @@ exec "$REAL_JQ" "$@"
 STUB
 chmod +x "$STUBS"/*
 
-# run_scenario <name> [VAR=value...]: runs the driver against the stubs; sets T, S, RC, SECS.
+# rerun_seed: what a failed run leaves in a kept namespace, the out-of-band Coder objects and the driver's Secrets (#390)
+rerun_seed() {
+  local n
+  jq -n '{id: "aip-e2e-taken", name: "e2e-taken", type: "openai-compat", base_url: "http://ai-upstream.invalid:8080/v1", enabled: false,
+    display_name: "e2e-taken", api_keys: [], updated_at: "1"}' >"$S/aip/e2e-taken.json"
+  jq -n '{id: "aip-e2e-mcp-llm", name: "e2e-mcp-llm", type: "openai-compat", base_url: "http://mcp-stub.coder.svc:8080/v1", enabled: true,
+    display_name: "E2E MCP stub", api_keys: [{id: "key-old", masked: "e2e-...-key"}], updated_at: "1"}' >"$S/aip/e2e-mcp-llm.json"
+  jq -n '{id: "mcp-e2e-mcp-taken", slug: "e2e-mcp-taken", url: "http://mcp-stub.coder.svc:8080/mcp", enabled: false,
+    display_name: "Taken out of band", updated_at: 0, groups: ["Everyone"]}' >"$S/mcpc/e2e-mcp-taken.json"
+  for n in e2e-ai-key e2e-ai-key-unlabeled e2e-gw-hijack e2e-mcp-key e2e-mcp-unlabeled; do
+    jq -n --arg n "$n" '{metadata: {name: $n, resourceVersion: "7"}, data: {"api-key": ("stale" | @base64)}}' >"$S/secrets/$n.json"
+  done
+}
+# run_scenario <name> [VAR=value...]: runs the driver against the stubs; sets T, S, RC, SECS. SEED names a function that
+# adds state before the driver runs.
 # SCENARIO_TIMEOUT caps one driver run. The full lifecycle with the MCP phases takes about 70 s on a loaded host.
 SCENARIO_TIMEOUT=${E2E_TEST_SCENARIO_TIMEOUT_SECONDS:-180}
 run_scenario() {
@@ -484,12 +515,12 @@ run_scenario() {
   shift
   T=$BASE/$name S=$BASE/$name/state
   mkdir -p "$S/ws" "$S/secrets" "$S/cr" "$S/aip" "$S/gw" "$S/mcp" "$S/mcpc" && echo '{"mcp":[],"llm":[]}' >"$S/report.json"
-  : >"$S/calls.log" && : >"$S/events" && echo 0 >"$S/counter"
+  : >"$S/calls.log" && : >"$S/events" && echo 0 >"$S/counter" && "${SEED:-:}"
   jq -n '{items: [
     {metadata: {name: "coder-k8s-old", deletionTimestamp: "2026-09-23T00:00:00Z"}, spec: {containers: [{image: "ghcr.io/coder/coder-k8s:e2e"}]},
-      status: {podIP: "10.244.0.4", conditions: [{type: "Ready", status: "True"}], containerStatuses: [{imageID: "docker.io/library/import-2026-09-22@\($old)"}]}},
+      status: {podIP: "10.244.0.4", conditions: [{type: "Ready", status: "True"}], containerStatuses: [{name: "manager", restartCount: 0, imageID: "docker.io/library/import-2026-09-22@\($old)"}]}},
     {metadata: {name: "coder-k8s-new"}, spec: {containers: [{image: "ghcr.io/coder/coder-k8s:e2e"}]},
-      status: {podIP: "10.244.0.5", conditions: [{type: "Ready", status: "True"}], containerStatuses: [{imageID: "docker.io/library/import-2026-09-23@\($new)"}]}}]}' \
+      status: {podIP: "10.244.0.5", conditions: [{type: "Ready", status: "True"}], containerStatuses: [{name: "manager", restartCount: 1, imageID: "docker.io/library/import-2026-09-23@\($new)"}]}}]}' \
     --arg old "$OLD_DIGEST" --arg new "$NEW_DIGEST" >"$S/pods.json"
   jq -n --arg ip "$endpoint_ip" '{items: [{endpoints: [{addresses: [$ip], conditions: {ready: true}}]}]}' >"$S/endpoints.json"
   RC=0
@@ -611,6 +642,10 @@ check "AI Gateway key phases: NotAllowed, then LicenseRequired after the opt-in,
   [[ ! -f $S/gw/e2e-gw-off.json && ! -f $S/gw/e2e-gw-hijack.json && $(sed -n 4p "$S/ai-keys.txt" | tr -d "\n" | wc -c) == 43 ]] &&
   jq -e ".spec == {controlPlaneRef: {name: \"coder\"}, secretName: \"e2e-gw-hijack\"}" "$T/work/gw-e2e-gw-hijack.json" >/dev/null &&
   grep -q "curl -sS --max-time 30 -o .*/coder-raw.json .*/api/v2/ai-gateway/keys$" "$S/calls.log"'
+check "leak checks read the Coder pod log; operator log checks read the previous container log after a restart (#156)" eval '
+  grep -q "^kubectl --request-timeout=30s -n coder logs coder-5f7d8-x2x4q -c coder$" "$S/calls.log" &&
+  [[ $(grep -c "^kubectl --request-timeout=30s -n coder-system logs coder-k8s-new -c manager --previous$" "$S/calls.log") == 4 ]] &&
+  ! grep -q "logs coder-k8s-old" "$S/calls.log"'
 check "MCP server phases: each refusal reason seen; chats at both hosts and as the tester; e2e-mcp-taken kept; e2e-mcp deleted; e2e-mcp-keep released" \
   eval 'out_has "MCP server e2e-mcp-unlisted: False MCPServersNotAllowed" && out_has "MCP server e2e-mcp-unlabeled: False CredentialNotOptedIn" &&
   out_has "MCP server e2e-mcp-refused: False CredentialRefused" && out_has "MCP server e2e-mcp-origin: False CredentialDestinationNotAllowed" &&
@@ -620,6 +655,13 @@ check "MCP server phases: each refusal reason seen; chats at both hosts and as t
   [[ -f $S/mcpc/e2e-mcp-taken.json && ! -f $S/mcpc/e2e-mcp.json ]] && grep -q -- "-H @$T/work/member.hdr .*/api/v2/chats$" "$S/calls.log" &&
   jq -e ".spec.auth.apiKey.secretRef == {name: \"op-token\", key: \"token\"}" "$T/work/mcp-e2e-mcp-refused.json" >/dev/null &&
   grep -q "get --raw /api/v1/namespaces/coder/services/mcp-stub:8080/proxy/report" "$S/calls.log"'
+
+echo "TEST rerun-kept-namespace: a rerun reuses the Coder objects and replaces the Secrets that a failed run left (#390)"
+SEED=rerun_seed run_scenario rerun-kept-namespace; summary
+check "driver exits 0 and prints PASS" eval '[[ $RC -eq 0 ]] && out_has "PASS: workspace lifecycle"'
+check "reuses e2e-taken, e2e-mcp-llm and e2e-mcp-taken; replaces the five Secrets" eval 'out_has "AI provider e2e-taken exists in Coder from an earlier run: reusing it" &&
+  out_has "AI provider e2e-mcp-llm exists in Coder from an earlier run: reusing it" && out_has "MCP server config e2e-mcp-taken exists in Coder from an earlier run: reusing it" &&
+  [[ $(grep -c "from an earlier run: replacing it" "$T/out") == 5 ]] && ! grep -qE "^curl .* -X POST .*/api/v2/(ai/providers|organizations/coder/mcp-servers)$" "$S/calls.log"'
 
 echo "TEST image-mismatch: serving image differs from built image"
 run_scenario image-mismatch SERVING_ID="$OTHER"; summary
@@ -886,17 +928,21 @@ while IFS='|' read -r name msg muts; do
 done <<CASES
 mcp-licensed|Coder has a license: the MCP phases test unlicensed Coder|$GW
 mcp-never-ready|timed out after 3s waiting for: MCP server e2e-mcp Ready|$M1
-mcp-cr-leak|CoderMCPServer e2e-mcp or the operator log holds the MCP server key (1 lines)|$M1
+mcp-unlisted-writes|a CoderMCPServer of an unlisted organization wrote to Coder|$GW,kubectl apply,curl POST,curl POST,curl POST,kubectl patch,kubectl apply,kubectl delete
+mcp-cr-leak|CoderMCPServer e2e-mcp, the operator log or the Coder log holds the MCP server key (1 lines)|$M1
+mcp-coder-log-leak|CoderMCPServer e2e-mcp, the operator log or the Coder log holds the MCP server key (1 lines)|$M1
 mcp-hash-mismatch|the tools/list requests of the chat turn do not all reach mcp-stub.coder.svc:8080 with the key in ai-key-mcp-1: key hash no match|$M2
 mcp-tools-missing|the LLM did not get exactly the tools e2e-mcp__alpha, e2e-mcp__beta and e2e-mcp__Gamma: ["e2e-mcp__alpha","e2e-mcp__beta","read_file"]|$M2
 mcp-no-rotation|the tools/list requests of the chat turn do not all reach mcp-stub.coder.svc:8080 with the key in ai-key-mcp-2: key hash no match|$M2,kubectl replace,curl POST
 mcp-meta-resend|a metadata-only Secret change wrote to Coder: updated_at 2 -> 3|$M3
+mcp-conflict-writes|a refused CoderMCPServer wrote to Coder|$M4A
 mcp-wrong-reason|MCP server e2e-mcp-origin stalled with False CredentialMalformed stalled=True, want Ready=False CredentialDestinationNotAllowed|$M4A
 mcp-url-early|Coder config mcp-e2e-mcp changed before the Secret allowed the new origin|$M5
 mcp-acl-open|a tester chat that selects e2e-mcp with access.groups [] answered HTTP 201, want 400 invalid or disabled|$M6,curl POST
 mcp-kill-undone|the controller undid the disable of MCP server e2e-mcp|$M7
 mcp-delete-kept|MCP server config e2e-mcp (mcp-e2e-mcp) still exists in Coder after its object was deleted|$MCPM
 mcp-ns-stuck|timed out after 2s waiting for: test, provider, control plane, and namespace coder deleted|$NSM,kubectl patch,kubectl delete
+mcp-ns-no-release|the operator log has no ControlPlaneGone release of MCP server e2e-mcp-keep|$NSM,kubectl patch,kubectl delete
 CASES
 
 echo "TEST missing-built-id: BUILT_IMAGE_ID is not a sha256 ID"
