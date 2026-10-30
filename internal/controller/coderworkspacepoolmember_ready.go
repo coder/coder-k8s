@@ -139,7 +139,7 @@ func checkPoolMemberReadiness(
 	// last_used_at from this read is the baseline for the use check: a
 	// create that Coder serves from one of its prebuilds sets it at the claim.
 	member.Status.ReadyTime = &metav1.Time{Time: now}
-	member.Status.ReadyLastUsedAt = &metav1.Time{Time: workspace.LastUsedAt}
+	member.Status.ReadyLastUsedAt = &metav1.MicroTime{Time: workspace.LastUsedAt}
 	return coderWait("WorkspaceReady", "Every agent of workspace %s is ready.", name), nil
 }
 

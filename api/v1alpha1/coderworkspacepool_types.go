@@ -279,9 +279,9 @@ type CoderWorkspacePoolStatus struct {
 	// BoundReplicas is the number of members that claims hold.
 	// +optional
 	BoundReplicas int32 `json:"boundReplicas,omitempty"`
-	// UsedReplicas is the number of members that someone used without a
-	// claim. They no longer count toward the pool, and the controller never
-	// deletes their workspaces.
+	// UsedReplicas is the number of members that someone may have used
+	// without a claim. They no longer count toward the pool, and the
+	// controller never deletes their workspaces.
 	// +optional
 	UsedReplicas int32 `json:"usedReplicas,omitempty"`
 	// PendingClaims is the number of claims that wait for a workspace.
