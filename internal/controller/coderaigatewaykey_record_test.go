@@ -227,3 +227,21 @@ func TestCoderAIGatewayKeyRecordBackfill(t *testing.T) {
 	requireAIGatewayKeyReady(t, got)
 	require.Equal(t, want, env.aiGatewayKeyRecord(ctx, t, got.UID))
 }
+
+// #353 (#362 follow-up 9): when someone clears status.lastCreateAttemptTime
+// by hand, the controller counts the settle window from now (fail closed),
+// and the record gets that time too, so a sweep does not count from the
+// older one.
+func TestCoderAIGatewayKeyRecordAfterClearedCreateTime(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+	got, _ := env.reconcile(ctx, t, env.createKey(ctx, t, "coder", testAIGatewaySecret))
+	requireAIGatewayKeyReady(t, got)
+	env.clock.Step(time.Hour)
+	got.Status.LastCreateAttemptTime = nil
+	require.NoError(t, k8sClient.Status().Update(ctx, got))
+	got, _ = env.reconcile(ctx, t, got)
+	require.Equal(t, env.clock.Now().UTC(), got.Status.LastCreateAttemptTime.UTC())
+	require.Equal(t, env.clock.Now().UTC().Format(time.RFC3339), env.aiGatewayKeyRecord(ctx, t, got.UID)["createAttemptTime"])
+}
