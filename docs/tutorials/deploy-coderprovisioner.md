@@ -78,7 +78,9 @@ kubectl get secret coderprovisioner-sample-provisioner-key -n coder
 kubectl delete coderprovisioner coderprovisioner-sample -n coder
 ```
 
-The operator then deletes the provisioner key in Coder that this provisioner created. It finds the key by the organization and key IDs in `status.organizationID` and `status.provisionerKeyID`, not by the names in the spec. When the status has no key, for example because the provisioner never passed its checks, the operator removes its finalizer without a call to Coder.
+The operator then deletes the provisioner keys in Coder that this provisioner created. It finds the key in the provisioner key Secret by the organization and key IDs in `status.organizationID` and `status.provisionerKeyID`, not by the names in the spec. It also deletes each key in `status.pendingKeys`. These are keys that the operator created but did not write to the Secret, for example because a reconcile failed, and keys that a rotation replaced but that Coder did not confirm as deleted. Each entry names the Coder URL of the key and the control plane whose operator token the operator uses to delete it. An entry without `keyID` is deleted by name. When the status has no key, for example because the provisioner never passed its checks, the operator removes its finalizer without a call to Coder.
+
+The same records apply while the provisioner runs. When `spec.controlPlaneRef`, the control plane URL, the organization, the key name, or the tags change, the operator creates a new key and deletes the replaced keys, each at its own Coder URL. An entry stays in `status.pendingKeys` until Coder confirms that its key is gone.
 
 This cleanup is best-effort. When the operator cannot reach Coder, for example because the control plane or its operator token is gone, or when the delete call fails, the operator still removes its finalizer, and the key stays valid in Coder. Delete the provisioner while the control plane runs. If cleanup could not reach Coder, list the keys with `coder provisioner keys list --org <organization>`, and delete the key by hand with `coder provisioner keys delete <name> --org <organization>`.
 

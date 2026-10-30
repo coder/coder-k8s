@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -445,41 +446,68 @@ func TestDeleteProvisionerKey_Success(t *testing.T) {
 	require.Equal(t, 1, deleteCalls)
 }
 
+// coderNotFound is the body of the 404 that Coder answers for a missing
+// organization or provisioner key.
+var coderNotFound = map[string]any{"message": "Resource not found or you do not have access to this resource"}
+
 func TestDeleteProvisionerKey_NotFound(t *testing.T) {
 	t.Parallel()
 
 	const keyName = "already-deleted"
-	orgID := uuid.New()
-	now := time.Now().UTC().Format(time.RFC3339)
-	deleteCalls := 0
+	tests := []struct {
+		name        string
+		orgGone     bool
+		deleteBody  map[string]any
+		wantDeletes int
+		wantErr     bool
+	}{
+		{name: "key gone", deleteBody: coderNotFound, wantDeletes: 1},
+		{name: "organization gone", orgGone: true},
+		{name: "404 not from Coder", deleteBody: map[string]any{"message": "Route not found."}, wantDeletes: 1, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID := uuid.New()
+			now := time.Now().UTC().Format(time.RFC3339)
+			var mu sync.Mutex
+			deleteCalls := 0
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/organizations/default":
-			writeJSONResponse(t, w, http.StatusOK, map[string]any{
-				"id":         orgID.String(),
-				"name":       "default",
-				"created_at": now,
-				"updated_at": now,
-			})
-			return
-		case r.Method == http.MethodDelete && r.URL.Path == "/api/v2/organizations/"+orgID.String()+"/provisionerkeys/"+keyName:
-			deleteCalls++
-			writeJSONResponse(t, w, http.StatusNotFound, map[string]any{
-				"message": "provisioner key not found",
-			})
-			return
-		default:
-			writeJSONResponse(t, w, http.StatusNotFound, map[string]any{"message": "unexpected route"})
-			return
-		}
-	}))
-	defer server.Close()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v2/organizations/default":
+					if tt.orgGone {
+						writeJSONResponse(t, w, http.StatusNotFound, coderNotFound)
+						return
+					}
+					writeJSONResponse(t, w, http.StatusOK, map[string]any{
+						"id":         orgID.String(),
+						"name":       "default",
+						"created_at": now,
+						"updated_at": now,
+					})
+				case r.Method == http.MethodDelete && r.URL.Path == "/api/v2/organizations/"+orgID.String()+"/provisionerkeys/"+keyName:
+					mu.Lock()
+					deleteCalls++
+					mu.Unlock()
+					writeJSONResponse(t, w, http.StatusNotFound, tt.deleteBody)
+				default:
+					writeJSONResponse(t, w, http.StatusNotFound, map[string]any{"message": "unexpected route"})
+				}
+			}))
+			defer server.Close()
 
-	client := coderbootstrap.NewSDKClient()
-	err := client.DeleteProvisionerKey(context.Background(), server.URL, "session-token", "", keyName)
-	require.NoError(t, err)
-	require.Equal(t, 1, deleteCalls)
+			err := coderbootstrap.NewSDKClient().DeleteProvisionerKey(context.Background(), server.URL, "session-token", "", keyName)
+			if tt.wantErr {
+				require.Error(t, err, "only Coder's own 404 proves that the key is gone")
+			} else {
+				require.NoError(t, err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			require.Equal(t, tt.wantDeletes, deleteCalls)
+		})
+	}
 }
 
 func writeJSONResponse(t *testing.T, w http.ResponseWriter, statusCode int, payload any) {

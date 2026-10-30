@@ -25,12 +25,15 @@ func TestDeleteProvisionerKeyByID(t *testing.T) {
 	tests := []struct {
 		name        string
 		listStatus  int
+		listBody    map[string]any
 		listedID    uuid.UUID
 		wantDeletes []string
+		wantErr     bool
 	}{
 		{name: "recorded key exists", listStatus: http.StatusOK, listedID: recordedKeyID, wantDeletes: []string{keysPath + "/shared-name"}},
 		{name: "same name, other ID", listStatus: http.StatusOK, listedID: uuid.New()},
-		{name: "organization gone", listStatus: http.StatusNotFound},
+		{name: "organization gone", listStatus: http.StatusNotFound, listBody: coderNotFound},
+		{name: "404 not from Coder", listStatus: http.StatusNotFound, listBody: map[string]any{"message": "Route not found."}, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -43,7 +46,7 @@ func TestDeleteProvisionerKeyByID(t *testing.T) {
 				switch {
 				case r.Method == http.MethodGet && r.URL.Path == keysPath:
 					if tt.listStatus != http.StatusOK {
-						writeJSONResponse(t, w, tt.listStatus, map[string]any{"message": "not found"})
+						writeJSONResponse(t, w, tt.listStatus, tt.listBody)
 						return
 					}
 					writeJSONResponse(t, w, http.StatusOK, []map[string]any{{
@@ -71,7 +74,11 @@ func TestDeleteProvisionerKeyByID(t *testing.T) {
 				OrganizationID: orgID,
 				KeyID:          recordedKeyID,
 			})
-			require.NoError(t, err)
+			if tt.wantErr {
+				require.Error(t, err, "only Coder's own 404 proves that the key is gone")
+			} else {
+				require.NoError(t, err)
+			}
 			mu.Lock()
 			defer mu.Unlock()
 			require.Equal(t, tt.wantDeletes, deletes)

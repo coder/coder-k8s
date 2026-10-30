@@ -104,7 +104,7 @@ func (c *SDKClient) EnsureProvisionerKey(ctx context.Context, req EnsureProvisio
 }
 
 // DeleteProvisionerKey deletes a provisioner key by name.
-// A missing key is treated as success for idempotency.
+// A missing key or organization is treated as success for idempotency.
 func (c *SDKClient) DeleteProvisionerKey(ctx context.Context, coderURL, sessionToken, orgName, keyName string) error {
 	if err := validateProvisionerKeyInputs(coderURL, sessionToken, keyName); err != nil {
 		return err
@@ -121,6 +121,9 @@ func (c *SDKClient) DeleteProvisionerKey(ctx context.Context, coderURL, sessionT
 	}
 
 	organization, err := resolveOrganizationByName(ctx, client, organizationName)
+	if isNotFound(err) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -128,12 +131,7 @@ func (c *SDKClient) DeleteProvisionerKey(ctx context.Context, coderURL, sessionT
 	_, err = withOptionalRateLimitBypass(ctx, func(requestCtx context.Context) (struct{}, error) {
 		return struct{}{}, client.DeleteProvisionerKey(requestCtx, organization.ID, keyName)
 	})
-	if err == nil {
-		return nil
-	}
-
-	var apiErr *codersdk.Error
-	if errors.As(err, &apiErr) && apiErr.StatusCode() == http.StatusNotFound {
+	if err == nil || isNotFound(err) {
 		return nil
 	}
 
@@ -208,9 +206,15 @@ func (c *SDKClient) DeleteProvisionerKeyByID(ctx context.Context, req DeleteProv
 	return nil
 }
 
+// coderNotFoundMessage is the message of the 404 that Coder answers for a
+// missing organization or provisioner key (coderd/httpapi/httpapi.go:149 and
+// coderd/httpmw/provisionerkey.go:45-46 in v2.37.3). Another 404, for example
+// from a proxy or for a wrong base URL, does not prove that the key is gone.
+const coderNotFoundMessage = "Resource not found or you do not have access to this resource"
+
 func isNotFound(err error) bool {
 	var apiErr *codersdk.Error
-	return errors.As(err, &apiErr) && apiErr.StatusCode() == http.StatusNotFound
+	return errors.As(err, &apiErr) && apiErr.StatusCode() == http.StatusNotFound && apiErr.Message == coderNotFoundMessage
 }
 
 // Entitlements returns deployment entitlements for the given coderd instance.

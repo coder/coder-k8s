@@ -3,6 +3,7 @@ package controller_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -143,10 +144,10 @@ func TestCoderProvisionerKey_RecordedBeforePublished(t *testing.T) {
 
 			base, err := ctrlclient.NewWithWatch(cfg, ctrlclient.Options{Scheme: scheme})
 			require.NoError(t, err)
-			var statusAtSecretWrite string
+			var recordedAtSecretWrite bool
 			ordered := interceptor.NewClient(base, interceptor.Funcs{
 				SubResourceUpdate: func(ctx context.Context, c ctrlclient.Client, sub string, obj ctrlclient.Object, opts ...ctrlclient.SubResourceUpdateOption) error {
-					if p, ok := obj.(*coderv1alpha1.CoderProvisioner); ok && failStatus && p.Status.ProvisionerKeyID == created.KeyID.String() {
+					if p, ok := obj.(*coderv1alpha1.CoderProvisioner); ok && failStatus && pendingKeyRecorded(p, created.KeyID) {
 						return apierrors.NewConflict(coderv1alpha1.GroupVersion.WithResource("coderprovisioners").GroupResource(), p.Name, errors.New("injected"))
 					}
 					return c.SubResource(sub).Update(ctx, obj, opts...)
@@ -155,7 +156,7 @@ func TestCoderProvisionerKey_RecordedBeforePublished(t *testing.T) {
 					if s, ok := obj.(*corev1.Secret); ok && s.Name == keySecretName.Name {
 						latest := &coderv1alpha1.CoderProvisioner{}
 						require.NoError(t, c.Get(ctx, types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}, latest))
-						statusAtSecretWrite = latest.Status.ProvisionerKeyID
+						recordedAtSecretWrite = pendingKeyRecorded(latest, created.KeyID)
 					}
 					return c.Create(ctx, obj, opts...)
 				},
@@ -169,7 +170,7 @@ func TestCoderProvisionerKey_RecordedBeforePublished(t *testing.T) {
 
 			if !failStatus {
 				require.NoError(t, err)
-				require.Equal(t, created.KeyID.String(), statusAtSecretWrite, "status must record the key before the Secret holds it")
+				require.True(t, recordedAtSecretWrite, "status must record the key before the Secret holds it")
 				require.Empty(t, f.bootstrapClient.deleteKeyByIDRequests)
 				return
 			}
@@ -224,7 +225,7 @@ func TestCoderProvisionerKey_FailedSecretUpdateRotatesAgain(t *testing.T) {
 	_, err = f.reconciler.Reconcile(ctx, request)
 	require.Error(t, err, "the injected Secret update failure must fail the reconcile")
 	afterFailure := f.get(ctx, t, provisioner)
-	require.Equal(t, f.bootstrapClient.provisionerKeyResponses[1].KeyID.String(), afterFailure.Status.ProvisionerKeyID,
+	require.True(t, pendingKeyRecorded(afterFailure, f.bootstrapClient.provisionerKeyResponses[1].KeyID),
 		"status must record the new key before the Secret write")
 
 	_, err = f.reconciler.Reconcile(ctx, request)
@@ -234,44 +235,12 @@ func TestCoderProvisionerKey_FailedSecretUpdateRotatesAgain(t *testing.T) {
 		"the retry must rotate again and publish a live key")
 	final := f.get(ctx, t, provisioner)
 	require.Equal(t, f.bootstrapClient.provisionerKeyResponses[2].KeyID.String(), final.Status.ProvisionerKeyID)
+	require.Empty(t, final.Status.PendingKeys, "the published key moves to the applied status fields")
 }
 
-// TestCoderProvisionerDeletion_TriesCurrentControlPlaneURL checks the window
-// of a control plane URL change: status holds the new key's IDs but still the
-// old status.controlPlaneURL. Deletion must also try the current URL.
-func TestCoderProvisionerDeletion_TriesCurrentControlPlaneURL(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	f := newProvisionerCredentialFixture(ctx, t, "cprov-delete-urldrift")
-	provisioner := f.createProvisioner(ctx, t, nil, nil)
-	f.reconcile(ctx, t, provisioner)
-	f.reconcile(ctx, t, provisioner)
-
-	newKey := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: uuid.New(), KeyID: uuid.New()}
-	latest := f.get(ctx, t, provisioner)
-	require.Equal(t, testCoderOrigin, latest.Status.ControlPlaneURL)
-	latest.Status.OrganizationID = newKey.OrganizationID.String()
-	latest.Status.ProvisionerKeyID = newKey.KeyID.String()
-	require.NoError(t, k8sClient.Status().Update(ctx, latest))
-
-	const newURL = "https://coder-new.example.com"
-	controlPlane := &coderv1alpha1.CoderControlPlane{}
-	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: f.controlPlane.Name, Namespace: f.namespace}, controlPlane))
-	controlPlane.Status.URL = newURL
-	require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
-
-	require.NoError(t, k8sClient.Delete(ctx, f.get(ctx, t, provisioner)))
-	f.reconcile(ctx, t, provisioner)
-
-	require.Len(t, f.bootstrapClient.deleteKeyByIDRequests, 2)
-	// The recorded URL names an earlier endpoint and is used as recorded. The
-	// current endpoint is HTTPS, so the call uses the internal HTTP URL.
-	require.Equal(t, testCoderOrigin, f.bootstrapClient.deleteKeyByIDRequests[0].CoderURL)
-	require.Equal(t, internalCoderURL(f), f.bootstrapClient.deleteKeyByIDRequests[1].CoderURL)
-	for _, req := range f.bootstrapClient.deleteKeyByIDRequests {
-		require.Equal(t, newKey.OrganizationID, req.OrganizationID)
-		require.Equal(t, newKey.KeyID, req.KeyID)
-	}
-	require.Zero(t, f.bootstrapClient.deleteKeyCalls, "no name-based key deletion")
-	requireProvisionerGone(ctx, t, types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace})
+// pendingKeyRecorded reports whether status.pendingKeys records the key ID.
+func pendingKeyRecorded(provisioner *coderv1alpha1.CoderProvisioner, keyID uuid.UUID) bool {
+	return slices.ContainsFunc(provisioner.Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
+		return record.KeyID == keyID.String()
+	})
 }
