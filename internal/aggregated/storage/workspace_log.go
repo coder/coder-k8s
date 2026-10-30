@@ -92,11 +92,18 @@ func (s *WorkspaceLogStorage) Get(ctx context.Context, name string, opts runtime
 	if !ok || options == nil {
 		return nil, fmt.Errorf("assertion failed: unexpected log options type %T", opts)
 	}
+	var invalid field.ErrorList
 	if options.LimitBytes != nil && *options.LimitBytes < 1 {
+		invalid = append(invalid, field.Invalid(field.NewPath("limitBytes"), *options.LimitBytes, "must be greater than 0"))
+	}
+	if options.TailLines != nil && *options.TailLines < 0 {
+		invalid = append(invalid, field.Invalid(field.NewPath("tailLines"), *options.TailLines, "must be greater than or equal to 0"))
+	}
+	if len(invalid) > 0 {
 		return nil, apierrors.NewInvalid(
 			schema.GroupKind{Group: aggregationv1alpha1.SchemeGroupVersion.Group, Kind: "CoderWorkspaceLogOptions"},
 			name,
-			field.ErrorList{field.Invalid(field.NewPath("limitBytes"), *options.LimitBytes, "must be greater than 0")},
+			invalid,
 		)
 	}
 	namespace, err := requiredNamespaceFromRequestContext(ctx)
@@ -125,6 +132,7 @@ func (s *WorkspaceLogStorage) Get(ctx context.Context, name string, opts runtime
 		budget:        budget,
 		callerLimited: callerLimited,
 		follow:        options.Follow,
+		tailLines:     options.TailLines,
 	}, nil
 }
 
@@ -137,6 +145,7 @@ type workspaceLogStream struct {
 	budget        int64
 	callerLimited bool
 	follow        bool
+	tailLines     *int64 // nil: the whole log
 }
 
 var _ rest.ResourceStreamer = (*workspaceLogStream)(nil)
@@ -216,14 +225,15 @@ func (w *workspaceLogStream) InputStream(ctx context.Context, _, _ string) (io.R
 // logSnapshot is the rendered existing log of a build.
 type logSnapshot struct {
 	data     []byte
-	lastID   int64 // ID of the last rendered entry; follow continues after it
+	lastID   int64 // ID of the last entry read; follow continues after it
 	warnings []string
 	// truncated is set when the byte budget or the read cap ended the snapshot.
 	truncated bool
 }
 
 // readSnapshot renders the build's existing log entries, bounded by the stream's byte budget
-// and the read cap. It never puts log content into an error or warning.
+// and the read cap. With tailLines, it keeps only the last lines of what it read, then applies
+// the byte budget to them, as Pod logs do. It never puts log content into an error or warning.
 func (w *workspaceLogStream) readSnapshot(ctx context.Context, sdk *codersdk.Client, buildID uuid.UUID) (logSnapshot, error) {
 	resource := aggregationv1alpha1.Resource("coderworkspaces")
 	res, err := sdk.Request(ctx, http.MethodGet, fmt.Sprintf("/api/v2/workspacebuilds/%s/logs", buildID), nil)
@@ -275,6 +285,10 @@ func (w *workspaceLogStream) readSnapshot(ctx context.Context, sdk *codersdk.Cli
 	case open != json.Delim('['):
 		return logSnapshot{}, readFailed(errMalformedLog)
 	}
+	var tail *lineTail
+	if w.tailLines != nil {
+		tail = newLineTail(*w.tailLines, limits.maxBytes)
+	}
 	scanTruncated := false
 	for decoder.More() {
 		var entry codersdk.ProvisionerJobLog
@@ -287,6 +301,11 @@ func (w *workspaceLogStream) readSnapshot(ctx context.Context, sdk *codersdk.Cli
 			return logSnapshot{}, readFailed(err)
 		}
 		line := entry.Text() + "\n"
+		if tail != nil {
+			tail.push(line)
+			result.lastID = entry.ID
+			continue
+		}
 		remaining := w.budget - int64(out.Len())
 		if int64(len(line)) > remaining {
 			out.WriteString(runePrefix(line, remaining))
@@ -311,8 +330,24 @@ func (w *workspaceLogStream) readSnapshot(ctx context.Context, sdk *codersdk.Cli
 	}
 	if scanTruncated {
 		result.warnings = append(result.warnings, fmt.Sprintf("build log truncated: Coder returned more than the server read limit of %d bytes", limits.maxScanBytes))
+		if tail != nil {
+			result.warnings = append(result.warnings, "tailLines counts from the end of the part of the build log that the server read, not from the end of the log")
+		}
 	}
 	result.data, result.truncated = out.Bytes(), scanTruncated
+	if tail != nil {
+		// The tail holds at most maxBytes, so only a caller's limitBytes can cut it here.
+		data := tail.String()
+		if int64(len(data)) > w.budget {
+			data = runePrefix(data, w.budget)
+			result.truncated = true
+		}
+		if tail.cut {
+			result.warnings = append(result.warnings, fmt.Sprintf("build log tail truncated at the server limit of %d bytes", limits.maxBytes))
+			result.truncated = true
+		}
+		result.data = []byte(data)
+	}
 	return result, nil
 }
 

@@ -107,6 +107,17 @@ func (f *fakeCoder) touchTemplateWorkspaces(templateID uuid.UUID, at time.Time) 
 	}
 }
 
+// editTemplate models a template edit that writes no last_used_at, for
+// example a version promote: only updated_at moves.
+func (f *fakeCoder) editTemplate(templateID uuid.UUID, at time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	tpl, ok := f.templates[templateID]
+	require.True(f.t, ok, "assertion failed: unknown template %s", templateID)
+	tpl.UpdatedAt = at
+	f.templates[templateID] = tpl
+}
+
 // setDormant sets dormant_at and deleting_at. Leaving dormancy (nil
 // dormantAt) also sets last_used_at to now, like UpdateWorkspaceDormantDeletingAt.
 func (f *fakeCoder) setDormant(workspaceID uuid.UUID, dormantAt, deletingAt *time.Time) {
