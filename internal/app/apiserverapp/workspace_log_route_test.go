@@ -54,7 +54,18 @@ func TestWorkspaceLogRoute(t *testing.T) {
 	if status, body := f.server.do(t, cert, http.MethodGet, testLogPath+"?limitBytes=10", alice, ""); status != http.StatusOK || body != integrationMockRenderedLog()[:10] {
 		t.Fatalf("limitBytes=10: status=%d body=%q", status, body)
 	}
-	for query, want := range map[string]int{"?limitBytes=0": http.StatusUnprocessableEntity, "?limitBytes=abc": http.StatusBadRequest} {
+	lastLine := integrationMockBuildLog[len(integrationMockBuildLog)-1].Text() + "\n"
+	for query, want := range map[string]string{"?tailLines=1": lastLine, "?tailLines=1&limitBytes=10": lastLine[:10], "?tailLines=0": ""} {
+		if status, body := f.server.do(t, cert, http.MethodGet, testLogPath+query, alice, ""); status != http.StatusOK || body != want {
+			t.Errorf("%s: status=%d body=%q want=%q", query, status, body, want)
+		}
+	}
+	for query, want := range map[string]int{
+		"?limitBytes=0":   http.StatusUnprocessableEntity,
+		"?limitBytes=abc": http.StatusBadRequest,
+		"?tailLines=-1":   http.StatusUnprocessableEntity,
+		"?tailLines=abc":  http.StatusBadRequest,
+	} {
 		if status, body := f.server.do(t, cert, http.MethodGet, testLogPath+query, alice, ""); status != want {
 			t.Errorf("%s: status=%d want %d body=%.200s", query, status, want, body)
 		}

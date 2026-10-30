@@ -15,11 +15,14 @@ func TestCoderWorkspaceLogOptionsQueryDecoding(t *testing.T) {
 	codec := runtime.NewParameterCodec(scheme)
 
 	var opts CoderWorkspaceLogOptions
-	if err := codec.DecodeParameters(url.Values{"limitBytes": {"64"}, "unknown": {"x"}}, SchemeGroupVersion, &opts); err != nil {
+	if err := codec.DecodeParameters(url.Values{"limitBytes": {"64"}, "tailLines": {"5"}, "unknown": {"x"}}, SchemeGroupVersion, &opts); err != nil {
 		t.Fatal(err)
 	}
 	if opts.LimitBytes == nil || *opts.LimitBytes != 64 {
 		t.Fatalf("limitBytes: %v", opts.LimitBytes)
+	}
+	if opts.TailLines == nil || *opts.TailLines != 5 {
+		t.Fatalf("tailLines: %v", opts.TailLines)
 	}
 	for value, want := range map[string]bool{"": true, "true": true, "false": false} {
 		var follow CoderWorkspaceLogOptions
@@ -28,10 +31,12 @@ func TestCoderWorkspaceLogOptionsQueryDecoding(t *testing.T) {
 		}
 	}
 	var empty CoderWorkspaceLogOptions
-	if err := codec.DecodeParameters(url.Values{}, SchemeGroupVersion, &empty); err != nil || empty.LimitBytes != nil {
-		t.Fatalf("no parameters: err=%v limitBytes=%v", err, empty.LimitBytes)
+	if err := codec.DecodeParameters(url.Values{}, SchemeGroupVersion, &empty); err != nil || empty.LimitBytes != nil || empty.TailLines != nil {
+		t.Fatalf("no parameters: err=%v limitBytes=%v tailLines=%v", err, empty.LimitBytes, empty.TailLines)
 	}
-	if err := codec.DecodeParameters(url.Values{"limitBytes": {"abc"}}, SchemeGroupVersion, &empty); err == nil {
-		t.Fatal("a malformed limitBytes must fail to decode")
+	for _, name := range []string{"limitBytes", "tailLines"} {
+		if err := codec.DecodeParameters(url.Values{name: {"abc"}}, SchemeGroupVersion, &empty); err == nil {
+			t.Fatalf("a malformed %s must fail to decode", name)
+		}
 	}
 }
