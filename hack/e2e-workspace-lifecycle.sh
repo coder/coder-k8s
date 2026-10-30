@@ -927,8 +927,15 @@ PROVIDER_ID=$(coder_ensure /api/v2/ai/providers name e2e-mcp-llm "AI provider" "
   name: "e2e-mcp-llm", display_name: "E2E MCP stub", enabled: true, base_url: $u, api_keys: ["e2e-stub-llm-key"]}')" |
   jq -er --arg u "http://$MCP_HOST/v1" 'select(.enabled and .base_url == $u) | .id') ||
   fail "cannot create the stub LLM provider e2e-mcp-llm (enabled, base URL http://$MCP_HOST/v1) through the Coder API"
-MODEL_ID=$(coder_api POST "/api/v2/organizations/$ORG/chats/models" "$(jq -nc --arg p "$PROVIDER_ID" '{ai_provider_id: $p, model: "stub-model",
-  context_limit: 100000, display_name: "E2E stub model", enabled: true, is_default: true}')" | jq -er '.id') || fail "cannot create the stub chat model"
+MODEL_ID=$(coder_api GET "/api/v2/organizations/$ORG/chats/models" | jq -er --arg p "$PROVIDER_ID" '[.models[] |
+  select(.ai_provider_id == $p and .model == "stub-model")] | if length > 1 then error("duplicate") else .[0] // {} |
+  if . == {} or (.enabled and .is_default) then .id // "" else error("disabled or not the default") end end') ||
+  fail "cannot reuse the stub chat model stub-model of e2e-mcp-llm: it is duplicated, disabled or not the default"
+if [[ -n $MODEL_ID ]]; then log "chat model stub-model exists in Coder from an earlier run: reusing it" # (#390)
+else
+  MODEL_ID=$(coder_api POST "/api/v2/organizations/$ORG/chats/models" "$(jq -nc --arg p "$PROVIDER_ID" '{ai_provider_id: $p, model: "stub-model",
+    context_limit: 100000, display_name: "E2E stub model", enabled: true, is_default: true}')" | jq -er '.id') || fail "cannot create the stub chat model"
+fi
 # The chats run as the tester, an organization member with a password login: the operator user does not run chats.
 MEMBER_TOKEN=$(coder_api POST /api/v2/users/login "$(jq -nc --arg e "$TESTER@e2e.example.com" --arg p "$TESTER_PASSWORD" '{email: $e, password: $p}')" |
   jq -er '.session_token') || fail "cannot log in as the tester $TESTER"

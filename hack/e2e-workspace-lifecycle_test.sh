@@ -424,7 +424,9 @@ case "$method $path" in
     [[ -f $f ]] || { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
     [[ $method == GET ]] || { jq --argjson d "$data" '. + $d | .updated_at = "2"' "$f" >"$f.tmp" && mv "$f.tmp" "$f"; }
     cat "$f" ;;
-  "POST /api/v2/organizations/coder/chats/models") echo '{"id":"model-1"}' ;;
+  "GET /api/v2/organizations/coder/chats/models") jq -n --slurpfile m <(cat "$S/chat-models.json" 2>/dev/null) '{models: $m, providers: []}' ;;
+  "POST /api/v2/organizations/coder/chats/models")
+    jq -c '{id: "model-1", ai_provider_id, model, enabled, is_default}' <<<"$data" | tee -a "$S/chat-models.json" ;;
   "POST /api/v2/users/login") echo '{"session_token":"member-token-value"}' ;;
   "GET /api/v2/organizations/coder/mcp-servers") f=("$S"/mcpc/*.json) && if [[ -e ${f[0]} ]]; then jq -s . "${f[@]}"; else echo '[]'; fi ;;
   "POST /api/v2/organizations/coder/mcp-servers") # a config created out of band; the slug is unique in the organization
@@ -502,6 +504,7 @@ rerun_seed() {
     display_name: "E2E MCP stub", api_keys: [{id: "key-old", masked: "e2e-...-key"}], updated_at: "1"}' >"$S/aip/e2e-mcp-llm.json"
   jq -n '{id: "mcp-e2e-mcp-taken", slug: "e2e-mcp-taken", url: "http://mcp-stub.coder.svc:8080/mcp", enabled: false,
     display_name: "Taken out of band", updated_at: 0, groups: ["Everyone"]}' >"$S/mcpc/e2e-mcp-taken.json"
+  jq -nc '{id: "model-old", ai_provider_id: "aip-e2e-mcp-llm", model: "stub-model", enabled: true, is_default: true}' >"$S/chat-models.json"
   for n in e2e-ai-key e2e-ai-key-unlabeled e2e-gw-hijack e2e-mcp-key e2e-mcp-unlabeled; do
     jq -n --arg n "$n" '{metadata: {name: $n, resourceVersion: "7"}, data: {"api-key": ("stale" | @base64)}}' >"$S/secrets/$n.json"
   done
@@ -659,9 +662,11 @@ check "MCP server phases: each refusal reason seen; chats at both hosts and as t
 echo "TEST rerun-kept-namespace: a rerun reuses the Coder objects and replaces the Secrets that a failed run left (#390)"
 SEED=rerun_seed run_scenario rerun-kept-namespace; summary
 check "driver exits 0 and prints PASS" eval '[[ $RC -eq 0 ]] && out_has "PASS: workspace lifecycle"'
-check "reuses e2e-taken, e2e-mcp-llm and e2e-mcp-taken; replaces the five Secrets" eval 'out_has "AI provider e2e-taken exists in Coder from an earlier run: reusing it" &&
+check "reuses e2e-taken, e2e-mcp-llm, its chat model and e2e-mcp-taken; replaces the five Secrets" eval 'out_has "AI provider e2e-taken exists in Coder from an earlier run: reusing it" &&
   out_has "AI provider e2e-mcp-llm exists in Coder from an earlier run: reusing it" && out_has "MCP server config e2e-mcp-taken exists in Coder from an earlier run: reusing it" &&
-  [[ $(grep -c "from an earlier run: replacing it" "$T/out") == 5 ]] && ! grep -qE "^curl .* -X POST .*/api/v2/(ai/providers|organizations/coder/mcp-servers)$" "$S/calls.log"'
+  out_has "chat model stub-model exists in Coder from an earlier run: reusing it" && [[ $(wc -l <"$S/chat-models.json") == 1 ]] &&
+  [[ $(grep -c "from an earlier run: replacing it" "$T/out") == 5 ]] &&
+  ! grep -qE "^curl .* -X POST .*/api/v2/(ai/providers|organizations/coder/(mcp-servers|chats/models))$" "$S/calls.log"'
 
 echo "TEST image-mismatch: serving image differs from built image"
 run_scenario image-mismatch SERVING_ID="$OTHER"; summary
