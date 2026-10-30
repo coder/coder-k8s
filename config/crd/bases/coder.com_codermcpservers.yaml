@@ -24,7 +24,7 @@ spec:
     - jsonPath: .spec.auth.type
       name: Auth
       type: string
-    - jsonPath: .spec.enabled
+    - jsonPath: .status.enabled
       name: Enabled
       type: boolean
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
@@ -537,6 +537,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - field
                 x-kubernetes-list-type: map
+              enabled:
+                description: |-
+                  Enabled is the enabled flag of the Coder MCP server config at the
+                  controller's last read or update of it. It is empty while Coder holds no
+                  config of this object, or before the first read.
+                type: boolean
               observedGeneration:
                 description: ObservedGeneration is the generation the controller last
                   processed.
