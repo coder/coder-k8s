@@ -322,6 +322,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// applied key is kept, and bound to that control plane, only when Coder
 	// there lists it under its recorded IDs. An organization can be renamed
 	// and its name reused, so the lookup does not use the name.
+	appliedGone := false
 	if !replacing && status.ControlPlaneUID == "" {
 		var applied *codersdk.ProvisionerKey
 		if appliedOrgID, appliedKeyID, ok := parseKeyIDs(status.OrganizationID, status.ProvisionerKeyID); ok {
@@ -343,6 +344,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			appliedControlPlaneUID = string(controlPlane.UID)
 		} else {
 			replacing = true
+			appliedGone = true
 		}
 	}
 	// Coder allows one key per name in an organization. A key with the target
@@ -379,7 +381,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 	pending := slices.Clone(provisioner.Status.PendingKeys)
 	var replaced coderv1alpha1.CoderProvisionerKeyRecord
-	if driftDetected {
+	if replacing {
 		replaced, err = r.appliedKeyRecord(ctx, provisioner, organizationName, keyName)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -388,14 +390,14 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		if !sameKeySlot(replaced, target) && !slices.Contains(pending, replaced) {
-			pending = append(pending, replaced)
-		}
+	}
+	if driftDetected && !sameKeySlot(replaced, target) && !slices.Contains(pending, replaced) {
+		pending = append(pending, replaced)
 	}
 	if replacing {
-		// The newest target record with IDs stays until a create at the
-		// target proves its key gone. Coder allows one key per name, so each
-		// earlier create at the target already proved the older ones gone.
+		// The newest target record with IDs stays until the replacement below
+		// deletes its key by ID. Each earlier replacement at the target
+		// already deleted the older ones by ID before its create.
 		newest := -1
 		for i, record := range pending {
 			if sameKeySlot(record, target) && record.KeyID != "" {
@@ -438,14 +440,39 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		// Coder returns the plaintext of a key only in the create response,
 		// so a key recorded in status is replaced: deleted by its ID, then
-		// created again with the desired tags.
+		// created again with the desired tags. An organization can be renamed
+		// and its name reused, so the lookup by name above can miss a key that
+		// status records at the target. Such keys are deleted by their
+		// recorded IDs too, before the create overwrites or drops the record.
+		var replacedKeys []coderbootstrap.DeleteProvisionerKeyByIDRequest
 		if existingKey != nil {
-			if deleteErr := r.BootstrapClient.DeleteProvisionerKeyByID(ctx, coderbootstrap.DeleteProvisionerKeyByIDRequest{
+			replacedKeys = append(replacedKeys, coderbootstrap.DeleteProvisionerKeyByIDRequest{
 				CoderURL:       coderURL,
 				SessionToken:   sessionToken,
 				OrganizationID: existingKey.OrganizationID,
 				KeyID:          existingKey.ID,
-			}); deleteErr != nil {
+			})
+		}
+		recorded := slices.Clone(provisioner.Status.PendingKeys)
+		if !appliedGone {
+			recorded = append(recorded, replaced)
+		}
+		for _, record := range recorded {
+			recordOrgID, recordKeyID, ok := parseKeyIDs(record.OrganizationID, record.KeyID)
+			if !ok || !sameKeySlot(record, target) || slices.ContainsFunc(replacedKeys, func(req coderbootstrap.DeleteProvisionerKeyByIDRequest) bool {
+				return req.KeyID == recordKeyID
+			}) {
+				continue
+			}
+			replacedKeys = append(replacedKeys, coderbootstrap.DeleteProvisionerKeyByIDRequest{
+				CoderURL:       coderURL,
+				SessionToken:   sessionToken,
+				OrganizationID: recordOrgID,
+				KeyID:          recordKeyID,
+			})
+		}
+		for _, replacedKey := range replacedKeys {
+			if deleteErr := r.BootstrapClient.DeleteProvisionerKeyByID(ctx, replacedKey); deleteErr != nil {
 				setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
 					metav1.ConditionFalse, "ProvisionerKeyFailed",
 					fmt.Sprintf("Failed to delete provisioner key %q to replace it", keyName))
@@ -553,10 +580,9 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, fmt.Errorf("assertion failed: key status snapshot must not be nil")
 	}
 	// The Secret holds the key at the target, so the applied fields take over
-	// its record. Coder allows one key per name, so the create also proved
-	// that the keys of the other target records are gone, and so did the
-	// delete of the key that the create replaced, wherever it was recorded.
-	// No other key is in the Secret now.
+	// its record. The replacement deleted the keys of the other target
+	// records by ID, and the key that the name lookup found, wherever it was
+	// recorded. No other key is in the Secret now.
 	provisioner.Status.PendingKeys = slices.DeleteFunc(provisioner.Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
 		return sameKeySlot(record, target) || (existingKey != nil && isKeyID(record.KeyID, existingKey.ID))
 	})
