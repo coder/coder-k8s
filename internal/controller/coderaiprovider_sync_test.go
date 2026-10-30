@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -656,4 +657,35 @@ func TestCoderAIProviderSyncUpdate404NotCoderRead(t *testing.T) {
 			require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider))
 		})
 	}
+}
+
+// #321: a key update interrupted before Coder commits leaves the resend
+// marker, but status.observedGeneration must not claim the edit before the
+// conditions describe it, or GitOps health checks report the old Ready.
+func TestCoderAIProviderInterruptedUpdateKeepsObservedGeneration(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, secret, provider := newReadyAIProvider(ctx, t)
+	readyGeneration := provider.Generation
+	provider = editSpec(ctx, t, provider, func(s *coderv1alpha1.CoderAIProviderSpec) { s.DisplayName = "OpenAI v2" })
+	setSecretValue(ctx, t, secret, testAIProviderKeyRotated)
+	env.fake.failNext(routeUpdateAIProvider, fakeFault{Hang: true})
+	short, cancel := context.WithTimeout(ctx, hangTimeout)
+	defer cancel()
+	_, err := env.r.Reconcile(short, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(provider)})
+	require.Error(t, err)
+
+	stored := &coderv1alpha1.CoderAIProvider{}
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(provider), stored))
+	require.NotNil(t, stored.Status.Credential.ResendAttemptTime, "the marker was written before the PATCH")
+	require.Equal(t, readyGeneration, stored.Status.ObservedGeneration, "the marker write does not observe the edit")
+	require.Equal(t, readyGeneration, meta.FindStatusCondition(stored.Status.Conditions, "Ready").ObservedGeneration)
+	coder, _ := env.fake.aiProvider("openai")
+	require.NotEqual(t, "OpenAI v2", coder.displayName)
+
+	got, _ := env.reconcile(ctx, t, stored)
+	requireAIProviderReady(t, got)
+	coder, _ = env.fake.aiProvider("openai")
+	require.Equal(t, "OpenAI v2", coder.displayName)
+	require.Equal(t, testAIProviderKeyRotated, coder.keys[0].plaintext)
 }

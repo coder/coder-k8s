@@ -28,6 +28,7 @@
 | `observedGeneration` | integer | ObservedGeneration is the generation the controller last processed. |
 | `appliedGeneration` | integer | AppliedGeneration is the last generation whose spec Coder fully holds. |
 | `providerID` | string | ProviderID is the Coder provider ID. |
+| `enabled` | boolean | Enabled is the enabled flag of the Coder provider at the controller's last read or update of it. It is empty while Coder holds no provider of this object, or before the first read. |
 | `createAttemptTime` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#time-v1-meta) | CreateAttemptTime is set before every provider create request. While it is set and ProviderID is empty, a create request can be in flight or already committed in Coder. |
 | `credential` | [CoderAIProviderCredentialStatus](#coderaiprovidercredentialstatus) | Credential records the Secret value last sent to Coder. |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#condition-v1-meta) array | Conditions are Ready, Reconciling, and Stalled. |

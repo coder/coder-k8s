@@ -3,6 +3,8 @@ package controller_test
 import (
 	"context"
 	"net/http"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -110,4 +112,33 @@ func TestCoderAIProviderPendingCreateBeforeEnvCheck(t *testing.T) {
 			require.Empty(t, got.Status.ProviderID)
 		})
 	}
+}
+
+// aiProviderSeedingFactsChecked lists the Coder versions whose source backs
+// the seeding facts in coderaiprovider_env.go. v2.37.8 has the same
+// codersdk/deployment.go, cli/server.go, codersdk/aiproviders_bedrock.go and
+// coderd/ai_providers_migrate.go as v2.37.3.
+var aiProviderSeedingFactsChecked = []string{"v2.37.3", "v2.37.8"}
+
+// #321: a Coder bump fails here until someone re-checks the seeding facts
+// against the new Coder source.
+func TestCoderAIProviderSeedingFactsMatchVendoredCoder(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile("../../vendor/modules.txt")
+	require.NoError(t, err)
+	var version string
+	for line := range strings.Lines(string(data)) {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[0] == "#" && fields[1] == "github.com/coder/coder/v2" {
+			require.Len(t, fields, 3, "assertion failed: a replaced Coder module needs a manual check of the seeding facts: %s", line)
+			version = fields[2]
+		}
+	}
+	require.NotEmpty(t, version, "assertion failed: vendor/modules.txt does not list github.com/coder/coder/v2")
+	require.Contains(t, aiProviderSeedingFactsChecked, version,
+		"The vendored Coder is %s, but the AI provider seeding facts in coderaiprovider_env.go were checked only at %v. "+
+			"Re-check in the Coder %s source which env variables, flags and config file (YAML) keys seed providers: "+
+			"codersdk/deployment.go, cli/server.go, codersdk/aiproviders_bedrock.go and coderd/ai_providers_migrate.go. "+
+			"Update the facts, their tests and docs/how-to/manage-ai-providers.md#seeding-limits, then add %s to aiProviderSeedingFactsChecked.",
+		version, aiProviderSeedingFactsChecked, version, version)
 }

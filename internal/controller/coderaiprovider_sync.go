@@ -50,6 +50,7 @@ func (r *CoderAIProviderReconciler) syncAIProvider(
 	if step := checkAIProviderAnswer(ctx, provider, found); step != nil {
 		return step, false, nil
 	}
+	provider.Status.Enabled = &found.Enabled
 
 	enabled := provider.Spec.Enabled == nil || *provider.Spec.Enabled
 	keys := found.APIKeys
@@ -61,8 +62,10 @@ func (r *CoderAIProviderReconciler) syncAIProvider(
 	// resend that committed without an answer. Such a key stalls too.
 	switch {
 	case applied && enabled && !found.Enabled:
+		// The credential kill switch keeps appliedGeneration too, so the
+		// controller itself can have disabled the provider.
 		return aiProviderStalled(aiProviderResync, "DisabledExternally",
-			"Provider %s was disabled in Coder. The controller does not enable it again until the spec changes.", provider.Name), false, nil
+			"Provider %s is disabled in Coder, by a Coder admin or by the controller's credential kill switch. The controller does not enable it again until the spec changes.", provider.Name), false, nil
 	case applied && !ownKey && resending:
 		return aiProviderStalled(aiProviderResync, "KeyChangedExternally",
 			"The key of provider %s in Coder is not the recorded key: it was changed in Coder, or a key resend committed without an answer. The controller does not send its key again until the spec changes.", provider.Name), false, nil
@@ -141,6 +144,7 @@ func (r *CoderAIProviderReconciler) syncAIProvider(
 	if step := checkAIProviderAnswer(ctx, provider, updated); step != nil {
 		return step, false, nil
 	}
+	provider.Status.Enabled = &updated.Enabled
 	if updated.DisplayName != cmp.Or(provider.Spec.DisplayName, provider.Name) || updated.Icon != provider.Spec.Icon ||
 		updated.Enabled != enabled || updated.BaseURL != provider.Spec.BaseURL {
 		return aiProviderStalled(aiProviderResync, "CoderAnswerMismatch",
@@ -168,6 +172,7 @@ func (r *CoderAIProviderReconciler) syncAIProvider(
 // providerGone handles a provider that is missing in Coder. After a full
 // apply it is a kill switch. Before one, the object creates it again.
 func (r *CoderAIProviderReconciler) providerGone(provider *coderv1alpha1.CoderAIProvider, applied bool) (*aiProviderStep, bool, error) {
+	provider.Status.Enabled = nil
 	if applied {
 		return aiProviderStalled(aiProviderResync, "DeletedExternally",
 			"Provider %s (ID %s) was deleted in Coder. The controller does not create it again until the spec changes.", provider.Name, provider.Status.ProviderID), false, nil

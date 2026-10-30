@@ -99,7 +99,9 @@ func TestCoderAIProviderDisablesWithoutConsent(t *testing.T) {
 			editSecret(ctx, t, secret, func(s *corev1.Secret) { s.Labels, s.Annotations = consented.Labels, consented.Annotations })
 			writes = env.writes()
 			got, _ = env.reconcile(ctx, t, got)
-			requireAIProviderStep(t, got, true, "DisabledExternally")
+			// #321: the controller disabled the provider, so the message
+			// names the kill switch, not only a Coder admin.
+			require.Contains(t, requireAIProviderStep(t, got, true, "DisabledExternally"), "by a Coder admin or by the controller's credential kill switch")
 			require.Equal(t, writes, env.writes())
 			stored, _ = env.fake.aiProvider("openai")
 			require.Equal(t, "sk-dashboard-0123456789abcdef", stored.keys[0].plaintext)

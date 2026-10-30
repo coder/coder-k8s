@@ -95,6 +95,11 @@ type CoderAIProviderStatus struct {
 	// ProviderID is the Coder provider ID.
 	// +optional
 	ProviderID string `json:"providerID,omitempty"`
+	// Enabled is the enabled flag of the Coder provider at the controller's
+	// last read or update of it. It is empty while Coder holds no provider of
+	// this object, or before the first read.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
 	// CreateAttemptTime is set before every provider create request. While it
 	// is set and ProviderID is empty, a create request can be in flight or
 	// already committed in Coder.
@@ -115,7 +120,7 @@ type CoderAIProviderStatus struct {
 // +kubebuilder:resource:path=coderaiproviders,scope=Namespaced
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.spec.type`
-// +kubebuilder:printcolumn:name="Enabled",type=boolean,JSONPath=`.spec.enabled`
+// +kubebuilder:printcolumn:name="Enabled",type=boolean,JSONPath=`.status.enabled`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63 && self.metadata.name.matches('^[a-z0-9]+(-[a-z0-9]+)*$')",message="metadata.name is the Coder provider name: at most 63 lowercase letters, digits, and single hyphens between them"

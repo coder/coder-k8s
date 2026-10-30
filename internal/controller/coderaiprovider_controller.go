@@ -347,8 +347,11 @@ func (r *CoderAIProviderReconciler) patchFinalizer(ctx context.Context, provider
 }
 
 // applyAIProviderStep sets the kstatus conditions for step. Messages are cut
-// to the CoderTemplateTest limit.
+// to the CoderTemplateTest limit. status.observedGeneration moves only here,
+// so a status write between two steps never claims a generation that the
+// conditions do not describe yet.
 func applyAIProviderStep(provider *coderv1alpha1.CoderAIProvider, step *aiProviderStep) {
+	provider.Status.ObservedGeneration = provider.Generation
 	message := truncateTemplateTestMessage(step.message)
 	ready, reconciling, stalled := metav1.ConditionFalse, metav1.ConditionTrue, metav1.ConditionFalse
 	switch {
@@ -373,7 +376,6 @@ func applyAIProviderStep(provider *coderv1alpha1.CoderAIProvider, step *aiProvid
 
 // writeStatus writes the status only when it changed.
 func (r *CoderAIProviderReconciler) writeStatus(ctx context.Context, provider *coderv1alpha1.CoderAIProvider, before *coderv1alpha1.CoderAIProviderStatus) error {
-	provider.Status.ObservedGeneration = provider.Generation
 	if equality.Semantic.DeepEqual(before, &provider.Status) {
 		return nil
 	}

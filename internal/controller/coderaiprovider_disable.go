@@ -55,6 +55,7 @@ func (r *CoderAIProviderReconciler) disableWithoutConsent(
 	switch {
 	case isCoderResourceNotFound(err):
 		// Only Coder's own 404 proves that nothing can use the key (#327).
+		provider.Status.Enabled = nil
 		return stalled("Provider %s does not exist in Coder.", provider.Name), nil
 	case err != nil:
 		return unchecked("get provider: %s", coderErrorSummary(err)), nil
@@ -62,6 +63,7 @@ func (r *CoderAIProviderReconciler) disableWithoutConsent(
 	if step := checkAIProviderAnswer(ctx, provider, found); step != nil {
 		return step, nil
 	}
+	provider.Status.Enabled = &found.Enabled
 	if !found.Enabled {
 		return stalled("Provider %s is disabled in Coder.", provider.Name), nil
 	}
@@ -89,6 +91,7 @@ func (r *CoderAIProviderReconciler) disableWithoutConsent(
 	if step := checkAIProviderAnswer(ctx, provider, updated); step != nil {
 		return step, nil
 	}
+	provider.Status.Enabled = &updated.Enabled
 	if updated.Enabled {
 		return aiProviderWait(aiProviderRetry, "CoderAnswerMismatch",
 			"Coder answered the disable of provider %s with an enabled provider. The controller disables it again.", provider.Name), nil
