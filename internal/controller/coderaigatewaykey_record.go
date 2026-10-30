@@ -74,12 +74,14 @@ func (r *CoderAIGatewayKeyReconciler) recordIssuedKeyID(ctx context.Context, key
 	}
 }
 
-// recordAIGatewayKeyID writes the ID of a current key that Coder lists into
-// the record. It never stops the reconcile: the record already holds the
-// prefix, which finds the key too, so a failure is logged and retried.
+// recordAIGatewayKeyID writes the ID of a current key that Coder lists, and a
+// create time that the observe step stamped later (#353), into the record. It
+// never stops the reconcile: the record already holds the prefix, which
+// finds the key too, so a failure is logged and retried.
 func (r *CoderAIGatewayKeyReconciler) recordAIGatewayKeyID(ctx context.Context, sdk *codersdk.Client, key *coderv1alpha1.CoderAIGatewayKey, prefix string) {
 	record, _, err := readCleanupRecord(ctx, r.APIReader, r.OperatorNamespace, key.UID)
-	if err == nil && record != nil && record.CoderID == key.Status.CurrentKey.ID {
+	if err == nil && record != nil && record.CoderID == key.Status.CurrentKey.ID &&
+		(key.Status.LastCreateAttemptTime == nil || !record.CreateAttemptTime.Before(key.Status.LastCreateAttemptTime.Time)) {
 		return
 	}
 	if err == nil {
