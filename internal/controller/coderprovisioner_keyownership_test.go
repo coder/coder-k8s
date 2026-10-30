@@ -381,6 +381,8 @@ type renamedOrgCoder struct {
 	keys map[uuid.UUID]codersdk.ProvisionerKey
 	// team is the ID of the organization named team.
 	team uuid.UUID
+	// failList is the ID of an organization whose key list fails.
+	failList uuid.UUID
 }
 
 func (c *renamedOrgCoder) EnsureProvisionerKey(ctx context.Context, req coderbootstrap.EnsureProvisionerKeyRequest) (coderbootstrap.EnsureProvisionerKeyResponse, error) {
@@ -409,6 +411,11 @@ func (c *renamedOrgCoder) serveHTTP(t *testing.T, w http.ResponseWriter, r *http
 	if len(parts) >= 5 && parts[0] == "api" && parts[1] == "v2" && parts[2] == "organizations" && parts[4] == "provisionerkeys" {
 		if orgID, err := uuid.Parse(parts[3]); err == nil {
 			if r.Method == http.MethodGet && len(parts) == 5 {
+				if orgID == c.failList {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					_ = json.NewEncoder(w).Encode(codersdk.Response{Message: "injected list failure"})
+					return
+				}
 				keys := []codersdk.ProvisionerKey{}
 				for _, key := range c.keys {
 					if key.OrganizationID == orgID {
@@ -514,6 +521,113 @@ func TestCoderProvisionerKey_OrganizationRenamed(t *testing.T) {
 			coder.mu.Lock()
 			defer coder.mu.Unlock()
 			require.NotContains(t, coder.keys, keyA, "deleting the provisioner must revoke its recorded key in the renamed organization by ID")
+			require.Empty(t, coder.keys, "deleting the provisioner must leave none of its keys in Coder")
+		})
+	}
+}
+
+// TestCoderProvisionerKey_UpgradedStatusKeepsTargetRecords checks status from
+// an older operator with two unpublished records of the target key under
+// different organization IDs: the organization named team was renamed and
+// its name reused twice. Coder still holds both keys. The rotation must
+// delete each key by its recorded IDs before it drops the record, and keep a
+// record whose key Coder did not confirm gone.
+func TestCoderProvisionerKey_UpgradedStatusKeepsTargetRecords(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// failOlderList fails the key list in the organization of the older
+		// record until the first reconcile after the upgrade returns.
+		failOlderList bool
+	}{
+		{name: "both keys deleted"},
+		{name: "failed delete keeps the record", failOlderList: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			f := newProvisionerCredentialFixture(ctx, t, "cprov-upgraded")
+			orgA, orgB, orgC, orgD := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			keyA, olderKey, newerKey, keyD := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			coder := &renamedOrgCoder{
+				SDKClient: coderbootstrap.NewSDKClient(),
+				fake:      f.bootstrapClient,
+				keys:      map[uuid.UUID]codersdk.ProvisionerKey{},
+				team:      orgA,
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { coder.serveHTTP(t, w, r) }))
+			t.Cleanup(server.Close)
+			setControlPlaneURL(ctx, t, f, server.URL)
+			f.bootstrapClient.provisionerKeyResponses = []coderbootstrap.EnsureProvisionerKeyResponse{
+				{OrganizationID: orgA, KeyID: keyA, KeyName: "provisioner", Key: "material-a"},
+				{OrganizationID: orgD, KeyID: keyD, KeyName: "provisioner", Key: "material-d"},
+			}
+			f.reconciler.BootstrapClient = coder
+
+			p := f.createProvisioner(ctx, t, nil, nil)
+			p.Spec.OrganizationName = "team"
+			require.NoError(t, k8sClient.Update(ctx, p))
+			f.reconcile(ctx, t, p)
+			f.reconcile(ctx, t, p)
+			require.Equal(t, keyA.String(), f.get(ctx, t, p).Status.ProvisionerKeyID)
+
+			older := codersdk.ProvisionerKey{ID: olderKey, OrganizationID: orgB, Name: "provisioner"}
+			newer := codersdk.ProvisionerKey{ID: newerKey, OrganizationID: orgC, Name: "provisioner"}
+			coder.mu.Lock()
+			coder.keys[olderKey] = older
+			coder.keys[newerKey] = newer
+			coder.team = orgD
+			if tt.failOlderList {
+				coder.failList = orgB
+			}
+			coder.mu.Unlock()
+			latest := f.get(ctx, t, p)
+			for _, key := range []codersdk.ProvisionerKey{older, newer} {
+				latest.Status.PendingKeys = append(latest.Status.PendingKeys, coderv1alpha1.CoderProvisionerKeyRecord{
+					ControlPlaneRefName: f.controlPlane.Name,
+					CoderURL:            server.URL,
+					OrganizationName:    "team",
+					KeyName:             "provisioner",
+					OrganizationID:      key.OrganizationID.String(),
+					KeyID:               key.ID.String(),
+					Unpublished:         true,
+				})
+			}
+			require.NoError(t, k8sClient.Status().Update(ctx, latest))
+
+			if tt.failOlderList {
+				_, err := f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: p.Name, Namespace: p.Namespace}})
+				require.Error(t, err, "the rotation must stop when Coder does not confirm a recorded key gone")
+				recorded := f.get(ctx, t, p).Status.PendingKeys
+				for _, key := range []uuid.UUID{olderKey, newerKey} {
+					require.True(t, slices.ContainsFunc(recorded, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
+						return record.KeyID == key.String()
+					}), "status must keep the record of live key %s", key)
+				}
+				coder.mu.Lock()
+				require.Contains(t, coder.keys, olderKey)
+				coder.failList = uuid.Nil
+				coder.mu.Unlock()
+			}
+
+			f.reconcile(ctx, t, p)
+			rotated := f.get(ctx, t, p)
+			require.Equal(t, keyD.String(), rotated.Status.ProvisionerKeyID, "the rotation must create a new key")
+			require.Empty(t, rotated.Status.PendingKeys)
+			coder.mu.Lock()
+			require.NotContains(t, coder.keys, olderKey, "the rotation must delete the older recorded key by ID")
+			require.NotContains(t, coder.keys, newerKey, "the rotation must delete the newer recorded key by ID")
+			require.NotContains(t, coder.keys, keyA, "the rotation must delete the replaced key by ID")
+			coder.mu.Unlock()
+
+			require.NoError(t, k8sClient.Delete(ctx, rotated))
+			f.reconcile(ctx, t, p)
+			requireProvisionerGone(ctx, t, types.NamespacedName{Name: p.Name, Namespace: p.Namespace})
+			coder.mu.Lock()
+			defer coder.mu.Unlock()
 			require.Empty(t, coder.keys, "deleting the provisioner must leave none of its keys in Coder")
 		})
 	}
