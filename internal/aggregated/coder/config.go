@@ -112,12 +112,27 @@ func newCoderHTTPClient(coderURL *url.URL, transport http.RoundTripper, timeout 
 		// codersdk dials websockets (WorkspaceBuildLogsAfter for ?follow=true)
 		// with a new http.Client that keeps only this Transport, not
 		// CheckRedirect, so the Transport also refuses other origins.
-		Transport: sameorigin.RoundTripper(coderURL, transport),
+		Transport: markRedirectFollowUps{next: sameorigin.RoundTripper(coderURL, transport)},
 		Timeout:   timeout,
 		// net/http copies Coder-Session-Token to every redirect target, so refuse
 		// redirects that leave the Coder origin.
 		CheckRedirect: sameorigin.RedirectPolicy(coderURL),
 	}
+}
+
+// errAfterRedirect marks the error of a request that follows a redirect. The server that answered
+// with the redirect got the write, so a follow-up that fails before its own send does not make
+// the write certain.
+var errAfterRedirect = errors.New("the request after a redirect failed")
+
+type markRedirectFollowUps struct{ next http.RoundTripper }
+
+func (m markRedirectFollowUps) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := m.next.RoundTrip(req)
+	if err != nil && req.Response != nil {
+		return nil, fmt.Errorf("%w: %w", errAfterRedirect, err)
+	}
+	return resp, err
 }
 
 // Config describes how to construct a Coder SDK client.

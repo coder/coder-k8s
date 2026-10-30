@@ -755,10 +755,11 @@ func (s *TemplateStorage) Update(
 				Provisioner:   codersdk.ProvisionerTypeTerraform,
 			})
 			if err != nil {
-				return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
+				return nil, false, coder.MapCoderWriteError(err, coder.WriteUpdate, aggregationv1alpha1.Resource("codertemplates"), name)
 			}
 			if newVersion.ID == uuid.Nil {
-				return nil, false, fmt.Errorf("assertion failed: new template version ID must not be nil")
+				return nil, false, coder.UncertainWriteError(coder.WriteUpdate, aggregationv1alpha1.Resource("codertemplates"), name,
+					"an answer from the Coder API without the ID of the template version")
 			}
 
 			if waitErr := waitForTemplateVersionBuild(ctx, sdk, newVersion.ID); waitErr != nil {

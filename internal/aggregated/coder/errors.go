@@ -176,8 +176,12 @@ var handshakeRefusals = []tls.AlertError{40, 70}
 // notSent reports whether err proves that the request did not reach Coder: the connection to
 // Coder (or to the proxy in front of it) failed, the proxy refused the CONNECT tunnel, the TLS
 // handshake failed, or the client refused a request to another origin. A refused redirect is not
-// in this list: the server that answered with the redirect got the write.
+// in this list, and neither is an error of a request that followed a redirect: the server that
+// answered with the redirect got the write.
 func notSent(err error) bool {
+	if errors.Is(err, errAfterRedirect) {
+		return false
+	}
 	var opErr *net.OpError
 	if errors.As(err, &opErr) {
 		switch opErr.Op {
