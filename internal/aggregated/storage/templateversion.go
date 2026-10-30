@@ -194,6 +194,11 @@ func (s *TemplateVersionStorage) listNamespace(ctx context.Context, namespace st
 
 	items := make([]aggregationv1alpha1.CoderTemplateVersion, 0)
 	for _, template := range templates {
+		// Check the template before its versions request: Coder answers 404 for the zero ID, and
+		// the LIST skips a 404 as a template deleted meanwhile.
+		if _, err := convert.TemplateToK8s(namespace, template); err != nil {
+			return nil, apierrors.NewInternalError(err)
+		}
 		versions, err := sdk.TemplateVersionsByTemplate(ctx, codersdk.TemplateVersionsByTemplateRequest{
 			TemplateID:      template.ID,
 			IncludeArchived: true,
