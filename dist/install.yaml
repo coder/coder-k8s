@@ -6221,7 +6221,8 @@ spec:
                     organizationID:
                       description: |-
                         OrganizationID is the organization ID that Coder returned for the key.
-                        Without organizationID and keyID, the operator deletes the key by name.
+                        Without organizationID and keyID, the operator deletes the key by name,
+                        unless that name holds the key in provisionerKeyID.
                       type: string
                     organizationName:
                       description: OrganizationName is the Coder organization of the

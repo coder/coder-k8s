@@ -1,6 +1,7 @@
 package coderbootstrap
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"net/http"
@@ -104,7 +105,7 @@ func (c *SDKClient) EnsureProvisionerKey(ctx context.Context, req EnsureProvisio
 }
 
 // DeleteProvisionerKey deletes a provisioner key by name.
-// A missing key or organization is treated as success for idempotency.
+// A missing key is treated as success for idempotency.
 func (c *SDKClient) DeleteProvisionerKey(ctx context.Context, coderURL, sessionToken, orgName, keyName string) error {
 	if err := validateProvisionerKeyInputs(coderURL, sessionToken, keyName); err != nil {
 		return err
@@ -121,9 +122,6 @@ func (c *SDKClient) DeleteProvisionerKey(ctx context.Context, coderURL, sessionT
 	}
 
 	organization, err := resolveOrganizationByName(ctx, client, organizationName)
-	if isNotFound(err) {
-		return nil
-	}
 	if err != nil {
 		return err
 	}
@@ -131,11 +129,66 @@ func (c *SDKClient) DeleteProvisionerKey(ctx context.Context, coderURL, sessionT
 	_, err = withOptionalRateLimitBypass(ctx, func(requestCtx context.Context) (struct{}, error) {
 		return struct{}{}, client.DeleteProvisionerKey(requestCtx, organization.ID, keyName)
 	})
-	if err == nil || isNotFound(err) {
+	if err == nil {
+		return nil
+	}
+
+	var apiErr *codersdk.Error
+	if errors.As(err, &apiErr) && apiErr.StatusCode() == http.StatusNotFound {
 		return nil
 	}
 
 	return xerrors.Errorf("delete provisioner key %q: %w", keyName, err)
+}
+
+// DeleteProvisionerKeyByNameRequest identifies a provisioner key by the name
+// that the caller recorded before it sent the create, when Coder had not yet
+// returned the key ID.
+type DeleteProvisionerKeyByNameRequest struct {
+	CoderURL         string
+	SessionToken     string
+	OrganizationName string
+	KeyName          string
+	// KeepKeyID is the ID of a key that the delete leaves in place, for
+	// example the key that the caller uses now.
+	KeepKeyID uuid.UUID
+}
+
+// DeleteProvisionerKeyByName deletes the provisioner key named req.KeyName in
+// the organization req.OrganizationName, unless its ID is req.KeepKeyID. It
+// does nothing when no key has that name.
+func (c *SDKClient) DeleteProvisionerKeyByName(ctx context.Context, req DeleteProvisionerKeyByNameRequest) error {
+	if err := validateProvisionerKeyInputs(req.CoderURL, req.SessionToken, req.KeyName); err != nil {
+		return err
+	}
+
+	client, err := newAuthenticatedClient(req.CoderURL, req.SessionToken)
+	if err != nil {
+		return err
+	}
+
+	organization, err := resolveOrganizationByName(ctx, client, cmp.Or(req.OrganizationName, codersdk.DefaultOrganization))
+	if err != nil {
+		return err
+	}
+	key, err := withOptionalRateLimitBypass(ctx, func(requestCtx context.Context) (*codersdk.ProvisionerKey, error) {
+		return findOrganizationProvisionerKey(requestCtx, client, organization.ID, req.KeyName)
+	})
+	if err != nil {
+		return err
+	}
+	if key == nil || (req.KeepKeyID != uuid.Nil && key.ID == req.KeepKeyID) {
+		return nil
+	}
+
+	_, err = withOptionalRateLimitBypass(ctx, func(requestCtx context.Context) (struct{}, error) {
+		return struct{}{}, client.DeleteProvisionerKey(requestCtx, organization.ID, key.Name)
+	})
+	if err != nil && !isNotFound(err) {
+		return xerrors.Errorf("delete provisioner key %q: %w", key.Name, err)
+	}
+
+	return nil
 }
 
 // DeleteProvisionerKeyByIDRequest identifies one provisioner key by the IDs

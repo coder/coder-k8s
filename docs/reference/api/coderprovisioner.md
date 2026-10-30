@@ -56,7 +56,7 @@ or was about to create, at one Coder endpoint.
 | `coderURL` | string | CoderURL is the Coder API URL that the operator sent the key request to. |
 | `organizationName` | string | OrganizationName is the Coder organization of the key. |
 | `keyName` | string | KeyName is the provisioner key name in Coder. |
-| `organizationID` | string | OrganizationID is the organization ID that Coder returned for the key. Without organizationID and keyID, the operator deletes the key by name. |
+| `organizationID` | string | OrganizationID is the organization ID that Coder returned for the key. Without organizationID and keyID, the operator deletes the key by name, unless that name holds the key in provisionerKeyID. |
 | `keyID` | string | KeyID is the provisioner key ID that Coder returned. |
 
 ### CoderProvisionerKeySpec

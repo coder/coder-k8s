@@ -876,10 +876,11 @@ func TestCoderProvisionerReconciler_KeyNameDrift(t *testing.T) {
 		_ = k8sClient.Delete(context.Background(), provisioner)
 	})
 
+	keyV1 := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "key-v1", Key: "key-v1-material"}
 	bootstrapClient := &fakeBootstrapClient{
 		provisionerKeyResponses: []coderbootstrap.EnsureProvisionerKeyResponse{
-			{KeyName: "key-v1", Key: "key-v1-material"},
-			{KeyName: "key-v2", Key: "key-v2-material"},
+			keyV1,
+			{OrganizationID: keyV1.OrganizationID, KeyID: uuid.New(), KeyName: "key-v2", Key: "key-v2-material"},
 		},
 	}
 	reconciler := &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: bootstrapClient}
@@ -895,10 +896,8 @@ func TestCoderProvisionerReconciler_KeyNameDrift(t *testing.T) {
 
 	reconcileProvisioner(ctx, t, reconciler, request)
 
-	require.GreaterOrEqual(t, bootstrapClient.deleteKeyCalls, 1)
-	require.NotEmpty(t, bootstrapClient.deleteKeyRequests)
-	lastDelete := bootstrapClient.deleteKeyRequests[len(bootstrapClient.deleteKeyRequests)-1]
-	require.Equal(t, "key-v1", lastDelete.KeyName)
+	require.Len(t, bootstrapClient.deleteKeyByIDRequests, 1)
+	require.Equal(t, keyV1.KeyID, bootstrapClient.deleteKeyByIDRequests[0].KeyID, "the key named key-v1 must be deleted")
 
 	require.GreaterOrEqual(t, len(bootstrapClient.provisionerKeyRequests), 2)
 	lastEnsure := bootstrapClient.provisionerKeyRequests[len(bootstrapClient.provisionerKeyRequests)-1]

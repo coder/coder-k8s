@@ -128,7 +128,8 @@ type CoderProvisionerKeyRecord struct {
 	// KeyName is the provisioner key name in Coder.
 	KeyName string `json:"keyName"`
 	// OrganizationID is the organization ID that Coder returned for the key.
-	// Without organizationID and keyID, the operator deletes the key by name.
+	// Without organizationID and keyID, the operator deletes the key by name,
+	// unless that name holds the key in provisionerKeyID.
 	OrganizationID string `json:"organizationID,omitempty"`
 	// KeyID is the provisioner key ID that Coder returned.
 	KeyID string `json:"keyID,omitempty"`

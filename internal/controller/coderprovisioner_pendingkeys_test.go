@@ -65,6 +65,9 @@ func keyDeletes(client *fakeBootstrapClient) []keyDelete {
 	for _, req := range client.deleteKeyRequests {
 		deletes = append(deletes, keyDelete{coderURL: req.CoderURL, token: req.SessionToken, keyName: req.KeyName})
 	}
+	for _, req := range client.deleteKeyByNameRequests {
+		deletes = append(deletes, keyDelete{coderURL: req.CoderURL, token: req.SessionToken, keyName: req.KeyName})
+	}
 	for _, req := range client.deleteKeyByIDRequests {
 		deletes = append(deletes, keyDelete{coderURL: req.CoderURL, token: req.SessionToken, keyID: req.KeyID.String()})
 	}
@@ -96,11 +99,15 @@ func TestCoderProvisionerKey_IntermediateEndpointRevoked(t *testing.T) {
 		statusWriteFails bool
 		// deleteAtC deletes the provisioner instead of reconciling at C.
 		deleteAtC bool
+		// revokeFailsOnce fails the first delete of key B at C. The record
+		// must stay until a later reconcile deletes the key.
+		revokeFailsOnce bool
 	}{
 		{name: "secret write fails at B, rotation at C"},
 		{name: "secret write fails at B, deletion at C", deleteAtC: true},
 		{name: "key B unrecorded by ID, rotation at C", statusWriteFails: true},
 		{name: "key B unrecorded by ID, deletion at C", statusWriteFails: true, deleteAtC: true},
+		{name: "revoke of key B fails once, rotation at C", revokeFailsOnce: true},
 	}
 
 	for _, tt := range tests {
@@ -176,7 +183,15 @@ func TestCoderProvisionerKey_IntermediateEndpointRevoked(t *testing.T) {
 			if tt.deleteAtC {
 				require.NoError(t, k8sClient.Delete(ctx, f.get(ctx, t, provisioner)))
 			}
+			if tt.revokeFailsOnce {
+				client.failRevoke = keyB.KeyID
+			}
 			f.reconcile(ctx, t, provisioner)
+			if tt.revokeFailsOnce {
+				require.True(t, pendingKeyRecorded(f.get(ctx, t, provisioner), keyB.KeyID), "a failed delete must keep the record of key B")
+				client.failRevoke = uuid.Nil
+				f.reconcile(ctx, t, provisioner)
+			}
 
 			deletes := keyDeletes(f.bootstrapClient)
 			revokedAtB := slices.ContainsFunc(deletes, func(d keyDelete) bool {
@@ -184,6 +199,8 @@ func TestCoderProvisionerKey_IntermediateEndpointRevoked(t *testing.T) {
 					(d.keyID == keyB.KeyID.String() || (d.keyID == "" && d.keyName == keyB.KeyName))
 			})
 			require.True(t, revokedAtB, "key B must be deleted at B with the operator token of B, got %+v", deletes)
+			require.Contains(t, deletes, keyDelete{coderURL: apiURL("coder"), token: testOperatorToken, keyID: keyA.KeyID.String()},
+				"key A must be deleted at A with the operator token of A")
 			for _, d := range deletes {
 				want, known := tokenAt[d.coderURL]
 				require.True(t, known, "delete sent to %s, which no record names", d.coderURL)
@@ -194,6 +211,8 @@ func TestCoderProvisionerKey_IntermediateEndpointRevoked(t *testing.T) {
 				requireProvisionerGone(ctx, t, name)
 				return
 			}
+			require.False(t, slices.ContainsFunc(deletes, func(d keyDelete) bool { return d.coderURL == apiURL("coder-c") }),
+				"nothing may delete key C, which the Secret holds")
 			final := f.get(ctx, t, provisioner)
 			require.Equal(t, keyC.KeyID.String(), final.Status.ProvisionerKeyID)
 			require.Equal(t, "https://coder-c.example.com", final.Status.ControlPlaneURL)
@@ -202,51 +221,95 @@ func TestCoderProvisionerKey_IntermediateEndpointRevoked(t *testing.T) {
 	}
 }
 
-// TestCoderProvisionerKey_FailedStatusWriteAfterSecretKeepsKey checks a
-// rotation whose Secret write succeeds while the status write after it fails.
-// The next reconcile must record the key in the Secret as the applied key, so
-// that deletion still deletes it.
-func TestCoderProvisionerKey_FailedStatusWriteAfterSecretKeepsKey(t *testing.T) {
+// TestCoderProvisionerKey_UnpublishedKeyIsRotated checks keys that an
+// earlier reconcile created at the target and did not publish. The next
+// reconcile must replace them with a key that status records as applied, also
+// when nothing else asks for a rotation, and deletion must delete that key.
+func TestCoderProvisionerKey_UnpublishedKeyIsRotated(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	f := newProvisionerCredentialFixture(ctx, t, "cprov-adopt")
-	first := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "provisioner", Key: "material-1"}
-	second := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "provisioner", Key: "material-2"}
-	f.bootstrapClient.provisionerKeyResponses = []coderbootstrap.EnsureProvisionerKeyResponse{first, second}
-	provisioner := f.createProvisioner(ctx, t, nil, nil)
-	name := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
-	f.reconcile(ctx, t, provisioner)
-	f.reconcile(ctx, t, provisioner)
 
-	keySecret := types.NamespacedName{Name: provisioner.Name + "-provisioner-key", Namespace: provisioner.Namespace}
-	require.NoError(t, k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: keySecret.Name, Namespace: keySecret.Namespace}}))
-	failStatusWrite := true
-	base, err := ctrlclient.NewWithWatch(cfg, ctrlclient.Options{Scheme: scheme})
-	require.NoError(t, err)
-	f.reconciler.Client = interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c ctrlclient.Client, sub string, obj ctrlclient.Object, opts ...ctrlclient.SubResourceUpdateOption) error {
-			if p, ok := obj.(*coderv1alpha1.CoderProvisioner); ok && failStatusWrite && p.Status.ProvisionerKeyID == second.KeyID.String() {
-				failStatusWrite = false
-				return apierrors.NewServiceUnavailable("injected status write failure")
-			}
-			return c.SubResource(sub).Update(ctx, obj, opts...)
+	tests := []struct {
+		name string
+		// fail makes one reconcile leave an unpublished key at the target.
+		fail func(ctx context.Context, t *testing.T, f provisionerCredentialFixture, provisioner *coderv1alpha1.CoderProvisioner, unpublished coderbootstrap.EnsureProvisionerKeyResponse)
+	}{
+		{
+			// The create reached Coder, but the operator got no answer. The
+			// spec change that caused the rotation is then reverted.
+			name: "create answer lost, spec reverted",
+			fail: func(ctx context.Context, t *testing.T, f provisionerCredentialFixture, provisioner *coderv1alpha1.CoderProvisioner, _ coderbootstrap.EnsureProvisionerKeyResponse) {
+				latest := f.get(ctx, t, provisioner)
+				latest.Spec.Tags = map[string]string{"region": "rotated"}
+				require.NoError(t, k8sClient.Update(ctx, latest))
+				f.bootstrapClient.provisionerKeyErr = errors.New("injected lost create answer")
+				_, err := f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}})
+				require.Error(t, err)
+				f.bootstrapClient.provisionerKeyErr = nil
+				latest = f.get(ctx, t, provisioner)
+				latest.Spec.Tags = nil
+				require.NoError(t, k8sClient.Update(ctx, latest))
+			},
 		},
-	})
-	_, err = f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
-	require.Error(t, err, "the injected status write failure must fail the rotation")
-	secret := &corev1.Secret{}
-	require.NoError(t, k8sClient.Get(ctx, keySecret, secret))
-	require.Equal(t, "material-2", string(secret.Data[coderv1alpha1.DefaultProvisionerKeySecretKey]))
+		{
+			// The Secret holds the new key, but the status write after it fails.
+			name: "status write after the Secret write fails",
+			fail: func(ctx context.Context, t *testing.T, f provisionerCredentialFixture, provisioner *coderv1alpha1.CoderProvisioner, unpublished coderbootstrap.EnsureProvisionerKeyResponse) {
+				require.NoError(t, k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: provisioner.Name + "-provisioner-key", Namespace: provisioner.Namespace}}))
+				base, err := ctrlclient.NewWithWatch(cfg, ctrlclient.Options{Scheme: scheme})
+				require.NoError(t, err)
+				failStatusWrite := true
+				f.reconciler.Client = interceptor.NewClient(base, interceptor.Funcs{
+					SubResourceUpdate: func(ctx context.Context, c ctrlclient.Client, sub string, obj ctrlclient.Object, opts ...ctrlclient.SubResourceUpdateOption) error {
+						if p, ok := obj.(*coderv1alpha1.CoderProvisioner); ok && failStatusWrite && p.Status.ProvisionerKeyID == unpublished.KeyID.String() {
+							failStatusWrite = false
+							return apierrors.NewServiceUnavailable("injected status write failure")
+						}
+						return c.SubResource(sub).Update(ctx, obj, opts...)
+					},
+				})
+				_, err = f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}})
+				require.Error(t, err)
+				f.reconciler.Client = k8sClient
+			},
+		},
+	}
 
-	f.reconcile(ctx, t, provisioner)
-	latest := f.get(ctx, t, provisioner)
-	require.Equal(t, second.KeyID.String(), latest.Status.ProvisionerKeyID, "status must name the key in the Secret")
-	require.Empty(t, latest.Status.PendingKeys)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			f := newProvisionerCredentialFixture(ctx, t, "cprov-unpublished")
+			first := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "provisioner", Key: "material-1"}
+			unpublished := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: first.OrganizationID, KeyID: uuid.New(), KeyName: "provisioner", Key: "material-2"}
+			// Coder lists the unpublished key, without plaintext, until the
+			// rotation deletes it by name.
+			listed := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: unpublished.OrganizationID, KeyID: unpublished.KeyID, KeyName: "provisioner"}
+			final := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: first.OrganizationID, KeyID: uuid.New(), KeyName: "provisioner", Key: "material-3"}
+			f.bootstrapClient.provisionerKeyResponses = []coderbootstrap.EnsureProvisionerKeyResponse{first, unpublished, listed, final}
+			provisioner := f.createProvisioner(ctx, t, nil, nil)
+			f.reconcile(ctx, t, provisioner)
+			f.reconcile(ctx, t, provisioner)
 
-	require.NoError(t, k8sClient.Delete(ctx, latest))
-	f.reconcile(ctx, t, provisioner)
-	require.True(t, slices.ContainsFunc(f.bootstrapClient.deleteKeyByIDRequests, func(req coderbootstrap.DeleteProvisionerKeyByIDRequest) bool {
-		return req.KeyID == second.KeyID
-	}), "deletion must delete the key in the Secret, got %+v", f.bootstrapClient.deleteKeyByIDRequests)
-	requireProvisionerGone(ctx, t, name)
+			tt.fail(ctx, t, f, provisioner, unpublished)
+			deletesBefore := len(f.bootstrapClient.deleteKeyRequests)
+			f.reconcile(ctx, t, provisioner)
+
+			latest := f.get(ctx, t, provisioner)
+			require.Equal(t, final.KeyID.String(), latest.Status.ProvisionerKeyID, "status must name the key in the Secret")
+			require.Empty(t, latest.Status.PendingKeys)
+			secret := &corev1.Secret{}
+			require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: provisioner.Name + "-provisioner-key", Namespace: provisioner.Namespace}, secret))
+			require.Equal(t, "material-3", string(secret.Data[coderv1alpha1.DefaultProvisionerKeySecretKey]))
+			require.Contains(t, f.bootstrapClient.deleteKeyRequests[deletesBefore:],
+				deleteKeyRequest{CoderURL: internalCoderURL(f), SessionToken: testOperatorToken, OrganizationName: "default", KeyName: "provisioner"},
+				"the rotation must delete the unpublished key")
+
+			require.NoError(t, k8sClient.Delete(ctx, latest))
+			f.reconcile(ctx, t, provisioner)
+			require.True(t, slices.ContainsFunc(f.bootstrapClient.deleteKeyByIDRequests, func(req coderbootstrap.DeleteProvisionerKeyByIDRequest) bool {
+				return req.KeyID == final.KeyID
+			}), "deletion must delete the key in the Secret, got %+v", f.bootstrapClient.deleteKeyByIDRequests)
+			requireProvisionerGone(ctx, t, types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace})
+		})
+	}
 }
