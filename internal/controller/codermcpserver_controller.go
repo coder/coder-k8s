@@ -550,8 +550,11 @@ func (r *CoderMCPServerReconciler) patchFinalizer(ctx context.Context, server *c
 }
 
 // applyMCPServerStep sets the kstatus conditions for step. Messages are cut to
-// the CoderTemplateTest limit.
+// the CoderTemplateTest limit. status.observedGeneration moves only here, so a
+// status write between two steps never claims a generation that the
+// conditions do not describe yet.
 func applyMCPServerStep(server *coderv1alpha1.CoderMCPServer, step *mcpServerStep) {
+	server.Status.ObservedGeneration = server.Generation
 	message := truncateTemplateTestMessage(step.message)
 	ready, reconciling, stalled := metav1.ConditionFalse, metav1.ConditionTrue, metav1.ConditionFalse
 	switch {
@@ -576,7 +579,6 @@ func applyMCPServerStep(server *coderv1alpha1.CoderMCPServer, step *mcpServerSte
 
 // writeStatus writes the status only when it changed.
 func (r *CoderMCPServerReconciler) writeStatus(ctx context.Context, server *coderv1alpha1.CoderMCPServer, before *coderv1alpha1.CoderMCPServerStatus) error {
-	server.Status.ObservedGeneration = server.Generation
 	if equality.Semantic.DeepEqual(before, &server.Status) {
 		return nil
 	}

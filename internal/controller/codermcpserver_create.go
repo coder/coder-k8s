@@ -106,7 +106,7 @@ func recordMCPServer(server *coderv1alpha1.CoderMCPServer, found codersdk.MCPSer
 			"Coder organization %s already has an MCP server config with slug %s (ID %s). The controller does not change a config that it did not create.",
 			server.Spec.Organization, server.Spec.Slug, found.ID)
 	}
-	server.Status.ConfigID, server.Status.CreateAttemptTime = found.ID.String(), nil
+	server.Status.ConfigID, server.Status.CreateAttemptTime, server.Status.Enabled = found.ID.String(), nil, &found.Enabled
 	return nil
 }
 
@@ -140,7 +140,7 @@ func (r *CoderMCPServerReconciler) createMCPServer(
 			return mcpServerWait(mcpServerConfirmPoll, "ConfirmingCreate",
 				"The create answer does not match the request. The controller reads Coder instead of sending it again."), nil
 		}
-		server.Status.ConfigID, server.Status.CreateAttemptTime = created.ID.String(), nil
+		server.Status.ConfigID, server.Status.CreateAttemptTime, server.Status.Enabled = created.ID.String(), nil, &created.Enabled
 		var sent []string
 		for _, c := range mcpServerCredentialRefs(server.Spec.Auth) {
 			sent = append(sent, c.field)

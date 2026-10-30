@@ -37,6 +37,7 @@
 | `appliedGeneration` | integer | AppliedGeneration is the last generation whose spec Coder fully holds, or that a kill switch holds: when the controller disables the config because a credential Secret or the control plane withdrew consent, it sets this field before it sends the disable, so only a later spec edit enables the config again. Ready tells whether Coder holds the spec. |
 | `organizationID` | string | OrganizationID is the Coder organization ID that spec.organization resolved to first. |
 | `configID` | string | ConfigID is the Coder MCP server config ID. |
+| `enabled` | boolean | Enabled is the enabled flag of the Coder MCP server config at the controller's last read or update of it. It is empty while Coder holds no config of this object, or before the first read. |
 | `createAttemptTime` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#time-v1-meta) | CreateAttemptTime is set before every create request. While it is set and ConfigID is empty, a create request can be in flight or already committed in Coder. |
 | `credentials` | [CoderMCPServerCredentialStatus](#codermcpservercredentialstatus) array | Credentials record the Secret values last sent to Coder. |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#condition-v1-meta) array | Conditions are Ready, Reconciling, and Stalled. |

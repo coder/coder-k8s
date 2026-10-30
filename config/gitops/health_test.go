@@ -156,6 +156,13 @@ func mcpServerCases() []healthCase {
 	stale := readyReconcilingStalled("ready", "Applied")
 	stale["observedGeneration"] = int64(1)
 	noConditions := map[string]any{"observedGeneration": int64(2)}
+	// An update interrupted before Coder committed it, as stored by
+	// controllers before the #415 fix: only the top-level generation moved.
+	interrupted := readyReconcilingStalled("ready", "Applied")
+	interrupted["appliedGeneration"] = int64(1)
+	for _, c := range interrupted["conditions"].([]any) {
+		c.(map[string]any)["observedGeneration"] = int64(1)
+	}
 	deleting := mcpServerObject(readyReconcilingStalled("ready", "Applied"))
 	deleting["metadata"].(map[string]any)["deletionTimestamp"] = "2026-10-14T10:00:00Z"
 	deletingWait := mcpServerObject(readyReconcilingStalled("reconciling", "CoderUnavailable"))
@@ -165,6 +172,7 @@ func mcpServerCases() []healthCase {
 		{"stale observedGeneration", mcpServerObject(stale), "Progressing", "Waiting for the controller", "InProgress", ""},
 		{"no conditions", mcpServerObject(noConditions), "Progressing", "Waiting for the controller", "InProgress", ""},
 		{"applied", mcpServerObject(readyReconcilingStalled("ready", "Applied")), "Healthy", "Applied: details", "Current", ""},
+		{"stale conditions", mcpServerObject(interrupted), "Progressing", "Waiting for the controller", "InProgress", ""},
 		{"control plane not ready", mcpServerObject(readyReconcilingStalled("reconciling", "ControlPlaneNotReady")), "Progressing", "ControlPlaneNotReady: details", "InProgress", ""},
 		{"Coder unavailable", mcpServerObject(readyReconcilingStalled("reconciling", "CoderUnavailable")), "Progressing", "CoderUnavailable: details", "InProgress", ""},
 		{"group not found", mcpServerObject(readyReconcilingStalled("stalled", "GroupNotFound")), "Degraded", "GroupNotFound: details", "Failed", ""},
