@@ -283,6 +283,92 @@ func TestControlPlaneHoldNeedsCoder(t *testing.T) {
 	}
 }
 
+// orphanCoderDeployment deletes the Coder Deployment as `kubectl delete
+// --cascade=orphan` does, which leaves Coder's pods running. Envtest has no
+// garbage collector, so the test removes the orphan finalizer itself.
+func orphanCoderDeployment(ctx context.Context, t *testing.T, namespace string) {
+	t.Helper()
+	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "coder"}}
+	require.NoError(t, k8sClient.Delete(ctx, deployment, client.PropagationPolicy(metav1.DeletePropagationOrphan)))
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(deployment), deployment); err == nil {
+		deployment.Finalizers = nil
+		require.NoError(t, k8sClient.Update(ctx, deployment))
+	}
+	require.True(t, apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(deployment), &appsv1.Deployment{})))
+}
+
+// #353: a missing Coder Deployment does not end the hold. Coder's pods can
+// still run (an orphan delete), so the control plane keeps its finalizer,
+// also when it reconciles before its deleted dependents, and they delete
+// their resources in Coder with retries.
+func TestControlPlaneHoldsWithoutCoderDeployment(t *testing.T) {
+	t.Parallel()
+	controlPlaneHolds := func(ctx context.Context, t *testing.T, namespace string) {
+		t.Helper()
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		ref := client.ObjectKey{Namespace: namespace, Name: "coder"}
+		result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ref})
+		require.NoError(t, err)
+		require.NoError(t, k8sClient.Get(ctx, ref, &coderv1alpha1.CoderControlPlane{}), "the control plane holds")
+		require.Equal(t, 10*time.Second, result.RequeueAfter)
+	}
+	t.Run("keys", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+		key := rotatedKey(ctx, t, &env)
+		deleteFinalizedControlPlane(ctx, t, env.namespace, "coder")
+		orphanCoderDeployment(ctx, t, env.namespace)
+		require.NoError(t, k8sClient.Delete(ctx, key))
+		controlPlaneHolds(ctx, t, env.namespace)
+		env.clock.Step(5 * time.Minute)
+		gone, _ := env.reconcile(ctx, t, key)
+		require.Nil(t, gone)
+		require.Empty(t, env.fake.aiGatewayKeys())
+	})
+	t.Run("provider", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		env, _, provider := newReadyAIProvider(ctx, t)
+		deleteFinalizedControlPlane(ctx, t, env.namespace, "coder")
+		orphanCoderDeployment(ctx, t, env.namespace)
+		require.NoError(t, k8sClient.Delete(ctx, provider))
+		controlPlaneHolds(ctx, t, env.namespace)
+		gone, _ := env.reconcileDeleting(ctx, t, provider)
+		require.Nil(t, gone)
+		_, found := env.fake.aiProvider("openai")
+		require.False(t, found)
+	})
+	t.Run("MCP server", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		env := newMCPServerEnv(ctx, t, true)
+		env.keySecret(ctx, t, testMCPKey)
+		server, _ := env.applied(ctx, t, nil)
+		deleteFinalizedControlPlane(ctx, t, env.namespace, "coder")
+		orphanCoderDeployment(ctx, t, env.namespace)
+		require.NoError(t, k8sClient.Delete(ctx, server))
+		controlPlaneHolds(ctx, t, env.namespace)
+		gone, _ := env.reconcileDeleting(ctx, t, server)
+		require.Nil(t, gone)
+		require.Empty(t, env.fake.mcpServers())
+	})
+	t.Run("provider retry", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		env, _, provider := newReadyAIProvider(ctx, t)
+		deleteFinalizedControlPlane(ctx, t, env.namespace, "coder")
+		orphanCoderDeployment(ctx, t, env.namespace)
+		env.fake.failNext(routeDeleteAIProvider, fakeFault{Status: http.StatusBadGateway})
+		got, _ := env.deleteAIProvider(ctx, t, provider)
+		require.NotNil(t, got, "a failed delete keeps the finalizer while the control plane holds")
+		got, _ = env.reconcileDeleting(ctx, t, got)
+		require.Nil(t, got)
+		_, found := env.fake.aiProvider("openai")
+		require.False(t, found)
+	})
+}
+
 // #353: when the hold ends, the control plane stays for a short grace period
 // while dependents remain, and a dependent under the hold requeues before the
 // hold ends, so it runs its bounded pass while Coder still runs.
