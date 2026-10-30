@@ -467,7 +467,11 @@ func (s *TemplateStorage) Create(
 			Provisioner:   codersdk.ProvisionerTypeTerraform,
 		})
 		if err != nil {
-			return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
+			return nil, coder.MapCoderWriteError(err, coder.WriteCreate, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name)
+		}
+		if templateVersion.ID == uuid.Nil {
+			return nil, coder.UncertainWriteError(coder.WriteCreate, aggregationv1alpha1.Resource("codertemplates"), templateObj.Name,
+				"an answer from the Coder API without the ID of the template version")
 		}
 
 		// Create the template only after its first version imports: until then Coder rejects workspace builds
