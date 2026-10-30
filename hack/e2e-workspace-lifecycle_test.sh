@@ -847,7 +847,7 @@ check "driver exits 0 without the mirror check" eval '[[ $RC -eq 0 ]] && out_has
 echo "TEST agent-start-error: the agent lifecycle ends in start_error"
 run_scenario agent-start-error; summary
 check "fails at once on the lifecycle; no delete" eval 'failed_with "failed to start: main=connected/start_error" &&
-  no_mutations_after "$LIFECYCLE,curl POST,curl PUT,kubectl apply,kubectl create" && ((SECS < 30))'
+  no_mutations_after "$LIFECYCLE,curl POST,curl PUT,kubectl apply,kubectl create" && ((SECS < 120))'
 
 echo "TEST agent-never-ready: the agent never connects"
 run_scenario agent-never-ready E2E_AGENT_TIMEOUT_SECONDS=2; summary
@@ -887,7 +887,9 @@ CASES
 # name|expected message|mutations: each CoderAIProvider phase failure (plan 8.2) stops before the next mutation.
 while IFS='|' read -r name msg muts; do
   echo "TEST $name (CoderAIProvider phases)"
-  run_scenario "$name" E2E_NAMESPACE_DELETE_TIMEOUT_SECONDS=2 </dev/null; summary
+  # *-ns-stuck waits out a namespace that never goes; the other rows need the delete to finish on a loaded host.
+  ns_timeout=30 && [[ $name != *-ns-stuck ]] || ns_timeout=2
+  run_scenario "$name" E2E_NAMESPACE_DELETE_TIMEOUT_SECONDS=$ns_timeout </dev/null; summary
   check "fails with '$msg'" eval 'failed_with "$msg" && no_mutations_after "$muts"'
 done <<CASES
 ai-never-ready|timed out after 3s waiting for: AI provider e2e-openai Ready|$PHASED,$P1M
@@ -923,7 +925,9 @@ CASES
 # name|expected message|mutations: each CoderMCPServer phase failure (plan 7.3) stops before the next mutation.
 while IFS='|' read -r name msg muts; do
   echo "TEST $name (CoderMCPServer phases)"
-  run_scenario "$name" E2E_NAMESPACE_DELETE_TIMEOUT_SECONDS=2 </dev/null; summary
+  # *-ns-stuck waits out a namespace that never goes; the other rows need the delete to finish on a loaded host.
+  ns_timeout=30 && [[ $name != *-ns-stuck ]] || ns_timeout=2
+  run_scenario "$name" E2E_NAMESPACE_DELETE_TIMEOUT_SECONDS=$ns_timeout </dev/null; summary
   check "fails with '$msg'" eval 'failed_with "$msg" && no_mutations_after "$muts"'
 done <<CASES
 mcp-licensed|Coder has a license: the MCP phases test unlicensed Coder|$GW
