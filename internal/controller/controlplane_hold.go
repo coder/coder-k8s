@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -105,10 +107,13 @@ func controlPlaneHoldRequeue(controlPlane *coderv1alpha1.CoderControlPlane, now 
 
 // controlPlaneHolds reports whether controlPlane, which is being deleted,
 // waits for its dependents at now: it still has its finalizer, the hold time
-// has not passed, it is not deleted in the foreground, and its namespace is
-// not being deleted. A namespace deletion removes Coder's pods at once, and a
+// has not passed, it is not deleted in the foreground, it has operator
+// access, its namespace is not being deleted, and its Coder Deployment
+// exists. A namespace deletion removes Coder's pods at once, and a
 // foreground deletion removes the Coder Deployment (blockOwnerDeletion)
 // before the control plane, so no hold can keep Coder reachable then.
+// Nothing repairs the operator access of a control plane that is being
+// deleted, so without it no dependent can call Coder (#353).
 func controlPlaneHolds(ctx context.Context, reader client.Reader, controlPlane *coderv1alpha1.CoderControlPlane, now time.Time) (bool, error) {
 	if reader == nil || controlPlane == nil {
 		return false, errors.New("assertion failed: the control plane hold check needs a reader and a control plane")
@@ -117,14 +122,25 @@ func controlPlaneHolds(ctx context.Context, reader client.Reader, controlPlane *
 		return false, errors.New("assertion failed: the control plane hold applies only while the control plane is being deleted")
 	}
 	if !controllerutil.ContainsFinalizer(controlPlane, workspaceRBACFinalizer) || controllerutil.ContainsFinalizer(controlPlane, metav1.FinalizerDeleteDependents) ||
-		!now.Before(controlPlaneHoldEnd(controlPlane)) {
+		!now.Before(controlPlaneHoldEnd(controlPlane)) || !controlPlane.Status.OperatorAccessReady || controlPlane.Status.OperatorTokenSecretRef == nil {
 		return false, nil
 	}
 	namespace := &corev1.Namespace{}
 	if err := reader.Get(ctx, types.NamespacedName{Name: controlPlane.Namespace}, namespace); err != nil {
 		return false, fmt.Errorf("get namespace %s: %w", controlPlane.Namespace, err)
 	}
-	return namespace.DeletionTimestamp.IsZero() && namespace.Status.Phase != corev1.NamespaceTerminating, nil
+	if !namespace.DeletionTimestamp.IsZero() || namespace.Status.Phase == corev1.NamespaceTerminating {
+		return false, nil
+	}
+	// The operator can see a foreground deletion only after its marker is
+	// gone, and then only the missing Deployment shows it.
+	deployment := types.NamespacedName{Namespace: controlPlane.Namespace, Name: controlPlane.Name}
+	if err := reader.Get(ctx, deployment, &appsv1.Deployment{}); apierrors.IsNotFound(err) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("get deployment %s: %w", deployment, err)
+	}
+	return true, nil
 }
 
 // controlPlaneDependents returns the CoderAIGatewayKey, CoderAIProvider and
