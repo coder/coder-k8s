@@ -66,7 +66,9 @@ kubectl -n coder get coderaiproviders
 kubectl -n coder get coderaiprovider openai -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}'
 ```
 
-The object has the conditions `Ready`, `Reconciling` and `Stalled`. A stalled object waits for a change of its spec or of an input. The most common reasons:
+The `ENABLED` column shows `status.enabled`: the enabled flag of the provider in Coder at the operator's last read or update. It is empty while Coder holds no provider of this object, for example when the key Secret is refused before the create.
+
+The object has the conditions `Ready`, `Reconciling` and `Stalled`. A stalled object waits for a change of its spec or of an input. For Argo CD and Flux health rules, see [Health rules for CoderAIProvider](gitops.md#health-rules-for-coderaiprovider). The most common reasons:
 
 | Reason | Meaning |
 | --- | --- |
@@ -77,7 +79,7 @@ The object has the conditions `Ready`, `Reconciling` and `Stalled`. A stalled ob
 | `NameConflict` | Coder has a provider with this name that the operator did not create. |
 | `NameReservedByEnv` | The control plane can seed a provider with this name. See [Seeding limits](#seeding-limits). |
 | `CoderRejected` | Coder rejected the create or update request. Fix the spec. |
-| `DisabledExternally`, `KeyChangedExternally`, `DeletedExternally` | Someone disabled the provider, changed its key or deleted it in Coder. See [Kill switches](#kill-switches). |
+| `DisabledExternally`, `KeyChangedExternally`, `DeletedExternally` | Someone disabled the provider, changed its key or deleted it in Coder. `DisabledExternally` also follows the credential kill switch, after the Secret was repaired. See [Kill switches](#kill-switches). |
 
 ## Kill switches
 
@@ -85,7 +87,7 @@ The object has the conditions `Ready`, `Reconciling` and `Stalled`. A stalled ob
 
 When the key Secret fails the credential contract for a provider that the operator created, the operator disables the provider in Coder at once. This covers every credential error: the Secret is deleted, loses its label or the destinations annotation, no longer lists the origin that Coder uses, is refused, has no such key, or holds a malformed value. The update holds only `enabled: false`. Coder keeps the old key, but no longer uses it. When a Coder call for the disable fails, including a 404 that Coder did not send (for example from a proxy), the operator retries every 30 seconds, and the condition message starts with `Coder can still send the key`.
 
-The object stalls with the credential reason. Repairing the Secret does not enable the provider again. To enable it, fix the Secret, then edit the spec (any change of `spec`, for example `displayName`). A short read error of the Secret, such as an API server timeout, is not a credential error: the operator retries and changes nothing.
+The object stalls with the credential reason. Repairing the Secret does not enable the provider again: the object then reports `DisabledExternally`, and the message names both causes, a Coder admin or the credential kill switch. To enable it, fix the Secret, then edit the spec (any change of `spec`, for example `displayName`). A short read error of the Secret, such as an API server timeout, is not a credential error: the operator retries and changes nothing.
 
 ### Dashboard changes
 

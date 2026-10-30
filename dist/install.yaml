@@ -409,7 +409,7 @@ spec:
     - jsonPath: .spec.type
       name: Type
       type: string
-    - jsonPath: .spec.enabled
+    - jsonPath: .status.enabled
       name: Enabled
       type: boolean
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
@@ -636,6 +636,12 @@ spec:
                     description: SecretUID is the UID of the Secret that was read.
                     type: string
                 type: object
+              enabled:
+                description: |-
+                  Enabled is the enabled flag of the Coder provider at the controller's
+                  last read or update of it. It is empty while Coder holds no provider of
+                  this object, or before the first read.
+                type: boolean
               observedGeneration:
                 description: ObservedGeneration is the generation the controller last
                   processed.
