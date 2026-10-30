@@ -339,6 +339,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		pending = append(next, target)
 	}
 	var kept, unverified []coderv1alpha1.CoderProvisionerKeyRecord
+	lookupFailed := false
 	for _, record := range pending {
 		if sameKeySlot(record, target) {
 			kept = append(kept, record)
@@ -354,8 +355,15 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if cleanup == keyUnverified {
 			unverified = append(unverified, record)
 		}
+		if cleanup == keyKept && record.KeyID == "" {
+			lookupFailed = true
+		}
 	}
-	conditionChanged := setUnverifiedKeyCondition(provisioner, unverified)
+	// A failed lookup does not show that an unverified key is gone.
+	conditionChanged := false
+	if len(unverified) > 0 || !lookupFailed {
+		conditionChanged = setUnverifiedKeyCondition(provisioner, unverified)
+	}
 	if conditionChanged || !slices.Equal(kept, provisioner.Status.PendingKeys) {
 		provisioner.Status.PendingKeys = kept
 		if err := r.Status().Update(ctx, provisioner); err != nil {
@@ -983,7 +991,8 @@ const (
 	// keyKept: Coder did not confirm that the key is gone. The record stays,
 	// and the operator tries again.
 	keyKept keyCleanup = iota
-	// keyGone: no key of the record exists in Coder.
+	// keyGone: Coder confirmed that the key is gone, or that no key other
+	// than the applied key holds the name of a record without key IDs.
 	keyGone
 	// keyUnverified: the record has no key IDs, and Coder holds a key with
 	// its name that nothing shows this provisioner created. The operator

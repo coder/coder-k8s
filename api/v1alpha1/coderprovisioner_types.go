@@ -30,7 +30,7 @@ const (
 	// When it is False, the operator keeps the last applied Deployment.
 	CoderProvisionerConditionCredentialsReady = "CredentialsReady"
 	// CoderProvisionerConditionUnverifiedKeyKept is True while an entry in
-	// status.pendingKeys has no key ID and Coder holds a key with its name.
+	// status.pendingKeys has no key IDs and Coder holds a key with its name.
 	// Nothing shows that this provisioner created that key, so the operator
 	// does not delete it. The operator removes the condition when no such
 	// entry is left.
@@ -115,9 +115,9 @@ type CoderProvisionerStatus struct {
 	// the key in provisionerKeyID: a key that the operator is about to create
 	// or has not yet written to the provisioner key Secret, and replaced keys
 	// whose deletion Coder has not confirmed. The operator deletes the key of
-	// each entry with keyID at its coderURL with the operator token of its
-	// control plane, and removes the entry when Coder confirms that the key
-	// is gone.
+	// each entry with organizationID and keyID at its coderURL with the
+	// operator token of its control plane, and removes the entry when Coder
+	// confirms that the key is gone.
 	// +listType=atomic
 	PendingKeys []CoderProvisionerKeyRecord `json:"pendingKeys,omitempty"`
 }
@@ -135,7 +135,7 @@ type CoderProvisionerKeyRecord struct {
 	// KeyName is the provisioner key name in Coder.
 	KeyName string `json:"keyName"`
 	// OrganizationID is the organization ID that Coder returned for the key.
-	// Without organizationID and keyID, the operator deletes no key. It
+	// When organizationID or keyID is empty, the operator deletes no key. It
 	// removes the entry when Coder has no key with keyName, or when that key
 	// is the key in provisionerKeyID. Otherwise it keeps the entry and sets
 	// the condition UnverifiedKeyKept.

@@ -456,11 +456,13 @@ func TestCoderProvisionerKey_RevertAfterFailedRotation(t *testing.T) {
 type keySlot struct{ coderURL, organizationName, keyName string }
 
 // keyStoreClient is a Coder that keeps provisioner keys, one per slot.
-// failEnsureAt fails each key create at that URL before it reaches Coder.
+// failEnsureAt fails each key create at that URL before it reaches Coder, and
+// failLookup fails each key lookup by name.
 type keyStoreClient struct {
 	*fakeBootstrapClient
 	keys         map[keySlot]uuid.UUID
 	failEnsureAt string
+	failLookup   bool
 }
 
 func newKeySlot(coderURL, organizationName, keyName string) keySlot {
@@ -500,6 +502,9 @@ func (c *keyStoreClient) DeleteProvisionerKeyByID(_ context.Context, req coderbo
 }
 
 func (c *keyStoreClient) ProvisionerKeyByName(_ context.Context, req coderbootstrap.ProvisionerKeyByNameRequest) (*codersdk.ProvisionerKey, error) {
+	if c.failLookup {
+		return nil, errors.New("injected lookup failure")
+	}
 	slot := newKeySlot(req.CoderURL, req.OrganizationName, req.KeyName)
 	keyID, ok := c.keys[slot]
 	if !ok {
@@ -577,6 +582,13 @@ func TestCoderProvisionerKey_IDLessRecordKeepsOtherProvisionersKey(t *testing.T)
 			require.Equal(t, metav1.ConditionTrue, unverified.Status)
 			require.Contains(t, unverified.Message, urlB)
 			require.Positive(t, result.RequeueAfter, "P must check the record at B again")
+
+			store.failLookup = true
+			_, err = f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: pName})
+			require.NoError(t, err)
+			require.NotNil(t, meta.FindStatusCondition(f.get(ctx, t, p).Status.Conditions, coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept),
+				"a failed lookup must not clear the report of the key at B")
+			store.failLookup = false
 
 			delete(store.keys, slotB)
 			f.reconcile(ctx, t, p)
