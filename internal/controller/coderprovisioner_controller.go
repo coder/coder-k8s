@@ -318,15 +318,39 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	replacing := driftDetected || rotate || metadataMissing
 	// Status from an operator that did not record the control plane UID does
 	// not show that the applied key belongs to the Coder backend of the
-	// current control plane. The applied key is kept, and bound to that
-	// control plane, only when the lookup below finds it there.
-	verifyApplied := !replacing && status.ControlPlaneUID == ""
+	// current control plane, which has the recorded name and URL here. The
+	// applied key is kept, and bound to that control plane, only when Coder
+	// there lists it under its recorded IDs. An organization can be renamed
+	// and its name reused, so the lookup does not use the name.
+	if !replacing && status.ControlPlaneUID == "" {
+		var applied *codersdk.ProvisionerKey
+		if appliedOrgID, appliedKeyID, ok := parseKeyIDs(status.OrganizationID, status.ProvisionerKeyID); ok {
+			applied, err = r.BootstrapClient.ProvisionerKeyByID(ctx, coderbootstrap.ProvisionerKeyByIDRequest{
+				CoderURL:       coderURL,
+				SessionToken:   sessionToken,
+				OrganizationID: appliedOrgID,
+				KeyID:          appliedKeyID,
+			})
+			if err != nil {
+				setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+					metav1.ConditionFalse, "ProvisionerKeyFailed",
+					fmt.Sprintf("Failed to look up provisioner key %q", provisionerKeyName))
+				_ = r.Status().Update(ctx, provisioner)
+				return ctrl.Result{}, fmt.Errorf("look up the applied provisioner key %q: %w", provisionerKeyName, err)
+			}
+		}
+		if applied != nil {
+			appliedControlPlaneUID = string(controlPlane.UID)
+		} else {
+			replacing = true
+		}
+	}
 	// Coder allows one key per name in an organization. A key with the target
 	// name that status does not record can belong to another provisioner or
 	// a person, so the operator neither deletes nor replaces it, and changes
 	// nothing else until the name is free.
 	var existingKey *codersdk.ProvisionerKey
-	if replacing || verifyApplied {
+	if replacing {
 		existingKey, err = r.BootstrapClient.ProvisionerKeyByName(ctx, coderbootstrap.ProvisionerKeyByNameRequest{
 			CoderURL:         coderURL,
 			SessionToken:     sessionToken,
@@ -339,12 +363,6 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				fmt.Sprintf("Failed to look up provisioner key %q", keyName))
 			_ = r.Status().Update(ctx, provisioner)
 			return ctrl.Result{}, fmt.Errorf("look up provisioner key %q: %w", keyName, err)
-		}
-		if verifyApplied && existingKey != nil && isKeyID(status.ProvisionerKeyID, existingKey.ID) {
-			appliedControlPlaneUID = string(controlPlane.UID)
-			existingKey = nil
-		} else {
-			replacing = true
 		}
 		if existingKey != nil && !recordsKeyID(provisioner.Status, existingKey.ID) {
 			// Keys recorded at earlier targets do not wait for this name.

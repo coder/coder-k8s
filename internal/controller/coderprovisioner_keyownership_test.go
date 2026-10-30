@@ -256,12 +256,21 @@ func TestCoderProvisionerKey_ControlPlaneRecreated(t *testing.T) {
 			var lookups []urlToken
 			// oldKeyInCoder: the backend at oldURL holds the old key.
 			oldKeyInCoder := false
-			f.bootstrapClient.provisionerKeyByName = func(req coderbootstrap.ProvisionerKeyByNameRequest) *codersdk.ProvisionerKey {
-				lookups = append(lookups, urlToken{req.CoderURL, req.SessionToken})
-				if !oldKeyInCoder || req.CoderURL != oldURL || len(f.bootstrapClient.deleteKeyByIDRequests) > 0 {
+			oldKeyAt := func(coderURL, token string) *codersdk.ProvisionerKey {
+				lookups = append(lookups, urlToken{coderURL, token})
+				if !oldKeyInCoder || coderURL != oldURL || len(f.bootstrapClient.deleteKeyByIDRequests) > 0 {
 					return nil
 				}
 				return &codersdk.ProvisionerKey{ID: keyOld.KeyID, OrganizationID: keyOld.OrganizationID, Name: keyOld.KeyName}
+			}
+			f.bootstrapClient.provisionerKeyByName = func(req coderbootstrap.ProvisionerKeyByNameRequest) *codersdk.ProvisionerKey {
+				return oldKeyAt(req.CoderURL, req.SessionToken)
+			}
+			f.bootstrapClient.provisionerKeyByID = func(req coderbootstrap.ProvisionerKeyByIDRequest) *codersdk.ProvisionerKey {
+				if req.OrganizationID != keyOld.OrganizationID || req.KeyID != keyOld.KeyID {
+					return nil
+				}
+				return oldKeyAt(req.CoderURL, req.SessionToken)
 			}
 
 			p := f.createProvisioner(ctx, t, nil, nil)

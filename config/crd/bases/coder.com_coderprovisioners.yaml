@@ -424,8 +424,9 @@ spec:
                   plane with controlPlaneRefName for this key only while that control
                   plane has this UID, and rotates the key when it has another UID. When it
                   is empty, it sends that token only to the current Coder API URL of that
-                  control plane, and the next reconcile looks the key up there: it sets
-                  this field when Coder holds the key, and creates a new key otherwise.
+                  control plane, and the next reconcile looks the key up there by
+                  organizationID and provisionerKeyID: it sets this field when Coder holds
+                  the key, and creates a new key when Coder answers that it has none.
                 type: string
               controlPlaneURL:
                 description: ControlPlaneURL is the control plane URL last applied

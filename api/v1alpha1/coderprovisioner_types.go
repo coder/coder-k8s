@@ -122,8 +122,9 @@ type CoderProvisionerStatus struct {
 	// plane with controlPlaneRefName for this key only while that control
 	// plane has this UID, and rotates the key when it has another UID. When it
 	// is empty, it sends that token only to the current Coder API URL of that
-	// control plane, and the next reconcile looks the key up there: it sets
-	// this field when Coder holds the key, and creates a new key otherwise.
+	// control plane, and the next reconcile looks the key up there by
+	// organizationID and provisionerKeyID: it sets this field when Coder holds
+	// the key, and creates a new key when Coder answers that it has none.
 	ControlPlaneUID string `json:"controlPlaneUID,omitempty"`
 	// SecretRef references the provisioner key secret data currently in use.
 	SecretRef *SecretKeySelector `json:"secretRef,omitempty"`

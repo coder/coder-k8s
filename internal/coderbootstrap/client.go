@@ -95,6 +95,7 @@ type Client interface {
 	EnsureWorkspaceProxy(context.Context, RegisterWorkspaceProxyRequest) (RegisterWorkspaceProxyResponse, error)
 	EnsureProvisionerKey(context.Context, EnsureProvisionerKeyRequest) (EnsureProvisionerKeyResponse, error)
 	DeleteProvisionerKeyByID(context.Context, DeleteProvisionerKeyByIDRequest) error
+	ProvisionerKeyByID(context.Context, ProvisionerKeyByIDRequest) (*codersdk.ProvisionerKey, error)
 	ProvisionerKeyByName(context.Context, ProvisionerKeyByNameRequest) (*codersdk.ProvisionerKey, error)
 	Entitlements(ctx context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error)
 }

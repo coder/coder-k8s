@@ -34,6 +34,9 @@ type fakeBootstrapClient struct {
 	// provisionerKeyByName answers ProvisionerKeyByName. When it is nil,
 	// Coder has no key with the name.
 	provisionerKeyByName func(coderbootstrap.ProvisionerKeyByNameRequest) *codersdk.ProvisionerKey
+	// provisionerKeyByID answers ProvisionerKeyByID. When it is nil, Coder
+	// has no key with the ID.
+	provisionerKeyByID func(coderbootstrap.ProvisionerKeyByIDRequest) *codersdk.ProvisionerKey
 
 	// Entitlements support.
 	entitlementsResponse codersdk.Entitlements
@@ -80,6 +83,13 @@ func (f *fakeBootstrapClient) ProvisionerKeyByName(_ context.Context, req coderb
 		return nil, nil
 	}
 	return f.provisionerKeyByName(req), nil
+}
+
+func (f *fakeBootstrapClient) ProvisionerKeyByID(_ context.Context, req coderbootstrap.ProvisionerKeyByIDRequest) (*codersdk.ProvisionerKey, error) {
+	if f.provisionerKeyByID == nil {
+		return nil, nil
+	}
+	return f.provisionerKeyByID(req), nil
 }
 
 func (f *fakeBootstrapClient) Entitlements(_ context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error) {

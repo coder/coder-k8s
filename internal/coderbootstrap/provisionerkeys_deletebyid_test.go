@@ -90,6 +90,73 @@ func TestDeleteProvisionerKeyByID(t *testing.T) {
 	}
 }
 
+func TestProvisionerKeyByID(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	recordedKeyID := uuid.New()
+	now := time.Now().UTC().Format(time.RFC3339)
+	keysPath := "/api/v2/organizations/" + orgID.String() + "/provisionerkeys"
+
+	tests := []struct {
+		name       string
+		listStatus int
+		listBody   map[string]any
+		listedID   uuid.UUID
+		wantKey    bool
+		wantErr    bool
+	}{
+		{name: "recorded key exists", listStatus: http.StatusOK, listedID: recordedKeyID, wantKey: true},
+		{name: "same name, other ID", listStatus: http.StatusOK, listedID: uuid.New()},
+		{name: "organization gone", listStatus: http.StatusNotFound, listBody: coderNotFound},
+		{name: "404 not from Coder", listStatus: http.StatusNotFound, listBody: map[string]any{"message": "Route not found."}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != keysPath {
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if tt.listStatus != http.StatusOK {
+					writeJSONResponse(t, w, tt.listStatus, tt.listBody)
+					return
+				}
+				writeJSONResponse(t, w, http.StatusOK, []map[string]any{{
+					"id":           tt.listedID.String(),
+					"created_at":   now,
+					"organization": orgID.String(),
+					"name":         "shared-name",
+					"tags":         map[string]string{},
+				}})
+			}))
+			defer server.Close()
+
+			key, err := coderbootstrap.NewSDKClient().ProvisionerKeyByID(context.Background(), coderbootstrap.ProvisionerKeyByIDRequest{
+				CoderURL:       server.URL,
+				SessionToken:   "session-token",
+				OrganizationID: orgID,
+				KeyID:          recordedKeyID,
+			})
+			if tt.wantErr {
+				require.Error(t, err, "only Coder's own 404 proves that the key is gone")
+				return
+			}
+			require.NoError(t, err)
+			if !tt.wantKey {
+				require.Nil(t, key)
+				return
+			}
+			require.NotNil(t, key)
+			require.Equal(t, recordedKeyID, key.ID)
+		})
+	}
+}
+
 func TestDeleteProvisionerKeyByID_ValidationErrors(t *testing.T) {
 	t.Parallel()
 

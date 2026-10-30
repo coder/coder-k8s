@@ -148,6 +148,27 @@ func (c *SDKClient) ProvisionerKeyByName(ctx context.Context, req ProvisionerKey
 	return key, nil
 }
 
+// ProvisionerKeyByIDRequest identifies one provisioner key by the IDs that
+// the caller recorded when it applied the key.
+type ProvisionerKeyByIDRequest struct {
+	CoderURL       string
+	SessionToken   string
+	OrganizationID uuid.UUID
+	KeyID          uuid.UUID
+}
+
+// ProvisionerKeyByID returns the provisioner key with req.KeyID in the
+// organization req.OrganizationID. It returns nil when Coder answers that the
+// organization does not exist, or lists no key with that ID in it.
+func (c *SDKClient) ProvisionerKeyByID(ctx context.Context, req ProvisionerKeyByIDRequest) (*codersdk.ProvisionerKey, error) {
+	client, err := newProvisionerKeyByIDClient(req)
+	if err != nil {
+		return nil, err
+	}
+
+	return findProvisionerKeyByID(ctx, client, req.OrganizationID, req.KeyID)
+}
+
 // DeleteProvisionerKeyByIDRequest identifies one provisioner key by the IDs
 // that the caller recorded when it applied the key.
 type DeleteProvisionerKeyByIDRequest struct {
@@ -164,46 +185,17 @@ type DeleteProvisionerKeyByIDRequest struct {
 // and the delete are two requests: a key deleted and created again with the
 // same name between them is deleted too.
 func (c *SDKClient) DeleteProvisionerKeyByID(ctx context.Context, req DeleteProvisionerKeyByIDRequest) error {
-	if req.CoderURL == "" {
-		return xerrors.New("coder URL is required")
-	}
-	if req.SessionToken == "" {
-		return xerrors.New("session token is required")
-	}
-	if req.OrganizationID == uuid.Nil {
-		return xerrors.New("organization ID is required")
-	}
-	if req.KeyID == uuid.Nil {
-		return xerrors.New("provisioner key ID is required")
-	}
-
-	client, err := newAuthenticatedClient(req.CoderURL, req.SessionToken)
+	client, err := newProvisionerKeyByIDClient(ProvisionerKeyByIDRequest(req))
 	if err != nil {
 		return err
 	}
 
-	keys, err := withOptionalRateLimitBypass(ctx, func(requestCtx context.Context) ([]codersdk.ProvisionerKey, error) {
-		return client.ListProvisionerKeys(requestCtx, req.OrganizationID)
-	})
-	if isNotFound(err) {
-		return nil
-	}
+	match, err := findProvisionerKeyByID(ctx, client, req.OrganizationID, req.KeyID)
 	if err != nil {
-		return xerrors.Errorf("list provisioner keys for organization %q: %w", req.OrganizationID, err)
-	}
-
-	var match *codersdk.ProvisionerKey
-	for i := range keys {
-		if keys[i].ID == req.KeyID {
-			match = &keys[i]
-			break
-		}
+		return err
 	}
 	if match == nil {
 		return nil
-	}
-	if match.Name == "" {
-		return xerrors.Errorf("assertion failed: provisioner key %q has an empty name", req.KeyID)
 	}
 
 	_, err = withOptionalRateLimitBypass(ctx, func(requestCtx context.Context) (struct{}, error) {
@@ -214,6 +206,50 @@ func (c *SDKClient) DeleteProvisionerKeyByID(ctx context.Context, req DeleteProv
 	}
 
 	return nil
+}
+
+func newProvisionerKeyByIDClient(req ProvisionerKeyByIDRequest) (*codersdk.Client, error) {
+	if req.CoderURL == "" {
+		return nil, xerrors.New("coder URL is required")
+	}
+	if req.SessionToken == "" {
+		return nil, xerrors.New("session token is required")
+	}
+	if req.OrganizationID == uuid.Nil {
+		return nil, xerrors.New("organization ID is required")
+	}
+	if req.KeyID == uuid.Nil {
+		return nil, xerrors.New("provisioner key ID is required")
+	}
+
+	return newAuthenticatedClient(req.CoderURL, req.SessionToken)
+}
+
+// findProvisionerKeyByID returns the key with keyID in the organization
+// organizationID, or nil when Coder answers that the organization does not
+// exist or lists no key with that ID.
+func findProvisionerKeyByID(ctx context.Context, client *codersdk.Client, organizationID, keyID uuid.UUID) (*codersdk.ProvisionerKey, error) {
+	keys, err := withOptionalRateLimitBypass(ctx, func(requestCtx context.Context) ([]codersdk.ProvisionerKey, error) {
+		return client.ListProvisionerKeys(requestCtx, organizationID)
+	})
+	if isNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, xerrors.Errorf("list provisioner keys for organization %q: %w", organizationID, err)
+	}
+
+	for i := range keys {
+		if keys[i].ID != keyID {
+			continue
+		}
+		if keys[i].Name == "" {
+			return nil, xerrors.Errorf("assertion failed: provisioner key %q has an empty name", keyID)
+		}
+		return &keys[i], nil
+	}
+
+	return nil, nil
 }
 
 // coderNotFoundMessage is the message of the 404 that Coder answers for a
