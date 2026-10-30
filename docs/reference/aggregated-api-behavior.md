@@ -17,7 +17,7 @@ The aggregated API server serves `coderworkspaces`, `codertemplates` and `codert
 | [Template versions](#template-versions) | Read-only: `get` and `list`, no watch. Reads never download template source. |
 | [Promote a template version](#promote-a-template-version) | `codertemplates/<name>/promote` (`create`) makes a version active. A rollback promotes an older version. It needs its own RBAC grant. `dryRun=All` previews it. An unconfirmed result returns `503`, and a concurrent change returns `409`. |
 | [Template builds](#template-builds) | Create and update with `spec.files` wait until Coder completes the import. The full request must complete within 34 seconds. |
-| [Coder timeouts](#coder-timeouts) | A Coder call that runs out of time returns `504` on every resource. A create that gets a broken `2xx` answer returns `504` or `500`. After a `504` on a write, or a `500` on a create, re-read before you retry. |
+| [Coder timeouts](#coder-timeouts) | A Coder call that runs out of time returns `504` on every resource. A write whose answer leaves the result open, for example a `502` from a proxy, also returns `504`. After a `504` on a write, re-read before you retry. |
 | [Workspace build log](#workspace-build-log) | `coderworkspaces/log` returns the latest build log as text. It needs its own RBAC grant and has fixed size, time, and concurrency limits. |
 | [Start and stop](#start-and-stop) | `coderworkspaces/start` and `coderworkspaces/stop` start or stop a workspace. Each needs its own RBAC grant. A repeated request does not queue a second build while one is active. |
 
@@ -168,15 +168,16 @@ A namespace has no Coder backend in these cases:
 
 - `all` mode: the namespace contains no `CoderControlPlane` at all.
 - Standalone mode: the namespace is not the one that `--coder-namespace` names.
+- Standalone mode without `--coder-url` and `--coder-session-token`: every namespace.
 
 In such a namespace, the server answers requests as follows:
 
 | Request | Result |
 | --- | --- |
 | `list` of `coderworkspaces`, `codertemplates`, or `codertemplateversions` in that namespace | `200` with an empty list. The server does not call Coder. |
-| `get`, `create`, `update`, `delete`, and the subresources | An error: `503` in `all` mode, `400` in standalone mode |
+| `get`, `create`, `update`, `delete`, and the subresources | An error: `503` in `all` mode and in standalone mode without a Coder URL and token, `400` in standalone mode |
 | `watch` | Works as described in [Watch](#watch). It shows no events, because no write can succeed in that namespace. |
-| `list` in all namespaces (`-A`) | Unchanged. In `all` mode, it returns `503` when no `CoderControlPlane` is eligible in any namespace. |
+| `list` in all namespaces (`-A`) | Unchanged. In `all` mode, it returns `503` when no `CoderControlPlane` is eligible in any namespace. In standalone mode without a Coder URL and token, it returns `503`. |
 
 A namespace that contains a `CoderControlPlane` that is not eligible is not in this group. For example, operator access is not ready, or the name contains a `.` character. For the eligibility rules, see [Aggregated reads return `ServiceUnavailable`](../how-to/troubleshooting.md#aggregated-reads-return-serviceunavailable). In such a namespace, every request returns `503`, `list` included.
 
@@ -225,17 +226,21 @@ A Coder call that runs out of time returns `504 Gateway Timeout` on every aggreg
 - the request deadline ends first (see [The 34-second write budget](#the-34-second-write-budget), the [log limits](#workspace-build-log), and the [start and stop budget](#time-limit-and-retries)), or
 - Coder itself answers `504`.
 
-A create of a workspace or a template can also get a broken `2xx` answer, for example from a proxy in front of Coder. Coder can have created the object. The server returns `504` for some of these answers and `500` for others:
+A write (create, update, patch, or delete) of a workspace or a template can also get an answer that leaves its result open, for example from a proxy in front of Coder. Coder can have applied the write. The server returns `504`, with a message that says that the result is uncertain, for these answers:
 
-- `504`, with a message that says that the result is uncertain. Examples are a `201` with an HTML page, an empty body, invalid JSON, or a JSON array, and a `200` with an HTML page or with the JSON of Coder.
-- `500`. Examples are a `200` with the type `application/json` and invalid JSON or a JSON array, a `201` with `{}` or `null`, and a connection that breaks while the server reads the answer.
+- A `502` or a `503`.
+- A `2xx` that Coder does not send: a status other than the expected one, or a body that is not the expected JSON. Examples on a create are a `201` with an HTML page, an empty body, invalid JSON, or a JSON array, and a `200` with an HTML page, invalid JSON, or the JSON of Coder.
+- A create answer without the name of the object, for example a `201` with `{}` or `null`.
+- A connection that breaks after the server sent the request, before or while the server reads the answer.
 
-After a `504` or a `500` on a create, re-read the object before you retry.
+A write that did not reach Coder keeps the `500` that says that the server cannot reach Coder. Examples are a refused connection, a failed DNS lookup, and a rejected TLS certificate. Nothing changed in Coder, so you can retry it.
+
+A `get` or a `list` that gets a Coder object without the fields of its name, for example `{}`, returns `500` with a message that starts with `the Coder API answered`.
 
 The message does not include the Coder URL. The same is true for a `403` that Coder answers, a `500` for a Coder server error, and a `500` when the server cannot reach Coder. These messages name only the resource, the object and the Coder status code. The server log keeps the full Coder error, on a line from the `coder-errors` logger.
 
 - After a `504` on a read, try again later.
-- After a `504` on a write (create, update, patch, or delete), the result is not certain. Coder can have applied the change before the call timed out. Re-read the object with `kubectl get` before you retry.
+- After a `504` on a write (create, update, patch, or delete), the result is not certain. Coder can have applied the change before the call timed out or the answer broke. Re-read the object with `kubectl get` before you retry.
 - A promotion handles this itself. It answers `504` only before it sends the activation, so a `504` on a promotion means that nothing changed. When the activation itself times out or fails without an answer, the server re-reads the template and answers `Promoted`, `409`, or `503`. See [Promote a template version](#promote-a-template-version).
 - After a `504` on start or stop, re-read the latest build of the workspace before you retry. See [Time limit and retries](#time-limit-and-retries).
 

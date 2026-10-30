@@ -166,6 +166,7 @@ If the error does not name a field, the ServiceAccount does not have a permissio
 - `500` that mentions `subjectaccessreviews`: the ServiceAccount of the server cannot create SubjectAccessReviews. Apply `config/rbac/auth-delegator-binding.yaml`. In standalone mode, apply `config/apiserver-standalone/auth-delegator-binding.yaml` instead.
 - `403` that says `the Coder API denied the request`: kube-apiserver let the caller in, but Coder refused the call that the server made with its Coder token. The message leaves out the Coder URL and Coder's own text. The server log has the full Coder error, on a line from the `coder-errors` logger.
 - `500` that says `the Coder API failed the request ... with status <code>` or `the Coder API could not be reached`: Coder answered with a server error, or the server could not reach Coder. Read the `coder-errors` line in the server log for the Coder URL and the full error.
+- `504` that says `the result is uncertain`: Coder, or a proxy in front of it, gave an answer to a write that leaves it open whether Coder applied the write. Re-read the object with `kubectl get` before you retry. See [Coder timeouts](../reference/aggregated-api-behavior.md#coder-timeouts).
 
 ## Aggregated reads return `ServiceUnavailable`
 
