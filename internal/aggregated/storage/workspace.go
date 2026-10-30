@@ -692,6 +692,9 @@ func (s *WorkspaceStorage) Update(
 	if err != nil {
 		return nil, false, coder.MapCoderWriteError(err, coder.WriteUpdate, aggregationv1alpha1.Resource("coderworkspaces"), name)
 	}
+	if build.ID == uuid.Nil {
+		return nil, false, uncertainBuildAnswer(coder.WriteUpdate, name)
+	}
 
 	currentWorkspace.LatestBuild = build
 
@@ -773,6 +776,9 @@ func (s *WorkspaceStorage) Delete(
 	})
 	if err != nil {
 		return nil, false, coder.MapCoderWriteError(err, coder.WriteDelete, aggregationv1alpha1.Resource("coderworkspaces"), name)
+	}
+	if deleteBuild.ID == uuid.Nil {
+		return nil, false, uncertainBuildAnswer(coder.WriteDelete, name)
 	}
 
 	// Update the workspace snapshot with the delete-transition build so
