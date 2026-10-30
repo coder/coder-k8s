@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -111,12 +112,14 @@ func (r *transportRegistry) forURL(coderURL *url.URL) (*registeredTransport, err
 // as active until its response body is closed, because a connection stays in use while
 // the body (or an upgraded websocket) is open.
 func (t *registeredTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	sent := withLowercaseHost(req)
 	current := t.begin()
-	res, err := current.transport.RoundTrip(req)
+	res, err := current.transport.RoundTrip(sent)
 	if err != nil {
 		current.end()
 		return nil, err
 	}
+	res.Request = req
 
 	done := sync.OnceFunc(current.end)
 	// codersdk's websocket dial needs the upgraded body to stay an io.ReadWriteCloser.
@@ -164,6 +167,33 @@ func (t *registeredTransport) end() {
 
 	t.active--
 	t.lastUsed = t.registry.now()
+}
+
+// withLowercaseHost returns req with the URL hostname in ASCII lowercase, because
+// http.Transport keys its per-host connection limit by the hostname as written. The
+// Host header keeps the original spelling, and an IPv6 zone keeps its case because
+// interface names are case-sensitive.
+func withLowercaseHost(req *http.Request) *http.Request {
+	host, zone, hasZone := strings.Cut(req.URL.Host, "%")
+	lower := []byte(host)
+	for i, c := range lower {
+		if 'A' <= c && c <= 'Z' {
+			lower[i] = c + ('a' - 'A')
+		}
+	}
+	if string(lower) == host {
+		return req
+	}
+
+	sent := req.Clone(req.Context())
+	sent.URL.Host = string(lower)
+	if hasZone {
+		sent.URL.Host += "%" + zone
+	}
+	if sent.Host == "" {
+		sent.Host = req.URL.Host
+	}
+	return sent
 }
 
 type activeBody struct {

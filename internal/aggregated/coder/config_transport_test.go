@@ -603,3 +603,140 @@ func TestTransportRegistryClosesIdleConnectionsOfCurrentEntry(t *testing.T) {
 		t.Fatal("expected CloseIdleConnections on a held transport to close the current pool's idle connection")
 	}
 }
+
+func TestTransportRegistryBoundsConnectionsAcrossHostnameCase(t *testing.T) {
+	t.Parallel()
+
+	const maxConns = 2
+	release := make(chan struct{})
+	arrived := make(chan string, maxConns+1)
+	var newConns atomic.Int64
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		arrived <- r.Host
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = io.WriteString(w, "ok")
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			newConns.Add(1)
+		}
+	}
+	server.Start()
+	t.Cleanup(func() {
+		server.CloseClientConnections()
+		server.Close()
+	})
+
+	registry := newTransportRegistry(func() (*http.Transport, error) {
+		transport, err := newCoderTransport()
+		if err != nil {
+			return nil, err
+		}
+		transport.Proxy = nil
+		transport.MaxConnsPerHost = maxConns
+		transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+		}
+		return transport, nil
+	})
+
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	defer releaseOnce()
+	start := func(rawURL string) {
+		target := mustParseURL(t, rawURL)
+		transport, err := registry.forURL(target)
+		if err != nil {
+			t.Fatalf("forURL(%q): %v", rawURL, err)
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, err := (&http.Client{Transport: transport}).Get(target.String())
+			if err != nil {
+				t.Errorf("GET %s: %v", rawURL, err)
+				return
+			}
+			defer func() { _ = res.Body.Close() }()
+			if _, err := io.Copy(io.Discard, res.Body); err != nil {
+				t.Errorf("read %s: %v", rawURL, err)
+			}
+		}()
+	}
+	waitArrival := func() string {
+		t.Helper()
+		select {
+		case host := <-arrived:
+			return host
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for a request to arrive")
+			return ""
+		}
+	}
+
+	for range maxConns {
+		start("http://coder.invalid/api/v2/buildinfo")
+	}
+	for range maxConns {
+		waitArrival()
+	}
+	start("http://CODER.INVALID/api/v2/buildinfo")
+	select {
+	case host := <-arrived:
+		t.Fatalf("request for %q opened a connection beyond MaxConnsPerHost=%d", host, maxConns)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	releaseOnce()
+	if host := waitArrival(); host != "CODER.INVALID" {
+		t.Fatalf("server got Host %q, want the host as written, %q", host, "CODER.INVALID")
+	}
+	wg.Wait()
+	if got := newConns.Load(); got != maxConns {
+		t.Fatalf("server accepted %d connections, want %d", got, maxConns)
+	}
+}
+
+func TestTransportRegistryDialsLowercaseHostname(t *testing.T) {
+	t.Parallel()
+
+	dialed := make(chan string, 1)
+	registry := newTransportRegistry(func() (*http.Transport, error) {
+		transport, err := newCoderTransport()
+		if err != nil {
+			return nil, err
+		}
+		transport.Proxy = nil
+		transport.DialContext = func(_ context.Context, _, addr string) (net.Conn, error) {
+			dialed <- addr
+			return nil, fmt.Errorf("test dialer refuses %s", addr)
+		}
+		return transport, nil
+	})
+
+	for rawURL, wantAddr := range map[string]string{
+		"http://CODER.Invalid:8080/api/v2": "coder.invalid:8080",
+		"http://[FD00::1]/api/v2":          "[fd00::1]:80",
+		// Interface names are case-sensitive, so the zone keeps its case.
+		"http://[FE80::1%25ETH0]/api/v2": "[fe80::1%ETH0]:80",
+	} {
+		target := mustParseURL(t, rawURL)
+		transport, err := registry.forURL(target)
+		if err != nil {
+			t.Fatalf("forURL(%q): %v", rawURL, err)
+		}
+		res, err := (&http.Client{Transport: transport}).Get(target.String())
+		if err == nil {
+			_ = res.Body.Close()
+			t.Fatalf("GET %s succeeded through a refusing dialer", rawURL)
+		}
+		if got := <-dialed; got != wantAddr {
+			t.Errorf("GET %s dialed %q, want %q", rawURL, got, wantAddr)
+		}
+	}
+}
