@@ -145,5 +145,30 @@ func TestCoderMCPServerShownNonceNotAdopted(t *testing.T) {
 	got, _ = env.reconcile(ctx, t, got)
 	requireMCPServerStep(t, got, true, "SlugConflict")
 	require.Empty(t, got.Status.ConfigID, "the person's config is not adopted")
-	require.Zero(t, env.fake.requestCount(routeUpdateMCPServer)-1, "the controller did not change it")
+	require.Equal(t, 1, env.fake.requestCount(routeUpdateMCPServer), "the controller did not change it")
+}
+
+// #426 migration: the nonce coder-k8s:<UID> of an older record proves a
+// create only while that create is unconfirmed. An object that an older
+// version left stalled with SlugConflict never creates again, so a person who
+// later gives a config with its slug that display name does not get it
+// adopted.
+func TestCoderMCPServerOldNonceNotAdoptedWithoutPendingCreate(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	server := env.create(ctx, t, nil)
+	createOldCleanupRecord(ctx, t, env.namespace, "CoderMCPServer", server.UID, map[string]string{
+		"namespace": env.namespace, "name": server.Name, "deploymentID": env.fake.deploymentID, "coderID": "", "type": "",
+		"organizationID": env.orgID.String(), "slug": server.Spec.Slug, "createAttemptTime": time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+	})
+	req := apiKeyMCPRequest(server.Spec.Slug)
+	req.DisplayName = "coder-k8s:" + string(server.UID)
+	_, err := env.dashboard(t).CreateMCPServerConfig(ctx, env.orgID, req)
+	require.NoError(t, err)
+
+	got, _ := env.reconcile(ctx, t, server)
+	requireMCPServerStep(t, got, true, "SlugConflict")
+	require.Empty(t, got.Status.ConfigID, "the person's config is not adopted")
 }

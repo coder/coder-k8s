@@ -191,8 +191,8 @@ func TestCoderAIProviderRecordBackfillOnDelete(t *testing.T) {
 	require.Equal(t, env.fake.deploymentID, record["deploymentID"])
 }
 
-// #422 item 3: a deployment ID read that hangs through the one bounded
-// attempt leaves no record, but the finalizer still goes after that attempt.
+// #422 item 3: a deployment ID read that hangs leaves no record, but it does
+// not use up the one bounded attempt: the delete still goes out and succeeds.
 func TestCoderAIProviderRecordBackfillOnDeleteHangs(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -203,7 +203,10 @@ func TestCoderAIProviderRecordBackfillOnDeleteHangs(t *testing.T) {
 
 	gone, _ := env.deleteAIProvider(ctx, t, provider)
 	require.Nil(t, gone, "released after one attempt")
-	require.Nil(t, cleanupRecord(ctx, t, env.namespace, provider.UID), "no deployment ID, so no record")
+	require.Equal(t, 1, env.fake.requestCount(routeDeleteAIProvider))
+	_, ok := env.fake.aiProvider("openai")
+	require.False(t, ok, "the delete had time left")
+	require.Nil(t, cleanupRecord(ctx, t, env.namespace, provider.UID))
 }
 
 // #374 review: the controller reads records live. A cache that does not

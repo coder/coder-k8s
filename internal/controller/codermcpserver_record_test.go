@@ -285,8 +285,8 @@ func TestCoderMCPServerRecordBackfillOnDelete(t *testing.T) {
 	require.Equal(t, env.fake.deploymentID, record["deploymentID"])
 }
 
-// #422 item 3: a deployment ID read that hangs through the one bounded
-// attempt leaves no record, but the finalizer still goes after that attempt.
+// #422 item 3: a deployment ID read that hangs leaves no record, but it does
+// not use up the one bounded attempt: the delete still goes out and succeeds.
 func TestCoderMCPServerRecordBackfillOnDeleteHangs(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -299,7 +299,9 @@ func TestCoderMCPServerRecordBackfillOnDeleteHangs(t *testing.T) {
 
 	gone, _ := env.deleteMCPServer(ctx, t, got)
 	require.Nil(t, gone, "released after one attempt")
-	require.Nil(t, env.mcpServerRecord(ctx, t, got.UID), "no deployment ID, so no record")
+	require.Equal(t, 1, env.fake.requestCount(routeDeleteMCPServer))
+	require.Empty(t, env.fake.mcpServers(), "the delete had time left")
+	require.Nil(t, env.mcpServerRecord(ctx, t, got.UID))
 }
 
 // #353: a create answer that was lost is confirmed by the next reconcile,

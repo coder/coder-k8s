@@ -180,3 +180,27 @@ func TestCoderAIProviderShownNonceNotAdopted(t *testing.T) {
 	stored, _ = env.fake.aiProvider(provider.Name)
 	require.Equal(t, nonce, stored.displayName, "the controller did not change it")
 }
+
+// #426 migration: the nonce coder-k8s:<UID> of an older record proves a
+// create only while that create is unconfirmed. An object that an older
+// version left stalled with NameConflict never creates again, so a person
+// who later gives a provider of its name that display name does not get it
+// adopted.
+func TestCoderAIProviderOldNonceNotAdoptedWithoutPendingCreate(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newAIProviderCreateEnv(ctx, t)
+	createOldCleanupRecord(ctx, t, env.namespace, "CoderAIProvider", provider.UID, map[string]string{
+		"namespace": env.namespace, "name": provider.Name, "deploymentID": env.fake.deploymentID, "coderID": "", "type": "openai",
+		"createAttemptTime": time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+	})
+	_, err := env.fake.client(t, 2*time.Second).CreateAIProvider(ctx, codersdk.CreateAIProviderRequest{
+		Type: codersdk.AIProviderTypeOpenAI, Name: provider.Name, DisplayName: "coder-k8s:" + string(provider.UID),
+		BaseURL: provider.Spec.BaseURL, APIKeys: []string{"sk-person-0123456789abcdef"},
+	})
+	require.NoError(t, err)
+
+	got, _ := env.reconcile(ctx, t, provider)
+	requireAIProviderStep(t, got, true, "NameConflict")
+	require.Empty(t, got.Status.ProviderID, "the person's provider is not adopted")
+}
