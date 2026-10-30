@@ -126,6 +126,13 @@ func (r *CoderAIProviderReconciler) deleteStep(ctx context.Context, provider *co
 		ctx, cancel = context.WithTimeout(ctx, aiProviderBoundedDeleteTimeout)
 		defer cancel()
 	}
+	if provider.Status.ProviderID != "" && checkAIProviderID(provider) == nil {
+		// A provider from before records existed gets its record before a
+		// delete that can release without a confirmation (#422 item 3).
+		if step, err := r.ensureAIProviderRecord(ctx, sdk, provider); err != nil || step != nil {
+			log.FromContext(ctx).Info("Cannot write the cleanup record of a provider that exists in Coder", "error", err, "step", step)
+		}
+	}
 	// The record names the deployment that holds the provider. When the
 	// control plane now reaches another deployment, a delete there proves
 	// nothing, so the record stays for a sweep (#353 invariant 7).
