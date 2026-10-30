@@ -369,6 +369,11 @@ func (in *CoderWorkspaceLogOptions) DeepCopyInto(out *CoderWorkspaceLogOptions) 
 		*out = new(int64)
 		**out = **in
 	}
+	if in.TailLines != nil {
+		in, out := &in.TailLines, &out.TailLines
+		*out = new(int64)
+		**out = **in
+	}
 	return
 }
 

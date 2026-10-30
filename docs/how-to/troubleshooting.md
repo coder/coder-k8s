@@ -222,13 +222,13 @@ See [Promote a template version](../reference/aggregated-api-behavior.md#promote
 
 - `403`: the caller has no `get` grant on `coderworkspaces/log`. Access to `coderworkspaces` alone is not enough. See [How callers are checked](deploy-aggregated-apiserver.md#how-callers-are-checked).
 - `406`: the `Accept` header allows only `text/plain`. Allow `*/*` or JSON, or use `kubectl get --raw`.
-- `422`: `limitBytes` is below 1.
+- `422`: `limitBytes` is below 1, or `tailLines` is below 0.
 - `429` that says `for this user`: this user already has 4 open log requests on this server. Open `follow=true` streams count too. Close one, or wait and try again.
 - `429` that says `on this server`: the server has 64 open log requests. Wait for the `Retry-After` time and try again.
 - `429` that says `You've been rate limited`: Coder rate-limited the operator token, which every aggregated API call uses. Coder allows 512 requests per minute by default (`CODER_API_RATE_LIMIT`).
 - `504`: Coder did not answer in time before the response started. Either one Coder call took longer than the Coder request timeout (30 seconds by default), or the time limit of the request ran out: 60 seconds for a snapshot, or 25 minutes with `follow=true`. Check that Coder is healthy, then try again.
 - A `Warning` that says the server cut the log: the log is larger than the server limit. See [Workspace build log](../reference/aggregated-api-behavior.md#workspace-build-log).
-- A `follow=true` stream ends before the build ends: the stream reached the 4 MiB response limit or the 25-minute time limit. The server sends no `Warning` for a cut in the live part of a stream. Send a new request with `follow=true`. It sends the existing entries again. It continues to follow only if the existing entries fit within the size limits of a log request. Otherwise it returns only the first part and ends, because this API cannot return the rest of the log.
+- A `follow=true` stream ends before the build ends: the stream reached the 4 MiB response limit or the 25-minute time limit. The server sends no `Warning` for a cut in the live part of a stream. Send a new request with `follow=true&tailLines=<n>`. It sends the last `n` existing lines, then follows. Without `tailLines`, it sends all existing entries again, and it continues to follow only if they fit within the size limits of a log request. Otherwise it returns only the first part and ends.
 
 ## `coderworkspaces/start` or `/stop` returns `400`, `403`, `409`, or `504`
 

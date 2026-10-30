@@ -20,6 +20,10 @@ type CoderWorkspaceLogOptions struct {
 
 	// Follow keeps the response open and streams new entries until the build ends.
 	Follow bool `json:"follow,omitempty"`
+
+	// TailLines returns only this many lines from the end of the existing log. LimitBytes applies
+	// to those lines. With Follow, new entries follow them.
+	TailLines *int64 `json:"tailLines,omitempty"`
 }
 
 // CoderTemplateVersionPromotionSpec names the template version to activate.
@@ -104,6 +108,11 @@ func convertURLValuesToCoderWorkspaceLogOptions(in *url.Values, out *CoderWorksp
 	if values, ok := (*in)["limitBytes"]; ok {
 		if err := runtime.Convert_Slice_string_To_Pointer_int64(&values, &out.LimitBytes, s); err != nil {
 			return fmt.Errorf("limitBytes: %w", err)
+		}
+	}
+	if values, ok := (*in)["tailLines"]; ok {
+		if err := runtime.Convert_Slice_string_To_Pointer_int64(&values, &out.TailLines, s); err != nil {
+			return fmt.Errorf("tailLines: %w", err)
 		}
 	}
 	if values, ok := (*in)["follow"]; ok {
