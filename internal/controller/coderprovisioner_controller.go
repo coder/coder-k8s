@@ -56,6 +56,7 @@ const (
 
 	externalProvisionerEntitlementRetryInterval = 2 * time.Minute
 	provisionerOperatorAccessRetryInterval      = 15 * time.Second
+	provisionerPendingKeyRetryInterval          = 2 * time.Minute
 
 	// #nosec G101 -- this is a field index key, not a credential.
 	provisionerControlPlaneRefNameFieldIndex = ".spec.controlPlaneRef.name"
@@ -320,10 +321,22 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 	if driftDetected || rotate || metadataMissing {
-		pending = slices.DeleteFunc(pending, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
-			return sameKeySlot(record, target)
-		})
-		pending = append(pending, target)
+		// The newest target record with IDs stays until a create at the
+		// target proves its key gone. Coder allows one key per name, so each
+		// earlier create at the target already proved the older ones gone.
+		newest := -1
+		for i, record := range pending {
+			if sameKeySlot(record, target) && record.KeyID != "" {
+				newest = i
+			}
+		}
+		var next []coderv1alpha1.CoderProvisionerKeyRecord
+		for i, record := range pending {
+			if !sameKeySlot(record, target) || i == newest {
+				next = append(next, record)
+			}
+		}
+		pending = append(next, target)
 	}
 	var kept []coderv1alpha1.CoderProvisionerKeyRecord
 	for _, record := range pending {
@@ -633,9 +646,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// rotated again on the next try. A failed status write (for example a
 		// conflict because the provisioner is being deleted) revokes the new
 		// key before anyone can read it.
-		i := slices.IndexFunc(provisioner.Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
-			return sameKeySlot(record, target)
-		})
+		i := slices.Index(provisioner.Status.PendingKeys, target)
 		if i < 0 {
 			return ctrl.Result{}, fmt.Errorf("assertion failed: status has no pending record of the new provisioner key %q", keyName)
 		}
@@ -684,7 +695,8 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, fmt.Errorf("assertion failed: key status snapshot must not be nil")
 	}
 	// The Secret holds the key at the target, so the applied fields take over
-	// its record.
+	// its record. Coder allows one key per name, so the create also proved
+	// that the keys of the other target records are gone.
 	provisioner.Status.PendingKeys = slices.DeleteFunc(provisioner.Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
 		return sameKeySlot(record, target)
 	})
@@ -745,6 +757,9 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
+	if len(provisioner.Status.PendingKeys) > 0 {
+		return ctrl.Result{RequeueAfter: provisionerPendingKeyRetryInterval}, nil
+	}
 	return ctrl.Result{}, nil
 }
 

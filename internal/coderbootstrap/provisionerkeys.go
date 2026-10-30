@@ -156,7 +156,7 @@ type DeleteProvisionerKeyByNameRequest struct {
 
 // DeleteProvisionerKeyByName deletes the provisioner key named req.KeyName in
 // the organization req.OrganizationName, unless its ID is req.KeepKeyID. It
-// does nothing when no key has that name.
+// does nothing when the organization or a key with that name does not exist.
 func (c *SDKClient) DeleteProvisionerKeyByName(ctx context.Context, req DeleteProvisionerKeyByNameRequest) error {
 	if err := validateProvisionerKeyInputs(req.CoderURL, req.SessionToken, req.KeyName); err != nil {
 		return err
@@ -168,6 +168,9 @@ func (c *SDKClient) DeleteProvisionerKeyByName(ctx context.Context, req DeletePr
 	}
 
 	organization, err := resolveOrganizationByName(ctx, client, cmp.Or(req.OrganizationName, codersdk.DefaultOrganization))
+	if isNotFound(err) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}

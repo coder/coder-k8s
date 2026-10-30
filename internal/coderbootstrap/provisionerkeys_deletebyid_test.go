@@ -130,12 +130,14 @@ func TestDeleteProvisionerKeyByName(t *testing.T) {
 
 	tests := []struct {
 		name        string
+		orgGone     bool
 		listedID    uuid.UUID
 		listedName  string
 		deleteBody  map[string]any
 		wantDeletes []string
 		wantErr     bool
 	}{
+		{name: "organization gone", orgGone: true},
 		{name: "key exists", listedID: uuid.New(), listedName: "provisioner", wantDeletes: []string{keysPath + "/provisioner"}},
 		{name: "no key with the name", listedID: uuid.New(), listedName: "other"},
 		{name: "key is the one to keep", listedID: keptKeyID, listedName: "provisioner"},
@@ -154,6 +156,8 @@ func TestDeleteProvisionerKeyByName(t *testing.T) {
 			var deletes []string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v2/organizations/default" && tt.orgGone:
+					writeJSONResponse(t, w, http.StatusNotFound, coderNotFound)
 				case r.Method == http.MethodGet && r.URL.Path == "/api/v2/organizations/default":
 					writeJSONResponse(t, w, http.StatusOK, map[string]any{"id": orgID.String(), "name": "default", "created_at": now, "updated_at": now})
 				case r.Method == http.MethodGet && r.URL.Path == keysPath:
