@@ -313,8 +313,8 @@ func (r *CleanupRecordReconciler) matchingControlPlanes(ctx context.Context, rec
 // then returns gone when a read by a site owner finds no provider of that
 // name and type, and kept otherwise.
 func sweepAIProvider(ctx context.Context, sdk *codersdk.Client, record *cleanupRecord) (outcome sweepOutcome, why string, err error) {
-	if record.Nonce != aiProviderNoncePrefix+string(record.UID) {
-		return sweepRetry, "", fmt.Errorf("assertion failed: cleanup record of %s has nonce %q, not the nonce of its UID", record.UID, record.Nonce)
+	if !validCreateNonce(aiProviderNoncePrefix, record.UID, record.Nonce) {
+		return sweepRetry, "", fmt.Errorf("assertion failed: cleanup record of %s has a nonce that the operator does not write", record.UID)
 	}
 	if step := requireSiteOwner(ctx, sdk); step != nil {
 		// Only a site owner can trust Coder's 404 for a provider.
@@ -397,8 +397,8 @@ func sweepAIGatewayKeys(ctx context.Context, sdk *codersdk.Client, record *clean
 // it. It then returns gone when a list by a site owner shows no config with
 // the record's slug and none with its nonce, and kept otherwise.
 func sweepMCPServer(ctx context.Context, sdk *codersdk.Client, record *cleanupRecord) (outcome sweepOutcome, why string, err error) {
-	if record.Nonce != mcpServerNoncePrefix+string(record.UID) {
-		return sweepRetry, "", fmt.Errorf("assertion failed: cleanup record of %s has nonce %q, not the nonce of its UID", record.UID, record.Nonce)
+	if !validCreateNonce(mcpServerNoncePrefix, record.UID, record.Nonce) {
+		return sweepRetry, "", fmt.Errorf("assertion failed: cleanup record of %s has a nonce that the operator does not write", record.UID)
 	}
 	orgID, err := uuid.Parse(record.Organization)
 	if err != nil || orgID == uuid.Nil || orgID.String() != record.Organization || record.Slug == "" {

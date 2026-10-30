@@ -29,7 +29,10 @@ func TestCoderMCPServerUIDDisplayNameNotAdopted(t *testing.T) {
 	requireMCPServerStep(t, got, true, "SlugConflict")
 	require.Empty(t, got.Status.ConfigID, "the person's config is not adopted")
 	require.Len(t, env.fake.mcpServers(), 1)
-	require.Equal(t, persons, env.fake.mcpServers()[0].view, "the controller did not change it")
+	stored := env.fake.mcpServers()[0].view
+	require.Equal(t, req.DisplayName, stored.DisplayName)
+	require.Equal(t, persons.UpdatedAt, stored.UpdatedAt, "the controller did not change it")
+	require.Zero(t, env.fake.requestCount(routeUpdateMCPServer))
 
 	gone, _ := env.deleteMCPServer(ctx, t, got)
 	require.Nil(t, gone)

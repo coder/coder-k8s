@@ -55,7 +55,7 @@ func TestCoderMCPServerCleanupRecord(t *testing.T) {
 	delete(record, "createAttemptTime")
 	require.Equal(t, map[string]string{
 		"kind": "CoderMCPServer", "uid": string(got.UID), "namespace": env.namespace, "name": got.Name,
-		"deploymentID": env.fake.deploymentID, "nonce": "coder-k8s:" + string(got.UID), "coderID": env.requireCreated(t, got).view.ID.String(),
+		"deploymentID": env.fake.deploymentID, "nonce": env.requireCreated(t, got).view.DisplayName, "coderID": env.requireCreated(t, got).view.ID.String(),
 		"type": "", "organizationID": env.orgID.String(), "slug": got.Spec.Slug,
 	}, record, "the config ID is recorded before the sync replaces the nonce")
 

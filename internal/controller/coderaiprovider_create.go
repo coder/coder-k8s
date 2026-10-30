@@ -19,16 +19,12 @@ import (
 
 const (
 	// aiProviderNoncePrefix starts the display name of a provider that the
-	// controller creates. With the object UID it proves that this object
-	// created the provider, because Coder stores no owner.
+	// controller creates. With the secret of the cleanup record it proves
+	// that this object created the provider, because Coder stores no owner.
 	aiProviderNoncePrefix = "coder-k8s:"
 	// aiProviderConfirmPoll is the poll while a create result is uncertain.
 	aiProviderConfirmPoll = 5 * time.Second
 )
-
-func aiProviderNonce(provider *coderv1alpha1.CoderAIProvider) string {
-	return aiProviderNoncePrefix + string(provider.UID)
-}
 
 // createOrConfirm handles a provider without a Coder ID. Without a create
 // marker it looks up the name and creates the provider when the name is free.
@@ -73,7 +69,15 @@ func (r *CoderAIProviderReconciler) createOrConfirm(
 	case err != nil:
 		return keepRejectedCreate(aiProviderWait(aiProviderRetry, "CoderUnavailable", "get provider %s: %s", provider.Name, coderErrorSummary(err)), rejected), nil
 	}
-	return r.recordAIProvider(ctx, provider, found)
+	record, _, err := readCleanupRecord(ctx, r.APIReader, r.OperatorNamespace, provider.UID)
+	if err != nil {
+		return nil, err
+	}
+	nonce := ""
+	if record != nil {
+		nonce = record.Nonce
+	}
+	return r.recordAIProvider(ctx, provider, found, nonce)
 }
 
 // keepRejectedCreate keeps the memory of a rejected create in the reason of a
@@ -101,14 +105,18 @@ func requireSiteOwner(ctx context.Context, sdk *codersdk.Client) *aiProviderStep
 }
 
 // recordAIProvider decides whether found is the provider that this object
-// created. Only the nonce and the type prove it. Anything else is a provider
-// that the controller never touches (no adoption).
-func (r *CoderAIProviderReconciler) recordAIProvider(ctx context.Context, provider *coderv1alpha1.CoderAIProvider, found codersdk.AIProvider) (*aiProviderStep, error) {
+// created. Only nonce, the display name of the last create, and the type
+// prove it. Without a nonce, no create of this object can be pending.
+// Anything else is a provider that the controller never touches (no
+// adoption).
+func (r *CoderAIProviderReconciler) recordAIProvider(
+	ctx context.Context, provider *coderv1alpha1.CoderAIProvider, found codersdk.AIProvider, nonce string,
+) (*aiProviderStep, error) {
 	if err := coderAnswerFor("AI provider", provider.Name, found.Name); err != nil {
 		log.FromContext(ctx).Error(err, "Coder answered something other than the controller asked for")
 		return aiProviderStalled(aiProviderResync, "CoderAnswerMismatch", "%s", err.Error()), nil
 	}
-	if found.DisplayName != aiProviderNonce(provider) || string(found.Type) != provider.Spec.Type {
+	if nonce == "" || found.DisplayName != nonce || string(found.Type) != provider.Spec.Type {
 		// No create of this object can commit while another provider holds
 		// the name, so nothing of this object can exist in Coder.
 		provider.Status.CreateAttemptTime, provider.Status.Credential = nil, nil
@@ -139,8 +147,9 @@ func (r *CoderAIProviderReconciler) recordAIProvider(ctx context.Context, provid
 // createAIProvider writes the cleanup record, then the create marker and the
 // change token of the key, then sends the only create request of this
 // attempt. A failed record write or a conflict on the marker write ends the
-// reconcile before any request. The provider starts disabled with the nonce
-// as its display name. The apply step then sets the spec values.
+// reconcile before any request. The provider starts disabled with the
+// recorded nonce as its display name. The apply step then sets the spec
+// values.
 func (r *CoderAIProviderReconciler) createAIProvider(
 	ctx context.Context, sdk *codersdk.Client, provider *coderv1alpha1.CoderAIProvider, key credentialsecret.Value, before *coderv1alpha1.CoderAIProviderStatus,
 ) (*aiProviderStep, error) {
@@ -148,7 +157,8 @@ func (r *CoderAIProviderReconciler) createAIProvider(
 	now := time.Now()
 	// The record goes first: without it, a provider that a namespace
 	// deletion leaves behind cannot be found again (#353 invariant 1).
-	if step, err := r.writeAIProviderRecord(ctx, sdk, provider, &now); step != nil || err != nil {
+	nonce, step, err := r.writeAIProviderRecord(ctx, sdk, provider, &now)
+	if step != nil || err != nil {
 		return step, err
 	}
 	provider.Status.CreateAttemptTime = &metav1.Time{Time: now}
@@ -162,13 +172,13 @@ func (r *CoderAIProviderReconciler) createAIProvider(
 	*before = *provider.Status.DeepCopy()
 
 	created, err := sdk.CreateAIProvider(ctx, codersdk.CreateAIProviderRequest{
-		Type: codersdk.AIProviderType(provider.Spec.Type), Name: provider.Name, DisplayName: aiProviderNonce(provider),
+		Type: codersdk.AIProviderType(provider.Spec.Type), Name: provider.Name, DisplayName: nonce,
 		Enabled: false, BaseURL: provider.Spec.BaseURL, APIKeys: []string{key.Reveal()},
 	})
 	status := coderStatus(err)
 	switch {
 	case err == nil:
-		if step, err := r.recordAIProvider(ctx, provider, created); step != nil || err != nil {
+		if step, err := r.recordAIProvider(ctx, provider, created, nonce); step != nil || err != nil {
 			// A wrong answer leaves the marker, so a read decides.
 			if step != nil {
 				provider.Status.CreateAttemptTime, provider.Status.Credential = before.CreateAttemptTime, before.Credential
@@ -184,7 +194,7 @@ func (r *CoderAIProviderReconciler) createAIProvider(
 		provider.Status.CreateAttemptTime, provider.Status.Credential = nil, nil
 		return aiProviderWait(aiProviderRetry, "CreateRetrying", "The create request had no effect: %s", coderErrorSummary(err)), nil
 	case status >= 400 && status < 500:
-		return r.confirmRejectedCreate(ctx, sdk, provider, status, err)
+		return r.confirmRejectedCreate(ctx, sdk, provider, nonce, status, err)
 	default:
 		return aiProviderWait(aiProviderConfirmPoll, "ConfirmingCreate",
 			"The create result is uncertain (%s). The controller reads Coder instead of sending it again.", coderErrorSummary(err)), nil
@@ -194,15 +204,16 @@ func (r *CoderAIProviderReconciler) createAIProvider(
 // confirmRejectedCreate reads Coder after a 4xx answer to a create. Coder
 // sends its 4xx answers before the insert commits, but a proxy can put a 4xx
 // in place of a committed answer, so only a read proves that nothing of this
-// object exists. Until then the marker stays (#253 review round 3).
+// object exists. Until then the marker stays (#253 review round 3). nonce is
+// the display name that the create sent.
 func (r *CoderAIProviderReconciler) confirmRejectedCreate(
-	ctx context.Context, sdk *codersdk.Client, provider *coderv1alpha1.CoderAIProvider, status int, createErr error,
+	ctx context.Context, sdk *codersdk.Client, provider *coderv1alpha1.CoderAIProvider, nonce string, status int, createErr error,
 ) (*aiProviderStep, error) {
 	found, err := sdk.AIProvider(ctx, provider.Name)
 	switch {
 	case err == nil:
 		// Ours (the create committed) or someone else's (NameConflict).
-		return r.recordAIProvider(ctx, provider, found)
+		return r.recordAIProvider(ctx, provider, found, nonce)
 	case !isCoderResourceNotFound(err):
 		reason := "ConfirmingCreate"
 		if !aiProviderCreateRetryable(status) {

@@ -2,8 +2,10 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
@@ -22,8 +24,9 @@ import (
 // which Coder deployment holds the resource and how to find it. It stays when
 // the object goes without a confirmed delete in Coder (for example in a
 // namespace deletion), so a later sweep through a control plane of the same
-// deployment can delete the resource. A record holds no secrets. The
-// ConfigMap creation time is the record's created-at.
+// deployment can delete the resource. A record holds no credentials, but the
+// nonce of a provider or MCP server config is a secret until its create
+// commits (#426). The ConfigMap creation time is the record's created-at.
 const (
 	cleanupRecordPrefix = "ck8s-cleanup-"
 	// cleanupRecordLabel marks a record. Its value is the object kind.
@@ -53,7 +56,7 @@ type cleanupRecord struct {
 	// database, so it names the database that holds the resource.
 	DeploymentID string
 	// Nonce finds a resource whose Coder ID is not known yet: the display
-	// name of a provider or of an MCP server config.
+	// name that the last create of a provider or MCP server config sent.
 	Nonce string
 	// CoderID is the Coder ID of the resource once the operator knows it.
 	CoderID string
@@ -70,6 +73,47 @@ type cleanupRecord struct {
 }
 
 func cleanupRecordObjectName(uid types.UID) string { return cleanupRecordPrefix + string(uid) }
+
+// The display name of a create of a provider or MCP server config is prefix
+// and a random secret (#426). Only the record holds it, and namespace users
+// cannot read records, so nobody can give another resource that display name
+// before the create commits. Operator versions before #426 sent prefix and
+// the object UID, which anyone who can read the object sees. A record of such
+// a version keeps that nonce until the next create.
+
+// nextCreateNonce returns the nonce for a create of an object whose record
+// is previous. A create of the previous nonce can still commit while the
+// record has no Coder ID, and only that nonce then proves it, so it is sent
+// again. Once the Coder ID is known, Coder has shown the nonce as a display
+// name, so a new create gets a new one.
+func nextCreateNonce(prefix string, previous *cleanupRecord) string {
+	if previous != nil && previous.CoderID == "" && isRandomCreateNonce(prefix, previous.Nonce) {
+		return previous.Nonce
+	}
+	return prefix + rand.Text()
+}
+
+// keptCreateNonce returns the nonce for a record write without a create. An
+// object without a record is from before records existed, so a create of it
+// sent prefix and the object UID.
+func keptCreateNonce(prefix string, uid types.UID, previous *cleanupRecord) string {
+	if previous != nil {
+		return previous.Nonce
+	}
+	return prefix + string(uid)
+}
+
+// validCreateNonce reports a nonce that the operator can have written in the
+// record of uid.
+func validCreateNonce(prefix string, uid types.UID, nonce string) bool {
+	return nonce == prefix+string(uid) || isRandomCreateNonce(prefix, nonce)
+}
+
+func isRandomCreateNonce(prefix, nonce string) bool {
+	secret, ok := strings.CutPrefix(nonce, prefix)
+	// rand.Text returns at least 26 characters of the base32 alphabet.
+	return ok && len(secret) >= 26 && strings.Trim(secret, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567") == ""
+}
 
 // errNotACleanupRecord marks a ConfigMap of a record's name that is not a
 // valid record of that object. The operator never writes over it or deletes it.

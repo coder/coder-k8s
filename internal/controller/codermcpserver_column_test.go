@@ -81,7 +81,7 @@ func TestCoderMCPServerInterruptedUpdateKeepsObservedGeneration(t *testing.T) {
 	require.NotEmpty(t, stored.Status.ConfigID, "the config ID was written before the PATCH")
 	require.Equal(t, confirmedGeneration, stored.Status.ObservedGeneration, "the config ID write does not observe the edit")
 	require.Equal(t, confirmedGeneration, meta.FindStatusCondition(stored.Status.Conditions, "Ready").ObservedGeneration)
-	require.Equal(t, "coder-k8s:"+string(stored.UID), env.stored(t, stored).view.DisplayName)
+	require.Equal(t, env.mcpServerRecord(ctx, t, stored.UID)["nonce"], env.stored(t, stored).view.DisplayName)
 
 	got, _ = env.reconcile(ctx, t, stored)
 	requireMCPServerApplied(t, got)

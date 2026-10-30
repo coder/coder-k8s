@@ -56,7 +56,7 @@ func TestCoderAIProviderCleanupRecord(t *testing.T) {
 	delete(record, "createAttemptTime")
 	require.Equal(t, map[string]string{
 		"kind": "CoderAIProvider", "uid": string(got.UID), "namespace": env.namespace, "name": "openai",
-		"deploymentID": env.fake.deploymentID, "nonce": "coder-k8s:" + string(got.UID), "coderID": stored.id.String(), "type": "openai",
+		"deploymentID": env.fake.deploymentID, "nonce": stored.displayName, "coderID": stored.id.String(), "type": "openai",
 	}, record, "the provider ID is recorded before the sync replaces the nonce")
 
 	got, _ = env.reconcile(ctx, t, got)

@@ -16,29 +16,33 @@ const cleanupRecordKindAIProvider = "CoderAIProvider"
 // writeAIProviderRecord writes the cleanup record of provider with the
 // deployment ID that Coder answers now, so the record names the database that
 // the next create or the learned provider ID belongs to. createAttempt is the
-// time of a create that the caller sends next, or nil. A failed read or write
+// time of a create that the caller sends next, or nil. It returns the
+// recorded nonce, the display name of that create. A failed read or write
 // returns a wait or an error, and the caller then sends no create (#353
 // invariant 1).
 func (r *CoderAIProviderReconciler) writeAIProviderRecord(
 	ctx context.Context, sdk *codersdk.Client, provider *coderv1alpha1.CoderAIProvider, createAttempt *time.Time,
-) (*aiProviderStep, error) {
+) (string, *aiProviderStep, error) {
 	previous, existing, err := readCleanupRecord(ctx, r.APIReader, r.OperatorNamespace, provider.UID)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	deploymentID, err := coderDeploymentID(ctx, sdk)
 	if err != nil {
-		return aiProviderWait(aiProviderRetry, "CoderUnavailable", "read the Coder deployment ID for the cleanup record: %s", coderErrorSummary(err)), nil
+		return "", aiProviderWait(aiProviderRetry, "CoderUnavailable", "read the Coder deployment ID for the cleanup record: %s", coderErrorSummary(err)), nil
 	}
 	if previous != nil && previous.DeploymentID != deploymentID {
 		// The control plane now reaches another Coder database. The record
 		// is the only locator of what this object made in the old one, so
 		// the controller neither overwrites it nor creates in the new one.
-		return r.aiProviderDeploymentChanged(provider, previous, deploymentID), nil
+		return "", r.aiProviderDeploymentChanged(provider, previous, deploymentID), nil
 	}
 	record := cleanupRecord{
 		Kind: cleanupRecordKindAIProvider, UID: provider.UID, Namespace: provider.Namespace, Name: provider.Name,
-		DeploymentID: deploymentID, Nonce: aiProviderNonce(provider), CoderID: provider.Status.ProviderID, Type: provider.Spec.Type,
+		DeploymentID: deploymentID, Nonce: keptCreateNonce(aiProviderNoncePrefix, provider.UID, previous), CoderID: provider.Status.ProviderID, Type: provider.Spec.Type,
+	}
+	if createAttempt != nil {
+		record.Nonce = nextCreateNonce(aiProviderNoncePrefix, previous)
 	}
 	if record.CoderID == "" && createAttempt == nil && previous != nil {
 		// A status without the ID does not prove that the provider is gone,
@@ -56,7 +60,7 @@ func (r *CoderAIProviderReconciler) writeAIProviderRecord(
 		// for the settle window after that create.
 		record.CreateAttemptTime = previous.CreateAttemptTime
 	}
-	return nil, writeCleanupRecord(ctx, r.Client, r.OperatorNamespace, existing, record)
+	return record.Nonce, nil, writeCleanupRecord(ctx, r.Client, r.OperatorNamespace, existing, record)
 }
 
 // aiProviderDeploymentChanged is the stall of an object whose record names
@@ -132,5 +136,6 @@ func (r *CoderAIProviderReconciler) ensureAIProviderRecord(
 	if record != nil && record.CoderID != "" && record.CoderID == provider.Status.ProviderID {
 		return nil, nil
 	}
-	return r.writeAIProviderRecord(ctx, sdk, provider, nil)
+	_, step, err := r.writeAIProviderRecord(ctx, sdk, provider, nil)
+	return step, err
 }

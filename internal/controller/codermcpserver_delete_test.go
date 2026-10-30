@@ -297,7 +297,7 @@ func TestCoderMCPServerDeletePendingCreateRead(t *testing.T) {
 func createWithNonce(ctx context.Context, t *testing.T, env mcpServerEnv, server *coderv1alpha1.CoderMCPServer) {
 	t.Helper()
 	req := apiKeyMCPRequest(server.Spec.Slug)
-	req.DisplayName = "coder-k8s:" + string(server.UID)
+	req.DisplayName = env.mcpServerRecord(ctx, t, server.UID)["nonce"]
 	_, err := env.dashboard(t).CreateMCPServerConfig(ctx, env.orgID, req)
 	require.NoError(t, err)
 }
@@ -307,7 +307,7 @@ func createWithNonce(ctx context.Context, t *testing.T, env mcpServerEnv, server
 func createWithNonceUnderOtherSlug(ctx context.Context, t *testing.T, env mcpServerEnv, server *coderv1alpha1.CoderMCPServer) {
 	t.Helper()
 	req := apiKeyMCPRequest("renamed")
-	req.DisplayName = "coder-k8s:" + string(server.UID)
+	req.DisplayName = env.mcpServerRecord(ctx, t, server.UID)["nonce"]
 	_, err := env.dashboard(t).CreateMCPServerConfig(ctx, env.orgID, req)
 	require.NoError(t, err)
 }

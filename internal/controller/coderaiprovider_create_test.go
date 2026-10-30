@@ -58,7 +58,7 @@ func TestCoderAIProviderCreate(t *testing.T) {
 	stored, ok := env.fake.aiProvider("openai")
 	require.True(t, ok)
 	require.False(t, stored.enabled, "the provider starts disabled")
-	require.Equal(t, "coder-k8s:"+string(got.UID), stored.displayName, "the nonce proves who created it")
+	require.Equal(t, cleanupRecord(ctx, t, env.namespace, got.UID)["nonce"], stored.displayName, "the nonce proves who created it")
 	require.Equal(t, codersdk.AIProviderTypeOpenAI, stored.providerType)
 	require.Equal(t, "https://api.openai.com/v1", stored.baseURL)
 	require.Len(t, stored.keys, 1)

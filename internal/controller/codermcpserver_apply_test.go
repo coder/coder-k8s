@@ -180,7 +180,7 @@ func TestCoderMCPServerApplyGroupNotFound(t *testing.T) {
 	requireMCPServerStep(t, got, true, "GroupNotFound")
 	stored := env.requireCreated(t, got)
 	require.False(t, stored.view.Enabled)
-	require.Equal(t, "coder-k8s:"+string(got.UID), stored.view.DisplayName)
+	require.Equal(t, env.mcpServerRecord(ctx, t, got.UID)["nonce"], stored.view.DisplayName)
 	require.Zero(t, env.fake.requestCount(routeUpdateMCPServer))
 	groups, _ := env.fake.mcpACL(stored.view.ID)
 	require.Empty(t, groups, "only the remove-only ACL write: Everyone goes")

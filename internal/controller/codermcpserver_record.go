@@ -19,38 +19,42 @@ const cleanupRecordKindMCPServer = "CoderMCPServer"
 
 // writeMCPServerRecord writes the cleanup record of server with the
 // deployment ID that Coder answers now. createAttempt is the time of a create
-// that the caller sends next, or nil. A failed read or write returns a wait
-// or an error, and the caller then sends no create (#353 invariant 1).
+// that the caller sends next, or nil. It returns the recorded nonce, the
+// display name of that create. A failed read or write returns a wait or an
+// error, and the caller then sends no create (#353 invariant 1).
 func (r *CoderMCPServerReconciler) writeMCPServerRecord(
 	ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, createAttempt *time.Time,
-) (*mcpServerStep, error) {
+) (string, *mcpServerStep, error) {
 	if orgID, err := uuid.Parse(server.Status.OrganizationID); err != nil || orgID == uuid.Nil || orgID.String() != server.Status.OrganizationID {
-		return nil, fmt.Errorf("assertion failed: MCP server %s/%s needs a pinned organization ID for its cleanup record, but has %q", server.Namespace, server.Name, server.Status.OrganizationID)
+		return "", nil, fmt.Errorf("assertion failed: MCP server %s/%s needs a pinned organization ID for its cleanup record, but has %q", server.Namespace, server.Name, server.Status.OrganizationID)
 	}
 	if id := server.Status.ConfigID; id != "" {
 		// A sweep deletes the recorded ID, so only a canonical UUID goes in.
 		if parsed, err := uuid.Parse(id); err != nil || parsed == uuid.Nil || parsed.String() != id {
-			return nil, fmt.Errorf("assertion failed: MCP server %s/%s has status.configID %q, which is not a canonical UUID", server.Namespace, server.Name, id)
+			return "", nil, fmt.Errorf("assertion failed: MCP server %s/%s has status.configID %q, which is not a canonical UUID", server.Namespace, server.Name, id)
 		}
 	}
 	previous, existing, err := readCleanupRecord(ctx, r.APIReader, r.OperatorNamespace, server.UID)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	deploymentID, err := coderDeploymentID(ctx, sdk)
 	if err != nil {
-		return mcpServerWait(mcpServerRetry, "CoderUnavailable", "read the Coder deployment ID for the cleanup record: %s", coderErrorSummary(err)), nil
+		return "", mcpServerWait(mcpServerRetry, "CoderUnavailable", "read the Coder deployment ID for the cleanup record: %s", coderErrorSummary(err)), nil
 	}
 	if previous != nil && previous.DeploymentID != deploymentID {
 		// The record is the only locator of what this object made in the old
 		// Coder database, so the controller neither overwrites it nor creates
 		// in the new one.
-		return r.mcpServerDeploymentChanged(server, previous, deploymentID), nil
+		return "", r.mcpServerDeploymentChanged(server, previous, deploymentID), nil
 	}
 	record := cleanupRecord{
 		Kind: cleanupRecordKindMCPServer, UID: server.UID, Namespace: server.Namespace, Name: server.Name,
-		DeploymentID: deploymentID, Nonce: mcpServerNonce(server), CoderID: server.Status.ConfigID,
+		DeploymentID: deploymentID, Nonce: keptCreateNonce(mcpServerNoncePrefix, server.UID, previous), CoderID: server.Status.ConfigID,
 		Organization: server.Status.OrganizationID, Slug: server.Spec.Slug,
+	}
+	if createAttempt != nil {
+		record.Nonce = nextCreateNonce(mcpServerNoncePrefix, previous)
 	}
 	if record.CoderID == "" && createAttempt == nil && previous != nil {
 		// A status without the ID does not prove that the config is gone, and
@@ -68,7 +72,7 @@ func (r *CoderMCPServerReconciler) writeMCPServerRecord(
 		// for the settle window after that create.
 		record.CreateAttemptTime = previous.CreateAttemptTime
 	}
-	return nil, writeCleanupRecord(ctx, r.Client, r.OperatorNamespace, existing, record)
+	return record.Nonce, nil, writeCleanupRecord(ctx, r.Client, r.OperatorNamespace, existing, record)
 }
 
 // mcpServerDeploymentChanged is the stall of an object whose record names
@@ -128,5 +132,6 @@ func (r *CoderMCPServerReconciler) ensureMCPServerRecord(ctx context.Context, sd
 	if record != nil && record.CoderID != "" && record.CoderID == server.Status.ConfigID {
 		return nil, nil
 	}
-	return r.writeMCPServerRecord(ctx, sdk, server, nil)
+	_, step, err := r.writeMCPServerRecord(ctx, sdk, server, nil)
+	return step, err
 }
