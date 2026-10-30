@@ -78,8 +78,9 @@ func cleanupRecordObjectName(uid types.UID) string { return cleanupRecordPrefix 
 // and a random secret (#426). Only the record holds it, and namespace users
 // cannot read records, so nobody can give another resource that display name
 // before the create commits. Operator versions before #426 sent prefix and
-// the object UID, which anyone who can read the object sees. A record of such
-// a version keeps that nonce until the next create.
+// the object UID, which anyone who can read the object sees. That nonce
+// proves only a create that is still pending, and the next create gets a
+// random one.
 
 // nextCreateNonce returns the nonce for a create of an object whose record
 // is previous. A create of the previous nonce can still commit while the

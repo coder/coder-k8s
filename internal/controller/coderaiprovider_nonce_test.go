@@ -117,9 +117,9 @@ func TestCoderAIProviderNonceReuse(t *testing.T) {
 }
 
 // #426 migration: a record of an operator version before #426 keeps its
-// nonce coder-k8s:<UID> until the next create, so a create of that version
-// whose answer was lost is still adopted. The next create gets a random
-// nonce.
+// nonce coder-k8s:<UID> until the next create, so a pending create of that
+// version whose answer was lost is still adopted. The next create gets a
+// random nonce.
 func TestCoderAIProviderOldNonceAdoptedUntilNextCreate(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
