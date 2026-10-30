@@ -32,7 +32,7 @@ func TestTemplateToK8s(t *testing.T) {
 		Deprecated:       true,
 	}
 
-	converted := TemplateToK8s("control-plane", template)
+	converted := mustTemplateToK8s(t, "control-plane", template)
 	if converted == nil {
 		t.Fatal("expected non-nil converted template")
 	}

@@ -44,7 +44,7 @@ func versionFixtureWorkspace() codersdk.Workspace {
 func TestWorkspaceToK8sResourceVersionIsOpaqueSHA256(t *testing.T) {
 	t.Parallel()
 
-	converted := WorkspaceToK8s("control-plane", versionFixtureWorkspace())
+	converted := mustWorkspaceToK8s(t, "control-plane", versionFixtureWorkspace())
 	if len(converted.ResourceVersion) != hex.EncodedLen(32) {
 		t.Fatalf("expected a full hex SHA-256 resourceVersion, got %q", converted.ResourceVersion)
 	}
@@ -63,8 +63,8 @@ func TestWorkspaceToK8sResourceVersionStableForIdenticalProjection(t *testing.T)
 	t.Parallel()
 
 	base := versionFixtureWorkspace()
-	first := WorkspaceToK8s("control-plane", base).ResourceVersion
-	second := WorkspaceToK8s("control-plane", base).ResourceVersion
+	first := mustWorkspaceToK8s(t, "control-plane", base).ResourceVersion
+	second := mustWorkspaceToK8s(t, "control-plane", base).ResourceVersion
 	if first != second {
 		t.Fatalf("identical input must yield identical resourceVersion: %q vs %q", first, second)
 	}
@@ -75,7 +75,7 @@ func TestWorkspaceToK8sResourceVersionStableForIdenticalProjection(t *testing.T)
 	backendOnly.LatestBuild.UpdatedAt = base.LatestBuild.UpdatedAt.Add(time.Hour)
 	backendOnly.LatestBuild.CreatedAt = base.LatestBuild.CreatedAt.Add(time.Hour)
 	backendOnly.LatestBuild.BuildNumber = 7
-	if got := WorkspaceToK8s("control-plane", backendOnly).ResourceVersion; got != first {
+	if got := mustWorkspaceToK8s(t, "control-plane", backendOnly).ResourceVersion; got != first {
 		t.Fatalf("backend-only timestamp/build-number change must keep the token, got %q want %q", got, first)
 	}
 
@@ -85,7 +85,7 @@ func TestWorkspaceToK8sResourceVersionStableForIdenticalProjection(t *testing.T)
 	changed.TTLMillis = &ttl
 	reverted := changed
 	reverted.TTLMillis = base.TTLMillis
-	if got := WorkspaceToK8s("control-plane", reverted).ResourceVersion; got != first {
+	if got := mustWorkspaceToK8s(t, "control-plane", reverted).ResourceVersion; got != first {
 		t.Fatalf("reverted projection must return the original token, got %q want %q", got, first)
 	}
 }
@@ -94,7 +94,7 @@ func TestWorkspaceToK8sResourceVersionTracksExposedFields(t *testing.T) {
 	t.Parallel()
 
 	base := versionFixtureWorkspace()
-	baseVersion := WorkspaceToK8s("control-plane", base).ResourceVersion
+	baseVersion := mustWorkspaceToK8s(t, "control-plane", base).ResourceVersion
 
 	newBuildID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
 	newTemplateVersionID := uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
@@ -128,7 +128,7 @@ func TestWorkspaceToK8sResourceVersionTracksExposedFields(t *testing.T) {
 
 			w := base
 			mutate(&w)
-			converted := WorkspaceToK8s("control-plane", w)
+			converted := mustWorkspaceToK8s(t, "control-plane", w)
 			if converted.ResourceVersion == baseVersion {
 				t.Fatalf("exposed field changed but resourceVersion stayed %q", baseVersion)
 			}
@@ -143,11 +143,11 @@ func TestWorkspaceToK8sResourceVersionIdentityAndNamespace(t *testing.T) {
 	t.Parallel()
 
 	base := versionFixtureWorkspace()
-	converted := WorkspaceToK8s("control-plane", base)
+	converted := mustWorkspaceToK8s(t, "control-plane", base)
 
 	recreated := base
 	recreated.ID = uuid.MustParse("33333333-3333-3333-3333-333333333333")
-	recreatedConverted := WorkspaceToK8s("control-plane", recreated)
+	recreatedConverted := mustWorkspaceToK8s(t, "control-plane", recreated)
 	if recreatedConverted.UID == converted.UID {
 		t.Fatal("recreated workspace (new ID, same name) must expose a new UID")
 	}
@@ -155,7 +155,7 @@ func TestWorkspaceToK8sResourceVersionIdentityAndNamespace(t *testing.T) {
 		t.Fatal("recreated workspace must expose a different resourceVersion")
 	}
 
-	if other := WorkspaceToK8s("other-namespace", base); other.ResourceVersion == converted.ResourceVersion {
+	if other := mustWorkspaceToK8s(t, "other-namespace", base); other.ResourceVersion == converted.ResourceVersion {
 		t.Fatal("namespace is part of the projection and must change the resourceVersion")
 	}
 }

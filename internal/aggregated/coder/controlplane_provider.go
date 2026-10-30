@@ -88,7 +88,7 @@ func (p *ControlPlaneClientProvider) ClientForNamespace(ctx context.Context, nam
 		if namespace == "" || listed > 0 {
 			return nil, unavailable
 		}
-		return nil, newNamespaceNotServedError(unavailable)
+		return nil, NewNamespaceNotServedError(unavailable)
 	case 1:
 		// handled below
 	default:

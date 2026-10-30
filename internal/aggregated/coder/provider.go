@@ -39,7 +39,9 @@ func (e *namespaceNotServedError) Error() string { return e.status.Error() }
 
 func (e *namespaceNotServedError) Unwrap() error { return e.status }
 
-func newNamespaceNotServedError(status *apierrors.StatusError) error {
+// NewNamespaceNotServedError marks status as the ClientForNamespace error for a namespace that no
+// Coder backend serves.
+func NewNamespaceNotServedError(status *apierrors.StatusError) error {
 	if status == nil {
 		panic("assertion failed: namespace-not-served status error must not be nil")
 	}
@@ -86,7 +88,7 @@ func (p *StaticClientProvider) ClientForNamespace(ctx context.Context, namespace
 		namespace = p.Namespace
 	}
 	if namespace != p.Namespace {
-		return nil, newNamespaceNotServedError(apierrors.NewBadRequest(
+		return nil, NewNamespaceNotServedError(apierrors.NewBadRequest(
 			fmt.Sprintf(
 				"namespace %q is not served by this aggregated API server (configured for %q)",
 				namespace,

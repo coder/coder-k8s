@@ -2,15 +2,20 @@ package coder
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"syscall"
 	"testing"
 
 	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
+	"github.com/coder/coder-k8s/internal/sameorigin"
 	"github.com/coder/coder/v2/codersdk"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -243,61 +248,101 @@ func withCoderMessage(err *codersdk.Error, message string) *codersdk.Error {
 	return err
 }
 
-func TestMapCoderCreateError(t *testing.T) {
+func TestMapCoderWriteError(t *testing.T) {
 	t.Parallel()
 
 	resource := aggregationv1alpha1.Resource("codertemplates")
 	name := "acme.docker"
+	const coderURL = "https://coder.example.com"
+	sdkErr := func(status int) error {
+		return fmt.Errorf("write: %w", codersdk.NewTestError(status, http.MethodPost, coderURL))
+	}
+	afterSend := func(err error) error { return &url.Error{Op: "Post", URL: coderURL, Err: err} }
+	dial := func(err error) error {
+		return afterSend(&net.OpError{Op: "dial", Net: "tcp", Err: err})
+	}
 
-	// Since codersdk v2.37, a 2xx whose body is not JSON (for example a proxy page) is a
-	// *codersdk.Error with that status. Coder can have created the object.
-	for _, status := range []int{http.StatusOK, http.StatusCreated, http.StatusNoContent} {
-		err := MapCoderCreateError(fmt.Errorf("create: %w", codersdk.NewTestError(status, http.MethodPost, "https://coder.example.com")), resource, name)
+	const (
+		uncertain   = "uncertain"
+		unreachable = "could not be reached"
+		timedOut    = "did not answer in time"
+	)
+	for _, tc := range []struct {
+		name    string
+		err     error
+		wantMsg string
+	}{
+		// A 2xx *codersdk.Error is an answer that Coder does not send. Coder can have applied it.
+		{"200", sdkErr(http.StatusOK), uncertain},
+		{"201", sdkErr(http.StatusCreated), uncertain},
+		{"204", sdkErr(http.StatusNoContent), uncertain},
+		{"proxy 502", sdkErr(http.StatusBadGateway), uncertain},
+		{"proxy 503", sdkErr(http.StatusServiceUnavailable), uncertain},
+		{"body breaks off", fmt.Errorf("read response body: %w", io.ErrUnexpectedEOF), uncertain},
+		{"malformed JSON on an unexpected 2xx", fmt.Errorf("decode body: %w", &json.SyntaxError{}), uncertain},
+		{"connection closed without an answer", afterSend(io.EOF), uncertain},
+		{"connection reset after the send", afterSend(&net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}), uncertain},
+		{"connection refused", dial(syscall.ECONNREFUSED), unreachable},
+		{"DNS failure", dial(&net.DNSError{Err: "no such host", Name: "coder.example.com", IsNotFound: true}), unreachable},
+		{"proxy unreachable", afterSend(&net.OpError{Op: "proxyconnect", Net: "tcp", Err: syscall.ECONNREFUSED}), unreachable},
+		{"certificate rejected", afterSend(&tls.CertificateVerificationError{Err: errors.New("unknown authority")}), unreachable},
+		// The redirect answer comes after the server got the write.
+		{"redirect to another origin", afterSend(sameorigin.ErrCrossOrigin), uncertain},
+		{"request to another origin", afterSend(sameorigin.ErrCrossOriginRequest), unreachable},
+		{"timeout", afterSend(context.DeadlineExceeded), timedOut},
+		{"Coder 504", sdkErr(http.StatusGatewayTimeout), timedOut},
+	} {
+		err := MapCoderWriteError(tc.err, WriteDelete, resource, name)
 		var statusErr *apierrors.StatusError
-		if !errors.As(err, &statusErr) || !apierrors.IsTimeout(err) {
-			t.Fatalf("status %d: expected a 504 Timeout, got %T %v", status, err, err)
+		if !errors.As(err, &statusErr) {
+			t.Fatalf("%s: expected a status error, got %T %v", tc.name, err, err)
 		}
 		message := statusErr.ErrStatus.Message
-		for _, want := range []string{"uncertain", "re-read", `codertemplates "acme.docker"`, fmt.Sprint(status)} {
-			if !strings.Contains(message, want) {
-				t.Fatalf("status %d: message %q does not contain %q", status, message, want)
+		if !strings.Contains(message, tc.wantMsg) || strings.Contains(message, "coder.example.com") {
+			t.Fatalf("%s: expected a message with %q and without the Coder URL, got %q", tc.name, tc.wantMsg, message)
+		}
+		switch tc.wantMsg {
+		case uncertain, timedOut:
+			if !apierrors.IsTimeout(err) {
+				t.Fatalf("%s: expected a 504, got %v", tc.name, err)
+			}
+			if tc.wantMsg == uncertain && !strings.Contains(message, `delete of codertemplates "acme.docker"`) {
+				t.Fatalf("%s: message %q must name the write and the object", tc.name, message)
+			}
+			if details := statusErr.ErrStatus.Details; details != nil && details.RetryAfterSeconds != 0 {
+				t.Fatalf("%s: an uncertain write must not ask clients to retry on their own, got Retry-After %d", tc.name, details.RetryAfterSeconds)
+			}
+		case unreachable:
+			if !apierrors.IsInternalError(err) {
+				t.Fatalf("%s: expected a 500, got %v", tc.name, err)
 			}
 		}
-		if strings.Contains(message, "coder.example.com") {
-			t.Fatalf("status %d: message %q must not contain the Coder URL", status, message)
-		}
-		if details := statusErr.ErrStatus.Details; details != nil && details.RetryAfterSeconds != 0 {
-			t.Fatalf("status %d: an uncertain create must not ask clients to retry on their own, got Retry-After %d", status, details.RetryAfterSeconds)
-		}
 	}
 
-	// Every other error maps as in MapCoderError.
-	for _, err := range []error{
-		codersdk.NewTestError(http.StatusConflict, http.MethodPost, "https://coder.example.com"),
-		codersdk.NewTestError(http.StatusBadRequest, http.MethodPost, "https://coder.example.com"),
-		codersdk.NewTestError(http.StatusBadGateway, http.MethodPost, "https://coder.example.com"),
-		codersdk.NewTestError(http.StatusMultipleChoices, http.MethodPost, "https://coder.example.com"),
-		errors.New("transport failed"),
-	} {
-		got, want := MapCoderCreateError(err, resource, name), MapCoderError(err, resource, name)
+	// A Coder answer with a status that leaves no doubt maps as in MapCoderError.
+	for _, status := range []int{http.StatusConflict, http.StatusBadRequest, http.StatusInternalServerError, http.StatusMultipleChoices} {
+		err := sdkErr(status)
+		got, want := MapCoderWriteError(err, WriteCreate, resource, name), MapCoderError(err, resource, name)
 		if got.Error() != want.Error() || apierrors.ReasonForError(got) != apierrors.ReasonForError(want) {
-			t.Fatalf("%v: expected the MapCoderError mapping %v, got %v", err, want, got)
+			t.Fatalf("%d: expected the MapCoderError mapping %v, got %v", status, want, got)
 		}
 	}
 
-	// The assertions run before the 2xx branch, so a 2xx error cannot hide them.
-	ok := codersdk.NewTestError(http.StatusOK, http.MethodPost, "https://coder.example.com")
+	// The assertions run before the uncertain branches, so an uncertain error cannot hide them.
+	ok := codersdk.NewTestError(http.StatusOK, http.MethodPost, coderURL)
 	for _, tc := range []struct {
 		err      error
+		write    Write
 		resource schema.GroupResource
 		name     string
 		want     string
 	}{
-		{nil, resource, name, "assertion failed: error must not be nil"},
-		{ok, schema.GroupResource{}, name, "assertion failed: resource must not be empty"},
-		{ok, resource, "", "assertion failed: resource name must not be empty"},
+		{nil, WriteCreate, resource, name, "assertion failed: error must not be nil"},
+		{ok, "", resource, name, "assertion failed: write must not be empty"},
+		{ok, WriteCreate, schema.GroupResource{}, name, "assertion failed: resource must not be empty"},
+		{ok, WriteCreate, resource, "", "assertion failed: resource name must not be empty"},
 	} {
-		if err := MapCoderCreateError(tc.err, tc.resource, tc.name); err == nil || apierrors.IsTimeout(err) || !strings.Contains(err.Error(), tc.want) {
+		if err := MapCoderWriteError(tc.err, tc.write, tc.resource, tc.name); err == nil || apierrors.IsTimeout(err) || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("expected %q, got %v", tc.want, err)
 		}
 	}

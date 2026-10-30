@@ -82,7 +82,9 @@ type errClientProvider struct {
 
 var _ coder.ClientProvider = (*errClientProvider)(nil)
 
-func (p *errClientProvider) ClientForNamespace(ctx context.Context, _ string) (*codersdk.Client, error) {
+// ClientForNamespace returns a 503 for every namespace. An unconfigured server serves no namespace,
+// so a namespaced LIST returns an empty list, and namespace deletion does not hang on it (#215).
+func (p *errClientProvider) ClientForNamespace(ctx context.Context, namespace string) (*codersdk.Client, error) {
 	if p == nil {
 		return nil, fmt.Errorf("assertion failed: err client provider must not be nil")
 	}
@@ -93,7 +95,11 @@ func (p *errClientProvider) ClientForNamespace(ctx context.Context, _ string) (*
 		return nil, fmt.Errorf("assertion failed: service unavailable message must not be empty")
 	}
 
-	return nil, apierrors.NewServiceUnavailable(p.serviceUnavailableMessage)
+	unavailable := apierrors.NewServiceUnavailable(p.serviceUnavailableMessage)
+	if namespace == "" {
+		return nil, unavailable
+	}
+	return nil, coder.NewNamespaceNotServedError(unavailable)
 }
 
 func buildClientProvider(opts Options, requestTimeout time.Duration) (coder.ClientProvider, error) {
