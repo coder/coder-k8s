@@ -71,7 +71,8 @@ func (r *CoderWorkspacePoolMemberReconciler) watchReady(
 // use too (#349). It writes one value to every workspace of the template, and
 // so does a usage flush after someone used each of them
 // (coderd/workspacestats/tracker.go). The template does not store the flag,
-// and its updated_at moves on every edit, so no read tells the two apart.
+// and other edits, such as a version promote, move its updated_at too, so no
+// read tells the two apart.
 // After such an update, every unclaimed ready member is Used: the pool
 // releases it, and its workspace stays in Coder.
 func checkPoolMemberUse(member *coderv1alpha1.CoderWorkspacePoolMember, workspace codersdk.Workspace, now time.Time) (*coderStep, error) {
