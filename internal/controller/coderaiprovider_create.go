@@ -119,12 +119,12 @@ func recordAIProvider(ctx context.Context, provider *coderv1alpha1.CoderAIProvid
 	if found.ID == uuid.Nil {
 		return nil, fmt.Errorf("assertion failed: Coder answered AI provider %s without an ID", provider.Name)
 	}
-	if provider.Status.Credential == nil {
-		// A create of this object committed after its marker was cleared, so
-		// the key it sent is not known. An empty change token makes the sync
-		// step send the current key.
-		provider.Status.Credential = &coderv1alpha1.CoderAIProviderCredentialStatus{}
-	}
+	// A key ID does not prove which key value Coder holds: a read can find a
+	// key that was changed in Coder after the create committed (#332), and a
+	// create can commit after its marker was cleared. An empty change token
+	// makes the sync step send the current key. Only a create answer proves
+	// the key, so createAIProvider sets the token again.
+	provider.Status.Credential = &coderv1alpha1.CoderAIProviderCredentialStatus{}
 	if len(found.APIKeys) != 1 || found.APIKeys[0].ID == uuid.Nil {
 		return aiProviderStalled(0, "KeyChangedExternally",
 			"Provider %s has %d keys in Coder, but this resource created it with one. The controller does not change it until the spec changes.", provider.Name, len(found.APIKeys)), nil
@@ -174,6 +174,7 @@ func (r *CoderAIProviderReconciler) createAIProvider(
 			}
 			return step, err
 		}
+		setAIProviderToken(provider.Status.Credential, token)
 		r.rememberSentKey(provider, key)
 		return nil, nil
 	case status == 0 && createHadNoEffect(err):
