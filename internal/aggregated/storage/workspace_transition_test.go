@@ -638,6 +638,37 @@ func TestWorkspaceTransitionUncertainPost(t *testing.T) {
 	}
 }
 
+// TestWorkspaceTransitionMalformedConfirmingReRead: Coder queued the build, the POST answer leaves
+// it open, and the confirming re-read finds the new build in a workspace without its name. The
+// re-read does not confirm the build, so the result is the uncertain 504, not a 500.
+func TestWorkspaceTransitionMalformedConfirmingReRead(t *testing.T) {
+	for _, postStatus := range []int{http.StatusTemporaryRedirect, http.StatusBadGateway} {
+		f := newTransitionFakeCoder(t, build(codersdk.WorkspaceTransitionStart, codersdk.ProvisionerJobSucceeded))
+		queued := build(codersdk.WorkspaceTransitionStop, codersdk.ProvisionerJobPending)
+		queued.ID, queued.BuildNumber, queued.InitiatorID = uuid.New(), 8, f.operatorID
+		f.set(func(f *transitionFakeCoder) {
+			f.onPost = func(w http.ResponseWriter, _ *http.Request) {
+				f.update(func(ws *codersdk.Workspace) { ws.LatestBuild = queued })
+				writeLogFakeError(w, postStatus)
+			}
+			f.onReread = func(w http.ResponseWriter, _ *http.Request) {
+				f.mu.Lock()
+				current := f.ws
+				f.mu.Unlock()
+				current.Name = ""
+				writeLogFakeJSON(w, current)
+			}
+		})
+		_, err := runTransition(t, newTestTransitionStorage(t, f, codersdk.WorkspaceTransitionStop), false)
+		if posts, _ := f.recordedPosts(); len(posts) != 1 || f.rereads.Load() != 1 || f.meCalls.Load() != 1 {
+			t.Fatalf("POST %d: POSTs=%d rereads=%d me calls=%d, want 1, 1 and 1", postStatus, len(posts), f.rereads.Load(), f.meCalls.Load())
+		}
+		if !apierrors.IsTimeout(err) || !strings.Contains(err.Error(), "uncertain") || !strings.Contains(err.Error(), "re-read") {
+			t.Fatalf("POST %d: err=%v, want an uncertain 504", postStatus, err)
+		}
+	}
+}
+
 // TestWorkspaceTransitionRequestChecks covers the body, identity checks, and Coder errors.
 func TestWorkspaceTransitionRequestChecks(t *testing.T) {
 	f := newTransitionFakeCoder(t, build(codersdk.WorkspaceTransitionStop, codersdk.ProvisionerJobSucceeded))
