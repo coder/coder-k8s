@@ -498,6 +498,8 @@ func TestWorkspaceTransitionUncertainPost(t *testing.T) {
 		{"a proxy answered 200 with an HTML page", stop, false, nil, http.StatusOK, false, ""},
 		{"a proxy answered 201 with {} after the build was queued", stop, false, &found{transition: stop}, http.StatusCreated, true, "{}"},
 		{"a proxy answered 201 with null", stop, false, nil, http.StatusCreated, false, "null"},
+		{"a proxy answered 201 with only a build ID", stop, false, nil, http.StatusCreated, false, `{"id":"` + uuid.NewString() + `"}`},
+		{"a proxy answered 307 without Location after the build was queued", stop, false, &found{transition: stop}, http.StatusTemporaryRedirect, true, ""},
 		{"another user queued the same transition", stop, false, &found{transition: stop, byOther: true}, 0, false, ""},
 		{"the new build has the other transition", stop, false, &found{transition: start}, 0, false, ""},
 		{"a start with the requested version", start, true, &found{transition: start}, 0, true, ""},

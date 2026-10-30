@@ -278,6 +278,10 @@ func TestMapCoderWriteError(t *testing.T) {
 		{"204", sdkErr(http.StatusNoContent), uncertain},
 		{"proxy 502", sdkErr(http.StatusBadGateway), uncertain},
 		{"proxy 503", sdkErr(http.StatusServiceUnavailable), uncertain},
+		// net/http returns a 3xx without Location instead of following it. The server that
+		// answered got the write.
+		{"300", sdkErr(http.StatusMultipleChoices), uncertain},
+		{"307 without Location", sdkErr(http.StatusTemporaryRedirect), uncertain},
 		{"body breaks off", fmt.Errorf("read response body: %w", io.ErrUnexpectedEOF), uncertain},
 		{"malformed JSON on an unexpected 2xx", fmt.Errorf("decode body: %w", &json.SyntaxError{}), uncertain},
 		{"connection closed without an answer", afterSend(io.EOF), uncertain},
@@ -320,7 +324,7 @@ func TestMapCoderWriteError(t *testing.T) {
 	}
 
 	// A Coder answer with a status that leaves no doubt maps as in MapCoderError.
-	for _, status := range []int{http.StatusConflict, http.StatusBadRequest, http.StatusInternalServerError, http.StatusMultipleChoices} {
+	for _, status := range []int{http.StatusConflict, http.StatusBadRequest, http.StatusInternalServerError} {
 		err := sdkErr(status)
 		got, want := MapCoderWriteError(err, WriteCreate, resource, name), MapCoderError(err, resource, name)
 		if got.Error() != want.Error() || apierrors.ReasonForError(got) != apierrors.ReasonForError(want) {
