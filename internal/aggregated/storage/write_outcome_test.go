@@ -523,6 +523,86 @@ func TestWorkspaceCreateStoppedStopBuildAnswer(t *testing.T) {
 	}
 }
 
+// TestWorkspaceCreateStoppedFailedReRead checks a create with spec.running=false whose stop build
+// is not confirmed and whose re-read of the workspace fails. A stop that can have reached Coder
+// returns the uncertain 504 and no object, never the start build as a success. A stop that Coder
+// refused leaves the start build, so the create succeeds with it.
+func TestWorkspaceCreateStoppedFailedReRead(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name          string
+		stopAnswer    brokenAnswer
+		forwarded     bool
+		readStatus    int
+		wantUncertain bool
+	}{
+		{"201 with an empty object, re-read 502", jsonAnswer(http.StatusCreated, `{}`), true, http.StatusBadGateway, true},
+		{"201 with an empty object, re-read 404", jsonAnswer(http.StatusCreated, `{}`), true, http.StatusNotFound, true},
+		{"proxy 502, re-read 502", gatewayPage(http.StatusBadGateway), true, http.StatusBadGateway, true},
+		{"proxy 502, re-read 404", gatewayPage(http.StatusBadGateway), true, http.StatusNotFound, true},
+		{"Coder 400 without the stop, re-read 502", jsonAnswer(http.StatusBadRequest, `{"message":"bad stop"}`), false, http.StatusBadGateway, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			coderServer, _ := newMockCoderServer(t)
+			t.Cleanup(coderServer.Close)
+			var stops, reReads atomic.Int32
+			proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/builds") {
+					stops.Add(1)
+					recorder := httptest.NewRecorder()
+					if tc.forwarded {
+						coderServer.Config.Handler.ServeHTTP(recorder, r)
+						if recorder.Code != http.StatusCreated {
+							t.Errorf("mock Coder answered the stop with %d: %s", recorder.Code, recorder.Body.String())
+						}
+					}
+					tc.stopAnswer(t, w, recorder)
+					return
+				}
+				if stops.Load() > 0 && r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v2/workspaces/") {
+					reReads.Add(1)
+					writeCoderError(w, tc.readStatus, "proxy cannot read the workspace")
+					return
+				}
+				coderServer.Config.Handler.ServeHTTP(w, r)
+			}))
+			t.Cleanup(proxy.Close)
+
+			ctx := namespacedContext("control-plane")
+			createdObj, err := NewWorkspaceStorage(newTestClientProvider(t, proxy.URL)).Create(ctx, &aggregationv1alpha1.CoderWorkspace{
+				ObjectMeta: metav1.ObjectMeta{Name: "acme.alice.stopped"},
+				Spec:       aggregationv1alpha1.CoderWorkspaceSpec{Organization: "acme", TemplateName: "starter-template", Running: false},
+			}, rest.ValidateAllObjectFunc, nil)
+			if stops.Load() != 1 || reReads.Load() != 1 {
+				t.Fatalf("stop POSTs=%d re-reads=%d, want 1 and 1", stops.Load(), reReads.Load())
+			}
+			coderObj, getErr := NewWorkspaceStorage(newTestClientProvider(t, coderServer.URL)).Get(ctx, "acme.alice.stopped", nil)
+			if getErr != nil {
+				t.Fatalf("get from Coder: %v", getErr)
+			}
+			inCoder := coderObj.(*aggregationv1alpha1.CoderWorkspace)
+			if inCoder.Spec.Running == tc.forwarded {
+				t.Fatalf("Coder has running=%t, want %t", inCoder.Spec.Running, !tc.forwarded)
+			}
+
+			if tc.wantUncertain {
+				if !apierrors.IsTimeout(err) || !strings.Contains(err.Error(), "uncertain") || !strings.Contains(err.Error(), "stop") || createdObj != nil {
+					t.Fatalf("expected the uncertain 504 about the stop and no object, got %v (object returned: %t)", err, createdObj != nil)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			if created := createdObj.(*aggregationv1alpha1.CoderWorkspace); created.Status.LatestBuildID != inCoder.Status.LatestBuildID || !created.Spec.Running {
+				t.Fatalf("created object has build %s running=%t, Coder has the start build %s", created.Status.LatestBuildID, created.Spec.Running, inCoder.Status.LatestBuildID)
+			}
+		})
+	}
+}
+
 // TestTemplateUpdateReadAfterChange checks the read of the template that ends an update. When it
 // fails after Coder applied the change, the update returns the uncertain 504.
 func TestTemplateUpdateReadAfterChange(t *testing.T) {
