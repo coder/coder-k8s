@@ -1,0 +1,68 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: set-by-kustomization
+  namespace: coder
+  annotations:
+    # Argo CD creates the Job after the test (wave 1) is healthy. Because the
+    # marker below is in a later wave, Argo CD waits until the Job is healthy
+    # and fails the sync when the Job fails. It is not a sync hook: a hook runs
+    # on every sync and promotes this version again, even after another writer
+    # activated a newer one.
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  # A failed promotion must not run again on its own: another writer can have
+  # activated a third version in the meantime.
+  backoffLimit: 0
+  # The longest test (timeoutSeconds 7200), the 900 s start grace of
+  # promote.sh, and 300 s for the promotion request.
+  activeDeadlineSeconds: 8400
+  template:
+    spec:
+      serviceAccountName: docker-promote
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: promote
+          image: alpine/k8s:1.35.9@sha256:b9cb6db0091a2327c0a56ecda69d37fa830c7a96ea669e7382b3ee778aa07a24
+          command: ["bash", "/promote/promote.sh", "promote", "/promote/codertemplatetest.json"]
+          env:
+            - name: HOME
+              value: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: promote
+              mountPath: /promote
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: promote
+          configMap:
+            name: docker-promote
+        - name: tmp
+          emptyDir: {}
+---
+# Argo CD waits for the health of a wave only when a later wave follows. It
+# ends the sync right after it applies the last wave, so without this marker
+# a failed Job would not fail the sync. The marker holds the test name, so each
+# version changes it and the sync option ApplyOutOfSyncOnly=true cannot skip
+# its wave.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: docker-promote-done
+  namespace: coder
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+data:
+  test: set-by-kustomization

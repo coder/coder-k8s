@@ -1,0 +1,19 @@
+# Argo CD Application for this directory. It needs the CoderTemplateTest
+# health check from config/gitops/ in argocd-cm, see docs/how-to/gitops.md.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: docker-template
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/example/gitops.git
+    targetRevision: main
+    path: templates/docker
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: coder
+  syncPolicy:
+    automated:
+      prune: true
