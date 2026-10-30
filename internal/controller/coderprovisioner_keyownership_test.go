@@ -527,9 +527,9 @@ func TestCoderProvisionerKey_OrganizationRenamed(t *testing.T) {
 }
 
 // TestCoderProvisionerKey_UpgradedStatusKeepsTargetRecords checks status from
-// an older operator with two unpublished records of the target key under
-// different organization IDs: the organization named team was renamed and
-// its name reused twice. Coder still holds both keys. The rotation must
+// an older operator with two records of the target key under different
+// organization IDs: the organization named team was renamed and its name
+// reused twice. Coder still holds both keys. The rotation must
 // delete each key by its recorded IDs before it drops the record, and keep a
 // record whose key Coder did not confirm gone.
 func TestCoderProvisionerKey_UpgradedStatusKeepsTargetRecords(t *testing.T) {

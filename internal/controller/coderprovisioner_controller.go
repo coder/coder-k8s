@@ -311,9 +311,11 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// An unpublished record names a key that an earlier reconcile created, or
 	// started to create, for the Secret and did not record as applied. The
 	// Secret can hold that key, or a key that the rotation already deleted,
-	// so a rotation replaces it with a key that status records.
+	// so a rotation replaces it with a key that status records. A published
+	// target record with IDs other than the applied key names a key that is
+	// not in the Secret and can still be valid, so a rotation deletes it by ID.
 	rotate := !secretUsable || slices.ContainsFunc(provisioner.Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
-		return record.Unpublished
+		return record.Unpublished || (sameKeySlot(record, target) && record.KeyID != "" && record.KeyID != status.ProvisionerKeyID)
 	})
 	replacing := driftDetected || rotate || metadataMissing
 	// Status from an operator that did not record the control plane UID does
