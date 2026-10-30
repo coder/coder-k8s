@@ -13,6 +13,9 @@ import (
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
+	"github.com/prometheus/client_golang/prometheus"
+	"k8s.io/component-base/metrics/legacyregistry"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
 // blockingCoderServer holds every request until the test releases the current round,
@@ -140,6 +143,7 @@ func TestNewSDKClientBoundsConnectionsPerHost(t *testing.T) {
 	const extra = 8
 	s := newBlockingCoderServer(t)
 
+	slowBefore := slowConnectionWaits(t)
 	release, wait := s.startRound(t, maxConnsPerCoderHost+extra, maxConnsPerCoderHost)
 	select {
 	case token := <-s.arrived:
@@ -157,6 +161,45 @@ func TestNewSDKClientBoundsConnectionsPerHost(t *testing.T) {
 	if got := s.newConns.Load(); got != maxConnsPerCoderHost {
 		t.Fatalf("server accepted %d connections in total, want %d", got, maxConnsPerCoderHost)
 	}
+	if got := slowConnectionWaits(t) - slowBefore; got < extra {
+		t.Fatalf("connection wait metric shows %d waits over %vs, want at least %d", got, slowWaitSeconds, extra)
+	}
+}
+
+const slowWaitSeconds = 0.1
+
+// slowConnectionWaits returns how many connection waits over slowWaitSeconds the
+// controller and the aggregated API server metrics endpoints report, after checking
+// that both report the same histogram.
+func slowConnectionWaits(t *testing.T) uint64 {
+	t.Helper()
+
+	count := func(gatherer prometheus.Gatherer) uint64 {
+		families, err := gatherer.Gather()
+		if err != nil {
+			t.Fatalf("gather metrics: %v", err)
+		}
+		for _, family := range families {
+			if family.GetName() != "coder_k8s_coder_connection_wait_seconds" {
+				continue
+			}
+			histogram := family.GetMetric()[0].GetHistogram()
+			for _, bucket := range histogram.GetBucket() {
+				if bucket.GetUpperBound() == slowWaitSeconds {
+					return histogram.GetSampleCount() - bucket.GetCumulativeCount()
+				}
+			}
+			t.Fatalf("connection wait histogram has no %vs bucket", slowWaitSeconds)
+		}
+		t.Fatal("connection wait histogram is not registered")
+		return 0
+	}
+
+	controller := count(metrics.Registry)
+	if apiserver := count(legacyregistry.DefaultGatherer); apiserver != controller {
+		t.Fatalf("aggregated API server reports %d slow connection waits, controller %d", apiserver, controller)
+	}
+	return controller
 }
 
 func TestTransportRegistrySeparatesDeploymentsBehindProxy(t *testing.T) {
@@ -251,17 +294,95 @@ func TestTransportRegistryKeysByDeployment(t *testing.T) {
 		return transport
 	}
 
-	base := forURL("http://coder.coder.svc.cluster.local")
-	if got := forURL("HTTP://Coder.coder.svc.cluster.local/api/v2"); got != base {
-		t.Fatal("expected one transport for the same scheme and host")
+	sameDeployment := [][]string{
+		{"http://coder.coder.svc.cluster.local", "HTTP://Coder.coder.svc.cluster.local/api/v2", "http://coder.coder.svc.cluster.local:80"},
+		{"https://coder.example.com", "https://coder.example.com:443/api/v2"},
+		{"http://[fd00::1]", "http://[FD00::1]:80"},
 	}
+	var bases []*http.Transport
+	for _, urls := range sameDeployment {
+		base := forURL(urls[0])
+		for _, rawURL := range urls[1:] {
+			if forURL(rawURL) != base {
+				t.Fatalf("expected %q to share the transport of %q", rawURL, urls[0])
+			}
+		}
+		bases = append(bases, base)
+	}
+
+	base := bases[0]
 	for _, other := range []string{
 		"https://coder.coder.svc.cluster.local",
+		"https://coder.coder.svc.cluster.local:80",
+		"http://coder.coder.svc.cluster.local:443",
 		"http://coder.coder.svc.cluster.local:8080",
 		"http://coder.other.svc.cluster.local",
 	} {
 		if forURL(other) == base {
 			t.Fatalf("expected %q to get its own transport", other)
 		}
+	}
+	if bases[1] == base || bases[2] == base || bases[1] == bases[2] {
+		t.Fatal("expected separate deployments to get separate transports")
+	}
+}
+
+func TestTransportRegistryEvictsUnusedDeployments(t *testing.T) {
+	t.Parallel()
+
+	closed := make(chan struct{}, 1)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			closed <- struct{}{}
+		}
+	}
+	server.Start()
+	t.Cleanup(server.Close)
+
+	now := time.Unix(0, 0)
+	registry := newTransportRegistry(newCoderTransport)
+	registry.now = func() time.Time { return now }
+	forURL := func(rawURL string) *http.Transport {
+		transport, err := registry.forURL(mustParseURL(t, rawURL))
+		if err != nil {
+			t.Fatalf("forURL(%q): %v", rawURL, err)
+		}
+		return transport
+	}
+
+	unused := forURL(server.URL)
+	res, err := (&http.Client{Transport: unused}).Get(server.URL)
+	if err != nil {
+		t.Fatalf("request through the unused transport: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, res.Body)
+	_ = res.Body.Close()
+
+	inUse := forURL("http://in-use.invalid")
+	now = now.Add(transportIdleEviction / 2)
+	if forURL("http://in-use.invalid") != inUse {
+		t.Fatal("expected a used deployment to keep its transport")
+	}
+	select {
+	case <-closed:
+		t.Fatal("the idle connection closed before its deployment went unused for the eviction period")
+	default:
+	}
+
+	now = now.Add(transportIdleEviction/2 + time.Second)
+	forURL("http://other.invalid")
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected the evicted transport to close its idle connection")
+	}
+	if forURL("http://in-use.invalid") != inUse {
+		t.Fatal("expected a deployment used within the eviction period to keep its transport")
+	}
+	if forURL(server.URL) == unused {
+		t.Fatal("expected an evicted deployment to get a new transport")
 	}
 }

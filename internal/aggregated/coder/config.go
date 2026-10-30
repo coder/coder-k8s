@@ -3,6 +3,7 @@ package coder
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -27,27 +28,39 @@ const (
 // coderTransports carries every Coder SDK request of the aggregated API server.
 var coderTransports = newTransportRegistry(newCoderTransport)
 
-// transportRegistry holds one long-lived transport per Coder deployment (URL scheme and
-// host). Separate transports keep the per-deployment limits separate even when an HTTP
-// proxy would make deployments share one connection-pool key. Clients stay per request:
-// the session token is set on each client, never on a transport.
+// transportIdleEviction is how long a deployment's transport stays unused before the
+// registry drops it. It is far longer than IdleConnTimeout and the default request timeout, so
+// an evicted transport has no idle connections and no regular request in flight.
+const transportIdleEviction = 10 * time.Minute
+
+// transportRegistry holds one long-lived transport per Coder deployment (URL scheme,
+// host, and port). Separate transports keep the per-deployment limits separate even
+// when an HTTP proxy would make deployments share one connection-pool key. Clients stay
+// per request: the session token is set on each client, never on a transport.
 type transportRegistry struct {
 	newTransport func() (*http.Transport, error)
+	now          func() time.Time
 
 	mu           sync.Mutex
-	byDeployment map[string]*http.Transport
+	byDeployment map[string]*registeredTransport
+}
+
+type registeredTransport struct {
+	transport *http.Transport
+	lastUsed  time.Time
 }
 
 func newTransportRegistry(newTransport func() (*http.Transport, error)) *transportRegistry {
 	return &transportRegistry{
 		newTransport: newTransport,
-		byDeployment: make(map[string]*http.Transport),
+		now:          time.Now,
+		byDeployment: make(map[string]*registeredTransport),
 	}
 }
 
-// forURL returns the transport for the deployment that serves coderURL.
-// Entries are never evicted: an unused transport closes its idle connections after
-// IdleConnTimeout and keeps no sockets.
+// forURL returns the transport for the deployment that serves coderURL. It also drops
+// the transports that no request used for transportIdleEviction, so deployments whose
+// control plane changed its URL or went away do not stay in the registry.
 func (r *transportRegistry) forURL(coderURL *url.URL) (*http.Transport, error) {
 	if r == nil {
 		return nil, fmt.Errorf("assertion failed: transport registry must not be nil")
@@ -56,13 +69,22 @@ func (r *transportRegistry) forURL(coderURL *url.URL) (*http.Transport, error) {
 		return nil, fmt.Errorf("assertion failed: coder URL must not be nil")
 	}
 
-	key := strings.ToLower(coderURL.Scheme) + "://" + strings.ToLower(coderURL.Host)
+	key := deploymentKey(coderURL)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if transport, ok := r.byDeployment[key]; ok {
-		return transport, nil
+	now := r.now()
+	for otherKey, entry := range r.byDeployment {
+		if otherKey != key && now.Sub(entry.lastUsed) > transportIdleEviction {
+			delete(r.byDeployment, otherKey)
+			entry.transport.CloseIdleConnections()
+		}
+	}
+
+	if entry, ok := r.byDeployment[key]; ok {
+		entry.lastUsed = now
+		return entry.transport, nil
 	}
 	transport, err := r.newTransport()
 	if err != nil {
@@ -71,9 +93,26 @@ func (r *transportRegistry) forURL(coderURL *url.URL) (*http.Transport, error) {
 	if transport == nil {
 		return nil, fmt.Errorf("assertion failed: new Coder transport is nil after successful construction")
 	}
-	r.byDeployment[key] = transport
+	r.byDeployment[key] = &registeredTransport{transport: transport, lastUsed: now}
 
 	return transport, nil
+}
+
+// deploymentKey identifies a deployment by scheme, host, and port, with the scheme's
+// default port filled in, so https://x and https://x:443 share one transport.
+func deploymentKey(coderURL *url.URL) string {
+	scheme := strings.ToLower(coderURL.Scheme)
+	port := coderURL.Port()
+	if port == "" {
+		switch scheme {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		}
+	}
+
+	return scheme + "://" + net.JoinHostPort(strings.ToLower(coderURL.Hostname()), port)
 }
 
 func newCoderTransport() (*http.Transport, error) {
@@ -125,7 +164,7 @@ func NewSDKClient(cfg Config) (*codersdk.Client, error) {
 		// codersdk dials websockets (WorkspaceBuildLogsAfter for ?follow=true)
 		// with a new http.Client that keeps only this Transport, not
 		// CheckRedirect, so the Transport also refuses other origins.
-		Transport: sameorigin.RoundTripper(&coderURL, transport),
+		Transport: sameorigin.RoundTripper(&coderURL, connectionWaitRoundTripper{base: transport}),
 		Timeout:   requestTimeout,
 		// net/http copies Coder-Session-Token to every redirect target, so refuse
 		// redirects that leave the Coder origin.

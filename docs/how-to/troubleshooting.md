@@ -61,6 +61,17 @@ Coder answered an operator call with a redirect to another origin. The operator 
 
 Most aggregated API calls then answer the caller with a `500` that says `the Coder API could not be reached`. The `coder-errors` line in the aggregated API server log shows the refusal. When Coder or a proxy redirects only the websocket request of the workspace build log stream (`coderworkspaces/log?follow=true`), that line shows `refusing request to a different origin than the coder URL` instead.
 
+## Operator calls to Coder are slow or time out under load
+
+Each operator process opens at most 128 connections to one Coder deployment. A Coder call beyond that waits for a free connection, up to the request timeout. The controller uses 30 seconds. The aggregated API server uses `--coder-request-timeout` (default 30 seconds).
+
+The histogram `coder_k8s_coder_connection_wait_seconds` shows how long each Coder call waited for a connection, including the dial of a new connection. Most samples fall in the lowest buckets. Samples near the request timeout mean that the 128 connections are in use.
+
+- The controller serves the metric at `/metrics` on port `8080`.
+- The aggregated API server serves the metric at `/metrics` on its secure port `6443`. The caller needs RBAC for the `get` verb on the non-resource URL `/metrics`.
+
+A process keeps one connection pool per Coder deployment, identified by URL scheme, host and port. `https://coder.example.com` and `https://coder.example.com:443` are the same deployment. The process drops a pool that no call used for 10 minutes, for example after a control plane changed its URL or went away.
+
 ## APIService is `False` / `Unavailable`
 
 ```bash
