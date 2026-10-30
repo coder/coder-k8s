@@ -463,14 +463,14 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		appliedControlPlaneRefName = desiredControlPlaneRefName
 		appliedControlPlaneURL = controlPlane.Status.URL
 		appliedControlPlaneUID = string(controlPlane.UID)
-		setCondition(
-			provisioner,
-			coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
-			metav1.ConditionTrue,
-			"ProvisionerKeyReady",
-			"Provisioner key is available in coderd",
-		)
 	}
+	setCondition(
+		provisioner,
+		coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+		metav1.ConditionTrue,
+		"ProvisionerKeyReady",
+		"Provisioner key is available in coderd",
+	)
 
 	if keyMaterial != "" {
 		// A new key exists in Coder. Record its IDs in its pending record

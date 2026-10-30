@@ -37,12 +37,11 @@ const (
 	// entry, and the operator removes the condition when none is left.
 	CoderProvisionerConditionUnverifiedKeyKept = "UnverifiedKeyKept"
 	// CoderProvisionerConditionControlPlaneChangedKeyKept is True while
-	// status.pendingKeys holds an entry whose control plane the operator
-	// cannot show is the one that the entry recorded: the control plane with
-	// its name has another UID, or the entry has no UID and its coderURL is
-	// not the current Coder API URL of that control plane. The operator sends
-	// no operator token for such an entry. The message names each entry, and
-	// the operator removes the condition when none is left.
+	// status.pendingKeys holds an entry whose coderURL is not the current
+	// Coder API URL of its control plane, and that control plane has another
+	// UID than the entry records, or the entry records no UID. The operator
+	// sends no operator token for such an entry. The message names each
+	// entry, and the operator removes the condition when none is left.
 	CoderProvisionerConditionControlPlaneChangedKeyKept = "ControlPlaneChangedKeyKept"
 
 	// DefaultProvisionerKeySecretKey is the default data key for provisioner key secrets.
@@ -120,9 +119,9 @@ type CoderProvisionerStatus struct {
 	ControlPlaneURL string `json:"controlPlaneURL,omitempty"`
 	// ControlPlaneUID is the UID of the control plane last applied to the
 	// provisioner key. The operator sends the operator token of the control
-	// plane with controlPlaneRefName for this key only while that control
-	// plane has this UID. When it is empty, it sends that token only to the
-	// current Coder API URL of that control plane.
+	// plane with controlPlaneRefName for this key to the current Coder API URL
+	// of that control plane, and to another URL only while that control plane
+	// has this UID.
 	ControlPlaneUID string `json:"controlPlaneUID,omitempty"`
 	// SecretRef references the provisioner key secret data currently in use.
 	SecretRef *SecretKeySelector `json:"secretRef,omitempty"`
@@ -144,11 +143,10 @@ type CoderProvisionerKeyRecord struct {
 	// operator used for the key.
 	ControlPlaneRefName string `json:"controlPlaneRefName"`
 	// ControlPlaneUID is the UID of that CoderControlPlane. The operator
-	// sends its operator token for this entry only while the control plane
-	// with controlPlaneRefName has this UID. When it is empty, it sends that
-	// token only when coderURL is the current Coder API URL of that control
-	// plane. Otherwise it keeps the entry and sets the condition
-	// ControlPlaneChangedKeyKept.
+	// sends its operator token for this entry when coderURL is the current
+	// Coder API URL of the control plane with controlPlaneRefName, or while
+	// that control plane has this UID. Otherwise it keeps the entry and sets
+	// the condition ControlPlaneChangedKeyKept.
 	ControlPlaneUID string `json:"controlPlaneUID,omitempty"`
 	// CoderURL is the Coder API URL that the operator sent the key request to.
 	CoderURL string `json:"coderURL"`

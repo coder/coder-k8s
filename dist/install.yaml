@@ -6183,9 +6183,9 @@ spec:
                 description: |-
                   ControlPlaneUID is the UID of the control plane last applied to the
                   provisioner key. The operator sends the operator token of the control
-                  plane with controlPlaneRefName for this key only while that control
-                  plane has this UID. When it is empty, it sends that token only to the
-                  current Coder API URL of that control plane.
+                  plane with controlPlaneRefName for this key to the current Coder API URL
+                  of that control plane, and to another URL only while that control plane
+                  has this UID.
                 type: string
               controlPlaneURL:
                 description: ControlPlaneURL is the control plane URL last applied
@@ -6230,11 +6230,10 @@ spec:
                     controlPlaneUID:
                       description: |-
                         ControlPlaneUID is the UID of that CoderControlPlane. The operator
-                        sends its operator token for this entry only while the control plane
-                        with controlPlaneRefName has this UID. When it is empty, it sends that
-                        token only when coderURL is the current Coder API URL of that control
-                        plane. Otherwise it keeps the entry and sets the condition
-                        ControlPlaneChangedKeyKept.
+                        sends its operator token for this entry when coderURL is the current
+                        Coder API URL of the control plane with controlPlaneRefName, or while
+                        that control plane has this UID. Otherwise it keeps the entry and sets
+                        the condition ControlPlaneChangedKeyKept.
                       type: string
                     keyID:
                       description: KeyID is the provisioner key ID that Coder returned.

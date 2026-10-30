@@ -1,6 +1,7 @@
 package controller_test
 
 import (
+	"cmp"
 	"context"
 	"slices"
 	"testing"
@@ -24,7 +25,7 @@ import (
 // the key. Whatever way P reaches that key name, P must not delete or replace
 // the key of Q, and must not change its own key, Secret or Deployment. It must
 // report the conflict, and get its own key once it has a distinct key name or
-// the key of Q is gone.
+// the key of Q is gone, or keep its key after a revert to its key name.
 func TestCoderProvisionerKey_OtherProvisionersKeyKept(t *testing.T) {
 	t.Parallel()
 
@@ -36,13 +37,14 @@ func TestCoderProvisionerKey_OtherProvisionersKeyKept(t *testing.T) {
 		// dropKeyStatus removes the key fields from the status of P, as
 		// status that lost its key records.
 		dropKeyStatus bool
-		// rename resolves the conflict with a distinct key name. Otherwise
-		// the key of Q goes.
-		rename bool
+		// resolveName resolves the conflict with this key name for P.
+		// Otherwise the key of Q goes.
+		resolveName string
 	}{
 		{name: "first key of P"},
-		{name: "key name change of P", holdsKey: true, rename: true},
-		{name: "status without key records", holdsKey: true, dropKeyStatus: true, rename: true},
+		{name: "key name change of P", holdsKey: true, resolveName: "p-own"},
+		{name: "key name change of P, reverted", holdsKey: true, resolveName: "p-key"},
+		{name: "status without key records", holdsKey: true, dropKeyStatus: true, resolveName: "p-own"},
 	}
 
 	for _, tt := range tests {
@@ -118,9 +120,8 @@ func TestCoderProvisionerKey_OtherProvisionersKeyKept(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, resourceVersion, f.get(ctx, t, p).ResourceVersion, "a repeated conflict must not write status")
 
-			keyName := "provisioner"
-			if tt.rename {
-				keyName = "p-own"
+			keyName := cmp.Or(tt.resolveName, "provisioner")
+			if tt.resolveName != "" {
 				latest.Spec.Key.Name = keyName
 				require.NoError(t, k8sClient.Update(ctx, latest))
 			} else {
@@ -133,8 +134,11 @@ func TestCoderProvisionerKey_OtherProvisionersKeyKept(t *testing.T) {
 			require.NotNil(t, keyReady)
 			require.Equal(t, metav1.ConditionTrue, keyReady.Status)
 			require.Nil(t, meta.FindStatusCondition(latest.Status.Conditions, coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept))
-			if tt.rename {
+			if tt.resolveName != "" {
 				require.Equal(t, qKeyID, store.keys[slotOf("provisioner")], "the key of Q must still exist")
+			}
+			if tt.resolveName == "p-key" {
+				require.Equal(t, pKeyID.String(), latest.Status.ProvisionerKeyID, "a revert must keep the key of P")
 			}
 		})
 	}
