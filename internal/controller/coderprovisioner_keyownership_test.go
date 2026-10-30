@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -477,4 +478,60 @@ func TestCoderProvisionerKey_StatusWithoutUIDOrganizationRenamed(t *testing.T) {
 	defer coder.mu.Unlock()
 	require.NotContains(t, coder.keys, keyA, "deleting the provisioner must revoke its recorded key in the renamed organization by ID")
 	require.Empty(t, coder.keys, "deleting the provisioner must leave none of its keys in Coder")
+}
+
+// TestCoderProvisionerKey_StatusWithoutUIDReplacedKeyBound checks status
+// without a control plane UID when P moves from the control plane coder to
+// coder-b, and Coder fails the delete of the replaced key. The control plane
+// coder is then deleted and created again at the same URL with another
+// operator token. The new token must not be used for the replaced key: its
+// entry stays, and P reports it.
+func TestCoderProvisionerKey_StatusWithoutUIDReplacedKeyBound(t *testing.T) {
+	t.Parallel()
+
+	const (
+		oldURL   = "http://coder-old.example.com"
+		newToken = "operator-token-new"
+	)
+	ctx := context.Background()
+	f := newProvisionerCredentialFixture(ctx, t, "cprov-bound")
+	setControlPlaneURL(ctx, t, f, oldURL)
+	keyOld := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "provisioner", Key: "material-old"}
+	keyNew := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "provisioner", Key: "material-new"}
+	f.bootstrapClient.provisionerKeyResponses = []coderbootstrap.EnsureProvisionerKeyResponse{keyOld, keyNew}
+	p := f.createProvisioner(ctx, t, nil, nil)
+	pName := types.NamespacedName{Name: p.Name, Namespace: p.Namespace}
+	f.reconcile(ctx, t, p)
+	f.reconcile(ctx, t, p)
+	require.Equal(t, keyOld.KeyID.String(), f.get(ctx, t, p).Status.ProvisionerKeyID)
+	require.NoError(t, k8sClient.Status().Patch(ctx, f.get(ctx, t, p),
+		ctrlclient.RawPatch(types.MergePatchType, []byte(`{"status":{"controlPlaneUID":null}}`))))
+
+	createControlPlaneWithToken(ctx, t, f.namespace, "coder-b", "http://coder-b.example.com", "operator-token-b")
+	latest := f.get(ctx, t, p)
+	latest.Spec.ControlPlaneRef.Name = "coder-b"
+	require.NoError(t, k8sClient.Update(ctx, latest))
+	f.bootstrapClient.deleteKeyByIDErr = errors.New("injected delete failure")
+	_, err := f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: pName})
+	require.NoError(t, err)
+	require.Equal(t, keyNew.KeyID.String(), f.get(ctx, t, p).Status.ProvisionerKeyID, "P must move its key to coder-b")
+
+	require.NoError(t, k8sClient.Delete(ctx, &coderv1alpha1.CoderControlPlane{ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: f.namespace}}))
+	require.NoError(t, k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "coder-operator-token", Namespace: f.namespace}}))
+	createControlPlaneWithToken(ctx, t, f.namespace, "coder", oldURL, newToken)
+	f.bootstrapClient.deleteKeyByIDErr = nil
+	_, err = f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: pName})
+	require.NoError(t, err)
+
+	for _, d := range keyDeletes(f.bootstrapClient) {
+		require.False(t, d.keyID == keyOld.KeyID.String() && d.token == newToken,
+			"the new control plane's token must not be used for the old key, sent %+v", keyDeletes(f.bootstrapClient))
+	}
+	latest = f.get(ctx, t, p)
+	require.True(t, slices.ContainsFunc(latest.Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
+		return record.KeyID == keyOld.KeyID.String()
+	}), "the record of the replaced key must stay")
+	report := meta.FindStatusCondition(latest.Status.Conditions, coderv1alpha1.CoderProvisionerConditionControlPlaneChangedKeyKept)
+	require.NotNil(t, report, "P must report the record that it keeps")
+	require.Equal(t, metav1.ConditionTrue, report.Status)
 }
