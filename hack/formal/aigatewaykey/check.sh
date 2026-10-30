@@ -18,6 +18,7 @@ out=""
 update=false
 declare -a sets=()
 while [[ $# -gt 0 ]]; do
+	case $1 in --config | --out | --set) (($# >= 2)) || { echo "$1 needs a value" >&2; exit 2; } ;; esac
 	case $1 in
 	--config) config=$2; shift 2 ;;
 	--out) out=$2; shift 2 ;;
