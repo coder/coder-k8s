@@ -234,14 +234,15 @@ A write (create, update, patch, or delete) of a workspace or a template can also
 - A redirect to another origin, which the server refuses, or a redirect whose next request fails. The server that sent the redirect got the write.
 - A template files update whose activation Coder accepted, when the re-read of the template fails or shows another active version.
 - A template update that changed the files or the metadata in Coder, when the read of the template that ends the update fails.
-- A connection that breaks after the server sent the request, before or while the server reads the answer. This includes a malformed TLS record from Coder or the proxy after the TLS handshake.
+- A connection that breaks after the server sent the request, before or while the server reads the answer. This includes a malformed TLS record or a TLS alert from Coder or the proxy after the TLS handshake.
+- An error of a later attempt of a request that the server already sent. For example, the HTTP/2 client sends the request again on a new connection after Coder or the proxy resets the stream. If that connection is refused, the write is still uncertain.
+- A TLS handshake that Coder or the proxy refuses, for example because it does not support the TLS version or the cipher suites of the client. The server cannot tell this refusal apart from a TLS alert after the request.
 
-A write that the server knows did not reach Coder keeps the `500` that says that the server cannot reach Coder. Nothing changed in Coder, so you can retry it. The server knows this for these errors:
+A write that the server knows did not reach Coder keeps the `500` that says that the server cannot reach Coder. Nothing changed in Coder, so you can retry it. A write counts as not sent only if the server wrote no request headers on any attempt of the request. Then the server knows it for these errors:
 
 - A refused connection to Coder or to the proxy, or a failed DNS lookup.
 - A proxy that refuses the `CONNECT` tunnel to Coder, for example with `407`.
 - A rejected TLS certificate.
-- A TLS handshake that the server refuses because it does not support the TLS version or the cipher suites of the client.
 - An `https` Coder URL that a plain HTTP server answers.
 - A request to an origin other than the Coder URL, which the server refuses before it sends it.
 

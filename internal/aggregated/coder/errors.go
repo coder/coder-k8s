@@ -169,36 +169,25 @@ func UncertainWriteError(write Write, resource schema.GroupResource, name, reaso
 	), 0)
 }
 
-// handshakeRefusals are the TLS alerts (RFC 8446, section 6.2) with which a server refuses the
-// handshake before it reads a request: handshake_failure (40) and protocol_version (70).
-var handshakeRefusals = []tls.AlertError{40, 70}
-
-// notSent reports whether err proves that the request did not reach Coder: the connection to
-// Coder (or to the proxy in front of it) failed, the proxy refused the CONNECT tunnel, the TLS
-// handshake failed, or the client refused a request to another origin. A refused redirect is not
-// in this list, and neither is an error of a request that followed a redirect: the server that
-// answered with the redirect got the write.
+// notSent reports whether err proves that the request did not reach Coder. Each error that it
+// accepts comes from a step before net/http writes the request: the dial of the connection to Coder
+// or to the proxy in front of it, the proxy answer to the CONNECT tunnel, the verification of the
+// certificate, a first record of the server that is not TLS (crypto/tls sets Conn only before the
+// server hello), and the refusal of a request to another origin. A received TLS alert is not in
+// this list: crypto/tls returns an alert that the server sends after it read the request in the
+// same way as one that refuses the handshake. A refused redirect is not in this list either, and
+// neither is an error of a request that followed a redirect: the server that answered with the
+// redirect got the write. An error after net/http wrote the request (errAfterWrite) never proves
+// it, even when a retry on a new connection failed in one of those steps.
 func notSent(err error) bool {
-	if errors.Is(err, errAfterRedirect) {
+	if errors.Is(err, errAfterRedirect) || errors.Is(err, errAfterWrite) {
 		return false
 	}
 	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		switch opErr.Op {
-		case "dial", "proxyconnect":
-			return true
-		case "remote error":
-			// crypto/tls keeps a received alert in an unexported type with the text of AlertError.
-			for _, alert := range handshakeRefusals {
-				if opErr.Err != nil && opErr.Err.Error() == alert.Error() {
-					return true
-				}
-			}
-		}
+	if errors.As(err, &opErr) && (opErr.Op == "dial" || opErr.Op == "proxyconnect") {
+		return true
 	}
 	var certErr *tls.CertificateVerificationError
-	// crypto/tls sets Conn only for a first record that is not a TLS handshake, before the server
-	// hello. A malformed record after the handshake can follow a request that the server read.
 	var recordErr tls.RecordHeaderError
 	return errors.As(err, &certErr) || (errors.As(err, &recordErr) && recordErr.Conn != nil) ||
 		errors.Is(err, http.ErrSchemeMismatch) || errors.Is(err, errProxyConnectRefused) ||

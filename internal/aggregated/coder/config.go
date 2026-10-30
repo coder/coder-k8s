@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
@@ -252,7 +254,7 @@ func newCoderHTTPClient(coderURL *url.URL, transport http.RoundTripper, timeout 
 		// codersdk dials websockets (WorkspaceBuildLogsAfter for ?follow=true)
 		// with a new http.Client that keeps only this Transport, not
 		// CheckRedirect, so the Transport also refuses other origins.
-		Transport: markRedirectFollowUps{next: sameorigin.RoundTripper(coderURL, transport)},
+		Transport: markMaybeSent{next: sameorigin.RoundTripper(coderURL, transport)},
 		Timeout:   timeout,
 		// net/http copies Coder-Session-Token to every redirect target, so refuse
 		// redirects that leave the Coder origin.
@@ -265,17 +267,34 @@ func newCoderHTTPClient(coderURL *url.URL, transport http.RoundTripper, timeout 
 // the write certain.
 var errAfterRedirect = errors.New("the request after a redirect failed")
 
-type markRedirectFollowUps struct{ next http.RoundTripper }
+// errAfterWrite marks the error of a request whose headers net/http wrote. A later error of a new
+// connection does not make the write certain: the HTTP/2 client sends a request again on a new
+// connection after the server reset its stream with PROTOCOL_ERROR, which it can do after it read
+// the request.
+var errAfterWrite = errors.New("the request failed after net/http wrote it")
 
-func (m markRedirectFollowUps) RoundTrip(req *http.Request) (*http.Response, error) {
-	resp, err := m.next.RoundTrip(req)
-	if err != nil && req.Response != nil {
+// markMaybeSent marks the errors of requests that can have reached Coder with errAfterRedirect or
+// errAfterWrite.
+type markMaybeSent struct{ next http.RoundTripper }
+
+func (m markMaybeSent) RoundTrip(req *http.Request) (*http.Response, error) {
+	var wrote atomic.Bool
+	traced := req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		WroteHeaders: func() { wrote.Store(true) },
+	}))
+	resp, err := m.next.RoundTrip(traced)
+	switch {
+	case err == nil:
+		return resp, nil
+	case req.Response != nil:
 		return nil, fmt.Errorf("%w: %w", errAfterRedirect, err)
+	case wrote.Load():
+		return nil, fmt.Errorf("%w: %w", errAfterWrite, err)
 	}
-	return resp, err
+	return nil, err
 }
 
-func (m markRedirectFollowUps) CloseIdleConnections() {
+func (m markMaybeSent) CloseIdleConnections() {
 	if closer, ok := m.next.(interface{ CloseIdleConnections() }); ok {
 		closer.CloseIdleConnections()
 	}
