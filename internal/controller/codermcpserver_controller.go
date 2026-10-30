@@ -245,6 +245,11 @@ func (r *CoderMCPServerReconciler) check(
 				return optInStep, err
 			}
 		}
+		// A new Coder database can miss the organization too. The recovery
+		// then is the deployment's, so that stall goes first.
+		if switched, err := r.recordedDeploymentChanged(ctx, sdk, server); switched != nil || err != nil {
+			return switched, err
+		}
 		return step, nil
 	}
 	server.Status.OrganizationID = org.ID.String()

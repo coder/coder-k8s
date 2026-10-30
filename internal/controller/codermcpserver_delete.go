@@ -41,9 +41,13 @@ func (r *CoderMCPServerReconciler) deleteStep(ctx context.Context, server *coder
 		return false, nil, err
 	}
 	if server.Status.ConfigID == "" && server.Status.CreateAttemptTime == nil && (record == nil || record.CoderID == "") {
-		// Nothing of this object can exist in Coder. A record with a config
-		// ID still locates a config, for example after a lost status write.
-		return true, nil, deleteCleanupRecord(ctx, r.Client, r.APIReader, r.OperatorNamespace, server.UID)
+		// The status shows nothing of this object in Coder. A record with a
+		// config ID still locates a config, for example after a lost status
+		// write. A record without one stays too: a SlugConflict clears the
+		// marker also when a person renamed the config of a lost create
+		// answer. The sweep removes it once Coder holds no config with the
+		// slug or the nonce.
+		return true, nil, nil
 	}
 	orgText := server.Status.OrganizationID
 	if orgText == "" && record != nil {
@@ -106,6 +110,16 @@ func (r *CoderMCPServerReconciler) deleteStep(ctx context.Context, server *coder
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, mcpServerBoundedDeleteTimeout)
 		defer cancel()
+	}
+	if record == nil && server.Status.ConfigID != "" {
+		// A config from before records existed gets its record before a
+		// delete that can release without a confirmation.
+		r.backfillMCPServerRecord(ctx, sdk, server)
+		if record, _, err = readCleanupRecord(ctx, r.APIReader, r.OperatorNamespace, server.UID); errors.Is(err, errNotACleanupRecord) {
+			record = nil
+		} else if err != nil {
+			return false, nil, err
+		}
 	}
 	recordedID := ""
 	if record != nil {
