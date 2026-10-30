@@ -131,17 +131,18 @@ func (r *CoderWorkspacePoolReconciler) refreshWaitingClaims(
 // example, someone used it) answers 409 and stays. A conflict ends the
 // reconcile. That status is the member's last read of Coder, up to a minute
 // old, so the pool reads the workspace again right before each bind and
-// skips a member that this read does not prove unused (#409). The bound
-// members change in all, so the later steps see them bound. The claims come from refreshWaitingClaims. Before each bind, the
-// pool stores ownerName in the claim status, so the name survives a crash
-// between the bind and the status. It also sets the pool label again, in
-// case it drifted.
+// skips a member that this read does not prove unused (#409). skipped
+// reports such a member, so the pool reads again soon. The bound members
+// change in all, so the later steps see them bound. The claims come from
+// refreshWaitingClaims. Before each bind, the pool stores ownerName in the
+// claim status, so the name survives a crash between the bind and the
+// status. It also sets the pool label again, in case it drifted.
 func (r *CoderWorkspacePoolReconciler) bindClaims(
 	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, claims []coderv1alpha1.CoderWorkspaceClaim,
 	all []coderv1alpha1.CoderWorkspacePoolMember, counts *poolMemberCounts, ownerName string,
-) error {
+) (skipped bool, err error) {
 	if ownerName == "" {
-		return fmt.Errorf("assertion failed: pool %s/%s binds claims without the owner's Coder username", pool.Namespace, pool.Name)
+		return false, fmt.Errorf("assertion failed: pool %s/%s binds claims without the owner's Coder username", pool.Namespace, pool.Name)
 	}
 	var free []*coderv1alpha1.CoderWorkspacePoolMember
 	for i := range all {
@@ -168,16 +169,16 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 		return readyAt(a).Compare(readyAt(b))
 	})
 	if len(free) == 0 {
-		return nil
+		return false, nil
 	}
 	sdk, _, wait, err := controlPlaneCoderClient(ctx, r.Client, pool.Namespace, pool.Spec.ControlPlaneRef.Name)
 	if err != nil || wait != nil {
-		return err // No bind without a read of Coder.
+		return wait != nil, err // No bind without a read of Coder.
 	}
 	for i := range claims {
 		claim := &claims[i]
 		if len(free) == 0 {
-			return nil
+			return skipped, nil
 		}
 		if !poolClaimWaits(claim, all) {
 			continue
@@ -185,21 +186,21 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 		if claim.Status.OwnerName != ownerName {
 			claim.Status.OwnerName = ownerName
 			if err := r.Status().Update(ctx, claim); err != nil {
-				return fmt.Errorf("update status of workspace claim %s/%s: %w", claim.Namespace, claim.Name, err)
+				return false, fmt.Errorf("update status of workspace claim %s/%s: %w", claim.Namespace, claim.Name, err)
 			}
 		}
 		for len(free) > 0 {
 			unused, err := poolMemberUnusedNow(ctx, sdk, free[0], r.Clock.Now())
 			if err != nil {
-				return err
+				return false, err
 			}
 			if unused {
 				break
 			}
-			free = free[1:]
+			free, skipped = free[1:], true
 		}
 		if len(free) == 0 {
-			return nil
+			return skipped, nil
 		}
 		m := free[0]
 		current := poolMemberInputMismatch(m, pool) == ""
@@ -211,10 +212,10 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 		}
 		bound.Labels[coderv1alpha1.CoderWorkspacePoolSelectorLabel] = string(pool.UID)
 		if err := controllerutil.SetControllerReference(claim, bound, r.Scheme); err != nil {
-			return fmt.Errorf("assertion failed: set claim %s as controller of member %s: %w", claim.Name, m.Name, err)
+			return false, fmt.Errorf("assertion failed: set claim %s as controller of member %s: %w", claim.Name, m.Name, err)
 		}
 		if err := r.Update(ctx, bound); err != nil {
-			return fmt.Errorf("bind pool member %s/%s to claim %s: %w", m.Namespace, m.Name, claim.Name, err)
+			return false, fmt.Errorf("bind pool member %s/%s to claim %s: %w", m.Namespace, m.Name, claim.Name, err)
 		}
 		*m, free = *bound, free[1:]
 		counts.unclaimed--
@@ -227,7 +228,7 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 			counts.outdated--
 		}
 	}
-	return nil
+	return skipped, nil
 }
 
 // poolMemberUnusedNow reads the member's workspace with the member's identity

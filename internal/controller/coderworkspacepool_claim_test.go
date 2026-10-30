@@ -157,6 +157,7 @@ func TestPoolBindSkipsUseAfterLastRead(t *testing.T) {
 	e.fake.failNext(routeWorkspace, fakeFault{Status: 502})
 	e.reconcilePool(t, 1)
 	requireClaim(t, e.claim(t, claim), coderv1alpha1.CoderWorkspaceClaimPhasePending, "WaitingForReadyWorkspace", false)
+	require.Positive(t, e.lastStep.RequeueAfter, "no event follows the failed reads, so the pool reads again")
 
 	e.reconcilePool(t, 1)
 	e.requireBound(t, unused, claim)
