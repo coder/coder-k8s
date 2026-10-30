@@ -52,6 +52,16 @@ func TestCoderAnswersWithoutNamesFailCleanly(t *testing.T) {
 			},
 		},
 		{
+			// Coder answers 404 to the versions of the zero template ID, which a LIST skips as a
+			// template deleted meanwhile, so the template must be checked first.
+			name:   "template version list of a template without its ID",
+			isRead: func(r *http.Request) bool { return r.URL.Path == "/api/v2/templates" },
+			body:   func(*mockCoderServerState) string { return `[{}]` },
+			read: func(provider coder.ClientProvider) (runtime.Object, error) {
+				return NewTemplateVersionStorage(provider).List(namespacedContext("control-plane"), nil)
+			},
+		},
+		{
 			name:   "template version list",
 			isRead: func(r *http.Request) bool { return strings.HasSuffix(r.URL.Path, "/versions") },
 			body: func(state *mockCoderServerState) string {
