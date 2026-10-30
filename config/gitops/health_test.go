@@ -197,6 +197,13 @@ func aiProviderCases() []healthCase {
 	stale := readyReconcilingStalled("ready", "Applied")
 	stale["observedGeneration"] = int64(1)
 	noConditions := map[string]any{"observedGeneration": int64(2)}
+	// An update interrupted before Coder committed it, as stored by
+	// controllers before the #321 fix: only the top-level generation moved.
+	interrupted := readyReconcilingStalled("ready", "Applied")
+	interrupted["appliedGeneration"] = int64(1)
+	for _, c := range interrupted["conditions"].([]any) {
+		c.(map[string]any)["observedGeneration"] = int64(1)
+	}
 	deleting := aiProviderObject(readyReconcilingStalled("ready", "Applied"))
 	deleting["metadata"].(map[string]any)["deletionTimestamp"] = "2026-10-30T10:00:00Z"
 	deletingWait := aiProviderObject(readyReconcilingStalled("reconciling", "CoderUnavailable"))
@@ -206,6 +213,7 @@ func aiProviderCases() []healthCase {
 		{"stale observedGeneration", aiProviderObject(stale), "Progressing", "Waiting for the controller", "InProgress", ""},
 		{"no conditions", aiProviderObject(noConditions), "Progressing", "Waiting for the controller", "InProgress", ""},
 		{"applied", aiProviderObject(readyReconcilingStalled("ready", "Applied")), "Healthy", "Applied: details", "Current", ""},
+		{"stale conditions", aiProviderObject(interrupted), "Progressing", "Waiting for the controller", "InProgress", ""},
 		{"control plane not ready", aiProviderObject(readyReconcilingStalled("reconciling", "ControlPlaneNotReady")), "Progressing", "ControlPlaneNotReady: details", "InProgress", ""},
 		{"confirming a create", aiProviderObject(readyReconcilingStalled("reconciling", "ConfirmingCreate")), "Progressing", "ConfirmingCreate: details", "InProgress", ""},
 		// A disable that failed retries with the credential reason.
