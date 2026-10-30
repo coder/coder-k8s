@@ -385,13 +385,15 @@ Keep the poll intervals well below 34 seconds. The wait sleeps a full interval b
 API=/apis/aggregation.coder.com/v1alpha1/namespaces/coder/coderworkspaces
 kubectl get --raw "$API/acme.alice.dev/log"
 kubectl get --raw "$API/acme.alice.dev/log?limitBytes=4096"
+kubectl get --raw "$API/acme.alice.dev/log?tailLines=20"
 kubectl get --raw "$API/acme.alice.dev/log?follow=true"
 ```
 
 Each line has the text format of Coder: `<RFC 3339 time> [<level>] [provisioner|<stage>] <output>`.
 
 - `limitBytes=<n>` ends the response after at most `n` bytes. It can cut a line, but not a UTF-8 character. A value below 1 returns `422`. The server ignores unknown query parameters.
-- `follow=true` (or `follow`) sends the existing entries, then new entries as Coder writes them. The response ends when the build ends, at the byte limit, or at the time limit below. There are no duplicate or missing entries between the two parts. To follow the next build, send a new request: the log is always the latest build at request time.
+- `tailLines=<n>` returns only the last `n` lines of the existing log. Each line break ends a line, so an entry whose output has line breaks counts as several lines. `tailLines=0` returns none of them. A value below 0 returns `422`. As for Pod logs, the server takes the last `n` lines first and then applies `limitBytes` to them. Coder sends a build log from its start, so the server reads the log as without `tailLines` and keeps only its last lines.
+- `follow=true` (or `follow`) sends the existing entries, then new entries as Coder writes them. The response ends when the build ends, at the byte limit, or at the time limit below. There are no duplicate or missing entries between the two parts. With `tailLines=<n>`, the existing part is the last `n` lines. To follow the next build, send a new request: the log is always the latest build at request time.
 - The name must be the canonical name (see [Object names](#object-names)). The server checks the name before it reads the log. An alias returns `400`, and a workspace in another organization returns `404`.
 - The `Accept` header must allow JSON or `*/*`. `Accept: text/plain` alone returns `406`. `kubectl get --raw` works.
 - Websocket and other upgrade requests return `400`.
@@ -401,15 +403,15 @@ The server limits each log request:
 
 | Limit | Value | When the limit applies |
 | --- | --- | --- |
-| Response size | 4 MiB | The response ends. When the snapshot part is cut, a `Warning` header says so. A `follow=true` stream that reaches the limit during the live part ends without a warning, because the headers are already sent. If it ends before the build ends, the server cut it. |
-| Data read from Coder | 4 MiB of JSON | The response holds the entries read until then, and a `Warning` header. A capped Coder build log is about 2.4 MB of JSON. |
+| Response size | 4 MiB | The response ends. When the snapshot part is cut, a `Warning` header says so. A `follow=true` stream that reaches the limit during the live part ends without a warning, because the headers are already sent. If it ends before the build ends, the server cut it. With `tailLines`, the server keeps at most 4 MiB of lines. If the last `n` lines are larger, it leaves out the oldest of them (a single line that is larger keeps only its start), a `Warning` header says so, and a `follow=true` request does not follow. |
+| Data read from Coder | 4 MiB of JSON | The response holds the entries read until then, and a `Warning` header. With `tailLines`, the lines are the last lines of the part that the server read, not of the whole log, and a second `Warning` header says so. A capped Coder build log is about 2.4 MB of JSON. |
 | Time to read from Coder | 60 seconds in total, or 25 minutes with `follow=true`. Each Coder call before the live stream also ends after the Coder request timeout (30 seconds by default). | A snapshot returns `504`. A `follow=true` stream ends. |
 | Time to write the response | 2 minutes after the request arrives, or 26 minutes with `follow=true` | If the client reads too slowly, the server closes the response. |
 | Open log requests | 64 for each server, 4 for each user | The server returns `429` with `Retry-After: 5`. It makes no Coder call. |
 
 Snapshots and `follow=true` streams use the same open-request slots. A user with 4 open `follow=true` streams gets `429` on a snapshot too.
 
-Every log request also uses the Coder API rate limit of the operator token, which all aggregated API calls share. Coder allows 512 requests per minute for each user and request path by default, and the Coder deployment can change it with `CODER_API_RATE_LIMIT`. A log request makes 2 Coder requests: one that reads the workspace and one that reads the log. With `follow=true`, it makes 1 more request that opens the live stream, unless the existing log already reaches a size limit. It sends no more requests while the stream is open. When Coder rate-limits the operator token, the server returns `429` with the message of Coder and without `Retry-After`. See [Cost and limits of reads](#cost-and-limits-of-reads).
+Every log request also uses the Coder API rate limit of the operator token, which all aggregated API calls share. Coder allows 512 requests per minute for each user and request path by default, and the Coder deployment can change it with `CODER_API_RATE_LIMIT`. A log request makes 2 Coder requests: one that reads the workspace and one that reads the log. With `follow=true`, it makes 1 more request that opens the live stream, unless the existing part of the response already reaches a size limit. It sends no more requests while the stream is open. `tailLines` does not change these counts. When Coder rate-limits the operator token, the server returns `429` with the message of Coder and without `Retry-After`. See [Cost and limits of reads](#cost-and-limits-of-reads).
 
 ## Start and stop
 

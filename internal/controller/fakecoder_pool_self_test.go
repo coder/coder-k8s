@@ -233,6 +233,12 @@ func TestFakeCoderPoolLastUsed(t *testing.T) {
 	tpl, err := c.Template(ctx, fx.templateID)
 	require.NoError(t, err)
 	require.True(t, touched.Equal(tpl.UpdatedAt))
+	edited := touched.Add(time.Minute)
+	fx.fake.editTemplate(fx.templateID, edited)
+	tpl, err = c.Template(ctx, fx.templateID)
+	require.NoError(t, err)
+	require.True(t, edited.Equal(tpl.UpdatedAt))
+	require.True(t, touched.Equal(read(b.ID).LastUsedAt), "a template edit writes no last_used_at")
 
 	dormant, deleting := time.Now(), time.Now().Add(time.Hour)
 	fx.fake.setDormant(a.ID, &dormant, &deleting)

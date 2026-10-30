@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -168,25 +169,44 @@ func grantReader(t *testing.T, namespace string, subject rbacv1.Subject, name, r
 	grantRole(t, namespace, subject, name, []rbacv1.PolicyRule{{APIGroups: []string{aggGroup}, Resources: []string{resource}, Verbs: []string{"get", "list"}}})
 }
 
-// grantRole creates a Role with rules and binds it to subject, both named name.
+// grantRole creates a Role with rules and binds it to subject, both named name. The test's
+// cleanup deletes both, so a repeated run (-count=N) on the shared envtest starts without them.
 func grantRole(t *testing.T, namespace string, subject rbacv1.Subject, name string, rules []rbacv1.PolicyRule) {
 	t.Helper()
 	ctx := t.Context()
-	mustCreate(t, func() error {
-		_, err := envtestAdmin.RbacV1().Roles(namespace).Create(ctx, &rbacv1.Role{
-			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Rules:      rules,
-		}, metav1.CreateOptions{})
-		return err
+	rbac := envtestAdmin.RbacV1()
+	if _, err := rbac.Roles(namespace).Create(ctx, &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Rules:      rules,
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := rbac.Roles(namespace).Delete(context.Background(), name, metav1.DeleteOptions{}); err != nil {
+			t.Errorf("delete Role %s/%s: %v", namespace, name, err)
+		}
 	})
-	mustCreate(t, func() error {
-		_, err := envtestAdmin.RbacV1().RoleBindings(namespace).Create(ctx, &rbacv1.RoleBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: name},
-			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: name},
-			Subjects:   []rbacv1.Subject{subject},
-		}, metav1.CreateOptions{})
-		return err
+	if _, err := rbac.RoleBindings(namespace).Create(ctx, &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: name},
+		Subjects:   []rbacv1.Subject{subject},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := rbac.RoleBindings(namespace).Delete(context.Background(), name, metav1.DeleteOptions{}); err != nil {
+			t.Errorf("delete RoleBinding %s/%s: %v", namespace, name, err)
+		}
 	})
+}
+
+// envtestRun gives every uniqueSubjectName call a new number, so a subject that must start
+// without grants is new in every run (-count=N) and no RBAC cache from an earlier run can
+// authorize it.
+var envtestRun atomic.Int64
+
+func uniqueSubjectName(base string) string {
+	return fmt.Sprintf("%s-%d", base, envtestRun.Add(1))
 }
 
 func startEnvtestAuthServer(t *testing.T, kubeconfigPath string) authTestServer {
@@ -250,11 +270,16 @@ func TestEnvtestDelegatedAuthWithRealRBAC(t *testing.T) {
 
 	// ServiceAccount bearer token via real TokenReview; RBAC granted after the first denial.
 	ctx := t.Context()
-	mustCreate(t, func() error {
-		_, err := envtestAdmin.CoreV1().ServiceAccounts("test-ns").Create(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "reader"}}, metav1.CreateOptions{})
-		return err
+	reader := uniqueSubjectName("reader")
+	if _, err := envtestAdmin.CoreV1().ServiceAccounts("test-ns").Create(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: reader}}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := envtestAdmin.CoreV1().ServiceAccounts("test-ns").Delete(context.Background(), reader, metav1.DeleteOptions{}); err != nil {
+			t.Errorf("delete ServiceAccount test-ns/%s: %v", reader, err)
+		}
 	})
-	tokenRequest, err := envtestAdmin.CoreV1().ServiceAccounts("test-ns").CreateToken(ctx, "reader", &authenticationv1.TokenRequest{
+	tokenRequest, err := envtestAdmin.CoreV1().ServiceAccounts("test-ns").CreateToken(ctx, reader, &authenticationv1.TokenRequest{
 		Spec: authenticationv1.TokenRequestSpec{ExpirationSeconds: ptrInt64(600)},
 	}, metav1.CreateOptions{})
 	if err != nil {
@@ -270,7 +295,7 @@ func TestEnvtestDelegatedAuthWithRealRBAC(t *testing.T) {
 	if calls := server.provider.calls.Load(); calls != allowedCalls {
 		t.Fatalf("denied requests reached the Coder backend: calls %d -> %d", allowedCalls, calls)
 	}
-	grantTemplateReader(t, "test-ns", rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Name: "reader", Namespace: "test-ns"}, "sa-template-reader")
+	grantTemplateReader(t, "test-ns", rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Name: reader, Namespace: "test-ns"}, "sa-template-reader")
 	// The deny decision is cached for up to DenyCacheTTL (10s); poll past it.
 	deadline := time.Now().Add(30 * time.Second)
 	for {
