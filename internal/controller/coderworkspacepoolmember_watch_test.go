@@ -99,6 +99,28 @@ func TestPoolMemberUseWithNewReadySiblings(t *testing.T) {
 	require.Zero(t, e.fake.requestCount(routeCreateBuild), "no delete build")
 }
 
+// TestPoolMemberUseInBaselineSecond (#349): use later in the same second as
+// the baseline value is still use, and the workspace is never deleted.
+func TestPoolMemberUseInBaselineSecond(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	key, workspaceID, buildID := e.createdMember(t, nil)
+	second := e.clock.Now().Add(10 * time.Minute).Truncate(time.Second)
+	e.fake.markUsed(workspaceID, second.Add(300*time.Millisecond))
+	e.fake.setBuildJob(buildID, codersdk.ProvisionerJobSucceeded)
+	e.fake.setAgents(buildID, agent("main", codersdk.WorkspaceAgentConnected, codersdk.WorkspaceAgentLifecycleReady))
+	e.clock.SetTime(second.Add(500 * time.Millisecond))
+	member := e.reconcileMember(t, key, 1)
+	require.Equal(t, coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, member.Status.Phase, member.Status.Message)
+	requireUsed(t, member, false)
+	e.fake.markUsed(workspaceID, second.Add(800*time.Millisecond))
+	e.clock.SetTime(second.Add(time.Minute))
+	requireUsed(t, e.reconcileMember(t, key, 1), true)
+	e.deleteMember(t, key)
+	require.Nil(t, e.reconcileMember(t, key, 1), "the member goes without deleting its workspace")
+	require.Zero(t, e.fake.requestCount(routeCreateBuild), "no delete build")
+}
+
 // TestPoolMemberWatchRules: an agent that stays not ready for 5 minutes, and
 // a dormant workspace, fail an unclaimed ready member.
 func TestPoolMemberWatchRules(t *testing.T) {
