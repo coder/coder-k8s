@@ -70,7 +70,7 @@ The histogram `coder_k8s_coder_connection_wait_seconds` shows how long each call
 - The controller serves the metric at `/metrics` on port `8080`.
 - The aggregated API server serves the metric at `/metrics` on its secure port `6443`. The caller needs RBAC for the `get` verb on the non-resource URL `/metrics`.
 
-A process keeps one connection pool per Coder deployment, identified by URL scheme, host and port. `https://coder.example.com` and `https://coder.example.com:443` are the same deployment. The process drops a pool that no call used for 10 minutes, for example after a control plane changed its URL or went away.
+A process keeps one connection pool per Coder deployment, identified by URL scheme, host and port. `https://coder.example.com` and `https://coder.example.com:443` are the same deployment. The process drops a pool after 10 minutes without an open call, for example after a control plane changed its URL or went away. A workspace build log stream counts as an open call until it ends.
 
 ## APIService is `False` / `Unavailable`
 

@@ -312,7 +312,7 @@ func TestTransportRegistryKeysByDeployment(t *testing.T) {
 	t.Parallel()
 
 	registry := newTransportRegistry(newCoderTransport)
-	forURL := func(rawURL string) *http.Transport {
+	forURL := func(rawURL string) *registeredTransport {
 		transport, err := registry.forURL(mustParseURL(t, rawURL))
 		if err != nil {
 			t.Fatalf("forURL(%q): %v", rawURL, err)
@@ -325,7 +325,7 @@ func TestTransportRegistryKeysByDeployment(t *testing.T) {
 		{"https://coder.example.com", "https://coder.example.com:443/api/v2"},
 		{"http://[fd00::1]", "http://[FD00::1]:80"},
 	}
-	var bases []*http.Transport
+	var bases []*registeredTransport
 	for _, urls := range sameDeployment {
 		base := forURL(urls[0])
 		for _, rawURL := range urls[1:] {
@@ -371,7 +371,7 @@ func TestTransportRegistryEvictsUnusedDeployments(t *testing.T) {
 	now := time.Unix(0, 0)
 	registry := newTransportRegistry(newCoderTransport)
 	registry.now = func() time.Time { return now }
-	forURL := func(rawURL string) *http.Transport {
+	forURL := func(rawURL string) *registeredTransport {
 		transport, err := registry.forURL(mustParseURL(t, rawURL))
 		if err != nil {
 			t.Fatalf("forURL(%q): %v", rawURL, err)
@@ -410,5 +410,52 @@ func TestTransportRegistryEvictsUnusedDeployments(t *testing.T) {
 	}
 	if forURL(server.URL) == unused {
 		t.Fatal("expected an evicted deployment to get a new transport")
+	}
+}
+
+func TestTransportRegistryKeepsDeploymentsWithOpenResponses(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	t.Cleanup(server.Close)
+
+	now := time.Unix(0, 0)
+	registry := newTransportRegistry(newCoderTransport)
+	registry.now = func() time.Time { return now }
+	forURL := func(rawURL string) *registeredTransport {
+		transport, err := registry.forURL(mustParseURL(t, rawURL))
+		if err != nil {
+			t.Fatalf("forURL(%q): %v", rawURL, err)
+		}
+		return transport
+	}
+
+	open := forURL(server.URL)
+	res, err := (&http.Client{Transport: open}).Get(server.URL)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+
+	now = now.Add(2 * transportIdleEviction)
+	forURL("http://other.invalid")
+	if forURL(server.URL) != open {
+		t.Fatal("expected a deployment with an open response to keep its transport")
+	}
+
+	now = now.Add(transportIdleEviction / 2)
+	_, _ = io.Copy(io.Discard, res.Body)
+	_ = res.Body.Close()
+	now = now.Add(transportIdleEviction/2 + time.Second)
+	forURL("http://other.invalid")
+	if forURL(server.URL) != open {
+		t.Fatal("expected the eviction period to start when the response closed")
+	}
+
+	now = now.Add(transportIdleEviction + time.Second)
+	forURL("http://other.invalid")
+	if forURL(server.URL) == open {
+		t.Fatal("expected the deployment to lose its transport once its response closed and the eviction period passed")
 	}
 }

@@ -3,6 +3,7 @@ package coder
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -28,9 +29,9 @@ const (
 // coderTransports carries every Coder SDK request of the aggregated API server.
 var coderTransports = newTransportRegistry(newCoderTransport)
 
-// transportIdleEviction is how long a deployment's transport stays unused before the
-// registry drops it. It is far longer than IdleConnTimeout and the default request timeout, so
-// an evicted transport has no idle connections and no regular request in flight.
+// transportIdleEviction is how long a deployment's transport must stay without requests
+// before the registry drops it. It is far longer than IdleConnTimeout, so an evicted
+// transport has no idle connections left.
 const transportIdleEviction = 10 * time.Minute
 
 // transportRegistry holds one long-lived transport per Coder deployment (URL scheme,
@@ -45,9 +46,16 @@ type transportRegistry struct {
 	byDeployment map[string]*registeredTransport
 }
 
+// registeredTransport counts its requests in flight, so that the registry never drops a
+// transport that still holds connections. Two transports for one deployment would allow
+// twice maxConnsPerCoderHost connections.
 type registeredTransport struct {
+	registry  *transportRegistry
 	transport *http.Transport
-	lastUsed  time.Time
+
+	// Guarded by registry.mu.
+	active   int
+	lastUsed time.Time
 }
 
 func newTransportRegistry(newTransport func() (*http.Transport, error)) *transportRegistry {
@@ -59,9 +67,9 @@ func newTransportRegistry(newTransport func() (*http.Transport, error)) *transpo
 }
 
 // forURL returns the transport for the deployment that serves coderURL. It also drops
-// the transports that no request used for transportIdleEviction, so deployments whose
+// the transports without a request for transportIdleEviction, so deployments whose
 // control plane changed its URL or went away do not stay in the registry.
-func (r *transportRegistry) forURL(coderURL *url.URL) (*http.Transport, error) {
+func (r *transportRegistry) forURL(coderURL *url.URL) (*registeredTransport, error) {
 	if r == nil {
 		return nil, fmt.Errorf("assertion failed: transport registry must not be nil")
 	}
@@ -76,7 +84,7 @@ func (r *transportRegistry) forURL(coderURL *url.URL) (*http.Transport, error) {
 
 	now := r.now()
 	for otherKey, entry := range r.byDeployment {
-		if otherKey != key && now.Sub(entry.lastUsed) > transportIdleEviction {
+		if otherKey != key && entry.active == 0 && now.Sub(entry.lastUsed) > transportIdleEviction {
 			delete(r.byDeployment, otherKey)
 			entry.transport.CloseIdleConnections()
 		}
@@ -84,7 +92,7 @@ func (r *transportRegistry) forURL(coderURL *url.URL) (*http.Transport, error) {
 
 	if entry, ok := r.byDeployment[key]; ok {
 		entry.lastUsed = now
-		return entry.transport, nil
+		return entry, nil
 	}
 	transport, err := r.newTransport()
 	if err != nil {
@@ -93,9 +101,58 @@ func (r *transportRegistry) forURL(coderURL *url.URL) (*http.Transport, error) {
 	if transport == nil {
 		return nil, fmt.Errorf("assertion failed: new Coder transport is nil after successful construction")
 	}
-	r.byDeployment[key] = &registeredTransport{transport: transport, lastUsed: now}
+	entry := &registeredTransport{registry: r, transport: transport, lastUsed: now}
+	r.byDeployment[key] = entry
 
-	return transport, nil
+	return entry, nil
+}
+
+// RoundTrip counts the request as active until its response body is closed, because a
+// connection stays in use while the body (or an upgraded websocket) is open.
+func (t *registeredTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.setActive(1)
+	res, err := t.transport.RoundTrip(req)
+	if err != nil {
+		t.setActive(-1)
+		return nil, err
+	}
+
+	done := sync.OnceFunc(func() { t.setActive(-1) })
+	// codersdk's websocket dial needs the upgraded body to stay an io.ReadWriteCloser.
+	if rwc, ok := res.Body.(io.ReadWriteCloser); ok {
+		res.Body = &activeReadWriteCloser{ReadWriteCloser: rwc, done: done}
+	} else {
+		res.Body = &activeBody{ReadCloser: res.Body, done: done}
+	}
+	return res, nil
+}
+
+func (t *registeredTransport) setActive(delta int) {
+	t.registry.mu.Lock()
+	defer t.registry.mu.Unlock()
+
+	t.active += delta
+	t.lastUsed = t.registry.now()
+}
+
+type activeBody struct {
+	io.ReadCloser
+	done func()
+}
+
+func (b *activeBody) Close() error {
+	defer b.done()
+	return b.ReadCloser.Close()
+}
+
+type activeReadWriteCloser struct {
+	io.ReadWriteCloser
+	done func()
+}
+
+func (b *activeReadWriteCloser) Close() error {
+	defer b.done()
+	return b.ReadWriteCloser.Close()
 }
 
 // deploymentKey identifies a deployment by scheme, host, and port, with the scheme's
