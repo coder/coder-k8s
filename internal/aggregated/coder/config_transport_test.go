@@ -324,6 +324,7 @@ func TestTransportRegistryKeysByDeployment(t *testing.T) {
 		{"http://coder.coder.svc.cluster.local", "HTTP://Coder.coder.svc.cluster.local/api/v2", "http://coder.coder.svc.cluster.local:80"},
 		{"https://coder.example.com", "https://coder.example.com:443/api/v2"},
 		{"http://[fd00::1]", "http://[FD00::1]:80"},
+		{"http://[fe80::1%25eth0]", "http://[FE80::1%25eth0]:80"},
 	}
 	var bases []*registeredTransport
 	for _, urls := range sameDeployment {
@@ -350,6 +351,9 @@ func TestTransportRegistryKeysByDeployment(t *testing.T) {
 	}
 	if bases[1] == base || bases[2] == base || bases[1] == bases[2] {
 		t.Fatal("expected separate deployments to get separate transports")
+	}
+	if forURL("http://[fe80::1%25ETH0]") == bases[3] {
+		t.Fatal("expected IPv6 zones that differ in case to get separate transports")
 	}
 }
 
@@ -457,5 +461,40 @@ func TestTransportRegistryKeepsDeploymentsWithOpenResponses(t *testing.T) {
 	forURL("http://other.invalid")
 	if forURL(server.URL) == open {
 		t.Fatal("expected the deployment to lose its transport once its response closed and the eviction period passed")
+	}
+}
+
+func TestNewSDKClientCloseIdleConnectionsReachesTransport(t *testing.T) {
+	t.Parallel()
+
+	closed := make(chan struct{}, 1)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			closed <- struct{}{}
+		}
+	}
+	server.Start()
+	t.Cleanup(server.Close)
+
+	client, err := NewSDKClient(Config{CoderURL: mustParseURL(t, server.URL), SessionToken: "token"})
+	if err != nil {
+		t.Fatalf("new SDK client: %v", err)
+	}
+	res, err := client.Request(context.Background(), http.MethodGet, "/api/v2/buildinfo", nil)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, res.Body)
+	_ = res.Body.Close()
+
+	client.HTTPClient.CloseIdleConnections()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected CloseIdleConnections to close the idle connection")
 	}
 }

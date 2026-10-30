@@ -50,3 +50,9 @@ func (rt connectionWaitRoundTripper) RoundTrip(req *http.Request) (*http.Respons
 	}
 	return res, err
 }
+
+func (rt connectionWaitRoundTripper) CloseIdleConnections() {
+	if closer, ok := rt.base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}

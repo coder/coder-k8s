@@ -135,3 +135,31 @@ func TestRoundTripper(t *testing.T) {
 		require.Equal(t, 1, base.idleClose)
 	})
 }
+
+func TestKeyMatchesSame(t *testing.T) {
+	t.Parallel()
+
+	urls := []string{
+		"http://coder.example.com",
+		"HTTP://Coder.Example.com:80/api/v2",
+		"http://coder.example.com:443",
+		"https://coder.example.com",
+		"https://coder.example.com:443",
+		"https://coder.example.com:8443",
+		"http://[fd00::1]",
+		"http://[FD00::1]:80",
+		"http://[fe80::1%25eth0]",
+		"http://[FE80::1%25eth0]:80",
+		"http://[fe80::1%25ETH0]",
+		"ftp://coder.example.com",
+	}
+	for _, a := range urls {
+		for _, b := range urls {
+			ua, err := url.Parse(a)
+			require.NoError(t, err)
+			ub, err := url.Parse(b)
+			require.NoError(t, err)
+			require.Equal(t, sameorigin.Same(ua, ub), sameorigin.Key(ua) == sameorigin.Key(ub), "Key(%q)=%q, Key(%q)=%q", a, sameorigin.Key(ua), b, sameorigin.Key(ub))
+		}
+	}
+}

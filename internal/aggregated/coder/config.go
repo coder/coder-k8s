@@ -4,10 +4,8 @@ package coder
 import (
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 
@@ -77,7 +75,7 @@ func (r *transportRegistry) forURL(coderURL *url.URL) (*registeredTransport, err
 		return nil, fmt.Errorf("assertion failed: coder URL must not be nil")
 	}
 
-	key := deploymentKey(coderURL)
+	key := sameorigin.Key(coderURL)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -127,6 +125,8 @@ func (t *registeredTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	return res, nil
 }
 
+func (t *registeredTransport) CloseIdleConnections() { t.transport.CloseIdleConnections() }
+
 func (t *registeredTransport) setActive(delta int) {
 	t.registry.mu.Lock()
 	defer t.registry.mu.Unlock()
@@ -153,23 +153,6 @@ type activeReadWriteCloser struct {
 func (b *activeReadWriteCloser) Close() error {
 	defer b.done()
 	return b.ReadWriteCloser.Close()
-}
-
-// deploymentKey identifies a deployment by scheme, host, and port, with the scheme's
-// default port filled in, so https://x and https://x:443 share one transport.
-func deploymentKey(coderURL *url.URL) string {
-	scheme := strings.ToLower(coderURL.Scheme)
-	port := coderURL.Port()
-	if port == "" {
-		switch scheme {
-		case "http":
-			port = "80"
-		case "https":
-			port = "443"
-		}
-	}
-
-	return scheme + "://" + net.JoinHostPort(strings.ToLower(coderURL.Hostname()), port)
 }
 
 func newCoderTransport() (*http.Transport, error) {
