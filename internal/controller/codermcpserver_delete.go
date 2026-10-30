@@ -165,6 +165,7 @@ func deleteMCPServerInCoder(ctx context.Context, sdk *codersdk.Client, server *c
 // releaseWithoutDelete logs what can stay in Coder, because nothing can
 // delete it any more, and returns true (ControlPlaneGone).
 func (r *CoderMCPServerReconciler) releaseWithoutDelete(ctx context.Context, server *coderv1alpha1.CoderMCPServer, why string) bool {
+	countReleasedWithoutDelete(server.UID, "CoderMCPServer")
 	log.FromContext(ctx).Info("Releasing the finalizer without a delete in Coder: the MCP server config can stay in the Coder database",
 		"reason", "ControlPlaneGone", "why", why, "slug", server.Spec.Slug, "configID", server.Status.ConfigID,
 		"createPending", server.Status.CreateAttemptTime != nil)

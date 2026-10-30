@@ -53,8 +53,8 @@ const controlPlaneLiveDependentWait = 30 * time.Second
 // its dependents. A dependent's removal also requeues it at once.
 const controlPlaneDependentPoll = 10 * time.Second
 
-// releasedWithoutDelete counts finalizers that went while their keys or
-// providers can stay in Coder (#353), by kind. Today the release log line is
+// releasedWithoutDelete counts finalizers that went while their keys,
+// providers or MCP server configs can stay in Coder (#353), by kind. Today the release log line is
 // the only other signal. countReleasedWithoutDelete records a release, and
 // releasedWithoutDeleteDone counts it once the finalizer is gone, so a
 // failed finalizer patch and its retry count once. Each delete reconcile
