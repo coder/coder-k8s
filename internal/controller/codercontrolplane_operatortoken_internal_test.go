@@ -46,7 +46,7 @@ func TestOperatorTokenDatabaseHash(t *testing.T) {
 	// with ":" and no port would read as host and port in the URL.
 	for _, unusable := range []string{
 		"", "  ", "host=db.example dbname", "host='db.example", "host=db.example\\", "mysql://db.example/coder",
-		"host='' user=coder dbname=coder", "host=db.example user= dbname=coder", "host=db.example:5433 dbname=coder",
+		"host='' user=coder dbname=coder", "host=db.example dbname=coder user=", "host=db.example:5433 dbname=coder",
 	} {
 		require.Empty(t, operatorTokenDatabaseHash(unusable), "%q", unusable)
 	}
