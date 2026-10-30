@@ -216,7 +216,7 @@ Delete `CoderMCPServer` objects before their control plane and before their name
 
 ### Cleanup records
 
-Before the operator creates a config in Coder, it writes a cleanup record: a ConfigMap named `ck8s-cleanup-<object UID>` with the label `coder.com/cleanup-record=CoderMCPServer` in the operator's namespace (`coder-system`). If it cannot write the record, it does not create the config. The record holds no credential: it holds the object's namespace, name and UID, Coder's deployment ID from `/api/v2/buildinfo`, the config's temporary display name, the pinned organization ID, the slug, and the config ID once the operator knows it.
+Before the operator creates a config in Coder, it writes a cleanup record: a ConfigMap named `ck8s-cleanup-<object UID>` with the label `coder.com/cleanup-record=CoderMCPServer` in the operator's namespace (`coder-system`). If it cannot write the record, it does not create the config. The record holds no credential: it holds the object's namespace, name and UID, Coder's deployment ID from `/api/v2/buildinfo`, the config's temporary display name, the pinned organization ID, the slug, and the config ID once the operator knows it. A config that an earlier operator version created gets its record on the next reconcile. A config that was left in Coder before that has no record: delete it in the dashboard.
 
 When the control plane later reaches another Coder deployment (for example after its database Secret changed), the record still locates the config in the old one. The operator then stalls the object with `CoderDeploymentChanged`, keeps the record and creates nothing in the new deployment. Delete the config in the old deployment, then delete the ConfigMap.
 
