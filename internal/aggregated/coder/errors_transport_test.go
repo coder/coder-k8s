@@ -16,10 +16,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
-	"github.com/coder/coder-k8s/internal/sameorigin"
 )
 
-// TestMapCoderWriteErrorRealTransport sends a write through the transport of NewSDKClient and
+// TestMapCoderWriteErrorRealTransport sends a write through the HTTP client of NewSDKClient and
 // checks that a write the Coder handler never got returns the 500, and a write it got returns
 // the uncertain 504.
 func TestMapCoderWriteErrorRealTransport(t *testing.T) {
@@ -121,10 +120,7 @@ func TestMapCoderWriteErrorRealTransport(t *testing.T) {
 				tc.configure(transport)
 			}
 			t.Cleanup(transport.CloseIdleConnections)
-			client := codersdk.New(coderURL, codersdk.WithHTTPClient(&http.Client{
-				Transport: sameorigin.RoundTripper(allowed, transport),
-				Timeout:   5 * time.Second,
-			}))
+			client := codersdk.New(coderURL, codersdk.WithHTTPClient(newCoderHTTPClient(allowed, transport, 5*time.Second)))
 
 			before := received.Load()
 			resp, err := client.Request(context.Background(), http.MethodPost, "/api/v2/workspaces", map[string]string{"name": "dev"})

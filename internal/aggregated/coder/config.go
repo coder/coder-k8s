@@ -106,6 +106,20 @@ func refuseFailedProxyConnect(_ context.Context, _ *url.URL, _ *http.Request, re
 	return nil
 }
 
+// newCoderHTTPClient returns the HTTP client of NewSDKClient for the Coder origin coderURL.
+func newCoderHTTPClient(coderURL *url.URL, transport http.RoundTripper, timeout time.Duration) *http.Client {
+	return &http.Client{
+		// codersdk dials websockets (WorkspaceBuildLogsAfter for ?follow=true)
+		// with a new http.Client that keeps only this Transport, not
+		// CheckRedirect, so the Transport also refuses other origins.
+		Transport: sameorigin.RoundTripper(coderURL, transport),
+		Timeout:   timeout,
+		// net/http copies Coder-Session-Token to every redirect target, so refuse
+		// redirects that leave the Coder origin.
+		CheckRedirect: sameorigin.RedirectPolicy(coderURL),
+	}
+}
+
 // Config describes how to construct a Coder SDK client.
 type Config struct {
 	CoderURL       *url.URL
@@ -136,16 +150,7 @@ func NewSDKClient(cfg Config) (*codersdk.Client, error) {
 		return nil, fmt.Errorf("get Coder transport: %w", err)
 	}
 
-	client := codersdk.New(&coderURL, codersdk.WithHTTPClient(&http.Client{
-		// codersdk dials websockets (WorkspaceBuildLogsAfter for ?follow=true)
-		// with a new http.Client that keeps only this Transport, not
-		// CheckRedirect, so the Transport also refuses other origins.
-		Transport: sameorigin.RoundTripper(&coderURL, transport),
-		Timeout:   requestTimeout,
-		// net/http copies Coder-Session-Token to every redirect target, so refuse
-		// redirects that leave the Coder origin.
-		CheckRedirect: sameorigin.RedirectPolicy(&coderURL),
-	}))
+	client := codersdk.New(&coderURL, codersdk.WithHTTPClient(newCoderHTTPClient(&coderURL, transport, requestTimeout)))
 	if client == nil {
 		return nil, fmt.Errorf("assertion failed: coder SDK client is nil after successful construction")
 	}
