@@ -204,8 +204,8 @@ func TestCoderProvisionerKey_EarlierTargetRevokedWhileTargetNotReady(t *testing.
 // TestCoderProvisionerKey_EarlierTargetReportsBesideUnpublishedKey checks the
 // reports of earlier target records while an unpublished record waits for a
 // control plane C that is not ready. A record whose control plane was created
-// again must be reported, and the report of a record without key IDs must go
-// once Coder has no key with its name.
+// again must be reported, also an unpublished one, and the report of a record
+// without key IDs must go once Coder has no key with its name.
 func TestCoderProvisionerKey_EarlierTargetReportsBesideUnpublishedKey(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -240,9 +240,12 @@ func TestCoderProvisionerKey_EarlierTargetReportsBesideUnpublishedKey(t *testing
 	recreated.ControlPlaneUID = uuid.NewString()
 	unpublished := record("unpublished", true)
 	unpublished.Unpublished = true
+	unpublishedRecreated := record("unpublished-recreated", true)
+	unpublishedRecreated.Unpublished = true
+	unpublishedRecreated.ControlPlaneUID = recreated.ControlPlaneUID
 	idLess := record("id-less", false)
 	latest := f.get(ctx, t, provisioner)
-	latest.Status.PendingKeys = []coderv1alpha1.CoderProvisionerKeyRecord{recreated, unpublished, idLess}
+	latest.Status.PendingKeys = []coderv1alpha1.CoderProvisionerKeyRecord{recreated, unpublished, unpublishedRecreated, idLess}
 	require.NoError(t, k8sClient.Status().Update(ctx, latest))
 	markNotEntitled(ctx, t, f.namespace)
 	latest = f.get(ctx, t, provisioner)
@@ -255,10 +258,11 @@ func TestCoderProvisionerKey_EarlierTargetReportsBesideUnpublishedKey(t *testing
 	}
 
 	got := reconcile()
-	require.Equal(t, []coderv1alpha1.CoderProvisionerKeyRecord{recreated, unpublished, idLess}, got.Status.PendingKeys)
+	require.Equal(t, []coderv1alpha1.CoderProvisionerKeyRecord{recreated, unpublished, unpublishedRecreated, idLess}, got.Status.PendingKeys)
 	changed := meta.FindStatusCondition(got.Status.Conditions, coderv1alpha1.CoderProvisionerConditionControlPlaneChangedKeyKept)
 	require.NotNil(t, changed, "the record whose control plane was created again must be reported")
 	require.Contains(t, changed.Message, `"recreated"`)
+	require.Contains(t, changed.Message, `"unpublished-recreated"`)
 	require.NotContains(t, changed.Message, `"unpublished"`)
 	unverified := meta.FindStatusCondition(got.Status.Conditions, coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept)
 	require.NotNil(t, unverified, "the record without key IDs must be reported")
@@ -267,7 +271,7 @@ func TestCoderProvisionerKey_EarlierTargetReportsBesideUnpublishedKey(t *testing
 	calls.failLookup = false
 	controller.ElapseEarlierKeyRetryInterval(f.reconciler, got.UID)
 	got = reconcile()
-	require.Equal(t, []coderv1alpha1.CoderProvisionerKeyRecord{recreated, unpublished}, got.Status.PendingKeys,
+	require.Equal(t, []coderv1alpha1.CoderProvisionerKeyRecord{recreated, unpublished, unpublishedRecreated}, got.Status.PendingKeys,
 		"the record without key IDs must go once Coder has no key with its name")
 	require.Nil(t, meta.FindStatusCondition(got.Status.Conditions, coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept))
 	require.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, coderv1alpha1.CoderProvisionerConditionControlPlaneChangedKeyKept))
