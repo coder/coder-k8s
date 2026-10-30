@@ -4,10 +4,11 @@ metadata:
   name: set-by-kustomization
   namespace: coder
   annotations:
-    # Argo CD creates the Job after the test (wave 1) is healthy, waits until
-    # the Job is healthy, and fails the sync when the Job fails. It is not a
-    # sync hook: a hook runs on every sync and promotes this version again,
-    # even after another writer activated a newer one.
+    # Argo CD creates the Job after the test (wave 1) is healthy. Because the
+    # marker below is in a later wave, Argo CD waits until the Job is healthy
+    # and fails the sync when the Job fails. It is not a sync hook: a hook runs
+    # on every sync and promotes this version again, even after another writer
+    # activated a newer one.
     argocd.argoproj.io/sync-wave: "2"
 spec:
   # A failed promotion must not run again on its own: another writer can have
@@ -50,3 +51,18 @@ spec:
             name: docker-promote
         - name: tmp
           emptyDir: {}
+---
+# Argo CD waits for the health of a wave only when a later wave follows. It
+# ends the sync right after it applies the last wave, so without this marker
+# a failed Job would not fail the sync. The marker holds the test name, so each
+# version changes it and the sync option ApplyOutOfSyncOnly=true cannot skip
+# its wave.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: docker-promote-done
+  namespace: coder
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+data:
+  test: set-by-kustomization

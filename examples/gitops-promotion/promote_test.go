@@ -30,6 +30,7 @@ const (
 	maxTestTimeoutSeconds = 7200
 	startGraceSeconds     = 900
 	pollSeconds           = 30
+	syncWave              = "argocd.argoproj.io/sync-wave"
 )
 
 var dnsLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
@@ -41,8 +42,11 @@ type rendered struct {
 	role        rbacv1.Role
 	roleBinding rbacv1.RoleBinding
 	configMap   corev1.ConfigMap
+	marker      corev1.ConfigMap
 	// namespaces maps each object ID to its namespace.
 	namespaces map[string]string
+	// lastWave is the last Argo CD sync wave of all objects.
+	lastWave int
 }
 
 func render(t *testing.T, fs filesys.FileSystem) rendered {
@@ -54,6 +58,9 @@ func render(t *testing.T, fs filesys.FileSystem) rendered {
 	out := rendered{namespaces: map[string]string{}}
 	for _, res := range resMap.Resources() {
 		out.namespaces[res.CurId().String()] = res.GetNamespace()
+		if wave, ok := res.GetAnnotations()[syncWave]; ok {
+			out.lastWave = max(out.lastWave, atoi(t, wave))
+		}
 		data, err := res.AsYAML()
 		if err != nil {
 			t.Fatalf("render %s: %v", res.CurId(), err)
@@ -70,6 +77,9 @@ func render(t *testing.T, fs filesys.FileSystem) rendered {
 			target = &out.roleBinding
 		case "ConfigMap":
 			target = &out.configMap
+			if res.GetName() == "docker-promote-done" {
+				target = &out.marker
+			}
 		default:
 			continue
 		}
@@ -77,8 +87,8 @@ func render(t *testing.T, fs filesys.FileSystem) rendered {
 			t.Fatalf("decode %s: %v", res.CurId(), err)
 		}
 	}
-	if out.test == nil || out.job.Name == "" || out.role.Name == "" || out.roleBinding.Name == "" || out.configMap.Name == "" {
-		t.Fatal("assertion failed: the example must render a test, a Job, a Role, a RoleBinding, and a ConfigMap")
+	if out.test == nil || out.job.Name == "" || out.role.Name == "" || out.roleBinding.Name == "" || out.configMap.Name == "" || out.marker.Name == "" {
+		t.Fatal("assertion failed: the example must render a test, a Job, a Role, a RoleBinding, a ConfigMap, and a marker ConfigMap")
 	}
 	return out
 }
@@ -168,9 +178,19 @@ func TestExampleWiring(t *testing.T) {
 	if deadline == nil || *deadline <= maxTestTimeoutSeconds+startGraceSeconds {
 		t.Errorf("Job activeDeadlineSeconds %v, want above %d", deadline, maxTestTimeoutSeconds+startGraceSeconds)
 	}
-	testWave := r.test["metadata"].(map[string]any)["annotations"].(map[string]any)["argocd.argoproj.io/sync-wave"].(string)
-	if atoi(t, testWave) >= atoi(t, r.job.Annotations["argocd.argoproj.io/sync-wave"]) {
-		t.Errorf("Job annotations %v: want a later Argo CD sync wave than the test (%s)", r.job.Annotations, testWave)
+	testWave := atoi(t, r.test["metadata"].(map[string]any)["annotations"].(map[string]any)[syncWave].(string))
+	jobWave := atoi(t, r.job.Annotations[syncWave])
+	if testWave >= jobWave {
+		t.Errorf("Job sync wave %d: want a later Argo CD sync wave than the test (%d)", jobWave, testWave)
+	}
+	// Argo CD waits for the health of a wave only when a later wave follows.
+	if jobWave >= r.lastWave {
+		t.Errorf("Job is in the last Argo CD sync wave %d: Argo CD ends the sync after it applies the Job and does not wait for the Job", jobWave)
+	}
+	// ApplyOutOfSyncOnly=true skips unchanged objects. An unchanged marker
+	// would make the Job's wave the last one again.
+	if r.marker.Data["test"] != name {
+		t.Errorf("marker data %v, want test %q so that each version changes the marker", r.marker.Data, name)
 	}
 	if hook, ok := r.job.Annotations["argocd.argoproj.io/hook"]; ok {
 		t.Errorf("Job is an Argo CD %s hook: a hook runs on every sync and promotes again", hook)

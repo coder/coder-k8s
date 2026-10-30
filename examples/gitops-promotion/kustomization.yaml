@@ -13,8 +13,9 @@ configMapGenerator:
       - promote.sh
       - codertemplatetest.json
 # codertemplatetest.json is the only file to change for a new version, another
-# template, or another namespace. These copy its name to the Job and to the
-# Role, its template to the Role, and its namespace to every object.
+# template, or another namespace. These copy its name to the Job, the Role,
+# and the marker ConfigMap, its template to the Role, and its namespace to
+# every object.
 replacements:
   - source:
       kind: CoderTemplateTest
@@ -28,6 +29,11 @@ replacements:
           kind: Role
         fieldPaths:
           - rules.0.resourceNames.0
+      - select:
+          kind: ConfigMap
+          name: docker-promote-done
+        fieldPaths:
+          - data.test
   - source:
       kind: CoderTemplateTest
       fieldPath: spec.template
