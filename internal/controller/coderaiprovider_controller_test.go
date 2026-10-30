@@ -247,7 +247,7 @@ func TestCoderAIProviderControlPlaneNotReady(t *testing.T) {
 	require.Equal(t, 30*time.Second, result.RequeueAfter)
 	require.Zero(t, env.fake.totalRequests())
 
-	operatorToken.ObjectMeta = metav1.ObjectMeta{Name: operatorToken.Name, Namespace: env.namespace}
+	operatorToken.ObjectMeta = metav1.ObjectMeta{Name: operatorToken.Name, Namespace: env.namespace, OwnerReferences: operatorToken.OwnerReferences}
 	require.NoError(t, k8sClient.Create(ctx, operatorToken))
 	got, _ = env.reconcile(ctx, t, provider)
 	requireAIProviderReady(t, got)

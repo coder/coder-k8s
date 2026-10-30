@@ -73,7 +73,7 @@ While the test waits, the condition `Reconciling` is `True` with the same reason
 | --- | --- | --- |
 | `Initializing` | The controller started the test. | Nothing. |
 | `ControlPlaneNotReady` | The `CoderControlPlane` does not exist, is being deleted, or has no usable `status.url`. | Check `spec.controlPlaneRef` and the control plane status. |
-| `OperatorAccessNotReady` | `status.operatorAccessReady` of the control plane is not `true`, or its operator token Secret is missing or has no token. | See [Deploy the controller](deploy-controller.md), and check the Secret in `status.operatorTokenSecretRef` of the control plane. |
+| `OperatorAccessNotReady` | `status.operatorAccessReady` of the control plane is not `true`, or its operator token Secret is missing, has no token, or is not owned by the control plane. | See [Deploy the controller](deploy-controller.md), and check the Secret in `status.operatorTokenSecretRef` of the control plane. |
 | `OwnerNotConfigured` | The control plane has no `spec.templateTests.ownerUserID`. | Set it, as in step 1. |
 | `OwnerNotEligible` | The tester does not exist, is not `active`, has a person's login type, has a role that is not allowed, or is not a member of the template's organization. | Fix the tester as described in step 1. The message names the problem. |
 | `TemplateNotFound` | The organization or the template in `spec.template` does not exist. | Check `spec.template` (`<organization>.<template>`). |

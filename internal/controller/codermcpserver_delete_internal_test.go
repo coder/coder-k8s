@@ -34,14 +34,17 @@ func TestMCPServerDeleteUnderHoldEndsAtHoldEnd(t *testing.T) {
 	require.NoError(t, coderv1alpha1.AddToScheme(scheme))
 	deleted := metav1.NewTime(time.Now().Add(5*time.Second - controlPlaneDependentHold))
 	controlPlane := &coderv1alpha1.CoderControlPlane{ObjectMeta: metav1.ObjectMeta{
-		Name: "coder", Namespace: "ns", DeletionTimestamp: &deleted, Finalizers: []string{workspaceRBACFinalizer},
+		Name: "coder", Namespace: "ns", UID: "cp-uid", DeletionTimestamp: &deleted, Finalizers: []string{workspaceRBACFinalizer},
 	}}
 	controlPlane.Status.URL = coder.URL
 	controlPlane.Status.OperatorAccessReady = true
 	controlPlane.Status.OperatorTokenSecretRef = &coderv1alpha1.SecretKeySelector{Name: "coder-operator-token"}
 	token := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-operator-token", Namespace: "ns"},
-		Data:       map[string][]byte{coderv1alpha1.DefaultTokenSecretKey: []byte("token")},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "coder-operator-token", Namespace: "ns",
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(controlPlane, coderv1alpha1.GroupVersion.WithKind("CoderControlPlane"))},
+		},
+		Data: map[string][]byte{coderv1alpha1.DefaultTokenSecretKey: []byte("token")},
 	}
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns"}}
 	r := &CoderMCPServerReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(controlPlane, token, namespace).Build(), Scheme: scheme}

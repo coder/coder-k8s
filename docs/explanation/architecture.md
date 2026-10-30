@@ -58,7 +58,7 @@ The `codertemplates/promote` subresource also uses the operator token. Its own R
 
 The server finds its Coder backend in one of two ways:
 
-- `all` mode: `ControlPlaneClientProvider` finds the eligible `CoderControlPlane` resources. For each request, it reads the operator token Secret of the matching control plane.
+- `all` mode: `ControlPlaneClientProvider` finds the eligible `CoderControlPlane` resources. For each request, it reads the operator token Secret of the matching control plane, and uses it only when that control plane is the controller owner of the Secret.
 - Standalone mode: you set the static flags `--coder-url`, `--coder-session-token`, and `--coder-namespace`.
 
 ```mermaid
