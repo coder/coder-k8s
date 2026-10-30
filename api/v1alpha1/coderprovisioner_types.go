@@ -105,6 +105,33 @@ type CoderProvisionerStatus struct {
 	ControlPlaneURL string `json:"controlPlaneURL,omitempty"`
 	// SecretRef references the provisioner key secret data currently in use.
 	SecretRef *SecretKeySelector `json:"secretRef,omitempty"`
+	// PendingKeys lists the provisioner keys that can exist in Coder besides
+	// the key in provisionerKeyID: a key that the operator is about to create
+	// or has not yet written to the provisioner key Secret, and replaced keys
+	// whose deletion Coder has not confirmed. The operator deletes each entry
+	// at its coderURL with the operator token of its control plane, and
+	// removes the entry when Coder confirms that the key is gone.
+	// +listType=atomic
+	PendingKeys []CoderProvisionerKeyRecord `json:"pendingKeys,omitempty"`
+}
+
+// CoderProvisionerKeyRecord names a provisioner key that the operator created,
+// or was about to create, at one Coder endpoint.
+type CoderProvisionerKeyRecord struct {
+	// ControlPlaneRefName is the CoderControlPlane whose operator token the
+	// operator used for the key.
+	ControlPlaneRefName string `json:"controlPlaneRefName"`
+	// CoderURL is the Coder API URL that the operator sent the key request to.
+	CoderURL string `json:"coderURL"`
+	// OrganizationName is the Coder organization of the key.
+	OrganizationName string `json:"organizationName"`
+	// KeyName is the provisioner key name in Coder.
+	KeyName string `json:"keyName"`
+	// OrganizationID is the organization ID that Coder returned for the key.
+	// Without organizationID and keyID, the operator deletes the key by name.
+	OrganizationID string `json:"organizationID,omitempty"`
+	// KeyID is the provisioner key ID that Coder returned.
+	KeyID string `json:"keyID,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

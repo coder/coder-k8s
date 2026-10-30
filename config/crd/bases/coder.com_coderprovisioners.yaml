@@ -434,6 +434,51 @@ spec:
                 description: OrganizationName is the organization name last applied
                   to the provisioner key.
                 type: string
+              pendingKeys:
+                description: |-
+                  PendingKeys lists the provisioner keys that can exist in Coder besides
+                  the key in provisionerKeyID: a key that the operator is about to create
+                  or has not yet written to the provisioner key Secret, and replaced keys
+                  whose deletion Coder has not confirmed. The operator deletes each entry
+                  at its coderURL with the operator token of its control plane, and
+                  removes the entry when Coder confirms that the key is gone.
+                items:
+                  description: |-
+                    CoderProvisionerKeyRecord names a provisioner key that the operator created,
+                    or was about to create, at one Coder endpoint.
+                  properties:
+                    coderURL:
+                      description: CoderURL is the Coder API URL that the operator
+                        sent the key request to.
+                      type: string
+                    controlPlaneRefName:
+                      description: |-
+                        ControlPlaneRefName is the CoderControlPlane whose operator token the
+                        operator used for the key.
+                      type: string
+                    keyID:
+                      description: KeyID is the provisioner key ID that Coder returned.
+                      type: string
+                    keyName:
+                      description: KeyName is the provisioner key name in Coder.
+                      type: string
+                    organizationID:
+                      description: |-
+                        OrganizationID is the organization ID that Coder returned for the key.
+                        Without organizationID and keyID, the operator deletes the key by name.
+                      type: string
+                    organizationName:
+                      description: OrganizationName is the Coder organization of the
+                        key.
+                      type: string
+                  required:
+                  - coderURL
+                  - controlPlaneRefName
+                  - keyName
+                  - organizationName
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
               phase:
                 description: Phase is a high-level readiness indicator.
                 type: string
