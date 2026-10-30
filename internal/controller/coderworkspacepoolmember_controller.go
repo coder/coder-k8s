@@ -267,7 +267,7 @@ func (r *CoderWorkspacePoolMemberReconciler) checkCreate(
 		// Nothing of this member exists yet, so the workspace belongs to
 		// someone else. The controller never touches it.
 		return nil, coderFail("WorkspaceNameConflict", "Coder user %s already has a workspace named %s.", spec.OwnerID, workspaceName), nil
-	case !isCoderNotFound(err):
+	case !isCoderResourceNotFound(err): // Only Coder's own 404 proves that the name is free (#355).
 		return nil, coderStepUnavailable("get workspace by name", err), nil
 	}
 	// Last, after the Coder reads: the owner cap and the consent again.
