@@ -40,6 +40,7 @@
               go
               gnumake
               git
+              jq
               lazygit
 
               # Kubernetes dev/demo tools

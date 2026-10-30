@@ -87,7 +87,12 @@ Set `spec.timeout` of the Kustomization above the test's `timeoutSeconds` (defau
 
 ### One test per version
 
-Create one test per template version, and name it after the version, for example `docker-v2` for version `v2`. The spec is immutable, so a new version needs a new object anyway, and the name shows which version a result belongs to. Object names allow only lowercase letters, digits, `-`, and `.`, but a version name can also hold uppercase letters and `_`. Map such a version to a safe name, for example `docker-v2-0-rc1` for `V2.0_rc1`.
+Create one test per template version, and name it after the version. The spec is immutable, so a new version needs a new object anyway, and the name shows which version a result belongs to. Object names allow only lowercase letters, digits, `-`, and `.`, but a version name can also hold uppercase letters and `_`. `promote.sh name` of the [promotion example](#run-the-promotion-example) maps any valid version name to a safe name. It lowercases the name, replaces `_` and `.` with `-`, and appends 8 characters of the SHA-256 hash of the exact version name, so `V2` and `v2` get different names:
+
+```sh
+$ examples/gitops-promotion/promote.sh name docker V2.0_rc1
+docker-v2-0-rc1-1c72012b
+```
 
 Do not set `ttlSecondsAfterFinished` on tests that GitOps manages. The controller deletes the finished test, GitOps creates it again, and a new workspace starts, forever.
 
@@ -97,14 +102,59 @@ Do not set `ttlSecondsAfterFinished` on tests that GitOps manages. The controlle
 2. Git holds a test of that version, with `spec.version.name`.
 3. A promotion step waits until the test is final. Only after `Succeeded`, it reads `status.templateVersionID` of the test and calls the `codertemplates/promote` subresource of the [aggregated API](../reference/aggregated-api-behavior.md#promote-a-template-version). Promoting the active version again answers `AlreadyActive`. After a `409` or a `503`, the step must read the active version before it tries again, because another writer can have activated a third version, and the last writer wins. See the confirmation rules of the [promote subresource](../reference/aggregated-api-behavior.md#promote-a-template-version).
 
-With **Argo CD**, put the test in sync wave 1 and the promotion step in wave 2. Argo CD applies wave 2 only after every resource of wave 1 is healthy. With **Flux**, a plain `dependsOn` does not wait until the dependency has applied the same Git revision, so the promotion step can start while the previous test still shows its result.
+With **Argo CD**, put the test in sync wave 1, the promotion step in wave 2, and at least one resource in wave 3. Argo CD applies a wave only after every resource of the previous wave is healthy. After it applies the last wave, it ends the sync without a wait, so a promotion step in the last wave can fail after a successful sync. With **Flux**, a plain `dependsOn` does not wait until the dependency has applied the same Git revision, so the promotion step can start while the previous test still shows its result. The promotion step must therefore wait for its own test.
 
-This page has no runnable promotion example yet ([#216](https://github.com/coder/coder-k8s/issues/216)). Any promotion step must check these points:
+Any promotion step must check these points. The [promotion example](#run-the-promotion-example) checks all of them:
 
 - **Full spec.** The test's whole `spec`, including `spec.parameters`, equals the spec in Git. Read spec and status with one `get`, so both come from the same object. Anyone who can create tests can create the test name first with another spec.
 - **Timeout.** The wait and the deadline of the step cover the test's `timeoutSeconds` (900 s by default, at most 7200 s) and the workspace delete.
 - **Names.** Test names and the names of promotion objects, such as a Job per version, are Kubernetes-safe, as described in [One test per version](#one-test-per-version).
 - **Result.** The pipeline waits for the promotion result and shows a failed promotion as a failure. With Flux, set `wait: true` and a `timeout` above the step's deadline on the Kustomization that runs the step.
+
+### Run the promotion example
+
+The directory `examples/gitops-promotion/` in this repository is a Kustomize directory for one template, `default.docker` in namespace `coder`. Argo CD and Flux both render it with Kustomize. It holds:
+
+| File | Content |
+| --- | --- |
+| `codertemplatetest.json` | The test of one version, in sync wave 1. It is JSON, so the Job can read it with `jq`. |
+| `promote.sh` | The promotion script. It needs `bash`, `kubectl`, and `jq`. `promote.sh name` also needs `sha256sum` or `shasum`. |
+| `promote-job.yaml` | A Job that runs `promote.sh promote`, in sync wave 2, and the ConfigMap `docker-promote-done` in sync wave 3. The ConfigMap holds only the test name. |
+| `rbac.yaml` | A ServiceAccount that can `get` only this test and `create` only `codertemplates/promote` of the test's template. |
+| `kustomization.yaml` | Puts `promote.sh` and `codertemplatetest.json` into the ConfigMap `docker-promote` for the Job. Copies the test name to the Job, the Role, and the ConfigMap `docker-promote-done`, the template to the Role, and the namespace to every object. |
+| `argocd-application.yaml`, `flux-kustomization.yaml` | An Argo CD Application and a Flux Kustomization for the directory. Apply one of them, not both. |
+
+The Job reads the test in Git from its ConfigMap. It reads the test in the cluster with one `get` every 30 s, and then does one of these:
+
+| The test in the cluster | Result |
+| --- | --- |
+| Its `spec` differs from the spec in Git. The API server default `timeoutSeconds: 900`, the order of `spec.parameters`, and an omitted versus an empty parameter `value` do not count. | The Job fails at once and does not promote. |
+| It does not exist, is being deleted, has a stale `status.observedGeneration`, or is `Pending` or `Running` | The Job waits. |
+| `Failed` | The Job fails and does not promote. Its log shows `status.reason` and `status.message`. |
+| `Succeeded` with `Ready=True` | The Job promotes `status.templateVersionID` of that object and completes when the answer is `Promoted` or `AlreadyActive`. |
+
+The Job waits at most the test's `timeoutSeconds` plus 900 s for the controller to start the test. The controller writes `Succeeded` only after the workspace delete, and `Failed` at the latest at the test deadline, so this wait covers the delete. The Job's `activeDeadlineSeconds` is 8400: 7200 s, the longest `timeoutSeconds`, plus the 900 s, plus 300 s for the promotion. The Flux Kustomization has `wait: true` and `timeout: 2h30m`, so Flux is ready only after the Job completed, and it fails when the Job fails. Argo CD creates the Job in wave 2 after the test is healthy. Because the ConfigMap `docker-promote-done` is in wave 3, Argo CD waits until the Job is healthy and fails the sync when the Job fails. The ConfigMap holds the test name, so each version changes it, and the sync option `ApplyOutOfSyncOnly=true` cannot skip wave 3. The Job is not an Argo CD sync hook, because a hook runs on every sync and promotes the version again, even after another writer activated a newer one.
+
+Each Job promotes once. The Job has `backoffLimit: 0`, and `promote.sh` sends the promotion only once. After a failed promotion, read the active version, and then delete the Job to run it again. A change of `promote.sh` changes the pod template of the Job, which Kubernetes cannot update, so the sync fails until the next version gets a new Job, or until you delete the Job. Do not set Flux `force: true` or the Argo CD sync option `Replace=true` for the Job: a replaced Job promotes again.
+
+To use the example:
+
+1. Install the [Argo CD health check](#install-the-argo-cd-health-check) if you use Argo CD. With Flux, the Job is the gate.
+2. Copy the directory into your Git repository. Set the control plane, the template, the namespace, and the parameters of your test in `codertemplatetest.json`. `spec.template` must be the exact name that `kubectl get codertemplates` shows, because the promote subresource refuses other casing with `400`. Set `repoURL` or `sourceRef` and `path` in the Argo CD or Flux manifest, and apply it. For a second template, also replace the name `docker-template` of the Argo CD Application or the Flux Kustomization, and, in the same namespace, the name `docker-promote` in `rbac.yaml`, `promote-job.yaml`, and `kustomization.yaml`. Otherwise the second copy changes the objects of the first.
+3. For each new version, CI pushes the version without activating it, sets the version and the test name in `codertemplatetest.json`, and commits the file. Git then holds a new test and a new Job, both with the new name.
+
+The CI commands for step 3, in the copied directory:
+
+```sh
+coder templates push docker --directory ./docker --name V2.0_rc1 --activate=false --yes
+name=$(./promote.sh name docker V2.0_rc1)
+jq --arg name "$name" --arg version V2.0_rc1 \
+  '.metadata.name = $name | .spec.version.name = $version' \
+  codertemplatetest.json >codertemplatetest.json.new
+mv codertemplatetest.json.new codertemplatetest.json
+```
+
+CAUTION: Install the example only in a namespace where only the GitOps tool creates Pods, Jobs, and ConfigMaps. Anyone who can create a Pod there can run it as the ServiceAccount `docker-promote` and promote any version of the template without a test. A test creator who has only the test rights from [Test templates](test-templates.md) cannot. To isolate the promoter, move the ServiceAccount, the ConfigMaps `docker-promote` and `docker-promote-done`, and the Job to a namespace that only the GitOps tool writes, and keep the Role and the RoleBinding in the namespace of the test. Set the new namespace in `rbac.yaml`, in `promote-job.yaml`, in the `configMapGenerator` of `kustomization.yaml`, and in `subjects[0].namespace` of the RoleBinding. Then remove the targets `ServiceAccount`, `ConfigMap`, and `Job`, and the field `subjects.0.namespace`, from the namespace replacement in `kustomization.yaml`. Otherwise Kustomize copies the test namespace back to the moved objects and to the RoleBinding subject.
 
 ### Check after promotion
 
@@ -114,4 +164,4 @@ If the import takes longer than the 34-second write budget of the aggregated API
 
 ## What CI covers
 
-The unit test in `config/gitops/` runs the Lua script with gopher-lua, the Lua engine of Argo CD, and the Flux expressions with cel-go, both over fixed test objects. CI does not run Argo CD or Flux.
+The unit test in `config/gitops/` runs the Lua script with gopher-lua, the Lua engine of Argo CD, and the Flux expressions with cel-go, both over fixed test objects. The unit test in `examples/gitops-promotion/` renders the example with Kustomize and runs `promote.sh` against a fake `kubectl`. Its cases include a test that someone created first with other parameters, which the script must refuse, and a test that runs for the longest `timeoutSeconds`. CI does not run Argo CD or Flux.

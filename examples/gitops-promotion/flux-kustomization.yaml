@@ -1,0 +1,17 @@
+# Flux Kustomization for this directory. With wait: true, it is ready only
+# after the promotion Job completed, and it fails when the Job fails.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: docker-template
+  namespace: flux-system
+spec:
+  interval: 10m
+  path: ./templates/docker
+  prune: true
+  wait: true
+  # Longer than activeDeadlineSeconds of the promotion Job (8400 s).
+  timeout: 2h30m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
