@@ -286,7 +286,8 @@ func TestMapCoderWriteError(t *testing.T) {
 		{"DNS failure", dial(&net.DNSError{Err: "no such host", Name: "coder.example.com", IsNotFound: true}), unreachable},
 		{"proxy unreachable", afterSend(&net.OpError{Op: "proxyconnect", Net: "tcp", Err: syscall.ECONNREFUSED}), unreachable},
 		{"certificate rejected", afterSend(&tls.CertificateVerificationError{Err: errors.New("unknown authority")}), unreachable},
-		{"redirect to another origin", afterSend(sameorigin.ErrCrossOrigin), unreachable},
+		// The redirect answer comes after the server got the write.
+		{"redirect to another origin", afterSend(sameorigin.ErrCrossOrigin), uncertain},
 		{"request to another origin", afterSend(sameorigin.ErrCrossOriginRequest), unreachable},
 		{"timeout", afterSend(context.DeadlineExceeded), timedOut},
 		{"Coder 504", sdkErr(http.StatusGatewayTimeout), timedOut},
