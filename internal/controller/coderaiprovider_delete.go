@@ -126,18 +126,20 @@ func (r *CoderAIProviderReconciler) deleteStep(ctx context.Context, provider *co
 		ctx, cancel = context.WithTimeout(ctx, aiProviderBoundedDeleteTimeout)
 		defer cancel()
 	}
-	if provider.Status.ProviderID != "" && checkAIProviderID(provider) == nil {
-		// A provider from before records existed gets its record before a
-		// delete that can release without a confirmation (#422 item 3).
-		if step, err := r.ensureAIProviderRecord(ctx, sdk, provider); err != nil || step != nil {
-			log.FromContext(ctx).Info("Cannot write the cleanup record of a provider that exists in Coder", "error", err, "step", step)
-		}
-	}
 	// The record names the deployment that holds the provider. When the
 	// control plane now reaches another deployment, a delete there proves
 	// nothing, so the record stays for a sweep (#353 invariant 7).
 	if record, _, err := readCleanupRecord(ctx, r.APIReader, r.OperatorNamespace, provider.UID); err != nil && !errors.Is(err, errNotACleanupRecord) {
 		return false, nil, err
+	} else if record == nil && provider.Status.ProviderID != "" && checkAIProviderID(provider) == nil {
+		// A provider from before records existed gets its record before a
+		// delete that can release without a confirmation (#422 item 3). The
+		// write takes the deployment ID that Coder answers now, so no check
+		// follows, and nothing after it reads Kubernetes with a context that
+		// a hanging Coder call used up.
+		if step, err := r.ensureAIProviderRecord(ctx, sdk, provider); err != nil || step != nil {
+			log.FromContext(ctx).Info("Cannot write the cleanup record of a provider that exists in Coder", "error", err, "step", step)
+		}
 	} else if record != nil && (provider.Status.ProviderID == "" || checkAIProviderID(provider) == nil) {
 		// A forged provider ID fails its assertion below, before any request.
 		id, err := coderDeploymentID(ctx, sdk)
