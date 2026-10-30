@@ -103,6 +103,18 @@ func keptCreateNonce(prefix string, uid types.UID, previous *cleanupRecord) stri
 	return prefix + string(uid)
 }
 
+// adoptionNonce returns the nonce that proves that a resource with the Coder
+// ID coderID is the object's: the recorded nonce while the record has no
+// Coder ID, or for the recorded ID itself. Once the operator knows the ID,
+// Coder has shown the nonce, so it proves nothing about another resource.
+// Without a record it returns "".
+func adoptionNonce(record *cleanupRecord, coderID string) string {
+	if record == nil || (record.CoderID != "" && record.CoderID != coderID) {
+		return ""
+	}
+	return record.Nonce
+}
+
 // validCreateNonce reports a nonce that the operator can have written in the
 // record of uid.
 func validCreateNonce(prefix string, uid types.UID, nonce string) bool {

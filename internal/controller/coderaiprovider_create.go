@@ -73,11 +73,7 @@ func (r *CoderAIProviderReconciler) createOrConfirm(
 	if err != nil {
 		return nil, err
 	}
-	nonce := ""
-	if record != nil {
-		nonce = record.Nonce
-	}
-	return r.recordAIProvider(ctx, provider, found, nonce)
+	return r.recordAIProvider(ctx, provider, found, adoptionNonce(record, found.ID.String()))
 }
 
 // keepRejectedCreate keeps the memory of a rejected create in the reason of a

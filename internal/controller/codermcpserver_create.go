@@ -54,17 +54,14 @@ func (r *CoderMCPServerReconciler) createOrRecord(
 		if err != nil {
 			return nil, err
 		}
-		nonce, recordedID := "", ""
-		if record != nil {
-			nonce = record.Nonce
-		}
+		recordedID := ""
 		if record != nil && record.CoderID == found.ID.String() {
 			if step, err := r.recordedDeploymentChanged(ctx, sdk, server); step != nil || err != nil {
 				return step, err
 			}
 			recordedID = record.CoderID
 		}
-		if step := recordMCPServer(server, *found, nonce, recordedID); step != nil {
+		if step := recordMCPServer(server, *found, adoptionNonce(record, found.ID.String()), recordedID); step != nil {
 			return step, nil
 		}
 		// Store the ID before the sync replaces the nonce (#353).
