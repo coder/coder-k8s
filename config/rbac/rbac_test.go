@@ -161,6 +161,11 @@ func scanSecretAccess(t *testing.T) secretAccess {
 			roles[key] = path + " " + key
 			if rules := secretRules(rules); len(rules) > 0 {
 				got.Rules[roles[key]] = rules
+				if object.Kind == "ClusterRole" && len(object.Labels) > 0 {
+					// The aggregationRule of any ClusterRole in the cluster can
+					// select a label and copy these rules to its subjects.
+					t.Errorf("%s grants Secret access and has labels %v, which can aggregate it into other ClusterRoles (plan #155 G2)", roles[key], object.Labels)
+				}
 			}
 		}
 	}
