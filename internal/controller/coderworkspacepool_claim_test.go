@@ -139,6 +139,30 @@ func TestPoolBindsCurrentBeforeOutdated(t *testing.T) {
 	require.Nil(t, e.reconcileMember(t, misnamed, 0).Spec.ClaimRef)
 }
 
+// TestPoolBindSkipsUseAfterLastRead (#409): a member reads last_used_at once
+// a minute, so its status does not show use since that read. The bind reads
+// Coder again: the claim takes the next member, and the used member's next
+// read marks it Used, so the pool releases it.
+func TestPoolBindSkipsUseAfterLastRead(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	used, usedID := e.readyMember(t)
+	e.tick() // The used member is the older one, so the bind tries it first.
+	unused, _ := e.readyMember(t)
+	e.fake.markUsed(usedID, e.clock.Now().Add(30*time.Second))
+	claim := e.createClaim(t, "build")
+
+	e.reconcilePool(t, 1)
+	e.requireBound(t, unused, claim)
+	require.Nil(t, e.reconcileMember(t, used, 0).Spec.ClaimRef, "a workspace used after the member's last read is never bound")
+
+	requireMember(t, e.reconcileMember(t, used, 1), coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "Used", "")
+	e.reconcilePool(t, 1)
+	m := e.reconcileMember(t, used, 0)
+	require.Nil(t, metav1.GetControllerOf(m), "the pool released the used member")
+	require.Nil(t, m.Spec.ClaimRef)
+}
+
 // bindHookClient runs hook once, right before the first member update.
 type bindHookClient struct {
 	client.Client
