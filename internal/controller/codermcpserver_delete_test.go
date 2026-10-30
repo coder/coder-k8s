@@ -9,6 +9,7 @@ import (
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -198,6 +199,11 @@ func (env mcpServerEnv) pendingCreate(
 	server.Status.ConfigID = ""
 	server.Status.CreateAttemptTime = &metav1.Time{Time: time.Now().Add(-age)}
 	require.NoError(t, k8sClient.Status().Update(ctx, server))
+	// The record of a pending create has no config ID yet.
+	record := &corev1.ConfigMap{}
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: env.namespace, Name: "ck8s-cleanup-" + string(server.UID)}, record))
+	delete(record.Data, "coderID")
+	require.NoError(t, k8sClient.Update(ctx, record))
 	return server
 }
 
@@ -320,7 +326,7 @@ func TestCoderMCPServerReleasedWithoutDeleteMetric(t *testing.T) {
 		base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
 		require.NoError(t, err)
 		failed := false
-		env.r = &controller.CoderMCPServerReconciler{Scheme: scheme, Client: interceptor.NewClient(base, interceptor.Funcs{
+		env.r = &controller.CoderMCPServerReconciler{Scheme: scheme, APIReader: k8sClient, OperatorNamespace: env.namespace, Client: interceptor.NewClient(base, interceptor.Funcs{
 			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 				if _, ok := obj.(*coderv1alpha1.CoderMCPServer); ok && !failed {
 					failed = true

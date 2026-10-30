@@ -63,8 +63,9 @@ func init() {
 // CleanupRecordReconciler sweeps the cleanup records of objects that went
 // without a confirmed delete in Coder (#353). It acts only through a ready
 // control plane whose current Coder deployment ID equals the record's, and
-// it deletes only the recorded provider ID, the provider with the recorded
-// nonce, or the AI Gateway keys whose names start with the recorded prefix.
+// it deletes only the recorded provider or MCP server config ID, the provider
+// or config with the recorded nonce, or the AI Gateway keys whose names
+// start with the recorded prefix.
 type CleanupRecordReconciler struct {
 	client.Client
 	// APIReader reads the object of a record live, so a stale cache never
@@ -78,9 +79,9 @@ type CleanupRecordReconciler struct {
 }
 
 // SetupWithManager watches the records in the operator namespace. It wakes a
-// record when its CoderAIProvider or CoderAIGatewayKey is deleted, and every
-// record when a control plane gets operator access, since that control plane
-// can match them.
+// record when its CoderAIProvider, CoderAIGatewayKey or CoderMCPServer is
+// deleted, and every record when a control plane gets operator access, since
+// that control plane can match them.
 func (r *CleanupRecordReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if mgr == nil || r.Client == nil || r.APIReader == nil || r.OperatorNamespace == "" || r.Clock == nil || r.Recorder == nil {
 		return errors.New("assertion failed: the cleanup record reconciler needs a manager, a client, an API reader, the operator namespace, a clock and an event recorder")
@@ -95,6 +96,7 @@ func (r *CleanupRecordReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&corev1.ConfigMap{}, builder.WithPredicates(isRecord)).
 		Watches(&coderv1alpha1.CoderAIProvider{}, recordOf, builder.WithPredicates(dependentRemoved)).
 		Watches(&coderv1alpha1.CoderAIGatewayKey{}, recordOf, builder.WithPredicates(dependentRemoved)).
+		Watches(&coderv1alpha1.CoderMCPServer{}, recordOf, builder.WithPredicates(dependentRemoved)).
 		Watches(&coderv1alpha1.CoderControlPlane{}, handler.EnqueueRequestsFromMapFunc(r.allRecords), builder.WithPredicates(operatorAccessGained)).
 		Named("cleanuprecord").
 		Complete(r)
@@ -228,6 +230,9 @@ var cleanupRecordKinds = map[string]cleanupSweepKind{
 	},
 	cleanupRecordKindAIGatewayKey: {
 		object: func() client.Object { return &coderv1alpha1.CoderAIGatewayKey{} }, what: "the AI Gateway keys", sweep: sweepAIGatewayKeys,
+	},
+	cleanupRecordKindMCPServer: {
+		object: func() client.Object { return &coderv1alpha1.CoderMCPServer{} }, what: "the MCP server config", sweep: sweepMCPServer,
 	},
 }
 
@@ -367,6 +372,58 @@ func sweepAIGatewayKeys(ctx context.Context, sdk *codersdk.Client, record *clean
 	return false, "Coder still lists keys of the object after their delete", nil
 }
 
+// sweepMCPServer deletes the MCP server config of record in Coder. It
+// returns gone when Coder confirms that it holds no config of the record: a
+// delete answered with success or Coder's own 404, or a list by a site owner
+// that shows no config of the record's slug with the record's nonce. It
+// deletes only the recorded ID or the config whose display name is the
+// recorded nonce (invariant 5).
+func sweepMCPServer(ctx context.Context, sdk *codersdk.Client, record *cleanupRecord) (gone bool, why string, err error) {
+	if record.Nonce != mcpServerNoncePrefix+string(record.UID) {
+		return false, "", fmt.Errorf("assertion failed: cleanup record of %s has nonce %q, not the nonce of its UID", record.UID, record.Nonce)
+	}
+	orgID, err := uuid.Parse(record.Organization)
+	if err != nil || orgID == uuid.Nil || orgID.String() != record.Organization || record.Slug == "" {
+		return false, "", fmt.Errorf("assertion failed: cleanup record of %s has organization ID %q and slug %q", record.UID, record.Organization, record.Slug)
+	}
+	if step := mcpServerRequireSiteOwner(ctx, sdk); step != nil {
+		// Only a site owner sees every config in the list.
+		return false, step.message, nil
+	}
+	var id uuid.UUID
+	if record.CoderID != "" {
+		if id, err = uuid.Parse(record.CoderID); err != nil || id == uuid.Nil || id.String() != record.CoderID {
+			return false, "", fmt.Errorf("assertion failed: cleanup record of %s has coderID %q, which is not a canonical UUID", record.UID, record.CoderID)
+		}
+	} else {
+		configs, err := sdk.MCPServerConfigs(ctx, orgID)
+		switch {
+		case isCoderResourceNotFound(err):
+			return true, "the organization is gone", nil
+		case err != nil:
+			return false, "list MCP server configs: " + coderErrorSummary(err), nil
+		}
+		found, step := mcpServerWithSlug(configs, record.Slug, orgID)
+		switch {
+		case step != nil:
+			return false, step.message, nil
+		case found == nil:
+			return true, "no config with that slug", nil
+		case found.DisplayName != record.Nonce:
+			// Another config holds the slug, so no create of this object
+			// committed after the settle window.
+			return true, "the config with that slug is not this object's", nil
+		}
+		id = found.ID
+	}
+	if err := sdk.DeleteMCPServerConfig(ctx, orgID, id); err != nil && !isCoderResourceNotFound(err) {
+		return false, "delete MCP server config " + id.String() + ": " + coderErrorSummary(err), nil
+	} else if err != nil {
+		return true, "MCP server config " + id.String() + " was already gone", nil //nolint:nilerr // Coder's own 404 confirms the delete.
+	}
+	return true, "deleted MCP server config " + id.String(), nil
+}
+
 // setUnmatched keeps the unmatched gauge equal to the records that no
 // deployment reaches.
 func (r *CleanupRecordReconciler) setUnmatched(uid types.UID, kind string, unmatched bool) {
@@ -375,7 +432,7 @@ func (r *CleanupRecordReconciler) setUnmatched(uid types.UID, kind string, unmat
 	} else {
 		r.unmatched.Delete(uid)
 	}
-	counts := map[string]float64{cleanupRecordKindAIProvider: 0, cleanupRecordKindAIGatewayKey: 0}
+	counts := map[string]float64{cleanupRecordKindAIProvider: 0, cleanupRecordKindAIGatewayKey: 0, cleanupRecordKindMCPServer: 0}
 	r.unmatched.Range(func(_, v any) bool {
 		counts[v.(string)]++
 		return true

@@ -1,7 +1,9 @@
 package controller
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -32,9 +34,16 @@ const (
 // returns release when the finalizer can go. Otherwise the step says why the
 // finalizer stays. The scope gate never blocks it.
 func (r *CoderMCPServerReconciler) deleteStep(ctx context.Context, server *coderv1alpha1.CoderMCPServer) (release bool, step *mcpServerStep, err error) {
-	if server.Status.ConfigID == "" && server.Status.CreateAttemptTime == nil {
-		// Nothing of this object can exist in Coder.
-		return true, nil, nil
+	record, _, err := readCleanupRecord(ctx, r.APIReader, r.OperatorNamespace, server.UID)
+	if errors.Is(err, errNotACleanupRecord) {
+		record, err = nil, nil // Not the operator's ConfigMap: it proves nothing either way.
+	} else if err != nil {
+		return false, nil, err
+	}
+	if server.Status.ConfigID == "" && server.Status.CreateAttemptTime == nil && (record == nil || record.CoderID == "") {
+		// Nothing of this object can exist in Coder. A record with a config
+		// ID still locates a config, for example after a lost status write.
+		return true, nil, deleteCleanupRecord(ctx, r.Client, r.APIReader, r.OperatorNamespace, server.UID)
 	}
 	orgID, err := uuid.Parse(server.Status.OrganizationID)
 	if err != nil || orgID == uuid.Nil {
@@ -94,7 +103,28 @@ func (r *CoderMCPServerReconciler) deleteStep(ctx context.Context, server *coder
 		ctx, cancel = context.WithTimeout(ctx, mcpServerBoundedDeleteTimeout)
 		defer cancel()
 	}
-	step, err = deleteMCPServerInCoder(ctx, sdk, server, orgID)
+	recordedID := ""
+	if record != nil {
+		// The record names the deployment that holds the config. When the
+		// control plane now reaches another deployment, a delete there
+		// proves nothing, so the record stays for a sweep (#353 invariant 7).
+		id, err := coderDeploymentID(ctx, sdk)
+		switch {
+		case err != nil && deleting:
+			return r.releaseWithoutDelete(ctx, server, "the deployment ID read while CoderControlPlane is being deleted failed: "+coderErrorSummary(err)), nil, nil
+		case err != nil:
+			return false, mcpServerWait(mcpServerDeletePoll, "CoderUnavailable", "read the Coder deployment ID: %s", coderErrorSummary(err)), nil
+		case id != record.DeploymentID:
+			return r.releaseWithoutDelete(ctx, server, fmt.Sprintf("CoderControlPlane now reaches Coder deployment %s, but the config is in deployment %s", id, record.DeploymentID)), nil, nil
+		}
+		recordedID = record.CoderID
+	}
+	step, err = deleteMCPServerInCoder(ctx, sdk, server, orgID, recordedID)
+	if err == nil && step == nil {
+		// Coder confirmed that it holds no config of this object. Only then
+		// does the record go (#353 invariant 7).
+		return true, nil, deleteCleanupRecord(ctx, r.Client, r.APIReader, r.OperatorNamespace, server.UID)
+	}
 	switch {
 	case err != nil && deleting:
 		// The attempt ended with an impossible answer. Log it, and still
@@ -106,19 +136,21 @@ func (r *CoderMCPServerReconciler) deleteStep(ctx context.Context, server *coder
 	case step != nil && deleting:
 		return r.releaseWithoutDelete(ctx, server, "the one delete attempt while CoderControlPlane is being deleted failed: "+step.message), nil, nil
 	}
-	return step == nil, step, nil
+	return false, step, nil
 }
 
 // deleteMCPServerInCoder deletes the config of this object in Coder and
-// returns nil when Coder holds none. With only a create marker, a read
-// decides first: only the nonce proves that the config is this object's.
-// Only Coder's own 404 proves absence (#337).
-func deleteMCPServerInCoder(ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, orgID uuid.UUID) (*mcpServerStep, error) {
+// returns nil when Coder holds none. Without status.configID it deletes
+// recordedID, the config ID of the cleanup record: a failed status write
+// after the create can leave the ID only there. With only a create marker, a
+// read decides first: only the nonce proves that the config is this
+// object's. Only Coder's own 404 proves absence (#337).
+func deleteMCPServerInCoder(ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, orgID uuid.UUID, recordedID string) (*mcpServerStep, error) {
 	var id uuid.UUID
-	if server.Status.ConfigID != "" {
-		parsed, err := uuid.Parse(server.Status.ConfigID)
-		if err != nil || parsed == uuid.Nil || parsed.String() != server.Status.ConfigID {
-			return nil, fmt.Errorf("assertion failed: MCP server %s/%s has status.configID %q, which is not a canonical UUID", server.Namespace, server.Name, server.Status.ConfigID)
+	if configID := cmp.Or(server.Status.ConfigID, recordedID); configID != "" {
+		parsed, err := uuid.Parse(configID)
+		if err != nil || parsed == uuid.Nil || parsed.String() != configID {
+			return nil, fmt.Errorf("assertion failed: MCP server %s/%s has config ID %q, which is not a canonical UUID", server.Namespace, server.Name, configID)
 		}
 		id = parsed
 	} else {
@@ -130,7 +162,7 @@ func deleteMCPServerInCoder(ctx context.Context, sdk *codersdk.Client, server *c
 		}
 		// Coder's own 404 means that the pinned organization is gone, and no
 		// config of it can be reached any more (#378).
-		found, step := mcpServerWithSlug(configs, server, orgID)
+		found, step := mcpServerWithSlug(configs, server.Spec.Slug, orgID)
 		switch {
 		case step != nil:
 			step.requeue = max(step.requeue, mcpServerDeletePoll)

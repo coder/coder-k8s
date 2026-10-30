@@ -330,7 +330,7 @@ func TestCoderMCPServerSyncSecretMetadataChange(t *testing.T) {
 	require.Empty(t, env.writesSince(mark))
 	require.Equal(t, secret.ResourceVersion, got.Status.Credentials[0].SecretResourceVersion)
 
-	env.r = &controller.CoderMCPServerReconciler{Client: k8sClient, Scheme: scheme}
+	env.r = &controller.CoderMCPServerReconciler{Client: k8sClient, Scheme: scheme, APIReader: k8sClient, OperatorNamespace: env.namespace}
 	touch("two")
 	mark = len(env.writeRoutes())
 	got, _ = env.reconcile(ctx, t, got)

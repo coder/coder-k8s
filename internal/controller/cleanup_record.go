@@ -37,6 +37,8 @@ const (
 	cleanupRecordNonce        = "nonce"
 	cleanupRecordCoderID      = "coderID"
 	cleanupRecordType         = "type"
+	cleanupRecordOrganization = "organizationID"
+	cleanupRecordSlug         = "slug"
 	cleanupRecordCreateSentAt = "createAttemptTime"
 )
 
@@ -51,13 +53,17 @@ type cleanupRecord struct {
 	// database, so it names the database that holds the resource.
 	DeploymentID string
 	// Nonce finds a resource whose Coder ID is not known yet: the display
-	// name of a provider.
+	// name of a provider or of an MCP server config.
 	Nonce string
 	// CoderID is the Coder ID of the resource once the operator knows it.
 	CoderID string
 	// Type is the provider type that the create sent. With the nonce it
 	// proves that a provider found by name is the object's.
 	Type string
+	// Organization and Slug locate an MCP server config: its Coder
+	// organization ID and its slug in that organization.
+	Organization string
+	Slug         string
 	// CreateAttemptTime is when the operator last sent a create. A sweep
 	// waits for the settle window after it.
 	CreateAttemptTime time.Time
@@ -111,6 +117,7 @@ func parseCleanupRecord(configMap *corev1.ConfigMap) (*cleanupRecord, error) {
 	record := &cleanupRecord{
 		Kind: d[cleanupRecordKind], UID: types.UID(d[cleanupRecordUID]), Namespace: d[cleanupRecordNamespace], Name: d[cleanupRecordName],
 		DeploymentID: d[cleanupRecordDeploymentID], Nonce: d[cleanupRecordNonce], CoderID: d[cleanupRecordCoderID], Type: d[cleanupRecordType],
+		Organization: d[cleanupRecordOrganization], Slug: d[cleanupRecordSlug],
 	}
 	if configMap.Labels[cleanupRecordLabel] == "" || configMap.Labels[cleanupRecordLabel] != record.Kind || record.UID == "" ||
 		configMap.Name != cleanupRecordObjectName(record.UID) || record.DeploymentID == "" {
@@ -135,6 +142,9 @@ func writeCleanupRecord(ctx context.Context, c client.Client, namespace string, 
 	data := map[string]string{
 		cleanupRecordKind: record.Kind, cleanupRecordUID: string(record.UID), cleanupRecordNamespace: record.Namespace, cleanupRecordName: record.Name,
 		cleanupRecordDeploymentID: record.DeploymentID, cleanupRecordNonce: record.Nonce, cleanupRecordCoderID: record.CoderID, cleanupRecordType: record.Type,
+	}
+	if record.Organization != "" || record.Slug != "" {
+		data[cleanupRecordOrganization], data[cleanupRecordSlug] = record.Organization, record.Slug
 	}
 	if !record.CreateAttemptTime.IsZero() {
 		data[cleanupRecordCreateSentAt] = record.CreateAttemptTime.UTC().Format(time.RFC3339)

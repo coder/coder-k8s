@@ -309,7 +309,7 @@ func TestCoderMCPServerApplyLostStatusWrite(t *testing.T) {
 	env := newMCPServerEnv(ctx, t, true)
 	env.keySecret(ctx, t, testMCPKey)
 	server := env.create(ctx, t, nil)
-	r := &controller.CoderMCPServerReconciler{Client: appliedStatusFailClient{k8sClient}, Scheme: scheme}
+	r := &controller.CoderMCPServerReconciler{Client: appliedStatusFailClient{k8sClient}, Scheme: scheme, APIReader: k8sClient, OperatorNamespace: env.namespace}
 	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(server)})
 	require.ErrorContains(t, err, "lost status write")
 	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(server), server))

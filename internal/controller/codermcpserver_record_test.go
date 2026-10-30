@@ -1,0 +1,222 @@
+package controller_test
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	"github.com/coder/coder-k8s/internal/controller"
+)
+
+// mcpServerRecord returns the data of the cleanup record of uid, or nil when
+// there is none. The env namespace is also the operator namespace.
+func (env mcpServerEnv) mcpServerRecord(ctx context.Context, t *testing.T, uid types.UID) map[string]string {
+	t.Helper()
+	configMap := &corev1.ConfigMap{}
+	err := k8sClient.Get(ctx, client.ObjectKey{Namespace: env.namespace, Name: "ck8s-cleanup-" + string(uid)}, configMap)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	require.NoError(t, err)
+	require.Equal(t, "CoderMCPServer", configMap.Labels["coder.com/cleanup-record"])
+	return configMap.Data
+}
+
+// #353 (#384 follow-up 3): before its create, the controller records which
+// Coder deployment holds the config, and the config ID before the sync
+// replaces the nonce. The record holds no credential. A confirmed delete in
+// Coder removes it.
+func TestCoderMCPServerCleanupRecord(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+
+	// Stop after the create, before the sync replaces the nonce.
+	env.fake.failNext(routeUpdateMCPServer, fakeFault{Status: http.StatusBadGateway})
+	got, _ := env.reconcile(ctx, t, env.create(ctx, t, nil))
+	requireMCPServerStep(t, got, false, "CoderUnavailable")
+	record := env.mcpServerRecord(ctx, t, got.UID)
+	require.NotEmpty(t, record["createAttemptTime"])
+	delete(record, "createAttemptTime")
+	require.Equal(t, map[string]string{
+		"kind": "CoderMCPServer", "uid": string(got.UID), "namespace": env.namespace, "name": got.Name,
+		"deploymentID": env.fake.deploymentID, "nonce": "coder-k8s:" + string(got.UID), "coderID": env.requireCreated(t, got).view.ID.String(),
+		"type": "", "organizationID": env.orgID.String(), "slug": got.Spec.Slug,
+	}, record, "the config ID is recorded before the sync replaces the nonce")
+
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerApplied(t, got)
+	for _, v := range env.mcpServerRecord(ctx, t, got.UID) {
+		require.NotContains(t, v, testMCPKey, "a record holds no credential")
+	}
+
+	gone, _ := env.deleteMCPServer(ctx, t, got)
+	require.Nil(t, gone)
+	require.Empty(t, env.fake.mcpServers())
+	require.Nil(t, env.mcpServerRecord(ctx, t, got.UID), "Coder confirmed the delete, so the record goes")
+}
+
+// #353 invariant 1: without a record, the controller sends no create.
+func TestCoderMCPServerNoCreateWithoutRecord(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	t.Run("record write fails", func(t *testing.T) {
+		t.Parallel()
+		env := newMCPServerEnv(ctx, t, true)
+		env.keySecret(ctx, t, testMCPKey)
+		server := env.create(ctx, t, nil)
+		env.r.Client = interceptor.NewClient(watchClient(t), interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, ok := obj.(*corev1.ConfigMap); ok {
+					return errors.New("injected record write failure")
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+		})
+		_, err := env.r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(server)})
+		require.ErrorContains(t, err, "injected record write failure")
+		require.Zero(t, env.posts(), "no create without a record")
+		require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(server), server))
+		require.Nil(t, server.Status.CreateAttemptTime, "no create marker either")
+	})
+	t.Run("deployment ID unknown", func(t *testing.T) {
+		t.Parallel()
+		env := newMCPServerEnv(ctx, t, true)
+		env.keySecret(ctx, t, testMCPKey)
+		env.fake.failNext(routeBuildInfo, fakeFault{Status: http.StatusServiceUnavailable})
+		got, _ := env.reconcile(ctx, t, env.create(ctx, t, nil))
+		requireMCPServerStep(t, got, false, "CoderUnavailable")
+		require.Zero(t, env.posts())
+		require.Nil(t, env.mcpServerRecord(ctx, t, got.UID))
+	})
+}
+
+// #353: a release without a delete in Coder keeps the record, so a later
+// sweep can delete the config. When the control plane reaches another Coder
+// deployment, a delete there proves nothing, so the record stays too.
+func TestCoderMCPServerRecordKeptWithoutDelete(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for name, leave := range map[string]func(env mcpServerEnv){
+		"control plane gone": func(env mcpServerEnv) { require.NoError(t, k8sClient.Delete(ctx, env.controlPlane)) },
+		"deployment switch": func(env mcpServerEnv) {
+			env.fake.mu.Lock()
+			env.fake.deploymentID = uuid.NewString() // A new database behind the same control plane.
+			env.fake.mu.Unlock()
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := newMCPServerEnv(ctx, t, true)
+			env.keySecret(ctx, t, testMCPKey)
+			got, id := env.applied(ctx, t, nil)
+			leave(env)
+			gone, _ := env.deleteMCPServer(ctx, t, got)
+			require.Nil(t, gone, "the finalizer goes without a delete")
+			require.Zero(t, env.fake.requestCount(routeDeleteMCPServer))
+			require.Len(t, env.fake.mcpServers(), 1, "the config stays in Coder")
+			require.Equal(t, id.String(), env.mcpServerRecord(ctx, t, got.UID)["coderID"], "the record stays for a sweep")
+		})
+	}
+}
+
+// #353 (#362 follow-up 7, for MCP servers): a create whose answer was lost
+// leaves a record without a config ID. When the control plane then reaches
+// another Coder deployment, where someone else's config has the same slug,
+// that slug conflict proves nothing about the old deployment. The controller
+// keeps the marker and the record, so a delete keeps the record for a sweep.
+func TestCoderMCPServerPendingCreateAfterDeploymentSwitch(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	env.fake.failNext(routeCreateMCPServer, fakeFault{AfterCommit: true, Reset: true})
+	got, _ := env.reconcile(ctx, t, env.create(ctx, t, nil))
+	requireMCPServerStep(t, got, false, "ConfirmingCreate")
+	before := env.mcpServerRecord(ctx, t, got.UID)
+	require.NotNil(t, before)
+	require.Empty(t, before["coderID"], "the create answer was lost")
+
+	env.fake.mu.Lock()
+	env.fake.deploymentID = uuid.NewString() // A new database behind the same control plane.
+	for _, s := range env.fake.mcp.servers {
+		s.view.DisplayName = "Someone else's server"
+	}
+	env.fake.mu.Unlock()
+	got, _ = env.reconcile(ctx, t, got)
+	require.Contains(t, requireMCPServerStep(t, got, true, "CoderDeploymentChanged"), before["deploymentID"])
+	require.NotNil(t, got.Status.CreateAttemptTime, "the marker stays")
+	require.Equal(t, before, env.mcpServerRecord(ctx, t, got.UID))
+
+	gone, _ := env.deleteMCPServer(ctx, t, got)
+	require.Nil(t, gone, "the finalizer goes without a delete")
+	require.Zero(t, env.fake.requestCount(routeDeleteMCPServer), "no delete in the new deployment")
+	require.Equal(t, before, env.mcpServerRecord(ctx, t, got.UID), "the record stays for a sweep")
+}
+
+// #353: a status without the config ID, but with a create marker, keeps the
+// recorded ID. After the sync the display name is no longer the nonce, so
+// only the recorded ID still finds the config for a delete.
+func TestCoderMCPServerKeepsRecordedIDWithoutStatusID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	got, id := env.applied(ctx, t, nil)
+	got.Status.ConfigID = ""
+	got.Status.CreateAttemptTime = &metav1.Time{Time: time.Now().Add(-time.Hour)}
+	require.NoError(t, k8sClient.Status().Update(ctx, got))
+
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerStep(t, got, true, "SlugConflict")
+	require.Equal(t, id.String(), env.mcpServerRecord(ctx, t, got.UID)["coderID"], "the record keeps the config ID")
+
+	gone, _ := env.deleteMCPServer(ctx, t, got)
+	require.Nil(t, gone)
+	require.Empty(t, env.fake.mcpServers(), "the delete used the recorded ID")
+	require.Nil(t, env.mcpServerRecord(ctx, t, got.UID))
+}
+
+// #353: a config from before records existed gets one, with the deployment
+// ID that Coder answers now.
+func TestCoderMCPServerRecordBackfill(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	got, id := env.applied(ctx, t, nil)
+	require.NoError(t, k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: env.namespace, Name: "ck8s-cleanup-" + string(got.UID)}}))
+
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerApplied(t, got)
+	record := env.mcpServerRecord(ctx, t, got.UID)
+	require.Equal(t, id.String(), record["coderID"])
+	require.Equal(t, env.fake.deploymentID, record["deploymentID"])
+}
+
+// The reconciler refuses to start without its cleanup record dependencies.
+func TestCoderMCPServerSetupNeedsRecordDependencies(t *testing.T) {
+	t.Parallel()
+	for name, r := range map[string]*controller.CoderMCPServerReconciler{
+		"no operator namespace": {Client: k8sClient, Scheme: scheme, APIReader: k8sClient},
+		"no API reader":         {Client: k8sClient, Scheme: scheme, OperatorNamespace: "coder-system"},
+	} {
+		mgr, err := ctrl.NewManager(cfg, ctrl.Options{Scheme: scheme, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0"})
+		require.NoError(t, err)
+		require.ErrorContains(t, r.SetupWithManager(mgr), "assertion failed: MCP server reconciler needs", name)
+	}
+}
