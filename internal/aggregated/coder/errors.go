@@ -197,8 +197,10 @@ func notSent(err error) bool {
 		}
 	}
 	var certErr *tls.CertificateVerificationError
+	// crypto/tls sets Conn only for a first record that is not a TLS handshake, before the server
+	// hello. A malformed record after the handshake can follow a request that the server read.
 	var recordErr tls.RecordHeaderError
-	return errors.As(err, &certErr) || errors.As(err, &recordErr) ||
+	return errors.As(err, &certErr) || (errors.As(err, &recordErr) && recordErr.Conn != nil) ||
 		errors.Is(err, http.ErrSchemeMismatch) || errors.Is(err, errProxyConnectRefused) ||
 		errors.Is(err, sameorigin.ErrCrossOriginRequest)
 }

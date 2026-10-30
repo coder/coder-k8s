@@ -233,7 +233,8 @@ A write (create, update, patch, or delete) of a workspace or a template can also
 - An answer without the object that the server needs: a create answer without the ID or name of the object, a build answer of a workspace update or delete without the ID of the build, a template version answer of a template create or files update without the ID of the version, or a template update answer without the template. An example is a `200` or `201` with `{}` or `null`.
 - A redirect to another origin, which the server refuses, or a redirect whose next request fails. The server that sent the redirect got the write.
 - A template files update whose activation Coder accepted, when the re-read of the template fails or shows another active version.
-- A connection that breaks after the server sent the request, before or while the server reads the answer.
+- A template update that changed the files or the metadata in Coder, when the read of the template that ends the update fails.
+- A connection that breaks after the server sent the request, before or while the server reads the answer. This includes a malformed TLS record from Coder or the proxy after the TLS handshake.
 
 A write that the server knows did not reach Coder keeps the `500` that says that the server cannot reach Coder. Nothing changed in Coder, so you can retry it. The server knows this for these errors:
 

@@ -709,6 +709,8 @@ func (s *TemplateStorage) Update(
 		updatedTemplate.Spec.Description != currentTemplate.Spec.Description ||
 		updatedTemplate.Spec.Icon != currentTemplate.Spec.Icon
 
+	// changed records a Coder change that this update applied.
+	changed := false
 	if updatedTemplate.Spec.Files != nil {
 		if normalizedDesiredFiles == nil {
 			return nil, false, fmt.Errorf("assertion failed: normalized desired template files must not be nil when spec.files is provided")
@@ -792,6 +794,7 @@ func (s *TemplateStorage) Update(
 					fmt.Sprintf("a re-read from the Coder API with active version %s instead of %s after the activation",
 						verifyTemplate.ActiveVersionID, newVersion.ID))
 			}
+			changed = true
 		}
 	}
 
@@ -807,10 +810,15 @@ func (s *TemplateStorage) Update(
 			return nil, false, coder.UncertainWriteError(coder.WriteUpdate, aggregationv1alpha1.Resource("codertemplates"), name,
 				"an answer from the Coder API without the updated template")
 		}
+		changed = true
 	}
 
 	refreshedObj, err := s.Get(ctx, name, nil)
 	if err != nil {
+		if changed {
+			return nil, false, coder.UncertainWriteError(coder.WriteUpdate, aggregationv1alpha1.Resource("codertemplates"), name,
+				"no re-read of the template from the Coder API after the update")
+		}
 		return nil, false, err
 	}
 
