@@ -114,10 +114,12 @@ func (r *CoderMCPServerReconciler) deleteStep(ctx context.Context, server *coder
 	if record == nil && server.Status.ConfigID != "" {
 		// A config from before records existed gets its record before a
 		// delete that can release without a confirmation. The write takes
-		// the deployment ID that Coder answers now, so no check follows, and
-		// nothing after it reads Kubernetes with a context that a hanging
-		// Coder call used up (#422 item 3).
-		r.backfillMCPServerRecord(ctx, sdk, server)
+		// the deployment ID that Coder answers now, so no check follows. It
+		// gets half of the bounded attempt, so a hanging Coder call leaves
+		// time for the delete (#422 item 3).
+		backfillCtx, cancel := context.WithTimeout(ctx, mcpServerBoundedDeleteTimeout/2)
+		r.backfillMCPServerRecord(backfillCtx, sdk, server)
+		cancel()
 	}
 	recordedID, recordedNonce := "", ""
 	if record != nil {

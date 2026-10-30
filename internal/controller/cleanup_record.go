@@ -107,9 +107,11 @@ func keptCreateNonce(prefix string, uid types.UID, previous *cleanupRecord) stri
 // ID coderID is the object's: the recorded nonce while the record has no
 // Coder ID, or for the recorded ID itself. Once the operator knows the ID,
 // Coder has shown the nonce, so it proves nothing about another resource.
-// Without a record it returns "".
-func adoptionNonce(record *cleanupRecord, coderID string) string {
-	if record == nil || (record.CoderID != "" && record.CoderID != coderID) {
+// The nonce prefix and object UID of an older record prove only a create that
+// is still pending: anyone who can read the object knows them. Without a
+// record it returns "".
+func adoptionNonce(prefix string, record *cleanupRecord, coderID string, pending bool) string {
+	if record == nil || (record.CoderID != "" && record.CoderID != coderID) || (!pending && !isRandomCreateNonce(prefix, record.Nonce)) {
 		return ""
 	}
 	return record.Nonce

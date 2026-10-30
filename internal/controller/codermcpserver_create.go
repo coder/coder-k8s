@@ -61,7 +61,8 @@ func (r *CoderMCPServerReconciler) createOrRecord(
 			}
 			recordedID = record.CoderID
 		}
-		if step := recordMCPServer(server, *found, adoptionNonce(record, found.ID.String()), recordedID); step != nil {
+		nonce := adoptionNonce(mcpServerNoncePrefix, record, found.ID.String(), server.Status.CreateAttemptTime != nil)
+		if step := recordMCPServer(server, *found, nonce, recordedID); step != nil {
 			return step, nil
 		}
 		// Store the ID before the sync replaces the nonce (#353).

@@ -73,7 +73,7 @@ func (r *CoderAIProviderReconciler) createOrConfirm(
 	if err != nil {
 		return nil, err
 	}
-	return r.recordAIProvider(ctx, provider, found, adoptionNonce(record, found.ID.String()))
+	return r.recordAIProvider(ctx, provider, found, adoptionNonce(aiProviderNoncePrefix, record, found.ID.String(), provider.Status.CreateAttemptTime != nil))
 }
 
 // keepRejectedCreate keeps the memory of a rejected create in the reason of a
