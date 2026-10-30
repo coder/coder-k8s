@@ -384,6 +384,10 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if err != nil {
 			return ctrl.Result{}, err
 		}
+		replaced, err = r.bindToControlPlane(ctx, provisioner.Namespace, replaced)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
 		if !sameKeySlot(replaced, target) && !slices.Contains(pending, replaced) {
 			pending = append(pending, replaced)
 		}
@@ -870,6 +874,28 @@ func (r *CoderProvisionerReconciler) readControlPlane(ctx context.Context, names
 			controlPlane.Namespace, controlPlane.Name, namespace, name)
 	}
 	return controlPlane, true, nil
+}
+
+// bindToControlPlane records in record, when it has no control plane UID, the
+// UID of the control plane that it names, while that control plane has the
+// recorded Coder API URL (see tokenBoundTo). A control plane created again
+// under that name later then gets no operator token for record.
+func (r *CoderProvisionerReconciler) bindToControlPlane(
+	ctx context.Context,
+	namespace string,
+	record coderv1alpha1.CoderProvisionerKeyRecord,
+) (coderv1alpha1.CoderProvisionerKeyRecord, error) {
+	if record.ControlPlaneUID != "" {
+		return record, nil
+	}
+	controlPlane, ok, err := r.readControlPlane(ctx, namespace, record.ControlPlaneRefName)
+	if err != nil || !ok {
+		return record, err
+	}
+	if tokenBoundTo(record, controlPlane) {
+		record.ControlPlaneUID = string(controlPlane.UID)
+	}
+	return record, nil
 }
 
 // keyCleanup is the result of the cleanup of one recorded provisioner key.

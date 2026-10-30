@@ -150,7 +150,9 @@ type CoderProvisionerKeyRecord struct {
 	// with controlPlaneRefName has this UID. When it is empty, it sends that
 	// token only when coderURL is the current Coder API URL of that control
 	// plane. Otherwise it keeps the entry and sets the condition
-	// ControlPlaneChangedKeyKept.
+	// ControlPlaneChangedKeyKept. When a rotation replaces the key of status
+	// without status.controlPlaneUID, the entry of that key records the UID
+	// while coderURL is the current Coder API URL of that control plane.
 	ControlPlaneUID string `json:"controlPlaneUID,omitempty"`
 	// CoderURL is the Coder API URL that the operator sent the key request to.
 	CoderURL string `json:"coderURL"`

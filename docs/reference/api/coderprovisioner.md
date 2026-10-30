@@ -54,7 +54,7 @@ or was about to create, at one Coder endpoint.
 | Field | Type | Description |
 | --- | --- | --- |
 | `controlPlaneRefName` | string | ControlPlaneRefName is the CoderControlPlane whose operator token the operator used for the key. |
-| `controlPlaneUID` | string | ControlPlaneUID is the UID of that CoderControlPlane. The operator sends its operator token for this entry only while the control plane with controlPlaneRefName has this UID. When it is empty, it sends that token only when coderURL is the current Coder API URL of that control plane. Otherwise it keeps the entry and sets the condition ControlPlaneChangedKeyKept. |
+| `controlPlaneUID` | string | ControlPlaneUID is the UID of that CoderControlPlane. The operator sends its operator token for this entry only while the control plane with controlPlaneRefName has this UID. When it is empty, it sends that token only when coderURL is the current Coder API URL of that control plane. Otherwise it keeps the entry and sets the condition ControlPlaneChangedKeyKept. When a rotation replaces the key of status without status.controlPlaneUID, the entry of that key records the UID while coderURL is the current Coder API URL of that control plane. |
 | `coderURL` | string | CoderURL is the Coder API URL that the operator sent the key request to. |
 | `organizationName` | string | OrganizationName is the Coder organization of the key. |
 | `keyName` | string | KeyName is the provisioner key name in Coder. |

@@ -6243,7 +6243,9 @@ spec:
                         with controlPlaneRefName has this UID. When it is empty, it sends that
                         token only when coderURL is the current Coder API URL of that control
                         plane. Otherwise it keeps the entry and sets the condition
-                        ControlPlaneChangedKeyKept.
+                        ControlPlaneChangedKeyKept. When a rotation replaces the key of status
+                        without status.controlPlaneUID, the entry of that key records the UID
+                        while coderURL is the current Coder API URL of that control plane.
                       type: string
                     keyID:
                       description: KeyID is the provisioner key ID that Coder returned.
