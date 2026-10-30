@@ -733,8 +733,8 @@ func TestTemplateStorageUpdateVerifiesActiveVersionPromotion(t *testing.T) {
 	if created {
 		t.Fatal("expected update created=false")
 	}
-	if !strings.Contains(err.Error(), "active version promotion did not take effect") {
-		t.Fatalf("expected promotion verification error, got %v", err)
+	if !apierrors.IsTimeout(err) || !strings.Contains(err.Error(), "the result is uncertain") {
+		t.Fatalf("expected the uncertain 504 from the promotion verification, got %v", err)
 	}
 
 	if state.fileCount() != fileCountBefore+1 {

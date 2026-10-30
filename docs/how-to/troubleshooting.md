@@ -59,7 +59,7 @@ kubectl get deploy,svc -n <namespace>
 
 Coder answered an operator call with a redirect to another origin. The operator does not follow such redirects, so that the operator token stays on the control plane origin. The usual cause is `CODER_REDIRECT_TO_ACCESS_URL=true` in `spec.extraEnv` of the `CoderControlPlane`. Remove it, and redirect browsers from HTTP to HTTPS in your Ingress, Gateway or load balancer instead. See [Redirects to another origin](deploy-controller.md#redirects-to-another-origin).
 
-Most aggregated API calls then answer the caller with a `500` that says `the Coder API could not be reached`. The `coder-errors` line in the aggregated API server log shows the refusal. When Coder or a proxy redirects only the websocket request of the workspace build log stream (`coderworkspaces/log?follow=true`), that line shows `refusing request to a different origin than the coder URL` instead.
+Most aggregated API reads then answer the caller with a `500` that says `the Coder API could not be reached`. Writes answer with the uncertain `504`, because the server that sent the redirect got the write. Re-read the object before you retry. The `coder-errors` line in the aggregated API server log shows the refusal. When Coder or a proxy redirects only the websocket request of the workspace build log stream (`coderworkspaces/log?follow=true`), that line shows `refusing request to a different origin than the coder URL` instead.
 
 ## Operator calls to Coder are slow or time out under load
 
@@ -177,6 +177,7 @@ If the error does not name a field, the ServiceAccount does not have a permissio
 - `500` that mentions `subjectaccessreviews`: the ServiceAccount of the server cannot create SubjectAccessReviews. Apply `config/rbac/auth-delegator-binding.yaml`. In standalone mode, apply `config/apiserver-standalone/auth-delegator-binding.yaml` instead.
 - `403` that says `the Coder API denied the request`: kube-apiserver let the caller in, but Coder refused the call that the server made with its Coder token. The message leaves out the Coder URL and Coder's own text. The server log has the full Coder error, on a line from the `coder-errors` logger.
 - `500` that says `the Coder API failed the request ... with status <code>` or `the Coder API could not be reached`: Coder answered with a server error, or the server could not reach Coder. Read the `coder-errors` line in the server log for the Coder URL and the full error.
+- `504` that says `the result is uncertain`: Coder, or a proxy in front of it, gave an answer to a write that leaves it open whether Coder applied the write. Re-read the object with `kubectl get` before you retry. See [Coder timeouts](../reference/aggregated-api-behavior.md#coder-timeouts).
 
 ## Aggregated reads return `ServiceUnavailable`
 

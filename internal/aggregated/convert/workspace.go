@@ -22,9 +22,15 @@ import (
 // this API exposes changes the token even when Coder's Workspace.UpdatedAt stays the same, and a
 // backend-only change that leaves the projection identical keeps the token. It is not monotonic
 // and not a history cursor: an identical projection yields the same token again.
-func WorkspaceToK8s(namespace string, w codersdk.Workspace) *aggregationv1alpha1.CoderWorkspace {
+//
+// It returns an error when w lacks its ID or the fields of the name.
+func WorkspaceToK8s(namespace string, w codersdk.Workspace) (*aggregationv1alpha1.CoderWorkspace, error) {
 	if namespace == "" {
 		panic("assertion failed: namespace must not be empty")
+	}
+	if err := requireIdentity("workspace", w.ID,
+		nameField{"organization", w.OrganizationName}, nameField{"user", w.OwnerName}, nameField{"workspace", w.Name}); err != nil {
+		return nil, err
 	}
 
 	var autoShutdown *metav1.Time
@@ -74,7 +80,7 @@ func WorkspaceToK8s(namespace string, w codersdk.Workspace) *aggregationv1alpha1
 	sum := sha256.Sum256(serialized)
 	obj.ResourceVersion = hex.EncodeToString(sum[:])
 
-	return obj
+	return obj, nil
 }
 
 func workspaceRunning(workspace codersdk.Workspace) bool {

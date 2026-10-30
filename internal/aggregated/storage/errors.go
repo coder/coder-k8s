@@ -10,6 +10,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apiserver/pkg/storage"
 	storageerrors "k8s.io/apiserver/pkg/storage/errors"
+
+	aggregationv1alpha1 "github.com/coder/coder-k8s/api/aggregation/v1alpha1"
+	"github.com/coder/coder-k8s/internal/aggregated/coder"
 )
 
 // rejectDryRun refuses server-side dry-run writes for resource. Storage calls Coder directly and
@@ -26,6 +29,19 @@ func rejectDryRun(resource string, dryRun []string) error {
 	return apierrors.NewBadRequest(fmt.Sprintf(
 		"server-side dry-run is not supported for %s; nothing was changed", resource,
 	))
+}
+
+// uncertainCreateAnswer is the error for a create that Coder answered with its success status,
+// but without the ID or name of the object, for example with {} from a proxy. Coder can have created
+// the object.
+func uncertainCreateAnswer(resource schema.GroupResource, name string) error {
+	return coder.UncertainWriteError(coder.WriteCreate, resource, name, "an answer from the Coder API without the ID or name of the object")
+}
+
+// uncertainBuildAnswer is the error for a workspace update or delete whose build request Coder
+// answered with its success status, but without a build, for example with {} from a proxy.
+func uncertainBuildAnswer(write coder.Write, name string) error {
+	return coder.UncertainWriteError(write, aggregationv1alpha1.Resource("coderworkspaces"), name, "an answer from the Coder API without the ID of the build")
 }
 
 func wrapClientError(err error) error {
