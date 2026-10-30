@@ -20,8 +20,9 @@ func TestEnvtestWorkspaceLogRBAC(t *testing.T) {
 	workspaceRule := func(verbs ...string) []rbacv1.PolicyRule {
 		return []rbacv1.PolicyRule{{APIGroups: []string{aggGroup}, Resources: []string{"coderworkspaces"}, Verbs: verbs}}
 	}
+	viewer := uniqueSubjectName("ws-viewer")
 	logRule := []rbacv1.PolicyRule{{APIGroups: []string{aggGroup}, Resources: []string{"coderworkspaces/log"}, Verbs: []string{"get"}}}
-	grantRole(t, "test-ns", userSubject("ws-viewer"), "ws-log-test-viewer", workspaceRule("get", "list", "watch"))
+	grantRole(t, "test-ns", userSubject(viewer), "ws-log-test-viewer", workspaceRule("get", "list", "watch"))
 	grantRole(t, "test-ns", userSubject("ws-editor"), "ws-log-test-editor", workspaceRule("get", "list", "watch", "update", "patch", "delete"))
 	grantRole(t, "test-ns", userSubject("ws-log-reader"), "ws-log-test-reader", logRule)
 
@@ -29,7 +30,7 @@ func TestEnvtestWorkspaceLogRBAC(t *testing.T) {
 	// The request-header CA is loaded asynchronously after startup; poll until the viewer's
 	// ordinary workspace read is served.
 	for deadline := time.Now().Add(15 * time.Second); ; {
-		status, _ := server.do(t, &frontProxy, http.MethodGet, workspacesTestNS+"/"+testWorkspaceName, remoteUser("ws-viewer"), "")
+		status, _ := server.do(t, &frontProxy, http.MethodGet, workspacesTestNS+"/"+testWorkspaceName, remoteUser(viewer), "")
 		if status == http.StatusOK {
 			break
 		}
@@ -40,9 +41,9 @@ func TestEnvtestWorkspaceLogRBAC(t *testing.T) {
 	}
 
 	calls := server.provider.calls.Load()
-	impersonateViewer := mergeHeaders(remoteUser("admin", "system:masters"), map[string]string{"Impersonate-User": "ws-viewer"})
+	impersonateViewer := mergeHeaders(remoteUser("admin", "system:masters"), map[string]string{"Impersonate-User": viewer})
 	for name, headers := range map[string]map[string]string{
-		"viewer":                remoteUser("ws-viewer"),
+		"viewer":                remoteUser(viewer),
 		"editor":                remoteUser("ws-editor"),
 		"admin as ws-viewer":    impersonateViewer,
 		"unknown authenticated": remoteUser("mallory"),
@@ -60,9 +61,9 @@ func TestEnvtestWorkspaceLogRBAC(t *testing.T) {
 
 	// Positive control: the same viewer is allowed once granted the log Role. The earlier deny is
 	// cached for up to 10 s, so poll past it.
-	grantRole(t, "test-ns", userSubject("ws-viewer"), "ws-log-test-viewer-logs", logRule)
+	grantRole(t, "test-ns", userSubject(viewer), "ws-log-test-viewer-logs", logRule)
 	for deadline := time.Now().Add(30 * time.Second); ; {
-		status, _ := server.do(t, &frontProxy, http.MethodGet, testLogPath, remoteUser("ws-viewer"), "")
+		status, _ := server.do(t, &frontProxy, http.MethodGet, testLogPath, remoteUser(viewer), "")
 		if status == http.StatusOK {
 			break
 		}
