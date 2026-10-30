@@ -455,14 +455,14 @@ func TestCoderProvisionerKey_RevertAfterFailedRotation(t *testing.T) {
 // per name in an organization.
 type keySlot struct{ coderURL, organizationName, keyName string }
 
-// keyStoreClient is a Coder that keeps provisioner keys, one per slot.
-// failEnsureAt fails each key create at that URL before it reaches Coder, and
-// failLookup fails each key lookup by name.
+// keyStoreClient is a Coder that keeps provisioner keys, one per slot. Each
+// key create at a URL in failEnsureAt fails before it reaches Coder, and each
+// key lookup by name at failLookupAt fails.
 type keyStoreClient struct {
 	*fakeBootstrapClient
 	keys         map[keySlot]uuid.UUID
-	failEnsureAt string
-	failLookup   bool
+	failEnsureAt []string
+	failLookupAt string
 }
 
 func newKeySlot(coderURL, organizationName, keyName string) keySlot {
@@ -474,7 +474,7 @@ func (s keySlot) organizationID() uuid.UUID {
 }
 
 func (c *keyStoreClient) EnsureProvisionerKey(_ context.Context, req coderbootstrap.EnsureProvisionerKeyRequest) (coderbootstrap.EnsureProvisionerKeyResponse, error) {
-	if req.CoderURL == c.failEnsureAt {
+	if slices.Contains(c.failEnsureAt, req.CoderURL) {
 		return coderbootstrap.EnsureProvisionerKeyResponse{}, errors.New("injected connection refused")
 	}
 	slot := newKeySlot(req.CoderURL, req.OrganizationName, req.KeyName)
@@ -502,7 +502,7 @@ func (c *keyStoreClient) DeleteProvisionerKeyByID(_ context.Context, req coderbo
 }
 
 func (c *keyStoreClient) ProvisionerKeyByName(_ context.Context, req coderbootstrap.ProvisionerKeyByNameRequest) (*codersdk.ProvisionerKey, error) {
-	if c.failLookup {
+	if req.CoderURL == c.failLookupAt {
 		return nil, errors.New("injected lookup failure")
 	}
 	slot := newKeySlot(req.CoderURL, req.OrganizationName, req.KeyName)
@@ -514,10 +514,13 @@ func (c *keyStoreClient) ProvisionerKeyByName(_ context.Context, req coderbootst
 }
 
 // TestCoderProvisionerKey_IDLessRecordKeepsOtherProvisionersKey checks a
-// provisioner P whose target moves to endpoint B, where provisioner Q holds
-// its key under the same key name. P records the create at B without key IDs,
-// and the create fails before it reaches Coder. Neither the cleanup after P
-// moves back nor the deletion of P may delete the key of Q.
+// provisioner P whose target moves from A to endpoint B, where provisioner Q
+// holds its key under the same key name, and then to endpoint C. P records
+// each create without key IDs, and each create fails before it reaches
+// Coder. Neither the cleanup after P moves back to A nor the deletion of P
+// may delete the key of Q. After the move back, P must report each entry it
+// keeps, and drop an entry and its report once Coder has no key with its
+// name.
 func TestCoderProvisionerKey_IDLessRecordKeepsOtherProvisionersKey(t *testing.T) {
 	t.Parallel()
 
@@ -531,7 +534,11 @@ func TestCoderProvisionerKey_IDLessRecordKeepsOtherProvisionersKey(t *testing.T)
 			ctx := context.Background()
 			f := newProvisionerCredentialFixture(ctx, t, "cprov-idless")
 			createControlPlaneWithToken(ctx, t, f.namespace, "coder-b", "https://coder-b.example.com", "operator-token-b")
-			urlB := "http://coder-b." + f.namespace + ".svc.cluster.local:80"
+			createControlPlaneWithToken(ctx, t, f.namespace, "coder-c", "https://coder-c.example.com", "operator-token-c")
+			apiURL := func(controlPlane string) string {
+				return "http://" + controlPlane + "." + f.namespace + ".svc.cluster.local:80"
+			}
+			urlB, urlC := apiURL("coder-b"), apiURL("coder-c")
 			store := &keyStoreClient{fakeBootstrapClient: f.bootstrapClient, keys: map[keySlot]uuid.UUID{}}
 			f.reconciler.BootstrapClient = store
 
@@ -549,19 +556,29 @@ func TestCoderProvisionerKey_IDLessRecordKeepsOtherProvisionersKey(t *testing.T)
 			pName := types.NamespacedName{Name: p.Name, Namespace: p.Namespace}
 			f.reconcile(ctx, t, p)
 			f.reconcile(ctx, t, p)
+			reconcileP := func() ctrl.Result {
+				result, err := f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: pName})
+				require.NoError(t, err)
+				return result
+			}
 			moveTo := func(controlPlane string) {
 				latest := f.get(ctx, t, p)
 				latest.Spec.ControlPlaneRef.Name = controlPlane
 				require.NoError(t, k8sClient.Update(ctx, latest))
 			}
+			unverifiedReport := func() *metav1.Condition {
+				return meta.FindStatusCondition(f.get(ctx, t, p).Status.Conditions, coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept)
+			}
 
-			store.failEnsureAt = urlB
-			moveTo("coder-b")
-			_, err := f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: pName})
-			require.Error(t, err, "the create at B must fail")
-			require.True(t, slices.ContainsFunc(f.get(ctx, t, p).Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
-				return record.CoderURL == urlB && record.KeyName == "provisioner" && record.KeyID == ""
-			}), "P must record its create at B without key IDs")
+			store.failEnsureAt = []string{urlB, urlC}
+			for _, controlPlane := range []string{"coder-b", "coder-c"} {
+				moveTo(controlPlane)
+				_, err := f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: pName})
+				require.Error(t, err, "the create at %s must fail", controlPlane)
+				require.True(t, slices.ContainsFunc(f.get(ctx, t, p).Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
+					return record.CoderURL == apiURL(controlPlane) && record.KeyName == "provisioner" && record.KeyID == ""
+				}), "P must record its create at %s without key IDs", controlPlane)
+			}
 
 			if deleteP {
 				require.NoError(t, k8sClient.Delete(ctx, f.get(ctx, t, p)))
@@ -571,30 +588,30 @@ func TestCoderProvisionerKey_IDLessRecordKeepsOtherProvisionersKey(t *testing.T)
 				return
 			}
 
+			store.failLookupAt = urlC
 			moveTo("coder")
-			result, err := f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: pName})
-			require.NoError(t, err)
+			result := reconcileP()
 			require.Equal(t, qKeyID, store.keys[slotB].String(), "the key of Q at B must still exist")
-			latest := f.get(ctx, t, p)
-			require.Len(t, latest.Status.PendingKeys, 1, "the record at B must stay while Coder holds a key with its name")
-			unverified := meta.FindStatusCondition(latest.Status.Conditions, coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept)
-			require.NotNil(t, unverified, "P must report the key at B that it does not delete")
-			require.Equal(t, metav1.ConditionTrue, unverified.Status)
-			require.Contains(t, unverified.Message, urlB)
-			require.Positive(t, result.RequeueAfter, "P must check the record at B again")
-
-			store.failLookup = true
-			_, err = f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: pName})
-			require.NoError(t, err)
-			require.NotNil(t, meta.FindStatusCondition(f.get(ctx, t, p).Status.Conditions, coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept),
-				"a failed lookup must not clear the report of the key at B")
-			store.failLookup = false
+			require.Len(t, f.get(ctx, t, p).Status.PendingKeys, 2, "the entries at B and C must stay")
+			report := unverifiedReport()
+			require.NotNil(t, report, "P must report the entries that it keeps")
+			require.Equal(t, metav1.ConditionTrue, report.Status)
+			require.Contains(t, report.Message, urlB)
+			require.Contains(t, report.Message, urlC)
+			require.Positive(t, result.RequeueAfter, "P must check the entries again")
 
 			delete(store.keys, slotB)
+			reconcileP()
+			require.Len(t, f.get(ctx, t, p).Status.PendingKeys, 1, "the entry at B must go once Coder has no key with its name")
+			report = unverifiedReport()
+			require.NotNil(t, report, "a failed lookup must keep the report of the entry at C")
+			require.NotContains(t, report.Message, urlB, "the report must not name the entry at B any more")
+			require.Contains(t, report.Message, urlC)
+
+			store.failLookupAt = ""
 			f.reconcile(ctx, t, p)
-			latest = f.get(ctx, t, p)
-			require.Empty(t, latest.Status.PendingKeys, "the record at B must go once Coder has no key with its name")
-			require.Nil(t, meta.FindStatusCondition(latest.Status.Conditions, coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept))
+			require.Empty(t, f.get(ctx, t, p).Status.PendingKeys)
+			require.Nil(t, unverifiedReport())
 		})
 	}
 }

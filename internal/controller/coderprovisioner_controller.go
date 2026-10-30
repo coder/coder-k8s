@@ -338,8 +338,8 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		pending = append(next, target)
 	}
-	var kept, unverified []coderv1alpha1.CoderProvisionerKeyRecord
-	lookupFailed := false
+	var kept []coderv1alpha1.CoderProvisionerKeyRecord
+	var unverified []string
 	for _, record := range pending {
 		if sameKeySlot(record, target) {
 			kept = append(kept, record)
@@ -349,21 +349,19 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if revokeErr != nil {
 			return ctrl.Result{}, revokeErr
 		}
-		if cleanup != keyGone {
-			kept = append(kept, record)
+		if cleanup == keyGone {
+			continue
 		}
-		if cleanup == keyUnverified {
-			unverified = append(unverified, record)
-		}
-		if cleanup == keyKept && record.KeyID == "" {
-			lookupFailed = true
+		kept = append(kept, record)
+		if _, _, ok := parseKeyIDs(record.OrganizationID, record.KeyID); !ok {
+			note := "the operator could not check Coder"
+			if cleanup == keyUnverified {
+				note = "Coder holds a key with this name that nothing shows this provisioner created"
+			}
+			unverified = append(unverified, fmt.Sprintf("key %q in organization %q at %s: %s", record.KeyName, record.OrganizationName, record.CoderURL, note))
 		}
 	}
-	// A failed lookup does not show that an unverified key is gone.
-	conditionChanged := false
-	if len(unverified) > 0 || !lookupFailed {
-		conditionChanged = setUnverifiedKeyCondition(provisioner, unverified)
-	}
+	conditionChanged := setUnverifiedKeyCondition(provisioner, unverified)
 	if conditionChanged || !slices.Equal(kept, provisioner.Status.PendingKeys) {
 		provisioner.Status.PendingKeys = kept
 		if err := r.Status().Update(ctx, provisioner); err != nil {
@@ -1058,24 +1056,19 @@ func (r *CoderProvisionerReconciler) revokeKey(
 }
 
 // setUnverifiedKeyCondition sets the UnverifiedKeyKept condition for the
-// records in unverified, or removes it when there are none. It reports
-// whether the conditions changed.
-func setUnverifiedKeyCondition(provisioner *coderv1alpha1.CoderProvisioner, unverified []coderv1alpha1.CoderProvisionerKeyRecord) bool {
+// pending entries without key IDs that unverified describes, or removes it
+// when there are none. It reports whether the conditions changed.
+func setUnverifiedKeyCondition(provisioner *coderv1alpha1.CoderProvisioner, unverified []string) bool {
 	if len(unverified) == 0 {
 		return meta.RemoveStatusCondition(&provisioner.Status.Conditions, coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept)
-	}
-	keys := make([]string, 0, len(unverified))
-	for _, record := range unverified {
-		keys = append(keys, fmt.Sprintf("%q in organization %q at %s", record.KeyName, record.OrganizationName, record.CoderURL))
 	}
 	return meta.SetStatusCondition(&provisioner.Status.Conditions, metav1.Condition{
 		Type:               coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept,
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: provisioner.Generation,
 		Reason:             "KeyIDUnknown",
-		Message: fmt.Sprintf("Coder holds provisioner key %s, and status.pendingKeys has no key ID for it, so nothing shows that this provisioner created it. "+
-			"The operator does not delete it, because another provisioner or a person can use the same name. Delete it in Coder if nothing uses it.",
-			strings.Join(keys, ", ")),
+		Message: "status.pendingKeys holds entries without key IDs, and the operator deletes no key for them, because another provisioner or a person can use the same name: " +
+			strings.Join(unverified, "; ") + ". Delete such a key in Coder if nothing uses it.",
 	})
 }
 

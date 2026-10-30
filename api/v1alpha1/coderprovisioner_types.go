@@ -29,11 +29,12 @@ const (
 	// referenced credential Secret and setting passed the operator's checks.
 	// When it is False, the operator keeps the last applied Deployment.
 	CoderProvisionerConditionCredentialsReady = "CredentialsReady"
-	// CoderProvisionerConditionUnverifiedKeyKept is True while an entry in
-	// status.pendingKeys has no key IDs and Coder holds a key with its name.
-	// Nothing shows that this provisioner created that key, so the operator
-	// does not delete it. The operator removes the condition when no such
-	// entry is left.
+	// CoderProvisionerConditionUnverifiedKeyKept is True while
+	// status.pendingKeys holds an entry without key IDs that the operator
+	// could not remove: Coder holds a key with its name, which nothing shows
+	// this provisioner created, or the operator could not check Coder. The
+	// operator deletes no key for such an entry. The message names each
+	// entry, and the operator removes the condition when none is left.
 	CoderProvisionerConditionUnverifiedKeyKept = "UnverifiedKeyKept"
 
 	// DefaultProvisionerKeySecretKey is the default data key for provisioner key secrets.
