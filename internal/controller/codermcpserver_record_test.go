@@ -270,31 +270,39 @@ func TestCoderMCPServerRecreateDropsGoneID(t *testing.T) {
 
 // #353: when the control plane reaches another Coder deployment while the
 // object lives, the config looks gone, but the record still locates it in
-// the old deployment. The controller keeps the record and creates nothing in
+// the old deployment. With or without a pending spec edit, the controller
+// stalls with CoderDeploymentChanged, keeps the record and creates nothing in
 // the new deployment, and a delete keeps the record too.
 func TestCoderMCPServerDeploymentSwitchKeepsRecord(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	env := newMCPServerEnv(ctx, t, true)
-	env.keySecret(ctx, t, testMCPKey)
-	got, _ := env.applied(ctx, t, nil)
-	before := env.mcpServerRecord(ctx, t, got.UID)
-	env.fake.mu.Lock()
-	env.fake.deploymentID = uuid.NewString() // A new database behind the same control plane.
-	env.fake.mcp.servers = nil
-	env.fake.mu.Unlock()
-	got.Spec.Description = "pending"
-	require.NoError(t, k8sClient.Update(ctx, got))
+	for name, edit := range map[string]bool{"applied": false, "pending spec edit": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := newMCPServerEnv(ctx, t, true)
+			env.keySecret(ctx, t, testMCPKey)
+			got, _ := env.applied(ctx, t, nil)
+			before := env.mcpServerRecord(ctx, t, got.UID)
+			env.fake.mu.Lock()
+			env.fake.deploymentID = uuid.NewString() // A new database behind the same control plane.
+			env.fake.mcp.servers = nil
+			env.fake.mu.Unlock()
+			if edit {
+				got.Spec.Description = "pending"
+				require.NoError(t, k8sClient.Update(ctx, got))
+			}
 
-	got, _ = env.reconcile(ctx, t, got)
-	require.Contains(t, requireMCPServerStep(t, got, true, "CoderDeploymentChanged"), before["deploymentID"])
-	require.Equal(t, 1, env.posts(), "no create in the new deployment")
-	require.Equal(t, before, env.mcpServerRecord(ctx, t, got.UID), "the record keeps the old locator")
+			got, _ = env.reconcile(ctx, t, got)
+			require.Contains(t, requireMCPServerStep(t, got, true, "CoderDeploymentChanged"), before["deploymentID"])
+			require.Equal(t, 1, env.posts(), "no create in the new deployment")
+			require.Equal(t, before, env.mcpServerRecord(ctx, t, got.UID), "the record keeps the old locator")
 
-	gone, _ := env.deleteMCPServer(ctx, t, got)
-	require.Nil(t, gone, "the finalizer goes without a delete")
-	require.Zero(t, env.fake.requestCount(routeDeleteMCPServer), "no delete in the new deployment")
-	require.Equal(t, before, env.mcpServerRecord(ctx, t, got.UID), "the record stays for a sweep")
+			gone, _ := env.deleteMCPServer(ctx, t, got)
+			require.Nil(t, gone, "the finalizer goes without a delete")
+			require.Zero(t, env.fake.requestCount(routeDeleteMCPServer), "no delete in the new deployment")
+			require.Equal(t, before, env.mcpServerRecord(ctx, t, got.UID), "the record stays for a sweep")
+		})
+	}
 }
 
 // #353: a delete never removes a ConfigMap of the record's name that is not

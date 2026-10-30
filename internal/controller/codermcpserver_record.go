@@ -45,9 +45,7 @@ func (r *CoderMCPServerReconciler) writeMCPServerRecord(
 		// The record is the only locator of what this object made in the old
 		// Coder database, so the controller neither overwrites it nor creates
 		// in the new one.
-		return mcpServerStalled(mcpServerResync, "CoderDeploymentChanged",
-			"MCP server config %s (ID %q) is in Coder deployment %s, but CoderControlPlane %s now reaches deployment %s. Delete the config there, then delete ConfigMap %s/%s. Until then the controller creates nothing.",
-			server.Spec.Slug, previous.CoderID, previous.DeploymentID, server.Spec.ControlPlaneRef.Name, deploymentID, r.OperatorNamespace, cleanupRecordObjectName(server.UID)), nil
+		return r.mcpServerDeploymentChanged(server, previous, deploymentID), nil
 	}
 	record := cleanupRecord{
 		Kind: cleanupRecordKindMCPServer, UID: server.UID, Namespace: server.Namespace, Name: server.Name,
@@ -71,6 +69,34 @@ func (r *CoderMCPServerReconciler) writeMCPServerRecord(
 		record.CreateAttemptTime = previous.CreateAttemptTime
 	}
 	return nil, writeCleanupRecord(ctx, r.Client, r.OperatorNamespace, existing, record)
+}
+
+// mcpServerDeploymentChanged is the stall of an object whose record names
+// another Coder deployment than the one that the control plane reaches now.
+func (r *CoderMCPServerReconciler) mcpServerDeploymentChanged(server *coderv1alpha1.CoderMCPServer, record *cleanupRecord, deploymentID string) *mcpServerStep {
+	return mcpServerStalled(mcpServerResync, "CoderDeploymentChanged",
+		"MCP server config %s (ID %q) is in Coder deployment %s, but CoderControlPlane %s now reaches deployment %s. Delete the config there, then delete ConfigMap %s/%s. Until then the controller creates nothing.",
+		server.Spec.Slug, record.CoderID, record.DeploymentID, server.Spec.ControlPlaneRef.Name, deploymentID, r.OperatorNamespace, cleanupRecordObjectName(server.UID))
+}
+
+// recordedDeploymentChanged returns the CoderDeploymentChanged stall when the
+// record names another Coder deployment than the one that the control plane
+// reaches now, or a wait when the deployment ID read fails. Without a record
+// it returns nil. A config that looks deleted can then still exist in the
+// old deployment.
+func (r *CoderMCPServerReconciler) recordedDeploymentChanged(ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer) (*mcpServerStep, error) {
+	record, _, err := readCleanupRecord(ctx, r.APIReader, r.OperatorNamespace, server.UID)
+	if err != nil || record == nil {
+		return nil, err
+	}
+	deploymentID, err := coderDeploymentID(ctx, sdk)
+	if err != nil {
+		return mcpServerWait(mcpServerRetry, "CoderUnavailable", "read the Coder deployment ID: %s", coderErrorSummary(err)), nil
+	}
+	if deploymentID != record.DeploymentID {
+		return r.mcpServerDeploymentChanged(server, record, deploymentID), nil
+	}
+	return nil, nil
 }
 
 // backfillMCPServerRecord writes the missing record of a config that exists

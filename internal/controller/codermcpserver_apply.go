@@ -50,12 +50,18 @@ func (r *CoderMCPServerReconciler) syncMCPServer(
 	switch {
 	// Only Coder's own 404 proves that the config is gone. A proxy page or
 	// "Route not found." waits below and changes nothing (#337).
-	case isCoderResourceNotFound(err) && applied:
-		server.Status.Enabled = nil
-		return mcpServerStalled(mcpServerResync, "DeletedExternally",
-			"MCP server config %s was deleted in Coder. The controller does not create it again until the spec changes.", id), false, nil
 	case isCoderResourceNotFound(err):
-		server.Status.ConfigID, server.Status.Credentials, server.Status.Enabled = "", nil, nil
+		server.Status.Enabled = nil
+		// The control plane can reach another Coder deployment now, which
+		// answers 404 for a config of the old one (#353).
+		if step, err := r.recordedDeploymentChanged(ctx, sdk, server); step != nil || err != nil {
+			return step, false, err
+		}
+		if applied {
+			return mcpServerStalled(mcpServerResync, "DeletedExternally",
+				"MCP server config %s was deleted in Coder. The controller does not create it again until the spec changes.", id), false, nil
+		}
+		server.Status.ConfigID, server.Status.Credentials = "", nil
 		r.sentCredentials.Delete(client.ObjectKeyFromObject(server))
 		return nil, true, nil
 	case err != nil:
