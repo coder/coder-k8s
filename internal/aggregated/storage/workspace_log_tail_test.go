@@ -31,7 +31,7 @@ func TestLineTail(t *testing.T) {
 		{"zero lines", push(newLineTail(0, 100), "a\n"), "", false},
 		{"byte cap drops the oldest lines", push(newLineTail(10, 5), "aa\n", "bb\n", "cc\n"), "cc\n", true},
 		{"lines that fit the byte cap exactly", push(newLineTail(10, 6), "aa\n", "bb\n"), "aa\nbb\n", false},
-		{"a line over the byte cap keeps its start", push(newLineTail(10, 4), "a\n", "üüü\n"), "üü", true},
+		{"a line over the byte cap keeps its start and line end", push(newLineTail(10, 6), "a\n", "üüü\n"), "üü\n", true},
 		{"each newline ends a line", push(newLineTail(2, 100), "a\n", "b1\nb2\nb3\n"), "b2\nb3\n", false},
 	}
 	for _, tc := range cases {
@@ -47,6 +47,17 @@ func TestLineTail(t *testing.T) {
 	}
 	if got := huge.String(); got != strings.Repeat("0123456789\n", 90) || !huge.cut {
 		t.Fatalf("huge tailLines: len=%d cut=%v, want the newest 90 lines and cut", len(got), huge.cut)
+	}
+
+	// One entry made of line breaks costs no allocation per line.
+	breaks := strings.Repeat("\n", 1<<20)
+	var many *lineTail
+	allocs := testing.AllocsPerRun(1, func() {
+		many = newLineTail(1<<62, 4<<20)
+		many.push(breaks)
+	})
+	if many.String() != breaks || allocs > 64 {
+		t.Fatalf("1 Mi line breaks: %v allocations, held %d bytes", allocs, len(many.String()))
 	}
 }
 

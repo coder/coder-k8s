@@ -1,15 +1,20 @@
 package storage
 
-import "strings"
+import (
+	"bytes"
+	"strings"
+)
 
 // lineTail keeps the newest lines of a log: at most maxLines lines and at most maxBytes bytes.
 // Coder returns a build log from the start, so a tail request reads the log and keeps only its
-// end. Memory stays bounded by maxBytes however large tailLines is.
+// end. The lines share one byte buffer of at most 2*maxBytes, with no allocation per line, so
+// memory stays bounded however large tailLines is and however many line breaks an entry has.
 type lineTail struct {
 	maxLines int64
 	maxBytes int64
-	lines    []string // oldest first
-	held     int64
+	buf      []byte // the held lines are buf[start:], each ending with '\n'
+	start    int
+	lines    int64
 	// cut is set when the byte cap dropped or shortened a line that maxLines would keep.
 	cut bool
 }
@@ -32,43 +37,45 @@ func (t *lineTail) push(text string) {
 		if end == 0 {
 			panic("assertion failed: log tail text must end with a newline")
 		}
-		line := text[:end]
-		if end < len(text) {
-			// A held substring would keep the whole entry in memory, beyond maxBytes.
-			line = strings.Clone(line)
-		}
-		t.pushLine(line)
+		t.pushLine(text[:end])
 		text = text[end:]
 	}
 }
 
 func (t *lineTail) pushLine(line string) {
 	if int64(len(line)) > t.maxBytes {
-		line = strings.Clone(runePrefix(line, t.maxBytes))
+		// Keep the start of the line and its line end, so every held line ends with '\n'.
+		line = runePrefix(line, t.maxBytes-1) + "\n"
 		t.cut = true
 	}
-	if int64(len(t.lines)) == t.maxLines {
+	if t.lines == t.maxLines {
 		t.dropOldest()
 	}
-	for t.held+int64(len(line)) > t.maxBytes {
+	for t.held()+int64(len(line)) > t.maxBytes {
 		t.dropOldest()
 		t.cut = true
 	}
-	t.lines = append(t.lines, line)
-	t.held += int64(len(line))
+	if len(t.buf)+len(line) > cap(t.buf) {
+		live := t.buf[t.start:]
+		if t.start >= len(live) {
+			// The dropped bytes pay for this copy, so compaction is amortized O(1) per byte.
+			t.buf = t.buf[:copy(t.buf, live)]
+		} else {
+			grown := make([]byte, len(live), min(2*(int64(len(live))+int64(len(line))), 2*t.maxBytes))
+			copy(grown, live)
+			t.buf = grown
+		}
+		t.start = 0
+	}
+	t.buf = append(t.buf, line...)
+	t.lines++
 }
+
+func (t *lineTail) held() int64 { return int64(len(t.buf) - t.start) }
 
 func (t *lineTail) dropOldest() {
-	t.held -= int64(len(t.lines[0]))
-	t.lines[0] = "" // so the backing array does not keep the dropped line alive
-	t.lines = t.lines[1:]
+	t.start += bytes.IndexByte(t.buf[t.start:], '\n') + 1
+	t.lines--
 }
 
-func (t *lineTail) String() string {
-	var b strings.Builder
-	b.Grow(int(t.held))
-	for _, line := range t.lines {
-		b.WriteString(line)
-	}
-	return b.String()
-}
+func (t *lineTail) String() string { return string(t.buf[t.start:]) }
