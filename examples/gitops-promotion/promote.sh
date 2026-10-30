@@ -51,7 +51,7 @@ cmd_name() {
 readonly VERDICT='
 def norm: .timeoutSeconds //= $defaultTimeout
   | .parameters = ((.parameters // []) | map(.value //= "") | sort_by(.name));
-if (.spec | norm) != ($want.spec | norm) then "SpecMismatch"
+if (.spec | norm) != ($want[0].spec | norm) then "SpecMismatch"
 elif .metadata.deletionTimestamp != null then "Deleting"
 elif (.status.observedGeneration // 0) != .metadata.generation then "Pending"
 elif .status.phase == "Failed" then "Failed"
@@ -76,7 +76,8 @@ cmd_promote() {
   while :; do
     # One GET: the spec check and the result come from the same object.
     if obj=$(kubectl -n "$ns" get codertemplatetest "$name" -o json); then
-      verdict=$(jq -r --argjson want "$want" --argjson defaultTimeout "$DEFAULT_TIMEOUT_SECONDS" "$VERDICT" <<<"$obj")
+      # --slurpfile, not --argjson: a test can be larger than one argument may be.
+      verdict=$(jq -r --slurpfile want "$1" --argjson defaultTimeout "$DEFAULT_TIMEOUT_SECONDS" "$VERDICT" <<<"$obj")
       case $verdict in
       SpecMismatch) die "refusing to promote: the spec of ${ns}/${name} differs from $1" ;;
       Failed) die "test ${ns}/${name} failed: $(jq -r '"\(.status.reason): \(.status.message)"' <<<"$obj")" ;;

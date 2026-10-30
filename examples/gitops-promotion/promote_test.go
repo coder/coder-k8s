@@ -428,6 +428,13 @@ func TestPromote(t *testing.T) {
 	setTimeout(maxTestTimeoutSeconds)(longTest["spec"].(map[string]any))
 	shortTest := clone(t, example)
 	setTimeout(60)(shortTest["spec"].(map[string]any))
+	// The API maximum: 64 parameters with 4096-character values.
+	largest := clone(t, example)
+	var params []any
+	for i := range 64 {
+		params = append(params, map[string]any{"name": fmt.Sprintf("p%02d", i), "value": strings.Repeat("x", 4096)})
+	}
+	largest["spec"].(map[string]any)["parameters"] = params
 	notReady := status("Succeeded")
 	notReady["conditions"] = []any{map[string]any{"type": "Ready", "status": "False"}}
 	stale := status("Succeeded")
@@ -455,6 +462,12 @@ func TestPromote(t *testing.T) {
 				3: inCluster(t, example, status("Succeeded"), nil),
 			},
 			promoteAnswer: promoted("Promoted"), wantOK: true, wantPromotions: 1, wantMinGets: 3, wantOutput: "phase Succeeded, Ready=False",
+		},
+		{
+			name:          "promotes a test of the largest allowed spec",
+			want:          largest,
+			gets:          map[int]map[string]any{1: inCluster(t, largest, status("Succeeded"), nil)},
+			promoteAnswer: promoted("Promoted"), wantOK: true, wantPromotions: 1,
 		},
 		{
 			name:          "accepts AlreadyActive",

@@ -140,7 +140,7 @@ The Job has `backoffLimit: 0`, and `promote.sh` sends the promotion only once. A
 To use the example:
 
 1. Install the [Argo CD health check](#install-the-argo-cd-health-check) if you use Argo CD. With Flux, the Job is the gate.
-2. Copy the directory into your Git repository. Set the control plane, the template, the namespace, and the parameters of your test in `codertemplatetest.json`. `spec.template` must be the exact name that `kubectl get codertemplates` shows, because the promote subresource refuses other casing with `400`. For a second template in the same namespace, also replace the name `docker-promote` in `rbac.yaml`, `promote-job.yaml`, and `kustomization.yaml`. Set `repoURL` or `sourceRef` and `path` in the Argo CD or Flux manifest, and apply it.
+2. Copy the directory into your Git repository. Set the control plane, the template, the namespace, and the parameters of your test in `codertemplatetest.json`. `spec.template` must be the exact name that `kubectl get codertemplates` shows, because the promote subresource refuses other casing with `400`. Set `repoURL` or `sourceRef` and `path` in the Argo CD or Flux manifest, and apply it. For a second template, also replace the name `docker-template` of the Argo CD Application or the Flux Kustomization, and, in the same namespace, the name `docker-promote` in `rbac.yaml`, `promote-job.yaml`, and `kustomization.yaml`. Otherwise the second copy changes the objects of the first.
 3. For each new version, CI pushes the version without activating it, sets the version and the test name in `codertemplatetest.json`, and commits the file. Git then holds a new test and a new Job, both with the new name.
 
 The CI commands for step 3, in the copied directory:
