@@ -13,12 +13,19 @@ local st = obj.status
 if st == nil or st.observedGeneration == nil or st.observedGeneration ~= obj.metadata.generation then
   return hs
 end
+-- A condition from an older generation does not describe the current spec.
+local conditions = {}
 for _, c in ipairs(st.conditions or {}) do
+  if c.observedGeneration == obj.metadata.generation then
+    table.insert(conditions, c)
+  end
+end
+for _, c in ipairs(conditions) do
   if c.type == "Ready" and c.reason ~= nil and c.message ~= nil then
     hs.message = c.reason .. ": " .. c.message
   end
 end
-for _, c in ipairs(st.conditions or {}) do
+for _, c in ipairs(conditions) do
   if c.type == "Ready" and c.status == "True" then
     hs.status = "Healthy"
   elseif c.type == "Stalled" and c.status == "True" then

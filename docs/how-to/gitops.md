@@ -164,11 +164,11 @@ If the import takes longer than the 34-second write budget of the aggregated API
 
 ## Health rules for CoderAIProvider
 
-Argo CD and Flux also need health rules to wait for a [`CoderAIProvider`](manage-ai-providers.md). Without them, Argo CD has no health check for the kind, and Flux reports a new provider as current before the controller writes its first status. The controller writes the conditions `Ready`, `Reconciling` and `Stalled` together, with one reason and message, and sets `status.observedGeneration` on every status write. Both rules wait until `status.observedGeneration` equals `metadata.generation`. Then they read the conditions:
+Argo CD and Flux also need health rules to wait for a [`CoderAIProvider`](manage-ai-providers.md). Without them, Argo CD has no health check for the kind, and Flux reports a new provider as current before the controller writes its first status. The controller writes the conditions `Ready`, `Reconciling` and `Stalled` together, with one reason and message. It sets `status.observedGeneration` to `metadata.generation` only when it writes the conditions for that generation. Both rules wait until `status.observedGeneration` equals `metadata.generation`. They also ignore a condition whose own `observedGeneration` is older, so a status that an older controller wrote in the middle of an update does not count as healthy. Then they read the conditions:
 
 | Conditions | Argo CD | Flux |
 | --- | --- | --- |
-| no status, or a stale `observedGeneration` | `Progressing` | `InProgress` (`Unknown` before the first status) |
+| no status, or a stale `observedGeneration` on the status or the `Ready` condition | `Progressing` | `InProgress` (`Unknown` before the first status) |
 | `Reconciling=True` | `Progressing` | `InProgress` |
 | `Ready=True` | `Healthy` | `Current` |
 | `Stalled=True` | `Degraded` | `Failed` |
@@ -193,12 +193,19 @@ local st = obj.status
 if st == nil or st.observedGeneration == nil or st.observedGeneration ~= obj.metadata.generation then
   return hs
 end
+-- A condition from an older generation does not describe the current spec.
+local conditions = {}
 for _, c in ipairs(st.conditions or {}) do
+  if c.observedGeneration == obj.metadata.generation then
+    table.insert(conditions, c)
+  end
+end
+for _, c in ipairs(conditions) do
   if c.type == "Ready" and c.reason ~= nil and c.message ~= nil then
     hs.message = c.reason .. ": " .. c.message
   end
 end
-for _, c in ipairs(st.conditions or {}) do
+for _, c in ipairs(conditions) do
   if c.type == "Ready" and c.status == "True" then
     hs.status = "Healthy"
   elseif c.type == "Stalled" and c.status == "True" then
@@ -217,7 +224,7 @@ Add this entry (`config/gitops/flux-healthcheck-coderaiprovider.yaml`) to `spec.
 # docs/how-to/gitops.md copies this file. A test keeps the copy equal.
 - apiVersion: coder.com/v1alpha1
   kind: CoderAIProvider
-  inProgress: "!has(status.observedGeneration) || status.observedGeneration != metadata.generation || !has(status.conditions) || status.conditions.exists(c, c.type == 'Reconciling' && c.status == 'True')"
+  inProgress: "!has(status.observedGeneration) || status.observedGeneration != metadata.generation || !has(status.conditions) || !status.conditions.exists(c, c.type == 'Ready' && has(c.observedGeneration) && c.observedGeneration == metadata.generation) || status.conditions.exists(c, c.type == 'Reconciling' && c.status == 'True')"
   failed: "status.conditions.exists(c, c.type == 'Stalled' && c.status == 'True')"
   current: "status.conditions.exists(c, c.type == 'Ready' && c.status == 'True')"
 ```

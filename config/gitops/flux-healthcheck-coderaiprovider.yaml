@@ -4,6 +4,6 @@
 # docs/how-to/gitops.md copies this file. A test keeps the copy equal.
 - apiVersion: coder.com/v1alpha1
   kind: CoderAIProvider
-  inProgress: "!has(status.observedGeneration) || status.observedGeneration != metadata.generation || !has(status.conditions) || status.conditions.exists(c, c.type == 'Reconciling' && c.status == 'True')"
+  inProgress: "!has(status.observedGeneration) || status.observedGeneration != metadata.generation || !has(status.conditions) || !status.conditions.exists(c, c.type == 'Ready' && has(c.observedGeneration) && c.observedGeneration == metadata.generation) || status.conditions.exists(c, c.type == 'Reconciling' && c.status == 'True')"
   failed: "status.conditions.exists(c, c.type == 'Stalled' && c.status == 'True')"
   current: "status.conditions.exists(c, c.type == 'Ready' && c.status == 'True')"
