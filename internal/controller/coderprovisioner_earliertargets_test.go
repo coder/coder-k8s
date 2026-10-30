@@ -81,7 +81,7 @@ func TestCoderProvisionerKey_EarlierTargetRevokedWhileTargetNotReady(t *testing.
 		name string
 		// notReady makes control plane C fail one of its checks. When it is
 		// nil, C is ready.
-		notReady func(ctx context.Context, t *testing.T, namespace string)
+		notReady func(ctx context.Context, t *testing.T, f provisionerCredentialFixture, provisioner *coderv1alpha1.CoderProvisioner)
 		// deleteFails fails every delete of key A at C.
 		deleteFails bool
 		// unpublishedAtB fails the Secret write at B instead of the delete
@@ -89,6 +89,7 @@ func TestCoderProvisionerKey_EarlierTargetRevokedWhileTargetNotReady(t *testing.
 		unpublishedAtB bool
 	}{
 		{name: "target not entitled", notReady: markNotEntitled},
+		{name: "credentials refused", notReady: refuseCredentials},
 		{name: "target operator token missing", notReady: deleteOperatorToken},
 		{name: "delete fails at the earlier target", notReady: markNotEntitled, deleteFails: true},
 		{name: "delete fails at the earlier target, target ready", deleteFails: true},
@@ -162,7 +163,7 @@ func TestCoderProvisionerKey_EarlierTargetRevokedWhileTargetNotReady(t *testing.
 			calls.urls = nil
 			f.bootstrapClient.deleteKeyByIDRequests = nil
 			if tt.notReady != nil {
-				tt.notReady(ctx, t, f.namespace)
+				tt.notReady(ctx, t, f, provisioner)
 			}
 			moveTo("coder-c")
 			reconcile()
@@ -176,6 +177,11 @@ func TestCoderProvisionerKey_EarlierTargetRevokedWhileTargetNotReady(t *testing.
 					"nothing may delete key B, which the Secret holds or can hold, while C is not ready")
 			}
 			final := f.get(ctx, t, provisioner)
+			if tt.name == "credentials refused" {
+				require.Empty(t, calls.urls, "a failed credential check must send nothing to Coder")
+				require.True(t, pendingKeyRecorded(final, keyA.KeyID), "the record of key A must stay")
+				return
+			}
 			if tt.unpublishedAtB {
 				require.Empty(t, keyDeletes(f.bootstrapClient))
 				require.True(t, pendingKeyRecorded(final, keyB.KeyID), "the record of the unpublished key B must stay")
@@ -247,7 +253,7 @@ func TestCoderProvisionerKey_EarlierTargetReportsBesideUnpublishedKey(t *testing
 	latest := f.get(ctx, t, provisioner)
 	latest.Status.PendingKeys = []coderv1alpha1.CoderProvisionerKeyRecord{recreated, unpublished, unpublishedRecreated, idLess}
 	require.NoError(t, k8sClient.Status().Update(ctx, latest))
-	markNotEntitled(ctx, t, f.namespace)
+	markNotEntitled(ctx, t, f, provisioner)
 	latest = f.get(ctx, t, provisioner)
 	latest.Spec.ControlPlaneRef.Name = "coder-c"
 	require.NoError(t, k8sClient.Update(ctx, latest))
@@ -278,17 +284,26 @@ func TestCoderProvisionerKey_EarlierTargetReportsBesideUnpublishedKey(t *testing
 	require.Empty(t, keyDeletes(f.bootstrapClient), "no recorded key may be deleted: one has another control plane, one is unpublished")
 }
 
-func markNotEntitled(ctx context.Context, t *testing.T, namespace string) {
+func markNotEntitled(ctx context.Context, t *testing.T, f provisionerCredentialFixture, _ *coderv1alpha1.CoderProvisioner) {
 	t.Helper()
 	controlPlane := &coderv1alpha1.CoderControlPlane{}
-	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: "coder-c", Namespace: namespace}, controlPlane))
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: "coder-c", Namespace: f.namespace}, controlPlane))
 	now := metav1.NewTime(time.Now())
 	controlPlane.Status.EntitlementsLastChecked = &now
 	controlPlane.Status.ExternalProvisionerDaemonsEntitlement = string(codersdk.EntitlementNotEntitled)
 	require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
 }
 
-func deleteOperatorToken(ctx context.Context, t *testing.T, namespace string) {
+func deleteOperatorToken(ctx context.Context, t *testing.T, f provisionerCredentialFixture, _ *coderv1alpha1.CoderProvisioner) {
 	t.Helper()
-	require.NoError(t, k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "coder-c-operator-token", Namespace: namespace}}))
+	require.NoError(t, k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "coder-c-operator-token", Namespace: f.namespace}}))
+}
+
+// refuseCredentials adds an extraEnv Secret without the credential opt-in.
+func refuseCredentials(ctx context.Context, t *testing.T, f provisionerCredentialFixture, provisioner *coderv1alpha1.CoderProvisioner) {
+	t.Helper()
+	createSecret(ctx, t, tokenSecret(metav1.ObjectMeta{Name: "extra", Namespace: f.namespace}, "value", testExtraEnvValue))
+	latest := f.get(ctx, t, provisioner)
+	latest.Spec.ExtraEnv = []corev1.EnvVar{secretEnv("EXTRA", "extra", "value")}
+	require.NoError(t, k8sClient.Update(ctx, latest))
 }

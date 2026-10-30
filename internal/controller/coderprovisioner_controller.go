@@ -233,14 +233,25 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// cleanup does not wait for the checks of the current target below. The
 	// key in the Secret and unpublished keys, which the Secret can hold, wait
 	// for a replacement below, because the running Deployment can still use
-	// them. Every status write below records the result.
-	appliedKeyID := provisioner.Status.ProvisionerKeyID
+	// them.
+	appliedKeyID, _ := uuid.Parse(provisioner.Status.ProvisionerKeyID)
 	inUse := func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
-		return record.Unpublished || (record.KeyID != "" && record.KeyID == appliedKeyID)
+		return record.Unpublished || isKeyID(record.KeyID, appliedKeyID)
 	}
 	earlier, err := r.revokeEarlierTargetKeys(ctx, provisioner, target, inUse)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	// The conditions go with the next status write, so that a replacement
+	// below can update them first.
+	if !slices.Equal(provisioner.Status.PendingKeys, statusSnapshot.PendingKeys) {
+		if err := r.Status().Update(ctx, provisioner); err != nil {
+			return ctrl.Result{}, fmt.Errorf("record deleted provisioner keys of earlier targets in status: %w", err)
+		}
+		statusSnapshot = provisioner.Status.DeepCopy()
+		if statusSnapshot == nil {
+			return ctrl.Result{}, fmt.Errorf("assertion failed: status snapshot must not be nil after earlier target key status update")
+		}
 	}
 
 	sessionToken, operatorAccessResult, operatorAccessReason, operatorAccessMessage, err := r.readOperatorSessionToken(ctx, provisioner, controlPlane)
@@ -1066,7 +1077,8 @@ func (r *CoderProvisionerReconciler) revokePendingKeys(
 			continue
 		}
 		cleanup := keyKept
-		if keep(record) {
+		heldBack := keep(record)
+		if heldBack {
 			controlPlane, ok, err := r.readControlPlane(ctx, provisioner.Namespace, record.ControlPlaneRefName)
 			if err != nil {
 				return nil, nil, err
@@ -1091,6 +1103,9 @@ func (r *CoderProvisionerReconciler) revokePendingKeys(
 		}
 		if _, _, ok := parseKeyIDs(record.OrganizationID, record.KeyID); !ok {
 			note := "the operator could not check Coder"
+			if heldBack {
+				note = "the operator checks Coder for it at the next key replacement"
+			}
 			if cleanup == keyUnverified {
 				note = "Coder holds a key with this name that nothing shows this provisioner created"
 			}
@@ -1149,7 +1164,7 @@ type earlierKeyCleanup struct {
 // revokeEarlierTargetKeys deletes the keys of the status.pendingKeys records
 // outside target that are not in use, each with the operator token of its own
 // control plane (see revokeKey). It updates status.pendingKeys and the
-// conditions of the kept records, and writes nothing to the API server. After
+// conditions of the kept records in provisioner only. After
 // a try that leaves a key that Coder did not confirm gone, it does not try
 // again for provisionerPendingKeyRetryInterval, so an unreachable earlier
 // endpoint does not get a request on every reconcile.
