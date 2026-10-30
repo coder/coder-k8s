@@ -285,6 +285,23 @@ func TestCoderMCPServerRecordBackfillOnDelete(t *testing.T) {
 	require.Equal(t, env.fake.deploymentID, record["deploymentID"])
 }
 
+// #422 item 3: a deployment ID read that hangs through the one bounded
+// attempt leaves no record, but the finalizer still goes after that attempt.
+func TestCoderMCPServerRecordBackfillOnDeleteHangs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	got, _ := env.applied(ctx, t, nil)
+	require.NoError(t, k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: env.namespace, Name: "ck8s-cleanup-" + string(got.UID)}}))
+	holdControlPlane(ctx, t, env.namespace)
+	env.fake.failNext(routeBuildInfo, fakeFault{Hang: true})
+
+	gone, _ := env.deleteMCPServer(ctx, t, got)
+	require.Nil(t, gone, "released after one attempt")
+	require.Nil(t, env.mcpServerRecord(ctx, t, got.UID), "no deployment ID, so no record")
+}
+
 // #353: a create answer that was lost is confirmed by the next reconcile,
 // which records the config ID before the sync replaces the nonce.
 func TestCoderMCPServerRecordAfterLostCreateAnswer(t *testing.T) {

@@ -191,6 +191,21 @@ func TestCoderAIProviderRecordBackfillOnDelete(t *testing.T) {
 	require.Equal(t, env.fake.deploymentID, record["deploymentID"])
 }
 
+// #422 item 3: a deployment ID read that hangs through the one bounded
+// attempt leaves no record, but the finalizer still goes after that attempt.
+func TestCoderAIProviderRecordBackfillOnDeleteHangs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newReadyAIProvider(ctx, t)
+	require.NoError(t, k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: env.namespace, Name: "ck8s-cleanup-" + string(provider.UID)}}))
+	holdControlPlane(ctx, t, env.namespace)
+	env.fake.failNext(routeBuildInfo, fakeFault{Hang: true})
+
+	gone, _ := env.deleteAIProvider(ctx, t, provider)
+	require.Nil(t, gone, "released after one attempt")
+	require.Nil(t, cleanupRecord(ctx, t, env.namespace, provider.UID), "no deployment ID, so no record")
+}
+
 // #374 review: the controller reads records live. A cache that does not
 // show the record yet must not make it create the record twice.
 func TestCoderAIProviderRecordReadLive(t *testing.T) {
