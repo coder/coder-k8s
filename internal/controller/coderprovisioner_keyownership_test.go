@@ -540,9 +540,13 @@ func TestCoderProvisionerKey_UpgradedStatusKeepsTargetRecords(t *testing.T) {
 		// failOlderList fails the key list in the organization of the older
 		// record until the first reconcile after the upgrade returns.
 		failOlderList bool
+		// published records the keys as published, so that nothing but the
+		// records themselves calls for a rotation.
+		published bool
 	}{
 		{name: "both keys deleted"},
 		{name: "failed delete keeps the record", failOlderList: true},
+		{name: "published records", published: true},
 	}
 
 	for _, tt := range tests {
@@ -593,7 +597,7 @@ func TestCoderProvisionerKey_UpgradedStatusKeepsTargetRecords(t *testing.T) {
 					KeyName:             "provisioner",
 					OrganizationID:      key.OrganizationID.String(),
 					KeyID:               key.ID.String(),
-					Unpublished:         true,
+					Unpublished:         !tt.published,
 				})
 			}
 			require.NoError(t, k8sClient.Status().Update(ctx, latest))
