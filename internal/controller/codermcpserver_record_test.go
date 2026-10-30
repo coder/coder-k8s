@@ -226,6 +226,27 @@ func TestCoderMCPServerRecordBackfillOnDisable(t *testing.T) {
 	require.Equal(t, id.String(), env.mcpServerRecord(ctx, t, got.UID)["coderID"])
 }
 
+// #353: a config from before records gets one also when its object is
+// already being deleted, so a release without a confirmed delete leaves a
+// record for a sweep.
+func TestCoderMCPServerRecordBackfillOnDelete(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	got, id := env.applied(ctx, t, nil)
+	require.NoError(t, k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: env.namespace, Name: "ck8s-cleanup-" + string(got.UID)}}))
+	holdControlPlane(ctx, t, env.namespace)
+	env.fake.failNext(routeDeleteMCPServer, fakeFault{Status: http.StatusBadGateway})
+
+	gone, _ := env.deleteMCPServer(ctx, t, got)
+	require.Nil(t, gone, "released after one attempt")
+	require.Len(t, env.fake.mcpServers(), 1)
+	record := env.mcpServerRecord(ctx, t, got.UID)
+	require.Equal(t, id.String(), record["coderID"], "the record stays for a sweep")
+	require.Equal(t, env.fake.deploymentID, record["deploymentID"])
+}
+
 // #353: a create answer that was lost is confirmed by the next reconcile,
 // which records the config ID before the sync replaces the nonce.
 func TestCoderMCPServerRecordAfterLostCreateAnswer(t *testing.T) {
@@ -276,7 +297,14 @@ func TestCoderMCPServerRecreateDropsGoneID(t *testing.T) {
 func TestCoderMCPServerDeploymentSwitchKeepsRecord(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	for name, edit := range map[string]bool{"applied": false, "pending spec edit": true} {
+	for name, tc := range map[string]struct {
+		edit    bool // A spec edit is pending.
+		noOrgID bool // The new database has no organization with the pinned ID.
+	}{
+		"applied":                         {},
+		"pending spec edit":               {edit: true},
+		"organization not in the new one": {noOrgID: true},
+	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			env := newMCPServerEnv(ctx, t, true)
@@ -286,8 +314,11 @@ func TestCoderMCPServerDeploymentSwitchKeepsRecord(t *testing.T) {
 			env.fake.mu.Lock()
 			env.fake.deploymentID = uuid.NewString() // A new database behind the same control plane.
 			env.fake.mcp.servers = nil
+			if tc.noOrgID {
+				delete(env.fake.orgs, env.orgID)
+			}
 			env.fake.mu.Unlock()
-			if edit {
+			if tc.edit {
 				got.Spec.Description = "pending"
 				require.NoError(t, k8sClient.Update(ctx, got))
 			}

@@ -185,6 +185,32 @@ func TestCoderMCPServerDeletePendingCreate(t *testing.T) {
 	}
 }
 
+// #353: when a person renames the config of a lost create answer, the
+// controller reports SlugConflict and drops its create marker. A delete then
+// keeps the record, so a sweep can report the config for manual cleanup.
+func TestCoderMCPServerDeleteKeepsRecordAfterSlugConflict(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	env.fake.failNext(routeCreateMCPServer, fakeFault{AfterCommit: true, Reset: true})
+	got, _ := env.reconcile(ctx, t, env.create(ctx, t, nil))
+	requireMCPServerStep(t, got, false, "ConfirmingCreate")
+	configs := env.fake.mcpServers()
+	require.Len(t, configs, 1)
+	displayName := "Renamed by a person"
+	_, err := env.dashboard(t).UpdateMCPServerConfig(ctx, env.orgID, configs[0].view.ID, codersdk.UpdateMCPServerConfigRequest{DisplayName: &displayName})
+	require.NoError(t, err)
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerStep(t, got, true, "SlugConflict")
+	require.Nil(t, got.Status.CreateAttemptTime)
+
+	gone, _ := env.deleteMCPServer(ctx, t, got)
+	require.Nil(t, gone)
+	require.Len(t, env.fake.mcpServers(), 1, "the controller never deletes a config that it cannot prove its own")
+	require.NotNil(t, env.mcpServerRecord(ctx, t, got.UID), "the record stays for a sweep")
+}
+
 // pendingCreate returns an object with only a create marker of the given age.
 // Coder holds no config of it, except one that create adds.
 func (env mcpServerEnv) pendingCreate(
