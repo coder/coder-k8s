@@ -22,7 +22,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
-	"github.com/coder/coder-k8s/internal/coderbootstrap"
 	"github.com/coder/coder-k8s/internal/controller"
 )
 
@@ -56,17 +55,6 @@ func deleteFinalizedControlPlane(ctx context.Context, t *testing.T, namespace, n
 			_ = k8sClient.Update(context.Background(), controlPlane)
 		}
 	})
-}
-
-// setOperatorToken writes token into the operator token Secret of the
-// control plane coder. Without a token, Coder calls wait with
-// OperatorAccessNotReady.
-func setOperatorToken(ctx context.Context, t *testing.T, namespace, token string) {
-	t.Helper()
-	secret := &corev1.Secret{}
-	require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: "coder-operator-token"}, secret))
-	secret.Data = map[string][]byte{coderv1alpha1.DefaultTokenSecretKey: []byte(token)}
-	require.NoError(t, k8sClient.Update(ctx, secret))
 }
 
 func releasedWithoutDelete(t *testing.T, kind string) float64 {
@@ -142,8 +130,8 @@ func TestControlPlaneWaitsForDependents(t *testing.T) {
 
 // #353: while the control plane holds for it, a deleted key takes the normal
 // path: it waits for the settle window, then deletes every key, instead of
-// one bounded pass. An operator token that cannot be read makes it wait and
-// retry (item q), not release.
+// one bounded pass. A control plane without operator access makes it wait
+// and retry (item q), not release.
 func TestCoderAIGatewayKeyDeleteUnderControlPlaneHold(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -157,14 +145,18 @@ func TestCoderAIGatewayKeyDeleteUnderControlPlaneHold(t *testing.T) {
 	require.Equal(t, 5*time.Minute, result.RequeueAfter, "the settle window, not the bounded pass")
 	require.Len(t, env.fake.aiGatewayKeys(), 2)
 
-	setOperatorToken(ctx, t, env.namespace, "")
+	controlPlane := &coderv1alpha1.CoderControlPlane{}
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: env.namespace, Name: "coder"}, controlPlane))
+	controlPlane.Status.OperatorAccessReady = false
+	require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
 	env.clock.Step(5 * time.Minute)
 	got, result = env.reconcile(ctx, t, got)
 	requireAIGatewayKeyStep(t, got, false, "OperatorAccessNotReady")
 	require.Equal(t, time.Minute, result.RequeueAfter)
 	require.Len(t, env.fake.aiGatewayKeys(), 2, "no release without a delete")
 
-	setOperatorToken(ctx, t, env.namespace, "operator-session-token")
+	controlPlane.Status.OperatorAccessReady = true
+	require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
 	gone, _ := env.reconcile(ctx, t, got)
 	require.Nil(t, gone)
 	require.Empty(t, env.fake.aiGatewayKeys())
@@ -246,93 +238,55 @@ func TestControlPlaneForegroundDeletionDoesNotHold(t *testing.T) {
 	require.NotContains(t, controlPlane.Finalizers, workspaceRBACFinalizer, "no hold under foreground deletion")
 }
 
-// #353 (#362 follow-up 1): the hold keeps Coder running only for dependents
-// that can reach it. Nothing repairs the operator access of a control plane
-// that is being deleted, so without it a deleted dependent and the control
-// plane go at once.
-func TestControlPlaneHoldNeedsCoder(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
-	got := rotatedKey(ctx, t, &env)
-	env.createNamedKey(ctx, t, "live", "coder", "live-secret")
-	deleteFinalizedControlPlane(ctx, t, env.namespace, "coder")
-	controlPlane := &coderv1alpha1.CoderControlPlane{}
-	ref := client.ObjectKey{Namespace: env.namespace, Name: "coder"}
-	require.NoError(t, k8sClient.Get(ctx, ref, controlPlane))
-	controlPlane.Status.OperatorAccessReady = false
-	require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
-	require.NoError(t, k8sClient.Delete(ctx, got))
-	gone, _ := env.reconcile(ctx, t, got)
-	require.Nil(t, gone, "the deleted key does not wait for a hold")
-
-	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
-	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ref})
-	require.NoError(t, err)
-	require.True(t, apierrors.IsNotFound(k8sClient.Get(ctx, ref, &coderv1alpha1.CoderControlPlane{})), "the control plane does not wait for the live key")
-}
-
-// deletingProvisioner deletes the control plane while it provisions the
-// operator token, like a deletion that comes during a reconcile.
-type deletingProvisioner struct {
-	*fakeOperatorAccessProvisioner
-	deleteControlPlane func()
-}
-
-func (p deletingProvisioner) EnsureOperatorToken(ctx context.Context, req coderbootstrap.EnsureOperatorTokenRequest) (string, error) {
-	p.deleteControlPlane()
-	return p.fakeOperatorAccessProvisioner.EnsureOperatorToken(ctx, req)
-}
-
-// #353 (#362 follow-up 1): TestControlPlaneHoldNeedsCoder is safe only
-// because a control plane that lost its operator access before its deletion,
-// here in a Postgres failure, does not get it back while it is being
-// deleted. A reconcile that was in flight when the deletion came does not
-// write it back, and a reconcile after the deletion does not provision it.
-func TestControlPlaneOperatorAccessStaysLostWhileDeleting(t *testing.T) {
+// #353: a status without operator access does not end the hold. A provider
+// cleanup that read the operator token before a Postgres failure cleared
+// operator access still calls Coder, so the deleted control plane keeps
+// Coder running for it.
+func TestControlPlaneHoldsForCleanupInFlight(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	t.Parallel()
 	ctx := context.Background()
-	namespace := createTestNamespace(ctx, t, "cp-access")
-	ref := client.ObjectKey{Namespace: namespace, Name: "coder"}
-	const keep = "coder.com/test-keep"
-	require.NoError(t, k8sClient.Create(ctx, &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: ref.Name, Namespace: namespace, Finalizers: []string{keep}},
-		Spec:       coderv1alpha1.CoderControlPlaneSpec{ExtraEnv: []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: "postgres://example/coder"}}},
-	}))
-	t.Cleanup(func() {
-		controlPlane := &coderv1alpha1.CoderControlPlane{}
-		if k8sClient.Get(context.Background(), ref, controlPlane) == nil {
-			controlPlane.Finalizers = nil
-			_ = k8sClient.Update(context.Background(), controlPlane)
-		}
+	env, _, provider := newReadyAIProvider(ctx, t)
+	ref := client.ObjectKey{Namespace: env.namespace, Name: "coder"}
+	controlPlane := &coderv1alpha1.CoderControlPlane{}
+	require.NoError(t, k8sClient.Get(ctx, ref, controlPlane))
+	controlPlane.Spec.ExtraEnv = []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: "postgres://example/coder"}}
+	require.NoError(t, k8sClient.Update(ctx, controlPlane))
+
+	base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+	tokenRead := false
+	env.r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if _, ok := obj.(*corev1.Secret); !ok || key.Name != "coder-operator-token" || tokenRead {
+				return nil
+			}
+			tokenRead = true
+			provisioner := &fakeOperatorAccessProvisioner{err: errors.New("dial tcp: connection refused")}
+			r := &controller.CoderControlPlaneReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ref})
+			require.NoError(t, err)
+			require.NoError(t, k8sClient.Get(ctx, ref, controlPlane))
+			require.False(t, controlPlane.Status.OperatorAccessReady, "a Postgres failure clears operator access")
+
+			require.NoError(t, k8sClient.Delete(ctx, controlPlane))
+			provisioner.err = nil
+			result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ref})
+			require.NoError(t, err)
+			require.NoError(t, k8sClient.Get(ctx, ref, controlPlane), "the control plane holds for the cleanup in flight")
+			require.Equal(t, 10*time.Second, result.RequeueAfter)
+			return nil
+		},
 	})
-	provisioner := &fakeOperatorAccessProvisioner{token: "operator-token"}
-	reconcile := func(p coderbootstrap.OperatorAccessProvisioner) *coderv1alpha1.CoderControlPlane {
-		t.Helper()
-		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: p}
-		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ref})
-		require.NoError(t, err)
-		got := &coderv1alpha1.CoderControlPlane{}
-		require.NoError(t, k8sClient.Get(ctx, ref, got))
-		return got
-	}
-	require.True(t, reconcile(provisioner).Status.OperatorAccessReady)
-	provisioner.err = errors.New("dial tcp: connection refused")
-	require.False(t, reconcile(provisioner).Status.OperatorAccessReady, "a Postgres failure clears operator access")
 
-	provisioner.err = nil
-	got := reconcile(deletingProvisioner{provisioner, func() {
-		require.NoError(t, k8sClient.Delete(ctx, &coderv1alpha1.CoderControlPlane{ObjectMeta: metav1.ObjectMeta{Name: ref.Name, Namespace: namespace}}))
-	}})
-	require.False(t, got.DeletionTimestamp.IsZero())
-	require.False(t, got.Status.OperatorAccessReady, "the reconcile in flight does not write operator access back")
-
-	calls := provisioner.calls
-	got = reconcile(provisioner)
-	require.Equal(t, []string{keep}, got.Finalizers, "the control plane finalized")
-	require.False(t, got.Status.OperatorAccessReady)
-	require.Equal(t, calls, provisioner.calls, "no operator token is provisioned for a control plane that is being deleted")
+	got, _ := env.deleteAIProvider(ctx, t, provider)
+	require.True(t, tokenRead)
+	require.Nil(t, got)
+	_, found := env.fake.aiProvider("openai")
+	require.False(t, found, "the cleanup deletes the provider in Coder")
 }
 
 // orphanCoderDeployment deletes the Coder Deployment as `kubectl delete
@@ -434,7 +388,8 @@ func TestControlPlaneHoldEnd(t *testing.T) {
 	require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: env.namespace, Name: "coder"}, controlPlane))
 	end := controlPlane.DeletionTimestamp.Add(10 * time.Minute)
 
-	setOperatorToken(ctx, t, env.namespace, "")
+	controlPlane.Status.OperatorAccessReady = false
+	require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
 	require.NoError(t, k8sClient.Delete(ctx, got))
 	env.clock.SetTime(end.Add(-30 * time.Second))
 	got, result := env.reconcile(ctx, t, got)
@@ -576,12 +531,6 @@ func TestControlPlaneHoldRevokesWorkspaceRBAC(t *testing.T) {
 			_ = k8sClient.Update(context.Background(), key)
 		}
 	})
-	// The control plane holds only with operator access, which this
-	// reconciler has no provisioner for.
-	require.NoError(t, k8sClient.Get(ctx, ref, cp))
-	cp.Status.OperatorAccessReady = true
-	cp.Status.OperatorTokenSecretRef = &coderv1alpha1.SecretKeySelector{Name: "coder-operator-token"}
-	require.NoError(t, k8sClient.Status().Update(ctx, cp))
 	require.NoError(t, k8sClient.Delete(ctx, key))
 	require.NoError(t, k8sClient.Delete(ctx, cp))
 	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ref})

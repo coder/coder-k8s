@@ -105,14 +105,10 @@ func controlPlaneHoldRequeue(controlPlane *coderv1alpha1.CoderControlPlane, now 
 
 // controlPlaneHolds reports whether controlPlane, which is being deleted,
 // waits for its dependents at now: it still has its finalizer, the hold time
-// has not passed, it is not deleted in the foreground, it has operator
-// access, and its namespace is not being deleted. A namespace deletion
-// removes Coder's pods at once, and a foreground deletion removes the Coder
-// Deployment (blockOwnerDeletion) before the control plane, so no hold can
-// keep Coder reachable then. Nothing repairs the operator access of a control
-// plane that is being deleted: its reconcile only finalizes, and a status
-// write still in flight was computed for an older generation and is dropped.
-// So without operator access no dependent can call Coder (#353).
+// has not passed, it is not deleted in the foreground, and its namespace is
+// not being deleted. A namespace deletion removes Coder's pods at once, and a
+// foreground deletion removes the Coder Deployment (blockOwnerDeletion)
+// before the control plane, so no hold can keep Coder reachable then.
 func controlPlaneHolds(ctx context.Context, reader client.Reader, controlPlane *coderv1alpha1.CoderControlPlane, now time.Time) (bool, error) {
 	if reader == nil || controlPlane == nil {
 		return false, errors.New("assertion failed: the control plane hold check needs a reader and a control plane")
@@ -121,7 +117,7 @@ func controlPlaneHolds(ctx context.Context, reader client.Reader, controlPlane *
 		return false, errors.New("assertion failed: the control plane hold applies only while the control plane is being deleted")
 	}
 	if !controllerutil.ContainsFinalizer(controlPlane, workspaceRBACFinalizer) || controllerutil.ContainsFinalizer(controlPlane, metav1.FinalizerDeleteDependents) ||
-		!now.Before(controlPlaneHoldEnd(controlPlane)) || !controlPlane.Status.OperatorAccessReady || controlPlane.Status.OperatorTokenSecretRef == nil {
+		!now.Before(controlPlaneHoldEnd(controlPlane)) {
 		return false, nil
 	}
 	namespace := &corev1.Namespace{}
