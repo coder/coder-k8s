@@ -112,8 +112,9 @@ func closedAddress(t *testing.T) string {
 type writeCase struct {
 	name    string
 	isWrite func(*http.Request) bool
-	// creates is true when Coder's answer to the write is converted to the returned object.
-	creates bool
+	// checksAnswer is true when the storage needs the object in Coder's answer: the created object,
+	// or the build of a workspace update or delete.
+	checksAnswer bool
 	// readsBody is false when the SDK ignores the body of a successful answer.
 	readsBody bool
 	run       func(t *testing.T, provider coder.ClientProvider) error
@@ -134,8 +135,8 @@ func writeCases() []writeCase {
 			isWrite: func(r *http.Request) bool {
 				return r.Method == http.MethodPost && r.URL.Path == "/api/v2/users/alice/workspaces"
 			},
-			creates:   true,
-			readsBody: true,
+			checksAnswer: true,
+			readsBody:    true,
 			run: func(_ *testing.T, provider coder.ClientProvider) error {
 				_, err := NewWorkspaceStorage(provider).Create(ctx(), &aggregationv1alpha1.CoderWorkspace{
 					ObjectMeta: metav1.ObjectMeta{Name: "acme.alice.proxied"},
@@ -145,9 +146,10 @@ func writeCases() []writeCase {
 			},
 		},
 		{
-			name:      "workspace update",
-			isWrite:   isBuild,
-			readsBody: true,
+			name:         "workspace update",
+			isWrite:      isBuild,
+			checksAnswer: true,
+			readsBody:    true,
 			run: func(t *testing.T, provider coder.ClientProvider) error {
 				workspaces := NewWorkspaceStorage(provider)
 				current, err := workspaces.Get(ctx(), "acme.alice.dev-workspace", nil)
@@ -161,19 +163,20 @@ func writeCases() []writeCase {
 			},
 		},
 		{
-			name:      "workspace delete",
-			isWrite:   isBuild,
-			readsBody: true,
+			name:         "workspace delete",
+			isWrite:      isBuild,
+			checksAnswer: true,
+			readsBody:    true,
 			run: func(_ *testing.T, provider coder.ClientProvider) error {
 				_, _, err := NewWorkspaceStorage(provider).Delete(ctx(), "acme.alice.dev-workspace", nil, nil)
 				return err
 			},
 		},
 		{
-			name:      "template create",
-			isWrite:   isPost("/templates"),
-			creates:   true,
-			readsBody: true,
+			name:         "template create",
+			isWrite:      isPost("/templates"),
+			checksAnswer: true,
+			readsBody:    true,
 			run: func(_ *testing.T, provider coder.ClientProvider) error {
 				_, err := NewTemplateStorage(provider).Create(ctx(), &aggregationv1alpha1.CoderTemplate{
 					ObjectMeta: metav1.ObjectMeta{Name: "acme.proxied"},
@@ -204,6 +207,23 @@ func writeCases() []writeCase {
 			},
 		},
 		{
+			name: "template activation of new files",
+			isWrite: func(r *http.Request) bool {
+				return r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/versions")
+			},
+			run: func(t *testing.T, provider coder.ClientProvider) error {
+				templates := NewTemplateStorage(provider)
+				current, err := templates.Get(ctx(), "acme.starter-template", nil)
+				if err != nil {
+					t.Fatalf("get template: %v", err)
+				}
+				desired := current.(*aggregationv1alpha1.CoderTemplate).DeepCopy()
+				desired.Spec.Files = map[string]string{"main.tf": `resource "null_resource" "changed" {}`}
+				_, _, err = templates.Update(ctx(), desired.Name, rest.DefaultUpdatedObjectInfo(desired), nil, nil, false, nil)
+				return err
+			},
+		},
+		{
 			name:    "template delete",
 			isWrite: func(r *http.Request) bool { return r.Method == http.MethodDelete },
 			run: func(_ *testing.T, provider coder.ClientProvider) error {
@@ -224,20 +244,20 @@ func TestWriteOutcomes(t *testing.T) {
 		name   string
 		answer brokenAnswer
 		// applies reports whether the outcome breaks the result of the write. A body that the
-		// SDK does not read, or an answer that only creates convert, leaves it intact.
+		// SDK does not read, or an object that the storage does not use, leaves it intact.
 		applies func(writeCase) bool
 	}
 	always := func(writeCase) bool { return true }
 	readsBody := func(w writeCase) bool { return w.readsBody }
-	creates := func(w writeCase) bool { return w.creates }
+	checksAnswer := func(w writeCase) bool { return w.checksAnswer }
 	outcomes := []outcome{
 		{"proxy 502", gatewayPage(http.StatusBadGateway), always},
 		{"proxy 503", gatewayPage(http.StatusServiceUnavailable), always},
 		{"connection closed without an answer", closedWithoutAnswer, always},
 		{"body breaks off", truncatedAnswer, readsBody},
 		{"200 with malformed JSON", jsonAnswer(http.StatusOK, `{"id":`), readsBody},
-		{"201 with an empty object", jsonAnswer(http.StatusCreated, `{}`), creates},
-		{"201 with null", jsonAnswer(http.StatusCreated, `null`), creates},
+		{"201 with an empty object", jsonAnswer(http.StatusCreated, `{}`), checksAnswer},
+		{"201 with null", jsonAnswer(http.StatusCreated, `null`), checksAnswer},
 	}
 
 	for _, write := range writeCases() {
