@@ -83,16 +83,23 @@ func (r *CoderAIProviderReconciler) deleteStep(ctx context.Context, provider *co
 		// While the control plane holds for this object, Coder keeps running:
 		// use the normal path, which retries, instead of the bounded pass
 		// (#353, item q).
-		now := time.Now()
-		holds, err := controlPlaneHolds(ctx, r.Client, controlPlane, now)
+		holds, err := controlPlaneHolds(ctx, r.Client, controlPlane, time.Now())
 		if err != nil {
 			return false, nil, err
 		}
 		deleting = !holds
 		if holds {
+			// A pass under the hold ends at the hold end, however slowly
+			// Coder answers, so the bounded pass after it still fits in the
+			// control plane's grace period (#384 follow-up 4).
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithDeadline(ctx, controlPlaneHoldEnd(controlPlane))
+			defer cancel()
 			defer func() {
 				if step != nil {
-					step.requeue = controlPlaneHoldRequeue(controlPlane, now, step.requeue)
+					// From the end of the pass: a pass that ran until the
+					// deadline retries right after the hold end.
+					step.requeue = controlPlaneHoldRequeue(controlPlane, time.Now(), step.requeue)
 				}
 			}()
 		}

@@ -2,11 +2,13 @@ package controller_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -25,11 +27,23 @@ import (
 
 const workspaceRBACFinalizer = "coder.com/workspace-rbac-cleanup"
 
-// deleteFinalizedControlPlane gives the control plane its own finalizer, as
-// its reconciler does, and deletes it, so it stays Terminating.
+// deleteFinalizedControlPlane gives the control plane its own finalizer and
+// its Coder Deployment, as its reconciler does, and deletes it, so it stays
+// Terminating.
 func deleteFinalizedControlPlane(ctx context.Context, t *testing.T, namespace, name string) {
 	t.Helper()
 	key := client.ObjectKey{Namespace: namespace, Name: name}
+	labels := map[string]string{"app": name}
+	require.NoError(t, k8sClient.Create(ctx, &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: labels},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "coder", Image: "coder:test"}}},
+			},
+		},
+	}))
 	controlPlane := &coderv1alpha1.CoderControlPlane{}
 	require.NoError(t, k8sClient.Get(ctx, key, controlPlane))
 	controlPlane.Finalizers = append(controlPlane.Finalizers, workspaceRBACFinalizer)
@@ -222,6 +236,143 @@ func TestControlPlaneForegroundDeletionDoesNotHold(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, k8sClient.Get(ctx, key, controlPlane))
 	require.NotContains(t, controlPlane.Finalizers, workspaceRBACFinalizer, "no hold under foreground deletion")
+}
+
+// #353: a status without operator access does not end the hold. A provider
+// cleanup that read the operator token before a Postgres failure cleared
+// operator access still calls Coder, so the deleted control plane keeps
+// Coder running for it.
+func TestControlPlaneHoldsForCleanupInFlight(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newReadyAIProvider(ctx, t)
+	ref := client.ObjectKey{Namespace: env.namespace, Name: "coder"}
+	controlPlane := &coderv1alpha1.CoderControlPlane{}
+	require.NoError(t, k8sClient.Get(ctx, ref, controlPlane))
+	controlPlane.Spec.ExtraEnv = []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: "postgres://example/coder"}}
+	require.NoError(t, k8sClient.Update(ctx, controlPlane))
+
+	base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+	tokenRead := false
+	env.r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if _, ok := obj.(*corev1.Secret); !ok || key.Name != "coder-operator-token" || tokenRead {
+				return nil
+			}
+			tokenRead = true
+			provisioner := &fakeOperatorAccessProvisioner{err: errors.New("dial tcp: connection refused")}
+			r := &controller.CoderControlPlaneReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ref})
+			require.NoError(t, err)
+			require.NoError(t, k8sClient.Get(ctx, ref, controlPlane))
+			require.False(t, controlPlane.Status.OperatorAccessReady, "a Postgres failure clears operator access")
+
+			require.NoError(t, k8sClient.Delete(ctx, controlPlane))
+			provisioner.err = nil
+			result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ref})
+			require.NoError(t, err)
+			require.NoError(t, k8sClient.Get(ctx, ref, controlPlane), "the control plane holds for the cleanup in flight")
+			require.Equal(t, 10*time.Second, result.RequeueAfter)
+			return nil
+		},
+	})
+
+	got, _ := env.deleteAIProvider(ctx, t, provider)
+	require.True(t, tokenRead)
+	require.Nil(t, got)
+	_, found := env.fake.aiProvider("openai")
+	require.False(t, found, "the cleanup deletes the provider in Coder")
+}
+
+// orphanCoderDeployment deletes the Coder Deployment as `kubectl delete
+// --cascade=orphan` does, which leaves Coder's pods running. Envtest has no
+// garbage collector, so the test removes the orphan finalizer itself.
+func orphanCoderDeployment(ctx context.Context, t *testing.T, namespace string) {
+	t.Helper()
+	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "coder"}}
+	require.NoError(t, k8sClient.Delete(ctx, deployment, client.PropagationPolicy(metav1.DeletePropagationOrphan)))
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(deployment), deployment); err == nil {
+		deployment.Finalizers = nil
+		require.NoError(t, k8sClient.Update(ctx, deployment))
+	}
+	require.True(t, apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(deployment), &appsv1.Deployment{})))
+}
+
+// #353: a missing Coder Deployment does not end the hold. Coder's pods can
+// still run (an orphan delete), so the control plane keeps its finalizer,
+// also when it reconciles before its deleted dependents, and they delete
+// their resources in Coder with retries.
+func TestControlPlaneHoldsWithoutCoderDeployment(t *testing.T) {
+	t.Parallel()
+	controlPlaneHolds := func(ctx context.Context, t *testing.T, namespace string) {
+		t.Helper()
+		r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+		ref := client.ObjectKey{Namespace: namespace, Name: "coder"}
+		result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ref})
+		require.NoError(t, err)
+		require.NoError(t, k8sClient.Get(ctx, ref, &coderv1alpha1.CoderControlPlane{}), "the control plane holds")
+		require.Equal(t, 10*time.Second, result.RequeueAfter)
+	}
+	t.Run("keys", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+		key := rotatedKey(ctx, t, &env)
+		deleteFinalizedControlPlane(ctx, t, env.namespace, "coder")
+		orphanCoderDeployment(ctx, t, env.namespace)
+		require.NoError(t, k8sClient.Delete(ctx, key))
+		controlPlaneHolds(ctx, t, env.namespace)
+		env.clock.Step(5 * time.Minute)
+		gone, _ := env.reconcile(ctx, t, key)
+		require.Nil(t, gone)
+		require.Empty(t, env.fake.aiGatewayKeys())
+	})
+	t.Run("provider", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		env, _, provider := newReadyAIProvider(ctx, t)
+		deleteFinalizedControlPlane(ctx, t, env.namespace, "coder")
+		orphanCoderDeployment(ctx, t, env.namespace)
+		require.NoError(t, k8sClient.Delete(ctx, provider))
+		controlPlaneHolds(ctx, t, env.namespace)
+		gone, _ := env.reconcileDeleting(ctx, t, provider)
+		require.Nil(t, gone)
+		_, found := env.fake.aiProvider("openai")
+		require.False(t, found)
+	})
+	t.Run("MCP server", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		env := newMCPServerEnv(ctx, t, true)
+		env.keySecret(ctx, t, testMCPKey)
+		server, _ := env.applied(ctx, t, nil)
+		deleteFinalizedControlPlane(ctx, t, env.namespace, "coder")
+		orphanCoderDeployment(ctx, t, env.namespace)
+		require.NoError(t, k8sClient.Delete(ctx, server))
+		controlPlaneHolds(ctx, t, env.namespace)
+		gone, _ := env.reconcileDeleting(ctx, t, server)
+		require.Nil(t, gone)
+		require.Empty(t, env.fake.mcpServers())
+	})
+	t.Run("provider retry", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		env, _, provider := newReadyAIProvider(ctx, t)
+		deleteFinalizedControlPlane(ctx, t, env.namespace, "coder")
+		orphanCoderDeployment(ctx, t, env.namespace)
+		env.fake.failNext(routeDeleteAIProvider, fakeFault{Status: http.StatusBadGateway})
+		got, _ := env.deleteAIProvider(ctx, t, provider)
+		require.NotNil(t, got, "a failed delete keeps the finalizer while the control plane holds")
+		got, _ = env.reconcileDeleting(ctx, t, got)
+		require.Nil(t, got)
+		_, found := env.fake.aiProvider("openai")
+		require.False(t, found)
+	})
 }
 
 // #353: when the hold ends, the control plane stays for a short grace period

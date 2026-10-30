@@ -93,7 +93,10 @@ func (r *CoderAIProviderReconciler) ensureAIProviderRecord(
 	if err != nil {
 		return nil, err
 	}
-	if record != nil && record.CoderID == provider.Status.ProviderID {
+	// A record without an ID names the deployment of a pending create, so
+	// the write checks the deployment ID before the create is confirmed in
+	// another deployment (#353).
+	if record != nil && record.CoderID != "" && record.CoderID == provider.Status.ProviderID {
 		return nil, nil
 	}
 	return r.writeAIProviderRecord(ctx, sdk, provider, nil)

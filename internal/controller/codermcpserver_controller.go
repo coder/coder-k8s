@@ -175,13 +175,18 @@ func (r *CoderMCPServerReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		if !controllerutil.ContainsFinalizer(server, coderv1alpha1.CoderMCPServerCleanupFinalizer) {
 			return ctrl.Result{}, nil
 		}
+		forgetReleasedWithoutDelete(server.UID)
 		release, step, err := r.deleteStep(ctx, server)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		if release {
 			r.sentCredentials.Delete(req.NamespacedName)
-			return ctrl.Result{}, r.patchFinalizer(ctx, server, false)
+			if err := r.patchFinalizer(ctx, server, false); err != nil {
+				return ctrl.Result{}, err
+			}
+			releasedWithoutDeleteDone(server.UID)
+			return ctrl.Result{}, nil
 		}
 		applyMCPServerStep(server, step)
 		return ctrl.Result{RequeueAfter: step.requeue}, r.writeStatus(ctx, server, before)

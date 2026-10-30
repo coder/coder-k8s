@@ -11,8 +11,10 @@ import (
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/controller"
@@ -304,6 +306,62 @@ func TestCoderMCPServerDeleteWhileControlPlaneDeletes(t *testing.T) {
 			require.Equal(t, tc.fault == nil, len(env.fake.mcpServers()) == 0)
 		})
 	}
+}
+
+// #384 follow-up 2 (#353): a release without a delete in Coder counts once in
+// coder_k8s_cleanup_released_without_delete_total, after the finalizer patch
+// succeeds. A release that a failed patch left recorded does not count when
+// the retry deletes the config. Not parallel: other tests release MCP servers
+// too.
+func TestCoderMCPServerReleasedWithoutDeleteMetric(t *testing.T) {
+	ctx := context.Background()
+	failFirstPatch := func(t *testing.T, env *mcpServerEnv) {
+		t.Helper()
+		base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+		require.NoError(t, err)
+		failed := false
+		env.r = &controller.CoderMCPServerReconciler{Scheme: scheme, Client: interceptor.NewClient(base, interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if _, ok := obj.(*coderv1alpha1.CoderMCPServer); ok && !failed {
+					failed = true
+					return apierrors.NewConflict(schema.GroupResource{Resource: "codermcpservers"}, obj.GetName(), nil)
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+		})}
+	}
+	t.Run("control plane gone", func(t *testing.T) {
+		env := newMCPServerEnv(ctx, t, true)
+		env.keySecret(ctx, t, testMCPKey)
+		got, _ := env.applied(ctx, t, nil)
+		before := releasedWithoutDelete(t, "CoderMCPServer")
+		require.NoError(t, k8sClient.Delete(ctx, env.controlPlane))
+		require.NoError(t, k8sClient.Delete(ctx, got))
+		failFirstPatch(t, &env)
+		_, err := env.r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(got)})
+		require.Error(t, err, "the finalizer patch fails once")
+		require.Equal(t, before, releasedWithoutDelete(t, "CoderMCPServer"), "no count before the finalizer is gone")
+		gone, _ := env.reconcileDeleting(ctx, t, got)
+		require.Nil(t, gone)
+		require.Len(t, env.fake.mcpServers(), 1, "the config stays in Coder")
+		require.Equal(t, before+1, releasedWithoutDelete(t, "CoderMCPServer"))
+	})
+	t.Run("recovered", func(t *testing.T) {
+		env := newMCPServerEnv(ctx, t, true)
+		env.keySecret(ctx, t, testMCPKey)
+		got, _ := env.applied(ctx, t, nil)
+		before := releasedWithoutDelete(t, "CoderMCPServer")
+		holdControlPlane(ctx, t, env.namespace)
+		require.NoError(t, k8sClient.Delete(ctx, got))
+		env.fake.failNext(routeDeleteMCPServer, fakeFault{Status: http.StatusBadGateway})
+		failFirstPatch(t, &env)
+		_, err := env.r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(got)})
+		require.Error(t, err, "the release after the failed bounded attempt fails its finalizer patch")
+		gone, _ := env.reconcileDeleting(ctx, t, got)
+		require.Nil(t, gone)
+		require.Empty(t, env.fake.mcpServers(), "the retry deleted the config")
+		require.Equal(t, before, releasedWithoutDelete(t, "CoderMCPServer"), "a release that deleted in Coder does not count")
+	})
 }
 
 // #382 (#353): a control plane that is being deleted waits for a
