@@ -233,7 +233,16 @@ A write (create, update, patch, or delete) of a workspace or a template can also
 - An answer without the object that the server needs: a create answer without the ID or name of the object, a build answer of a workspace update or delete without the ID of the build, or a template update answer without the template. An example is a `200` or `201` with `{}` or `null`.
 - A connection that breaks after the server sent the request, before or while the server reads the answer.
 
-A write that did not reach Coder keeps the `500` that says that the server cannot reach Coder. Examples are a refused connection, a failed DNS lookup, and a rejected TLS certificate. Nothing changed in Coder, so you can retry it.
+A write that the server knows did not reach Coder keeps the `500` that says that the server cannot reach Coder. Nothing changed in Coder, so you can retry it. The server knows this for these errors:
+
+- A refused connection to Coder or to the proxy, or a failed DNS lookup.
+- A proxy that refuses the `CONNECT` tunnel to Coder, for example with `407`.
+- A rejected TLS certificate.
+- A TLS handshake that the server refuses because it does not support the TLS version or the cipher suites of the client.
+- An `https` Coder URL that a plain HTTP server answers.
+- A request to an origin other than the Coder URL, which the server refuses before it sends it.
+
+The server cannot tell other transport errors without a status apart from a connection that broke after the send. It treats them as uncertain and returns the `504`.
 
 A `get` or a `list` that gets a Coder object without its ID or the fields of its name, for example `{}`, returns `500` with a message that contains `the Coder API answered`.
 

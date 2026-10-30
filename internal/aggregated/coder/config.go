@@ -2,6 +2,8 @@
 package coder
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -87,8 +89,21 @@ func newCoderTransport() (*http.Transport, error) {
 	transport.MaxConnsPerHost = maxConnsPerCoderHost
 	transport.MaxIdleConnsPerHost = maxConnsPerCoderHost
 	transport.MaxIdleConns = maxConnsPerCoderHost
+	transport.OnProxyConnectResponse = refuseFailedProxyConnect
 
 	return transport, nil
+}
+
+// errProxyConnectRefused marks a proxy answer other than 200 to the CONNECT for Coder. Go reports
+// that answer with an untyped error, and without this mark notSent cannot tell it apart from a
+// connection that broke after the request.
+var errProxyConnectRefused = errors.New("the proxy refused the CONNECT tunnel")
+
+func refuseFailedProxyConnect(_ context.Context, _ *url.URL, _ *http.Request, resp *http.Response) error {
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%w: %s", errProxyConnectRefused, resp.Status)
+	}
+	return nil
 }
 
 // Config describes how to construct a Coder SDK client.

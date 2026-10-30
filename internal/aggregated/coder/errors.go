@@ -169,18 +169,34 @@ func UncertainWriteError(write Write, resource schema.GroupResource, name, reaso
 	), 0)
 }
 
+// handshakeRefusals are the TLS alerts (RFC 8446, section 6.2) with which a server refuses the
+// handshake before it reads a request: handshake_failure (40) and protocol_version (70).
+var handshakeRefusals = []tls.AlertError{40, 70}
+
 // notSent reports whether err proves that the request did not reach Coder: the connection to
-// Coder (or to the proxy in front of it) failed, the TLS handshake failed, or the client refused
-// a request to another origin. A refused redirect is not in this list: the server that answered
-// with the redirect got the write.
+// Coder (or to the proxy in front of it) failed, the proxy refused the CONNECT tunnel, the TLS
+// handshake failed, or the client refused a request to another origin. A refused redirect is not
+// in this list: the server that answered with the redirect got the write.
 func notSent(err error) bool {
 	var opErr *net.OpError
-	if errors.As(err, &opErr) && (opErr.Op == "dial" || opErr.Op == "proxyconnect") {
-		return true
+	if errors.As(err, &opErr) {
+		switch opErr.Op {
+		case "dial", "proxyconnect":
+			return true
+		case "remote error":
+			// crypto/tls keeps a received alert in an unexported type with the text of AlertError.
+			for _, alert := range handshakeRefusals {
+				if opErr.Err != nil && opErr.Err.Error() == alert.Error() {
+					return true
+				}
+			}
+		}
 	}
 	var certErr *tls.CertificateVerificationError
 	var recordErr tls.RecordHeaderError
-	return errors.As(err, &certErr) || errors.As(err, &recordErr) || errors.Is(err, sameorigin.ErrCrossOriginRequest)
+	return errors.As(err, &certErr) || errors.As(err, &recordErr) ||
+		errors.Is(err, http.ErrSchemeMismatch) || errors.Is(err, errProxyConnectRefused) ||
+		errors.Is(err, sameorigin.ErrCrossOriginRequest)
 }
 
 // coderErrorMessage returns Coder's message for a 4xx answer. Without one, it returns a fixed

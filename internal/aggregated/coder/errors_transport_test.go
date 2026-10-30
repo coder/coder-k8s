@@ -39,7 +39,7 @@ func TestMapCoderWriteErrorRealTransport(t *testing.T) {
 	tls13Server.StartTLS()
 	t.Cleanup(tls13Server.Close)
 	cipherServer := httptest.NewUnstartedServer(created)
-	cipherServer.TLS = &tls.Config{
+	cipherServer.TLS = &tls.Config{ //nolint:gosec // G402: only TLS 1.2 lets a server refuse the cipher suites.
 		MaxVersion:   tls.VersionTLS12,
 		CipherSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256},
 	}
@@ -81,7 +81,7 @@ func TestMapCoderWriteErrorRealTransport(t *testing.T) {
 	}
 	tls12With := func(suites ...uint16) func(*http.Transport) {
 		return func(tr *http.Transport) {
-			tr.TLSClientConfig = &tls.Config{MaxVersion: tls.VersionTLS12, CipherSuites: suites}
+			tr.TLSClientConfig = &tls.Config{MaxVersion: tls.VersionTLS12, CipherSuites: suites} //nolint:gosec // G402: the test needs a TLS 1.2 client that the servers refuse.
 		}
 	}
 	proxy := func(raw string) func(*http.Transport) {
