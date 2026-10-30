@@ -603,6 +603,50 @@ func TestReconcile_OperatorAccess_RecordsTokenBeforeCreate(t *testing.T) {
 	require.Nil(t, getControlPlane(t, cp).Status.OperatorTokenSecretRef)
 }
 
+// TestReconcile_OperatorAccess_RecordsTokenBeforeCreate_StaleCache checks that
+// the operator stores the record before a create also when its cache still
+// shows a record that a delete already removed from the API server.
+func TestReconcile_OperatorAccess_RecordsTokenBeforeCreate_StaleCache(t *testing.T) {
+	ctx := context.Background()
+	cp, provisioner, _ := publishThenReplaceOperatorTokenSecret(ctx, t, "operator-token-record-stale-cache")
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	_, err := r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	requireOneRevoke(t, provisioner, losesOwnerPostgresURL)
+	require.Nil(t, getControlPlane(t, cp).Status.OperatorTokenSecretRef)
+	require.NoError(t, k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: cp.Name + "-operator-token", Namespace: cp.Namespace}}))
+
+	stale := cp.Status.DeepCopy()
+	base, err := ctrlclient.NewWithWatch(cfg, ctrlclient.Options{Scheme: scheme})
+	require.NoError(t, err)
+	staleCache := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, c ctrlclient.WithWatch, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if read, ok := obj.(*coderv1alpha1.CoderControlPlane); ok {
+				stale.DeepCopyInto(&read.Status)
+			}
+			return nil
+		},
+		SubResourceUpdate: func(ctx context.Context, c ctrlclient.Client, sub string, obj ctrlclient.Object, opts ...ctrlclient.SubResourceUpdateOption) error {
+			if provisioner.calls > 1 {
+				return errors.New("status update unavailable")
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	})
+	cached := &controller.CoderControlPlaneReconciler{Client: staleCache, APIReader: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	if _, err = cached.Reconcile(ctx, request); err != nil {
+		require.ErrorContains(t, err, "status update unavailable", "only a status write after the create may fail")
+	}
+	require.Equal(t, 2, provisioner.calls)
+	recorded := getControlPlane(t, cp)
+	require.Equal(t, cp.Status.OperatorTokenSecretRef, recorded.Status.OperatorTokenSecretRef, "the API server must hold the record of the new token")
+	require.Equal(t, cp.Status.OperatorTokenDatabaseHash, recorded.Status.OperatorTokenDatabaseHash)
+}
+
 // TestReconcile_OperatorAccess_ErrorKeepsTokenRecord checks that a failed
 // token check turns operator access off but keeps the record of the published
 // token. So when someone replaces the Secret afterwards, the operator still

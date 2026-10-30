@@ -41,7 +41,13 @@ func TestOperatorTokenDatabaseHash(t *testing.T) {
 		seen[hash] = dsn
 	}
 
-	for _, unusable := range []string{"", "  ", "host=db.example dbname", "host='db.example", "host=db.example\\", "mysql://db.example/coder"} {
+	// lib/pq takes a missing host from PGHOST but an empty one as is, and a
+	// URL cannot hold an empty value, so an empty value gets no hash. A host
+	// with ":" and no port would read as host and port in the URL.
+	for _, unusable := range []string{
+		"", "  ", "host=db.example dbname", "host='db.example", "host=db.example\\", "mysql://db.example/coder",
+		"host='' user=coder dbname=coder", "host=db.example user= dbname=coder", "host=db.example:5433 dbname=coder",
+	} {
 		require.Empty(t, operatorTokenDatabaseHash(unusable), "%q", unusable)
 	}
 }
