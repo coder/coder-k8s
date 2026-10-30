@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -34,6 +35,20 @@ func jsonAnswer(status int, body string) brokenAnswer {
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(body))
 	}
+}
+
+// answerWithoutID sends Coder's answer without its "id" field.
+func answerWithoutID(t *testing.T, w http.ResponseWriter, coderAnswer *httptest.ResponseRecorder) {
+	var object map[string]any
+	if err := json.Unmarshal(coderAnswer.Body.Bytes(), &object); err != nil {
+		t.Fatalf("decode Coder answer: %v", err)
+	}
+	delete(object, "id")
+	body, err := json.Marshal(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonAnswer(coderAnswer.Code, string(body))(t, w, coderAnswer)
 }
 
 func hijack(t *testing.T, w http.ResponseWriter) net.Conn {
@@ -112,8 +127,8 @@ func closedAddress(t *testing.T) string {
 type writeCase struct {
 	name    string
 	isWrite func(*http.Request) bool
-	// checksAnswer is true when the storage needs the object in Coder's answer: the created object,
-	// or the build of a workspace update or delete.
+	// checksAnswer is true when the storage checks the object in Coder's answer: the created
+	// object, the build of a workspace update or delete, or the template of a metadata update.
 	checksAnswer bool
 	// readsBody is false when the SDK ignores the body of a successful answer.
 	readsBody bool
@@ -193,7 +208,8 @@ func writeCases() []writeCase {
 			isWrite: func(r *http.Request) bool {
 				return r.Method == http.MethodPatch && !strings.HasSuffix(r.URL.Path, "/versions")
 			},
-			readsBody: true,
+			checksAnswer: true,
+			readsBody:    true,
 			run: func(t *testing.T, provider coder.ClientProvider) error {
 				templates := NewTemplateStorage(provider)
 				current, err := templates.Get(ctx(), "acme.starter-template", nil)
@@ -258,6 +274,7 @@ func TestWriteOutcomes(t *testing.T) {
 		{"200 with malformed JSON", jsonAnswer(http.StatusOK, `{"id":`), readsBody},
 		{"201 with an empty object", jsonAnswer(http.StatusCreated, `{}`), checksAnswer},
 		{"201 with null", jsonAnswer(http.StatusCreated, `null`), checksAnswer},
+		{"answer without the ID", answerWithoutID, checksAnswer},
 	}
 
 	for _, write := range writeCases() {

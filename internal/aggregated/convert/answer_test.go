@@ -37,8 +37,8 @@ func mustTemplateVersionToK8s(t *testing.T, namespace string, template codersdk.
 	return obj
 }
 
-// TestConvertersRejectAnswersWithoutNames checks that a Coder answer without the fields of the
-// Kubernetes name, for example the {} of a proxy (#242), is an error and not a panic.
+// TestConvertersRejectAnswersWithoutNames checks that a Coder answer without its ID or the fields
+// of the Kubernetes name, for example the {} of a proxy (#242), is an error and not a panic.
 func TestConvertersRejectAnswersWithoutNames(t *testing.T) {
 	t.Parallel()
 
@@ -53,6 +53,18 @@ func TestConvertersRejectAnswersWithoutNames(t *testing.T) {
 			_, err := TemplateToK8s("ns", codersdk.Template{OrganizationName: "acme", Name: "a.b"})
 			return err
 		}, `template must not contain "."`},
+		{"template without an ID", func() error {
+			_, err := TemplateToK8s("ns", codersdk.Template{OrganizationName: "acme", Name: "docker"})
+			return err
+		}, "without an ID"},
+		{"workspace without an ID", func() error {
+			_, err := WorkspaceToK8s("ns", codersdk.Workspace{OrganizationName: "acme", OwnerName: "alice", Name: "dev"})
+			return err
+		}, "without an ID"},
+		{"template version without an ID", func() error {
+			_, err := TemplateVersionToK8s("ns", codersdk.Template{ID: templateID, OrganizationName: "acme", Name: "docker"}, codersdk.TemplateVersion{TemplateID: &templateID, Name: "v1"})
+			return err
+		}, "without an ID"},
 		{"empty workspace", func() error { _, err := WorkspaceToK8s("ns", codersdk.Workspace{}); return err }, "organization must not be empty"},
 		{"workspace without an owner", func() error {
 			_, err := WorkspaceToK8s("ns", codersdk.Workspace{OrganizationName: "acme", Name: "dev"})
