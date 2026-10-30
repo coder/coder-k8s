@@ -1453,7 +1453,9 @@ func TestReconcile_OperatorAccess_Disabled_DoesNotDeleteUnmanagedSecret(t *testi
 	}
 }
 
-func TestReconcile_OperatorAccess_Disabled_RevokesWithoutStatusOrManagedSecret(t *testing.T) {
+// A status that names no operator token Secret records no token, so disabling
+// operator access deletes none in Coder, also next to an owned Secret.
+func TestReconcile_OperatorAccess_Disabled_DeletesNoTokenWithoutRecord(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 	testNamespace := createTestNamespace(ctx, t, "test-cp")
@@ -1479,6 +1481,29 @@ func TestReconcile_OperatorAccess_Disabled_RevokesWithoutStatusOrManagedSecret(t
 		_ = k8sClient.Delete(ctx, cp)
 	})
 
+	managedSecretName := cp.Name + "-operator-token"
+	managedSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      managedSecretName,
+			Namespace: cp.Namespace,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: coderv1alpha1.GroupVersion.String(),
+				Kind:       "CoderControlPlane",
+				Name:       cp.Name,
+				UID:        cp.UID,
+				Controller: ptrTo(true),
+			}},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{coderv1alpha1.DefaultTokenSecretKey: []byte("unrecorded-operator-token")},
+	}
+	if err := k8sClient.Create(ctx, managedSecret); err != nil {
+		t.Fatalf("failed to create managed operator secret: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, managedSecret)
+	})
+
 	provisioner := &fakeOperatorAccessProvisioner{}
 	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
 
@@ -1489,14 +1514,12 @@ func TestReconcile_OperatorAccess_Disabled_RevokesWithoutStatusOrManagedSecret(t
 	if result != (ctrl.Result{}) {
 		t.Fatalf("expected empty reconcile result, got %+v", result)
 	}
-	if provisioner.revokeCalls != 1 {
-		t.Fatalf("expected revoke to run even without managed secret/status ref, got %d calls", provisioner.revokeCalls)
+	if provisioner.revokeCalls != 0 {
+		t.Fatalf("expected no revoke without a recorded token, got %d calls", provisioner.revokeCalls)
 	}
-	if got := provisioner.revokeRequests[0].PostgresURL; got != "postgres://example.disabled.revoke/coder" {
-		t.Fatalf("expected revoke Postgres URL %q, got %q", "postgres://example.disabled.revoke/coder", got)
-	}
-	if got := provisioner.revokeRequests[0].TokenName; !strings.HasPrefix(got, "coder-k8s-operator-") {
-		t.Fatalf("expected revoke token name to be scoped with prefix %q, got %q", "coder-k8s-operator-", got)
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: managedSecretName, Namespace: cp.Namespace}, &corev1.Secret{})
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected managed operator secret to be deleted, got error %v", err)
 	}
 
 	reconciled := &coderv1alpha1.CoderControlPlane{}
@@ -1508,6 +1531,27 @@ func TestReconcile_OperatorAccess_Disabled_RevokesWithoutStatusOrManagedSecret(t
 	}
 	if reconciled.Status.OperatorTokenSecretRef != nil {
 		t.Fatalf("expected operator token secret ref to be nil when disabled")
+	}
+}
+
+// disableAfterPublish reconciles cp once with operator access on, so that its
+// status records the published operator token, then disables operator access.
+func disableAfterPublish(ctx context.Context, t *testing.T, r *controller.CoderControlPlaneReconciler, cp *coderv1alpha1.CoderControlPlane) {
+	t.Helper()
+	key := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("publish operator token: %v", err)
+	}
+	latest := &coderv1alpha1.CoderControlPlane{}
+	if err := k8sClient.Get(ctx, key, latest); err != nil {
+		t.Fatalf("get published control plane: %v", err)
+	}
+	if !latest.Status.OperatorAccessReady || latest.Status.OperatorTokenSecretRef == nil {
+		t.Fatalf("expected a published operator token, got status %+v", latest.Status)
+	}
+	latest.Spec.OperatorAccess.Disabled = true
+	if err := k8sClient.Update(ctx, latest); err != nil {
+		t.Fatalf("disable operator access: %v", err)
 	}
 }
 
@@ -1526,7 +1570,6 @@ func TestReconcile_OperatorAccess_Disabled_RevokesTokenAndDeletesSecret(t *testi
 			ExtraEnv: []corev1.EnvVar{
 				{Name: "CODER_PG_CONNECTION_URL", Value: "postgres://example.disabled/coder"},
 			},
-			OperatorAccess: coderv1alpha1.OperatorAccessSpec{Disabled: true},
 		},
 	}
 	if err := k8sClient.Create(ctx, cp); err != nil {
@@ -1537,32 +1580,9 @@ func TestReconcile_OperatorAccess_Disabled_RevokesTokenAndDeletesSecret(t *testi
 	})
 
 	managedSecretName := cp.Name + "-operator-token"
-	managedSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      managedSecretName,
-			Namespace: cp.Namespace,
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: coderv1alpha1.GroupVersion.String(),
-				Kind:       "CoderControlPlane",
-				Name:       cp.Name,
-				UID:        cp.UID,
-				Controller: ptrTo(true),
-			}},
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{
-			coderv1alpha1.DefaultTokenSecretKey: []byte("stale-operator-token"),
-		},
-	}
-	if err := k8sClient.Create(ctx, managedSecret); err != nil {
-		t.Fatalf("failed to create managed operator secret: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = k8sClient.Delete(ctx, managedSecret)
-	})
-
-	provisioner := &fakeOperatorAccessProvisioner{}
+	provisioner := &fakeOperatorAccessProvisioner{token: "stale-operator-token"}
 	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	disableAfterPublish(ctx, t, r, cp)
 
 	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}})
 	if err != nil {
@@ -1571,8 +1591,8 @@ func TestReconcile_OperatorAccess_Disabled_RevokesTokenAndDeletesSecret(t *testi
 	if result != (ctrl.Result{}) {
 		t.Fatalf("expected empty reconcile result when disabled cleanup succeeds, got %+v", result)
 	}
-	if provisioner.calls != 0 {
-		t.Fatalf("expected ensure token not to be called when disabled, got %d calls", provisioner.calls)
+	if provisioner.calls != 1 {
+		t.Fatalf("expected ensure token to be called only before access was disabled, got %d calls", provisioner.calls)
 	}
 	if provisioner.revokeCalls != 1 {
 		t.Fatalf("expected revoke to be called once when disabling existing credentials, got %d calls", provisioner.revokeCalls)
@@ -1621,7 +1641,6 @@ func TestReconcile_OperatorAccess_Disabled_RetriesRevocationAfterFailure(t *test
 				Name:  "CODER_PG_CONNECTION_URL",
 				Value: "postgres://example.disabled.retry/coder",
 			}},
-			OperatorAccess: coderv1alpha1.OperatorAccessSpec{Disabled: true},
 		},
 	}
 	if err := k8sClient.Create(ctx, cp); err != nil {
@@ -1632,32 +1651,9 @@ func TestReconcile_OperatorAccess_Disabled_RetriesRevocationAfterFailure(t *test
 	})
 
 	managedSecretName := cp.Name + "-operator-token"
-	managedSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      managedSecretName,
-			Namespace: cp.Namespace,
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: coderv1alpha1.GroupVersion.String(),
-				Kind:       "CoderControlPlane",
-				Name:       cp.Name,
-				UID:        cp.UID,
-				Controller: ptrTo(true),
-			}},
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{
-			coderv1alpha1.DefaultTokenSecretKey: []byte("stale-operator-token"),
-		},
-	}
-	if err := k8sClient.Create(ctx, managedSecret); err != nil {
-		t.Fatalf("failed to create managed operator secret: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = k8sClient.Delete(ctx, managedSecret)
-	})
-
-	provisioner := &fakeOperatorAccessProvisioner{revokeErr: errors.New("revoke failed")}
+	provisioner := &fakeOperatorAccessProvisioner{token: "stale-operator-token", revokeErr: errors.New("revoke failed")}
 	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	disableAfterPublish(ctx, t, r, cp)
 
 	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}})
 	if err != nil {
