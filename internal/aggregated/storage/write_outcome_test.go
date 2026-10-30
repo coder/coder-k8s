@@ -49,7 +49,7 @@ func hijack(t *testing.T, w http.ResponseWriter) net.Conn {
 func truncatedAnswer(t *testing.T, w http.ResponseWriter, coderAnswer *httptest.ResponseRecorder) {
 	body := coderAnswer.Body.Bytes()
 	conn := hijack(t, w)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_, _ = fmt.Fprintf(conn, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n",
 		coderAnswer.Code, http.StatusText(coderAnswer.Code), len(body))
 	_, _ = conn.Write(body[:len(body)/2])

@@ -122,13 +122,11 @@ func IsUncertainStatus(status int) bool {
 		status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
 }
 
-// MapCoderWriteError maps the error of the Coder call that creates, updates or deletes name.
-// When the error leaves it open whether Coder applied the write, it returns the uncertain 504 of
-// UncertainWriteError. Those are the statuses of IsUncertainStatus except 504, and every error
-// without a status that the request can have caused after it was sent: a connection that breaks
-// before or while the answer is read, or a body that is not the expected JSON. A timeout or a
-// Coder 504 keeps the 504 of MapCoderError, which says the same to clients. So does every
-// other error, including a request that provably never reached Coder (see notSent).
+// MapCoderWriteError maps the error of the Coder call that creates, updates or deletes name. An
+// error that leaves it open whether Coder applied the write returns UncertainWriteError: a status
+// of IsUncertainStatus other than 504, or an error without a status after the request was sent,
+// such as a connection that broke or a body that is not the expected JSON. A timeout, a Coder 504,
+// a request that did not reach Coder (see notSent) and every other status map as in MapCoderError.
 func MapCoderWriteError(err error, write Write, resource schema.GroupResource, name string) error {
 	if err == nil {
 		return fmt.Errorf("assertion failed: error must not be nil")
@@ -162,8 +160,8 @@ func MapCoderWriteError(err error, write Write, resource schema.GroupResource, n
 }
 
 // UncertainWriteError is the 504 for a write that Coder can have applied. reason names the answer
-// that the write got, for example "status 502 from the Coder API", and must not name the Coder URL. It has no Retry-After, so clients do not send the write
-// again on their own.
+// that the write got, for example "status 502 from the Coder API", and must not name the Coder
+// URL. The error has no Retry-After, so clients do not send the write again on their own.
 func UncertainWriteError(write Write, resource schema.GroupResource, name, reason string) error {
 	return apierrors.NewTimeoutError(fmt.Sprintf(
 		"the result is uncertain: the %s of %s %q got %s; re-read the object with kubectl get before you retry",
