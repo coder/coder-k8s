@@ -151,3 +151,32 @@ func TestCoderAIProviderOldNonceAdoptedUntilNextCreate(t *testing.T) {
 	require.Equal(t, 2, env.fake.requestCount(routeCreateAIProvider), "the setup create and one create of the controller")
 	requireRandomNonce(t, cleanupRecord(ctx, t, env.namespace, got.UID)["nonce"], got.UID)
 }
+
+// #426: after the operator learned the provider ID, Coder has shown the nonce
+// as the display name. A person who saw it can delete the provider and create
+// one of the same name with that display name. It is not this object's.
+func TestCoderAIProviderShownNonceNotAdopted(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newAIProviderCreateEnv(ctx, t)
+	env.fake.failNext(routeUpdateAIProvider, fakeFault{Status: http.StatusInternalServerError})
+	got, _ := env.reconcile(ctx, t, provider)
+	requireAIProviderStep(t, got, false, "CoderUnavailable")
+	stored, _ := env.fake.aiProvider(provider.Name)
+	nonce := stored.displayName
+	require.Equal(t, cleanupRecord(ctx, t, env.namespace, got.UID)["nonce"], nonce)
+
+	person := env.fake.client(t, 2*time.Second)
+	require.NoError(t, person.DeleteAIProvider(ctx, stored.id.String()))
+	_, err := person.CreateAIProvider(ctx, codersdk.CreateAIProviderRequest{
+		Type: codersdk.AIProviderTypeOpenAI, Name: provider.Name, DisplayName: nonce,
+		BaseURL: provider.Spec.BaseURL, APIKeys: []string{"sk-person-0123456789abcdef"},
+	})
+	require.NoError(t, err)
+
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIProviderStep(t, got, true, "NameConflict")
+	require.Empty(t, got.Status.ProviderID, "the person's provider is not adopted")
+	stored, _ = env.fake.aiProvider(provider.Name)
+	require.Equal(t, nonce, stored.displayName, "the controller did not change it")
+}

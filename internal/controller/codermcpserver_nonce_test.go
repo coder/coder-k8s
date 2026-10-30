@@ -121,3 +121,29 @@ func TestCoderMCPServerOldNonceAdoptedUntilNextCreate(t *testing.T) {
 	require.Equal(t, 2, env.posts(), "the setup create and one create of the controller")
 	requireRandomNonce(t, env.mcpServerRecord(ctx, t, got.UID)["nonce"], got.UID)
 }
+
+// #426: after the operator learned the config ID, Coder has shown the nonce
+// as the display name. A person who saw it can delete the config and create
+// one with the slug and that display name. It is not this object's.
+func TestCoderMCPServerShownNonceNotAdopted(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	env.fake.failNext(routeUpdateMCPServer, fakeFault{Status: http.StatusBadGateway})
+	got, _ := env.reconcile(ctx, t, env.create(ctx, t, nil))
+	requireMCPServerStep(t, got, false, "CoderUnavailable")
+	created := env.requireCreated(t, got).view
+	require.Equal(t, env.mcpServerRecord(ctx, t, got.UID)["nonce"], created.DisplayName)
+
+	require.NoError(t, env.dashboard(t).DeleteMCPServerConfig(ctx, env.orgID, created.ID))
+	req := apiKeyMCPRequest(got.Spec.Slug)
+	req.DisplayName = created.DisplayName
+	_, err := env.dashboard(t).CreateMCPServerConfig(ctx, env.orgID, req)
+	require.NoError(t, err)
+
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerStep(t, got, true, "SlugConflict")
+	require.Empty(t, got.Status.ConfigID, "the person's config is not adopted")
+	require.Zero(t, env.fake.requestCount(routeUpdateMCPServer)-1, "the controller did not change it")
+}
