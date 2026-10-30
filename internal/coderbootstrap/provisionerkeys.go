@@ -177,6 +177,9 @@ func (c *SDKClient) DeleteProvisionerKeyByName(ctx context.Context, req DeletePr
 	key, err := withOptionalRateLimitBypass(ctx, func(requestCtx context.Context) (*codersdk.ProvisionerKey, error) {
 		return findOrganizationProvisionerKey(requestCtx, client, organization.ID, req.KeyName)
 	})
+	if isNotFound(err) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
