@@ -247,7 +247,7 @@ func TestCoderProvisionerKey_ControlPlaneRecreated(t *testing.T) {
 				kept := slices.ContainsFunc(latest.Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
 					return record.KeyID == keyOld.KeyID.String() && record.CoderURL == oldURL
 				})
-				report := meta.FindStatusCondition(latest.Status.Conditions, "ControlPlaneChangedKeyKept")
+				report := meta.FindStatusCondition(latest.Status.Conditions, coderv1alpha1.CoderProvisionerConditionControlPlaneChangedKeyKept)
 				if tt.keep {
 					require.False(t, kept, "the old key must be deleted at its URL")
 					require.Nil(t, report)

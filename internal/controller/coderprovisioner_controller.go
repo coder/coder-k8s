@@ -57,6 +57,7 @@ const (
 	externalProvisionerEntitlementRetryInterval = 2 * time.Minute
 	provisionerOperatorAccessRetryInterval      = 15 * time.Second
 	provisionerPendingKeyRetryInterval          = 2 * time.Minute
+	provisionerKeyNameInUseRetryInterval        = 2 * time.Minute
 
 	// #nosec G101 -- this is a field index key, not a credential.
 	provisionerControlPlaneRefNameFieldIndex = ".spec.controlPlaneRef.name"
@@ -266,6 +267,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	appliedTagsHash := provisioner.Status.TagsHash
 	appliedControlPlaneRefName := provisioner.Status.ControlPlaneRefName
 	appliedControlPlaneURL := provisioner.Status.ControlPlaneURL
+	appliedControlPlaneUID := provisioner.Status.ControlPlaneUID
 
 	// Check whether a usable provisioner key secret already exists.
 	// The secret is considered "usable" only if this provisioner owns it
@@ -297,6 +299,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// another slot than the target are deleted here.
 	target := coderv1alpha1.CoderProvisionerKeyRecord{
 		ControlPlaneRefName: desiredControlPlaneRefName,
+		ControlPlaneUID:     string(controlPlane.UID),
 		CoderURL:            coderURL,
 		OrganizationName:    organizationName,
 		KeyName:             keyName,
@@ -309,6 +312,30 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	rotate := !secretUsable || slices.ContainsFunc(provisioner.Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
 		return record.Unpublished
 	})
+	replacing := driftDetected || rotate || metadataMissing
+	// Coder allows one key per name in an organization. A key with the target
+	// name that status does not record can belong to another provisioner or
+	// a person, so the operator neither deletes nor replaces it, and changes
+	// nothing else until the name is free.
+	var existingKey *codersdk.ProvisionerKey
+	if replacing {
+		existingKey, err = r.BootstrapClient.ProvisionerKeyByName(ctx, coderbootstrap.ProvisionerKeyByNameRequest{
+			CoderURL:         coderURL,
+			SessionToken:     sessionToken,
+			OrganizationName: organizationName,
+			KeyName:          keyName,
+		})
+		if err != nil {
+			setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+				metav1.ConditionFalse, "ProvisionerKeyFailed",
+				fmt.Sprintf("Failed to look up provisioner key %q", keyName))
+			_ = r.Status().Update(ctx, provisioner)
+			return ctrl.Result{}, fmt.Errorf("look up provisioner key %q: %w", keyName, err)
+		}
+		if existingKey != nil && !recordsKeyID(provisioner.Status, existingKey.ID) {
+			return r.refuseKeyNameInUse(ctx, provisioner, coderURL, organizationName, keyName, existingKey.ID)
+		}
+	}
 	pending := slices.Clone(provisioner.Status.PendingKeys)
 	var replaced coderv1alpha1.CoderProvisionerKeyRecord
 	if driftDetected {
@@ -320,7 +347,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			pending = append(pending, replaced)
 		}
 	}
-	if driftDetected || rotate || metadataMissing {
+	if replacing {
 		// The newest target record with IDs stays until a create at the
 		// target proves its key gone. Coder allows one key per name, so each
 		// earlier create at the target already proved the older ones gone.
@@ -339,7 +366,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		pending = append(next, target)
 	}
 	var kept []coderv1alpha1.CoderProvisionerKeyRecord
-	var unverified []string
+	var unverified, controlPlaneChanged []string
 	for _, record := range pending {
 		if sameKeySlot(record, target) {
 			kept = append(kept, record)
@@ -353,6 +380,11 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			continue
 		}
 		kept = append(kept, record)
+		if cleanup == keyControlPlaneChanged {
+			controlPlaneChanged = append(controlPlaneChanged, fmt.Sprintf("key %q in organization %q at %s (control plane %q)",
+				record.KeyName, record.OrganizationName, record.CoderURL, record.ControlPlaneRefName))
+			continue
+		}
 		if _, _, ok := parseKeyIDs(record.OrganizationID, record.KeyID); !ok {
 			note := "the operator could not check Coder"
 			if cleanup == keyUnverified {
@@ -362,6 +394,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 	conditionChanged := setUnverifiedKeyCondition(provisioner, unverified)
+	conditionChanged = setControlPlaneChangedKeyCondition(provisioner, controlPlaneChanged) || conditionChanged
 	if conditionChanged || !slices.Equal(kept, provisioner.Status.PendingKeys) {
 		provisioner.Status.PendingKeys = kept
 		if err := r.Status().Update(ctx, provisioner); err != nil {
@@ -373,109 +406,30 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
-	log := ctrl.LoggerFrom(ctx)
 	keyMaterial := ""
-	if driftDetected {
-		log.Info("spec drift detected, rotating provisioner key",
-			"orgDrift", orgDrift, "keyNameDrift", keyNameDrift, "tagsDrift", tagsDrift,
-			"controlPlaneRefDrift", controlPlaneRefDrift, "controlPlaneURLDrift", controlPlaneURLDrift)
-
-		// A replaced key in another slot was deleted above. One in the target
-		// slot is deleted here, so that the create below can use its name.
-		if sameKeySlot(replaced, target) {
-			if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
-				ctx,
-				coderURL,
-				sessionToken,
-				replaced.OrganizationName,
-				replaced.KeyName,
-			); deleteErr != nil {
-				log.Info("failed to delete old provisioner key during drift rotation, creating new key anyway",
-					"oldKeyName", replaced.KeyName, "error", deleteErr)
-			}
+	if replacing {
+		if driftDetected {
+			ctrl.LoggerFrom(ctx).Info("spec drift detected, rotating provisioner key",
+				"orgDrift", orgDrift, "keyNameDrift", keyNameDrift, "tagsDrift", tagsDrift,
+				"controlPlaneRefDrift", controlPlaneRefDrift, "controlPlaneURLDrift", controlPlaneURLDrift)
 		}
-
-		response, ensureErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
-			CoderURL:         coderURL,
-			SessionToken:     sessionToken,
-			OrganizationName: organizationName,
-			KeyName:          keyName,
-			Tags:             provisioner.Spec.Tags,
-		})
-		if ensureErr != nil {
-			setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
-				metav1.ConditionFalse, "ProvisionerKeyFailed",
-				fmt.Sprintf("Failed to ensure provisioner key %q after drift rotation", keyName))
-			_ = r.Status().Update(ctx, provisioner)
-			return ctrl.Result{}, fmt.Errorf("ensure provisioner key %q: %w", keyName, ensureErr)
-		}
-		if response.OrganizationID != uuid.Nil {
-			organizationID = response.OrganizationID.String()
-		}
-		if response.KeyID != uuid.Nil {
-			provisionerKeyID = response.KeyID.String()
-		}
-		if response.KeyName != "" {
-			provisionerKeyName = response.KeyName
-		}
-		keyMaterial = response.Key
-		if keyMaterial == "" {
-			log.Info("drift-rotated key exists in coderd but returned no plaintext, rotating to recover",
-				"keyName", keyName)
-
-			if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
-				ctx, coderURL, sessionToken, organizationName, keyName,
-			); deleteErr != nil {
+		// Coder returns the plaintext of a key only in the create response,
+		// so a key recorded in status is replaced: deleted by its ID, then
+		// created again with the desired tags.
+		if existingKey != nil {
+			if deleteErr := r.BootstrapClient.DeleteProvisionerKeyByID(ctx, coderbootstrap.DeleteProvisionerKeyByIDRequest{
+				CoderURL:       coderURL,
+				SessionToken:   sessionToken,
+				OrganizationID: existingKey.OrganizationID,
+				KeyID:          existingKey.ID,
+			}); deleteErr != nil {
 				setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
 					metav1.ConditionFalse, "ProvisionerKeyFailed",
-					fmt.Sprintf("Failed to delete provisioner key %q for drift recovery", keyName))
+					fmt.Sprintf("Failed to delete provisioner key %q to replace it", keyName))
 				_ = r.Status().Update(ctx, provisioner)
-				return ctrl.Result{}, fmt.Errorf("delete provisioner key %q for drift recovery: %w", keyName, deleteErr)
-			}
-			rotated, rotateErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
-				CoderURL:         coderURL,
-				SessionToken:     sessionToken,
-				OrganizationName: organizationName,
-				KeyName:          keyName,
-				Tags:             provisioner.Spec.Tags,
-			})
-			if rotateErr != nil {
-				setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
-					metav1.ConditionFalse, "ProvisionerKeyFailed",
-					fmt.Sprintf("Failed to recreate provisioner key %q after drift recovery", keyName))
-				_ = r.Status().Update(ctx, provisioner)
-				return ctrl.Result{}, fmt.Errorf("recreate provisioner key %q after drift recovery: %w", keyName, rotateErr)
-			}
-			if rotated.OrganizationID != uuid.Nil {
-				organizationID = rotated.OrganizationID.String()
-			}
-			if rotated.KeyID != uuid.Nil {
-				provisionerKeyID = rotated.KeyID.String()
-			}
-			if rotated.KeyName != "" {
-				provisionerKeyName = rotated.KeyName
-			}
-			keyMaterial = rotated.Key
-			if keyMaterial == "" {
-				setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
-					metav1.ConditionFalse, "ProvisionerKeyFailed",
-					fmt.Sprintf("Provisioner key %q returned empty material after drift recovery rotation", keyName))
-				_ = r.Status().Update(ctx, provisioner)
-				return ctrl.Result{}, fmt.Errorf("assertion failed: provisioner key %q returned empty material after drift recovery rotation", keyName)
+				return ctrl.Result{}, fmt.Errorf("delete provisioner key %q to replace it: %w", keyName, deleteErr)
 			}
 		}
-		appliedOrgName = organizationName
-		appliedTagsHash = desiredTagsHash
-		appliedControlPlaneRefName = desiredControlPlaneRefName
-		appliedControlPlaneURL = controlPlane.Status.URL
-		setCondition(
-			provisioner,
-			coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
-			metav1.ConditionTrue,
-			"ProvisionerKeyReady",
-			"Provisioner key is available in coderd",
-		)
-	} else if rotate {
 		response, ensureErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
 			CoderURL:         coderURL,
 			SessionToken:     sessionToken,
@@ -490,6 +444,10 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			_ = r.Status().Update(ctx, provisioner)
 			return ctrl.Result{}, fmt.Errorf("ensure provisioner key %q: %w", keyName, ensureErr)
 		}
+		if response.Key == "" {
+			// Another key took the name after the lookup above.
+			return r.refuseKeyNameInUse(ctx, provisioner, coderURL, organizationName, keyName, response.KeyID)
+		}
 		if response.OrganizationID != uuid.Nil {
 			organizationID = response.OrganizationID.String()
 		}
@@ -500,144 +458,11 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			provisionerKeyName = response.KeyName
 		}
 		keyMaterial = response.Key
-
-		// If the key already exists in coderd (e.g. the K8s secret was
-		// deleted), coderd won't return plaintext again. Rotate the key
-		// by deleting and recreating it to obtain fresh material.
-		if keyMaterial == "" {
-			log.Info("provisioner key exists in coderd but its plaintext is not in the secret, rotating key to recover",
-				"keyName", keyName, "secretName", keySecretName)
-
-			if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
-				ctx, coderURL, sessionToken, organizationName, keyName,
-			); deleteErr != nil {
-				setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
-					metav1.ConditionFalse, "ProvisionerKeyFailed",
-					fmt.Sprintf("Failed to delete stale provisioner key %q for rotation", keyName))
-				_ = r.Status().Update(ctx, provisioner)
-				return ctrl.Result{}, fmt.Errorf("delete stale provisioner key %q for rotation: %w", keyName, deleteErr)
-			}
-			rotated, rotateErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
-				CoderURL:         coderURL,
-				SessionToken:     sessionToken,
-				OrganizationName: organizationName,
-				KeyName:          keyName,
-				Tags:             provisioner.Spec.Tags,
-			})
-			if rotateErr != nil {
-				setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
-					metav1.ConditionFalse, "ProvisionerKeyFailed",
-					fmt.Sprintf("Failed to recreate provisioner key %q after rotation", keyName))
-				_ = r.Status().Update(ctx, provisioner)
-				return ctrl.Result{}, fmt.Errorf("recreate provisioner key %q after rotation: %w", keyName, rotateErr)
-			}
-			if rotated.OrganizationID != uuid.Nil {
-				organizationID = rotated.OrganizationID.String()
-			}
-			if rotated.KeyID != uuid.Nil {
-				provisionerKeyID = rotated.KeyID.String()
-			}
-			if rotated.KeyName != "" {
-				provisionerKeyName = rotated.KeyName
-			}
-			keyMaterial = rotated.Key
-			if keyMaterial == "" {
-				setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
-					metav1.ConditionFalse, "ProvisionerKeyFailed",
-					fmt.Sprintf("Provisioner key %q returned empty key material after rotation", keyName))
-				_ = r.Status().Update(ctx, provisioner)
-				return ctrl.Result{}, fmt.Errorf("assertion failed: provisioner key %q returned empty key material after rotation", keyName)
-			}
-		}
 		appliedOrgName = organizationName
 		appliedTagsHash = desiredTagsHash
 		appliedControlPlaneRefName = desiredControlPlaneRefName
 		appliedControlPlaneURL = controlPlane.Status.URL
-		setCondition(
-			provisioner,
-			coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
-			metav1.ConditionTrue,
-			"ProvisionerKeyReady",
-			"Provisioner key is available in coderd",
-		)
-	} else if metadataMissing {
-		// Secret is usable and no drift detected, but status metadata is empty
-		// (e.g. upgrade from older version). Call EnsureProvisionerKey to populate
-		// IDs and key name. If coderd reports an existing key (no plaintext key
-		// returned), rotate it best-effort so desired tags are applied before
-		// stamping the metadata baseline.
-		response, ensureErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
-			CoderURL:         coderURL,
-			SessionToken:     sessionToken,
-			OrganizationName: organizationName,
-			KeyName:          keyName,
-			Tags:             provisioner.Spec.Tags,
-		})
-		if ensureErr != nil {
-			// Return a requeue so metadata population retries.
-			return ctrl.Result{}, fmt.Errorf("verify provisioner key metadata: %w", ensureErr)
-		}
-		if response.OrganizationID != uuid.Nil {
-			organizationID = response.OrganizationID.String()
-		}
-		if response.KeyID != uuid.Nil {
-			provisionerKeyID = response.KeyID.String()
-		}
-		if response.KeyName != "" {
-			provisionerKeyName = response.KeyName
-		}
-		if response.Key != "" {
-			// Key was freshly created with desired tags; capture material and stamp baseline.
-			keyMaterial = response.Key
-			appliedOrgName = organizationName
-			appliedTagsHash = desiredTagsHash
-			appliedControlPlaneRefName = desiredControlPlaneRefName
-			appliedControlPlaneURL = controlPlane.Status.URL
-		} else {
-			// Key already exists; tags may be stale. Rotate to ensure desired tags are applied.
-			log.Info("existing key found during metadata backfill, rotating to ensure desired tags",
-				"keyName", keyName)
-			if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
-				ctx, coderURL, sessionToken, organizationName, keyName,
-			); deleteErr != nil {
-				return ctrl.Result{}, fmt.Errorf("delete provisioner key %q for metadata backfill rotation: %w", keyName, deleteErr)
-			}
-			rotated, rotateErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
-				CoderURL:         coderURL,
-				SessionToken:     sessionToken,
-				OrganizationName: organizationName,
-				KeyName:          keyName,
-				Tags:             provisioner.Spec.Tags,
-			})
-			if rotateErr != nil {
-				setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
-					metav1.ConditionFalse, "ProvisionerKeyFailed",
-					fmt.Sprintf("Failed to recreate provisioner key %q after metadata backfill rotation", keyName))
-				_ = r.Status().Update(ctx, provisioner)
-				return ctrl.Result{}, fmt.Errorf("recreate provisioner key %q after metadata backfill rotation: %w", keyName, rotateErr)
-			}
-			if rotated.OrganizationID != uuid.Nil {
-				organizationID = rotated.OrganizationID.String()
-			}
-			if rotated.KeyID != uuid.Nil {
-				provisionerKeyID = rotated.KeyID.String()
-			}
-			if rotated.KeyName != "" {
-				provisionerKeyName = rotated.KeyName
-			}
-			keyMaterial = rotated.Key
-			if keyMaterial == "" {
-				setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
-					metav1.ConditionFalse, "ProvisionerKeyFailed",
-					fmt.Sprintf("Provisioner key %q returned empty material after metadata backfill rotation", keyName))
-				_ = r.Status().Update(ctx, provisioner)
-				return ctrl.Result{}, fmt.Errorf("assertion failed: provisioner key %q returned empty material after metadata backfill rotation", keyName)
-			}
-			appliedOrgName = organizationName
-			appliedTagsHash = desiredTagsHash
-			appliedControlPlaneRefName = desiredControlPlaneRefName
-			appliedControlPlaneURL = controlPlane.Status.URL
-		}
+		appliedControlPlaneUID = string(controlPlane.UID)
 		setCondition(
 			provisioner,
 			coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
@@ -715,7 +540,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		provisioner.Status.PendingKeys[i].Unpublished = false
 	}
 	recordAppliedKeyStatus(provisioner, organizationID, appliedOrgName, provisionerKeyID, provisionerKeyName,
-		appliedTagsHash, appliedControlPlaneRefName, appliedControlPlaneURL)
+		appliedTagsHash, appliedControlPlaneRefName, appliedControlPlaneURL, appliedControlPlaneUID)
 	provisioner.Status.SecretRef = &coderv1alpha1.SecretKeySelector{Name: keySecretName, Key: keySecretKey}
 	if !equality.Semantic.DeepEqual(*keyStatusSnapshot, provisioner.Status) {
 		if err := r.Status().Update(ctx, provisioner); err != nil {
@@ -825,7 +650,8 @@ func (r *CoderProvisionerReconciler) reconcileDeletion(ctx context.Context, prov
 		}
 		if cleanup != keyGone {
 			log.Info("did not delete a recorded provisioner key during deletion, proceeding with finalizer removal",
-				"coderURL", record.CoderURL, "keyName", record.KeyName, "keyID", record.KeyID, "unverified", cleanup == keyUnverified)
+				"coderURL", record.CoderURL, "keyName", record.KeyName, "keyID", record.KeyID, "unverified", cleanup == keyUnverified,
+				"controlPlaneChanged", cleanup == keyControlPlaneChanged)
 		}
 	}
 
@@ -848,7 +674,7 @@ func coderAPIURL(controlPlane *coderv1alpha1.CoderControlPlane) (string, error) 
 // in Coder.
 func recordAppliedKeyStatus(
 	provisioner *coderv1alpha1.CoderProvisioner,
-	organizationID, organizationName, keyID, keyName, tagsHash, controlPlaneRefName, controlPlaneURL string,
+	organizationID, organizationName, keyID, keyName, tagsHash, controlPlaneRefName, controlPlaneURL, controlPlaneUID string,
 ) {
 	provisioner.Status.OrganizationID = organizationID
 	provisioner.Status.OrganizationName = organizationName
@@ -857,6 +683,45 @@ func recordAppliedKeyStatus(
 	provisioner.Status.TagsHash = tagsHash
 	provisioner.Status.ControlPlaneRefName = controlPlaneRefName
 	provisioner.Status.ControlPlaneURL = controlPlaneURL
+	provisioner.Status.ControlPlaneUID = controlPlaneUID
+}
+
+// recordsKeyID reports whether status records keyID as a key of this
+// provisioner: the applied key or a pending entry.
+func recordsKeyID(status coderv1alpha1.CoderProvisionerStatus, keyID uuid.UUID) bool {
+	if keyID == uuid.Nil {
+		return false
+	}
+	recorded := func(rawKeyID string) bool {
+		parsed, err := uuid.Parse(rawKeyID)
+		return err == nil && parsed == keyID
+	}
+	return recorded(status.ProvisionerKeyID) || slices.ContainsFunc(status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
+		return recorded(record.KeyID)
+	})
+}
+
+// refuseKeyNameInUse reports that Coder holds a key with the target name that
+// status does not record, and stops the reconcile before any key change. It
+// checks again later, because nothing signals when that key goes.
+func (r *CoderProvisionerReconciler) refuseKeyNameInUse(
+	ctx context.Context,
+	provisioner *coderv1alpha1.CoderProvisioner,
+	coderURL, organizationName, keyName string,
+	keyID uuid.UUID,
+) (ctrl.Result, error) {
+	ctrl.LoggerFrom(ctx).Info("leaving a provisioner key with the target name that this provisioner did not record",
+		"coderURL", coderURL, "organization", organizationName, "keyName", keyName, "foundKeyID", keyID)
+	setCondition(provisioner, coderv1alpha1.CoderProvisionerConditionProvisionerKeyReady,
+		metav1.ConditionFalse, "KeyNameInUse",
+		fmt.Sprintf("Coder at %s holds provisioner key %q (ID %s) in organization %q, and status does not record it as a key of this provisioner. "+
+			"Another provisioner or a person can use this name, so the operator does not delete or replace that key. "+
+			"Set spec.key.name to a name that nothing else uses, or delete that key in Coder if nothing uses it.",
+			coderURL, keyName, keyID, organizationName))
+	if err := r.Status().Update(ctx, provisioner); err != nil {
+		return ctrl.Result{}, fmt.Errorf("report provisioner key name %q in use: %w", keyName, err)
+	}
+	return ctrl.Result{RequeueAfter: provisionerKeyNameInUseRetryInterval}, nil
 }
 
 // revokeUnpublishedKey deletes a key whose plaintext was never written to a
@@ -923,6 +788,7 @@ func (r *CoderProvisionerReconciler) appliedKeyRecord(
 	status := provisioner.Status
 	record := coderv1alpha1.CoderProvisionerKeyRecord{
 		ControlPlaneRefName: cmp.Or(status.ControlPlaneRefName, provisioner.Spec.ControlPlaneRef.Name),
+		ControlPlaneUID:     status.ControlPlaneUID,
 		CoderURL:            strings.TrimSpace(status.ControlPlaneURL),
 		OrganizationName:    cmp.Or(status.OrganizationName, defaultOrganizationName),
 		KeyName:             cmp.Or(status.ProvisionerKeyName, defaultKeyName),
@@ -996,7 +862,24 @@ const (
 	// its name that nothing shows this provisioner created. The operator
 	// leaves that key, and the record stays.
 	keyUnverified
+	// keyControlPlaneChanged: the control plane of the record may not be the
+	// one that the record names (see tokenBoundTo), so the operator sends it
+	// no operator token. The record stays.
+	keyControlPlaneChanged
 )
+
+// tokenBoundTo reports whether the operator may send the operator token of
+// controlPlane for record. It may always send it to the current Coder API URL
+// of controlPlane. It sends it to another URL that record names only while
+// controlPlane has the UID that record names: a control plane deleted and
+// created again under the same name must not send its token to the URL of
+// the old one.
+func tokenBoundTo(record coderv1alpha1.CoderProvisionerKeyRecord, controlPlane *coderv1alpha1.CoderControlPlane) bool {
+	if current, err := coderAPIURL(controlPlane); err == nil && current == record.CoderURL {
+		return true
+	}
+	return record.ControlPlaneUID != "" && record.ControlPlaneUID == string(controlPlane.UID)
+}
 
 // revokeKey deletes the key that record names, at record.CoderURL with the
 // operator token of the control plane record.ControlPlaneRefName. A record
@@ -1011,6 +894,11 @@ func (r *CoderProvisionerReconciler) revokeKey(
 	controlPlane, ok, err := r.readControlPlane(ctx, provisioner.Namespace, record.ControlPlaneRefName)
 	if err != nil || !ok {
 		return keyKept, err
+	}
+	if !tokenBoundTo(record, controlPlane) {
+		log.Info("the control plane of the provisioner key record changed, sending it no operator token",
+			"recordedUID", record.ControlPlaneUID, "currentUID", controlPlane.UID)
+		return keyControlPlaneChanged, nil
 	}
 	sessionToken, tokenResult, tokenReason, tokenMessage, tokenErr := r.readOperatorSessionToken(ctx, provisioner, controlPlane)
 	if tokenErr != nil || tokenResult.RequeueAfter > 0 {
@@ -1069,6 +957,24 @@ func setUnverifiedKeyCondition(provisioner *coderv1alpha1.CoderProvisioner, unve
 		Reason:             "KeyIDUnknown",
 		Message: "status.pendingKeys holds entries without key IDs, and the operator deletes no key for them, because another provisioner or a person can use the same name: " +
 			strings.Join(unverified, "; ") + ". Delete such a key in Coder if nothing uses it.",
+	})
+}
+
+// setControlPlaneChangedKeyCondition sets the ControlPlaneChangedKeyKept
+// condition for the pending entries that changed describes, or removes it when
+// there are none. It reports whether the conditions changed.
+func setControlPlaneChangedKeyCondition(provisioner *coderv1alpha1.CoderProvisioner, changed []string) bool {
+	if len(changed) == 0 {
+		return meta.RemoveStatusCondition(&provisioner.Status.Conditions, coderv1alpha1.CoderProvisionerConditionControlPlaneChangedKeyKept)
+	}
+	return meta.SetStatusCondition(&provisioner.Status.Conditions, metav1.Condition{
+		Type:               coderv1alpha1.CoderProvisionerConditionControlPlaneChangedKeyKept,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: provisioner.Generation,
+		Reason:             "ControlPlaneUIDMismatch",
+		Message: "status.pendingKeys holds entries whose control plane now has another UID, or has no recorded UID and another Coder API URL, " +
+			"so the operator sends no operator token for them: " + strings.Join(changed, "; ") +
+			". Delete such a key in Coder by hand, then remove its entry from status.pendingKeys.",
 	})
 }
 

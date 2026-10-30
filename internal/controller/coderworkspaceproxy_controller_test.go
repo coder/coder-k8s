@@ -29,9 +29,6 @@ type fakeBootstrapClient struct {
 	provisionerKeyErr       error
 	provisionerKeyCalls     int
 	provisionerKeyRequests  []coderbootstrap.EnsureProvisionerKeyRequest
-	deleteKeyErr            error
-	deleteKeyCalls          int
-	deleteKeyRequests       []deleteKeyRequest
 	deleteKeyByIDErr        error
 	deleteKeyByIDRequests   []coderbootstrap.DeleteProvisionerKeyByIDRequest
 	// provisionerKeyByName answers ProvisionerKeyByName. When it is nil,
@@ -43,13 +40,6 @@ type fakeBootstrapClient struct {
 	entitlementsErr      error
 	entitlementsCalls    int
 	entitlementsRequests []entitlementsRequest
-}
-
-type deleteKeyRequest struct {
-	CoderURL         string
-	SessionToken     string
-	OrganizationName string
-	KeyName          string
 }
 
 type entitlementsRequest struct {
@@ -78,17 +68,6 @@ func (f *fakeBootstrapClient) EnsureProvisionerKey(_ context.Context, req coderb
 	}
 
 	return f.provisionerKeyResponses[idx], nil
-}
-
-func (f *fakeBootstrapClient) DeleteProvisionerKey(_ context.Context, coderURL, sessionToken, orgName, keyName string) error {
-	f.deleteKeyCalls++
-	f.deleteKeyRequests = append(f.deleteKeyRequests, deleteKeyRequest{
-		CoderURL:         coderURL,
-		SessionToken:     sessionToken,
-		OrganizationName: orgName,
-		KeyName:          keyName,
-	})
-	return f.deleteKeyErr
 }
 
 func (f *fakeBootstrapClient) DeleteProvisionerKeyByID(_ context.Context, req coderbootstrap.DeleteProvisionerKeyByIDRequest) error {

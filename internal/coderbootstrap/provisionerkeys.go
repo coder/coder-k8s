@@ -104,43 +104,6 @@ func (c *SDKClient) EnsureProvisionerKey(ctx context.Context, req EnsureProvisio
 	}, nil
 }
 
-// DeleteProvisionerKey deletes a provisioner key by name.
-// A missing key is treated as success for idempotency.
-func (c *SDKClient) DeleteProvisionerKey(ctx context.Context, coderURL, sessionToken, orgName, keyName string) error {
-	if err := validateProvisionerKeyInputs(coderURL, sessionToken, keyName); err != nil {
-		return err
-	}
-
-	client, err := newAuthenticatedClient(coderURL, sessionToken)
-	if err != nil {
-		return err
-	}
-
-	organizationName := orgName
-	if organizationName == "" {
-		organizationName = codersdk.DefaultOrganization
-	}
-
-	organization, err := resolveOrganizationByName(ctx, client, organizationName)
-	if err != nil {
-		return err
-	}
-
-	_, err = withOptionalRateLimitBypass(ctx, func(requestCtx context.Context) (struct{}, error) {
-		return struct{}{}, client.DeleteProvisionerKey(requestCtx, organization.ID, keyName)
-	})
-	if err == nil {
-		return nil
-	}
-
-	var apiErr *codersdk.Error
-	if errors.As(err, &apiErr) && apiErr.StatusCode() == http.StatusNotFound {
-		return nil
-	}
-
-	return xerrors.Errorf("delete provisioner key %q: %w", keyName, err)
-}
-
 // ProvisionerKeyByNameRequest identifies a provisioner key by its name.
 type ProvisionerKeyByNameRequest struct {
 	CoderURL         string

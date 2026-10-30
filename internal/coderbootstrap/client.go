@@ -94,7 +94,6 @@ type RegisterWorkspaceProxyResponse struct {
 type Client interface {
 	EnsureWorkspaceProxy(context.Context, RegisterWorkspaceProxyRequest) (RegisterWorkspaceProxyResponse, error)
 	EnsureProvisionerKey(context.Context, EnsureProvisionerKeyRequest) (EnsureProvisionerKeyResponse, error)
-	DeleteProvisionerKey(ctx context.Context, coderURL, sessionToken, orgName, keyName string) error
 	DeleteProvisionerKeyByID(context.Context, DeleteProvisionerKeyByIDRequest) error
 	ProvisionerKeyByName(context.Context, ProvisionerKeyByNameRequest) (*codersdk.ProvisionerKey, error)
 	Entitlements(ctx context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error)

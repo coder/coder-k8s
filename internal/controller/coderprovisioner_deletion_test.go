@@ -72,7 +72,6 @@ func TestCoderProvisionerDeletion_NoRecordedKeySkipsCoder(t *testing.T) {
 			_, err := f.reconciler.Reconcile(ctx, request)
 			require.NoError(t, err)
 
-			require.Zero(t, f.bootstrapClient.deleteKeyCalls, "no name-based key deletion")
 			require.Empty(t, f.bootstrapClient.deleteKeyByIDRequests, "no key deletion without a recorded key")
 			requireProvisionerGone(ctx, t, request.NamespacedName)
 		})
@@ -101,7 +100,6 @@ func TestCoderProvisionerDeletion_DeletesRecordedKey(t *testing.T) {
 	require.NoError(t, k8sClient.Delete(ctx, latest))
 	f.reconcile(ctx, t, provisioner)
 
-	require.Zero(t, f.bootstrapClient.deleteKeyCalls, "no name-based key deletion")
 	require.Len(t, f.bootstrapClient.deleteKeyByIDRequests, 1)
 	deleted := f.bootstrapClient.deleteKeyByIDRequests[0]
 	require.Equal(t, recorded.OrganizationID, deleted.OrganizationID)
@@ -278,6 +276,5 @@ func TestCoderProvisionerDeletion_TriesCurrentControlPlaneURL(t *testing.T) {
 		require.Equal(t, newKey.KeyID, req.KeyID)
 		require.Equal(t, testOperatorToken, req.SessionToken)
 	}
-	require.Zero(t, f.bootstrapClient.deleteKeyCalls, "no name-based key deletion")
 	requireProvisionerGone(ctx, t, types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace})
 }
