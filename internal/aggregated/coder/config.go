@@ -5,9 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 
@@ -29,28 +29,48 @@ const (
 // coderTransports carries every Coder SDK request of the aggregated API server.
 var coderTransports = newTransportRegistry(newCoderTransport)
 
-// transportRegistry holds one long-lived transport per Coder deployment (URL scheme and
-// host). Separate transports keep the per-deployment limits separate even when an HTTP
-// proxy would make deployments share one connection-pool key. Clients stay per request:
-// the session token is set on each client, never on a transport.
+// transportIdleEviction is how long a deployment's transport must stay without requests
+// before the registry drops it. It is far longer than IdleConnTimeout, so an evicted
+// transport has no idle connections left.
+const transportIdleEviction = 10 * time.Minute
+
+// transportRegistry holds one long-lived transport per Coder deployment (URL scheme,
+// host, and port). Separate transports keep the per-deployment limits separate even
+// when an HTTP proxy would make deployments share one connection-pool key. Clients stay
+// per request: the session token is set on each client, never on a transport.
 type transportRegistry struct {
 	newTransport func() (*http.Transport, error)
+	now          func() time.Time
 
 	mu           sync.Mutex
-	byDeployment map[string]*http.Transport
+	byDeployment map[string]*registeredTransport
+}
+
+// registeredTransport counts its requests in flight, so that the registry never drops a
+// transport that still holds connections. Two transports for one deployment would allow
+// twice maxConnsPerCoderHost connections.
+type registeredTransport struct {
+	registry  *transportRegistry
+	key       string
+	transport *http.Transport
+
+	// Guarded by registry.mu.
+	active   int
+	lastUsed time.Time
 }
 
 func newTransportRegistry(newTransport func() (*http.Transport, error)) *transportRegistry {
 	return &transportRegistry{
 		newTransport: newTransport,
-		byDeployment: make(map[string]*http.Transport),
+		now:          time.Now,
+		byDeployment: make(map[string]*registeredTransport),
 	}
 }
 
-// forURL returns the transport for the deployment that serves coderURL.
-// Entries are never evicted: an unused transport closes its idle connections after
-// IdleConnTimeout and keeps no sockets.
-func (r *transportRegistry) forURL(coderURL *url.URL) (*http.Transport, error) {
+// forURL returns the transport for the deployment that serves coderURL. It also drops
+// the transports without a request for transportIdleEviction, so deployments whose
+// control plane changed its URL or went away do not stay in the registry.
+func (r *transportRegistry) forURL(coderURL *url.URL) (*registeredTransport, error) {
 	if r == nil {
 		return nil, fmt.Errorf("assertion failed: transport registry must not be nil")
 	}
@@ -58,13 +78,22 @@ func (r *transportRegistry) forURL(coderURL *url.URL) (*http.Transport, error) {
 		return nil, fmt.Errorf("assertion failed: coder URL must not be nil")
 	}
 
-	key := strings.ToLower(coderURL.Scheme) + "://" + strings.ToLower(coderURL.Host)
+	key := sameorigin.Key(coderURL)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if transport, ok := r.byDeployment[key]; ok {
-		return transport, nil
+	now := r.now()
+	for otherKey, entry := range r.byDeployment {
+		if otherKey != key && entry.active == 0 && now.Sub(entry.lastUsed) > transportIdleEviction {
+			delete(r.byDeployment, otherKey)
+			entry.transport.CloseIdleConnections()
+		}
+	}
+
+	if entry, ok := r.byDeployment[key]; ok {
+		entry.lastUsed = now
+		return entry, nil
 	}
 	transport, err := r.newTransport()
 	if err != nil {
@@ -73,9 +102,90 @@ func (r *transportRegistry) forURL(coderURL *url.URL) (*http.Transport, error) {
 	if transport == nil {
 		return nil, fmt.Errorf("assertion failed: new Coder transport is nil after successful construction")
 	}
-	r.byDeployment[key] = transport
+	entry := &registeredTransport{registry: r, key: key, transport: transport, lastUsed: now}
+	r.byDeployment[key] = entry
 
-	return transport, nil
+	return entry, nil
+}
+
+// RoundTrip sends the request through the deployment's current entry, so a client that
+// outlived the eviction of its entry does not open a second pool. It counts the request
+// as active until its response body is closed, because a connection stays in use while
+// the body (or an upgraded websocket) is open.
+func (t *registeredTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	current := t.begin()
+	res, err := current.transport.RoundTrip(req)
+	if err != nil {
+		current.end()
+		return nil, err
+	}
+
+	done := sync.OnceFunc(current.end)
+	// codersdk's websocket dial needs the upgraded body to stay an io.ReadWriteCloser.
+	if rwc, ok := res.Body.(io.ReadWriteCloser); ok {
+		res.Body = &activeReadWriteCloser{ReadWriteCloser: rwc, done: done}
+	} else {
+		res.Body = &activeBody{ReadCloser: res.Body, done: done}
+	}
+	return res, nil
+}
+
+// CloseIdleConnections closes the idle connections of the deployment's current entry,
+// the pool that RoundTrip uses. An evicted entry has none left.
+func (t *registeredTransport) CloseIdleConnections() {
+	r := t.registry
+	r.mu.Lock()
+	current, ok := r.byDeployment[t.key]
+	r.mu.Unlock()
+	if !ok {
+		current = t
+	}
+	current.transport.CloseIdleConnections()
+}
+
+// begin returns the registry's entry for t's deployment, with the request counted. It
+// puts t back when the deployment has no entry.
+func (t *registeredTransport) begin() *registeredTransport {
+	r := t.registry
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	current, ok := r.byDeployment[t.key]
+	if !ok {
+		current = t
+		r.byDeployment[t.key] = t
+	}
+	current.active++
+	current.lastUsed = r.now()
+	return current
+}
+
+func (t *registeredTransport) end() {
+	t.registry.mu.Lock()
+	defer t.registry.mu.Unlock()
+
+	t.active--
+	t.lastUsed = t.registry.now()
+}
+
+type activeBody struct {
+	io.ReadCloser
+	done func()
+}
+
+func (b *activeBody) Close() error {
+	defer b.done()
+	return b.ReadCloser.Close()
+}
+
+type activeReadWriteCloser struct {
+	io.ReadWriteCloser
+	done func()
+}
+
+func (b *activeReadWriteCloser) Close() error {
+	defer b.done()
+	return b.ReadWriteCloser.Close()
 }
 
 func newCoderTransport() (*http.Transport, error) {
@@ -135,6 +245,12 @@ func (m markRedirectFollowUps) RoundTrip(req *http.Request) (*http.Response, err
 	return resp, err
 }
 
+func (m markRedirectFollowUps) CloseIdleConnections() {
+	if closer, ok := m.next.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
 // Config describes how to construct a Coder SDK client.
 type Config struct {
 	CoderURL       *url.URL
@@ -165,7 +281,7 @@ func NewSDKClient(cfg Config) (*codersdk.Client, error) {
 		return nil, fmt.Errorf("get Coder transport: %w", err)
 	}
 
-	client := codersdk.New(&coderURL, codersdk.WithHTTPClient(newCoderHTTPClient(&coderURL, transport, requestTimeout)))
+	client := codersdk.New(&coderURL, codersdk.WithHTTPClient(newCoderHTTPClient(&coderURL, connectionWaitRoundTripper{base: transport}, requestTimeout)))
 	if client == nil {
 		return nil, fmt.Errorf("assertion failed: coder SDK client is nil after successful construction")
 	}

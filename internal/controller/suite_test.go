@@ -34,6 +34,9 @@ func TestMain(m *testing.M) {
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths: []string{"../../config/crd/bases", "../../config/crd/dormant"},
 	}
+	// envtest runs no garbage collector, so Services owned by deleted test
+	// objects keep their ClusterIPs. The default /24 fills up under -count=3.
+	testEnv.ControlPlane.GetAPIServer().Configure().Set("service-cluster-ip-range", "10.0.0.0/16")
 
 	var err error
 	cfg, err = testEnv.Start()

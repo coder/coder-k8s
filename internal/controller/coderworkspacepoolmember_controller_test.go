@@ -498,3 +498,24 @@ func TestPoolMemberNeverTakesAnotherWorkspace(t *testing.T) {
 	requireMemberFailed(t, e.reconcileMember(t, key, 2), "WorkspaceNameConflict", "already has a workspace named "+name, metav1.ConditionTrue)
 	require.Equal(t, 1, e.fake.requestCount(routeCreateWorkspace), "only the test's own create request")
 }
+
+// Before the create, only Coder's own 404 proves that the kwp- name is free.
+// Another 404 waits and sends no create request (#355).
+func TestPoolMemberNameLookupTrustsOnlyCodersNotFound(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	for _, tc := range nonCoderNotFounds {
+		t.Run(tc.name, func(t *testing.T) { // Not parallel: the cases share e.
+			creates := e.fake.requestCount(routeCreateWorkspace)
+			key := e.createMember(t, nil)
+			e.reconcileMember(t, key, 1) // Finalizer.
+			e.fake.failNext(routeWorkspaceByName, tc.fault)
+			member := e.reconcileMember(t, key, 1)
+			requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhasePending, "CoderUnavailable", "get workspace by name: Coder answered 404")
+			require.Nil(t, member.Status.CreateAttemptTime, "no marker without a create request")
+			require.Equal(t, creates, e.fake.requestCount(routeCreateWorkspace), "no create request")
+			requireMember(t, e.reconcileMember(t, key, 1), coderv1alpha1.CoderWorkspacePoolMemberPhaseCreating, "WaitingForBuild", "")
+			require.Equal(t, creates+1, e.fake.requestCount(routeCreateWorkspace))
+		})
+	}
+}

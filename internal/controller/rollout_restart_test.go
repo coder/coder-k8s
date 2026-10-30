@@ -91,9 +91,10 @@ func runRolloutRestartCase(t *testing.T, tc rolloutRestartCase) {
 func TestRolloutRestart_CoderControlPlaneKeepsRestartedAt(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-rollout")
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-rollout-restart-cp", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-rollout-restart-cp", Namespace: testNamespace},
 		Spec:       coderv1alpha1.CoderControlPlaneSpec{Image: "rollout-restart-cp:v1"},
 	}
 	require.NoError(t, k8sClient.Create(ctx, cp))
@@ -166,9 +167,10 @@ func TestRolloutRestart_CoderProvisionerKeepsRestartedAt(t *testing.T) {
 
 func TestRolloutRestart_CoderWorkspaceProxyKeepsRestartedAt(t *testing.T) {
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-rollout")
 
 	secret := &corev1.Secret{
-		ObjectMeta: consentedObjectMeta("proxy-rollout-restart-token", "default", "https://coder.example.com"),
+		ObjectMeta: consentedObjectMeta("proxy-rollout-restart-token", testNamespace, "https://coder.example.com"),
 		Type:       corev1.SecretTypeOpaque,
 		Data:       map[string][]byte{coderv1alpha1.DefaultTokenSecretKey: []byte("token-value")},
 	}
@@ -176,7 +178,7 @@ func TestRolloutRestart_CoderWorkspaceProxyKeepsRestartedAt(t *testing.T) {
 	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), secret) })
 
 	workspaceProxy := &coderv1alpha1.CoderWorkspaceProxy{
-		ObjectMeta: metav1.ObjectMeta{Name: "proxy-rollout-restart", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "proxy-rollout-restart", Namespace: testNamespace},
 		Spec: coderv1alpha1.WorkspaceProxySpec{
 			Image:            "rollout-restart-proxy:v1",
 			PrimaryAccessURL: "https://coder.example.com",

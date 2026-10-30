@@ -191,11 +191,12 @@ func assertStatusAndEventsRedacted(t *testing.T, cp *coderv1alpha1.CoderControlP
 }
 
 func TestReconcile_DatabaseSecretRef_WiresDeploymentAndBootstrap(t *testing.T) {
+	testNamespace := createTestNamespace(context.Background(), t, "test-db")
 	ensureGatewaySchemeRegistered(t)
 
-	secret := newDatabaseSecret("test-db-ref-wiring-app", "default", map[string][]byte{"uri": []byte(testDatabaseURL)})
+	secret := newDatabaseSecret("test-db-ref-wiring-app", testNamespace, map[string][]byte{"uri": []byte(testDatabaseURL)})
 	createTestObject(t, secret)
-	cp := newDatabaseControlPlane("test-db-ref-wiring", "default", secret.Name, "uri")
+	cp := newDatabaseControlPlane("test-db-ref-wiring", testNamespace, secret.Name, "uri")
 	createTestObject(t, cp)
 
 	provisioner := &fakeOperatorAccessProvisioner{token: "operator-token-db-ref"}
@@ -227,6 +228,7 @@ func TestReconcile_DatabaseSecretRef_WiresDeploymentAndBootstrap(t *testing.T) {
 }
 
 func TestReconcile_DatabaseSecretRef_UnresolvedReasons(t *testing.T) {
+	testNamespace := createTestNamespace(context.Background(), t, "test-db")
 	ensureGatewaySchemeRegistered(t)
 
 	tests := []struct {
@@ -252,9 +254,9 @@ func TestReconcile_DatabaseSecretRef_UnresolvedReasons(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			secretName := "test-db-ref-" + tt.name + "-app"
 			if tt.secretData != nil {
-				createTestObject(t, newDatabaseSecret(secretName, "default", tt.secretData))
+				createTestObject(t, newDatabaseSecret(secretName, testNamespace, tt.secretData))
 			}
-			cp := newDatabaseControlPlane("test-db-ref-"+tt.name, "default", secretName, "uri")
+			cp := newDatabaseControlPlane("test-db-ref-"+tt.name, testNamespace, secretName, "uri")
 			createTestObject(t, cp)
 
 			provisioner := &fakeOperatorAccessProvisioner{token: "should-not-be-used"}
@@ -288,8 +290,9 @@ func TestReconcile_DatabaseSecretRef_UnresolvedReasons(t *testing.T) {
 func TestReconcile_DatabaseSecretRef_ConditionRemovedWhenUnset(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-db")
 
-	cp := newDatabaseControlPlane("test-db-ref-unset", "default", "test-db-ref-unset-app", "uri")
+	cp := newDatabaseControlPlane("test-db-ref-unset", testNamespace, "test-db-ref-unset-app", "uri")
 	createTestObject(t, cp)
 
 	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
@@ -315,6 +318,7 @@ func TestReconcile_DatabaseSecretRef_ConditionRemovedWhenUnset(t *testing.T) {
 }
 
 func TestReconcile_DatabaseSecretRef_LegacyExtraEnvUnchanged(t *testing.T) {
+	testNamespace := createTestNamespace(context.Background(), t, "test-db")
 	ensureGatewaySchemeRegistered(t)
 
 	extraEnv := []corev1.EnvVar{
@@ -328,7 +332,7 @@ func TestReconcile_DatabaseSecretRef_LegacyExtraEnvUnchanged(t *testing.T) {
 		{Name: "CODER_ACCESS_URL", Value: "http://localhost:3000"},
 	}
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-db-legacy-extra-env", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-db-legacy-extra-env", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image:    "test-db-legacy:latest",
 			ExtraEnv: extraEnv,
@@ -354,6 +358,7 @@ func TestReconcile_DatabaseSecretRef_LegacyExtraEnvUnchanged(t *testing.T) {
 
 func TestDatabaseSecretRef_AdmissionRejectsConflictAndEmptyFields(t *testing.T) {
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-db")
 	conflictEnv := []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: testDatabaseURL}}
 
 	tests := []struct {
@@ -379,7 +384,7 @@ func TestDatabaseSecretRef_AdmissionRejectsConflictAndEmptyFields(t *testing.T) 
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cp := newDatabaseControlPlane("test-db-admission-"+tt.name, "default", "test-db-admission-app", "uri")
+			cp := newDatabaseControlPlane("test-db-admission-"+tt.name, testNamespace, "test-db-admission-app", "uri")
 			tt.mutate(cp)
 			err := k8sClient.Create(ctx, cp)
 			if err == nil {
@@ -394,7 +399,7 @@ func TestDatabaseSecretRef_AdmissionRejectsConflictAndEmptyFields(t *testing.T) 
 	}
 
 	// Adding the conflicting env var to an existing object is rejected too.
-	cp := newDatabaseControlPlane("test-db-admission-update", "default", "test-db-admission-app", "uri")
+	cp := newDatabaseControlPlane("test-db-admission-update", testNamespace, "test-db-admission-app", "uri")
 	createTestObject(t, cp)
 	latest := getControlPlane(t, cp)
 	latest.Spec.ExtraEnv = conflictEnv
@@ -422,11 +427,12 @@ func (c *conflictInjectingClient) Get(ctx context.Context, key types.NamespacedN
 }
 
 func TestReconcile_DatabaseSecretRef_ControllerRejectsConflict(t *testing.T) {
+	testNamespace := createTestNamespace(context.Background(), t, "test-db")
 	ensureGatewaySchemeRegistered(t)
 
-	secret := newDatabaseSecret("test-db-ref-conflict-app", "default", map[string][]byte{"uri": []byte(testDatabaseURL)})
+	secret := newDatabaseSecret("test-db-ref-conflict-app", testNamespace, map[string][]byte{"uri": []byte(testDatabaseURL)})
 	createTestObject(t, secret)
-	cp := newDatabaseControlPlane("test-db-ref-conflict", "default", secret.Name, "uri")
+	cp := newDatabaseControlPlane("test-db-ref-conflict", testNamespace, secret.Name, "uri")
 	// Pre-set the finalizer: adding it would patch the object and replace the
 	// injected extraEnv with the stored spec.
 	cp.Finalizers = []string{"coder.com/workspace-rbac-cleanup"}
@@ -462,10 +468,11 @@ func TestReconcile_DatabaseSecretRef_ControllerRejectsConflict(t *testing.T) {
 func TestReconcile_DatabaseSecretRef_ConflictKeepsObservedGeneration(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-db")
 
-	secret := newDatabaseSecret("test-db-ref-conflict-gen-app", "default", map[string][]byte{"uri": []byte(testDatabaseURL)})
+	secret := newDatabaseSecret("test-db-ref-conflict-gen-app", testNamespace, map[string][]byte{"uri": []byte(testDatabaseURL)})
 	createTestObject(t, secret)
-	cp := newDatabaseControlPlane("test-db-ref-conflict-gen", "default", secret.Name, "uri")
+	cp := newDatabaseControlPlane("test-db-ref-conflict-gen", testNamespace, secret.Name, "uri")
 	createTestObject(t, cp)
 
 	// Generation 1 reconciles successfully.
@@ -523,8 +530,7 @@ func TestDatabaseSecretRef_SecretEventsTriggerReconcile(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 
-	const namespace = "database-secret-watch"
-	createTestObject(t, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}})
+	namespace := createTestNamespace(ctx, t, "database-secret-watch")
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,

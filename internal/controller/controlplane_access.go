@@ -5,11 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -17,6 +15,7 @@ import (
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/aggregated/coder"
 	"github.com/coder/coder-k8s/internal/controlplaneurl"
+	"github.com/coder/coder-k8s/internal/operatortoken"
 )
 
 // controlPlaneCoderTimeout bounds each Coder request made with the operator
@@ -66,18 +65,11 @@ func controlPlaneCoderClientFor(ctx context.Context, reader client.Reader, names
 	case !controlPlane.Status.OperatorAccessReady || controlPlane.Status.OperatorTokenSecretRef == nil:
 		return nil, nil, newControlPlaneWait("OperatorAccessNotReady", "CoderControlPlane %s has no operator access yet.", key.Name), nil
 	}
-	ref := controlPlane.Status.OperatorTokenSecretRef
-	secretKey := strings.TrimSpace(ref.Key)
-	if secretKey == "" {
-		secretKey = coderv1alpha1.DefaultTokenSecretKey
-	}
-	secret := &corev1.Secret{}
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: strings.TrimSpace(ref.Name)}, secret); client.IgnoreNotFound(err) != nil {
+	token, err := operatortoken.Read(ctx, reader, controlPlane)
+	if errors.Is(err, operatortoken.ErrUnavailable) {
+		return nil, nil, newControlPlaneWait("OperatorAccessNotReady", "CoderControlPlane %s: %v.", key.Name, err), nil
+	} else if err != nil {
 		return nil, nil, nil, fmt.Errorf("read operator token of codercontrolplane %s: %w", key, err)
-	}
-	token := string(secret.Data[secretKey])
-	if token == "" {
-		return nil, nil, newControlPlaneWait("OperatorAccessNotReady", "The operator token Secret of CoderControlPlane %s has no token yet.", key.Name), nil
 	}
 	coderURL, err := controlPlaneCoderURL(controlPlane)
 	if err != nil {

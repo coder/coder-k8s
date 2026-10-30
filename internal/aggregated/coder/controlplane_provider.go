@@ -2,6 +2,7 @@ package coder
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -9,11 +10,11 @@ import (
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/controlplaneurl"
+	"github.com/coder/coder-k8s/internal/operatortoken"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -99,63 +100,17 @@ func (p *ControlPlaneClientProvider) ClientForNamespace(ctx context.Context, nam
 		return nil, fmt.Errorf("assertion failed: eligible CoderControlPlane is missing status.operatorTokenSecretRef")
 	}
 
-	secretName := strings.TrimSpace(controlPlane.Status.OperatorTokenSecretRef.Name)
-	if secretName == "" {
+	sessionToken, err := operatortoken.Read(ctx, p.secretReader, &controlPlane)
+	if errors.Is(err, operatortoken.ErrUnavailable) {
 		return nil, apierrors.NewServiceUnavailable(
-			fmt.Sprintf(
-				"eligible CoderControlPlane %s/%s is missing status.operatorTokenSecretRef.name",
-				controlPlane.Namespace,
-				controlPlane.Name,
-			),
+			fmt.Sprintf("CoderControlPlane %s/%s: %v", controlPlane.Namespace, controlPlane.Name, err),
 		)
-	}
-
-	secretKey := strings.TrimSpace(controlPlane.Status.OperatorTokenSecretRef.Key)
-	if secretKey == "" {
-		secretKey = coderv1alpha1.DefaultTokenSecretKey
-	}
-
-	tokenSecret := &corev1.Secret{}
-	if err := p.secretReader.Get(
-		ctx,
-		client.ObjectKey{Namespace: controlPlane.Namespace, Name: secretName},
-		tokenSecret,
-	); err != nil {
+	} else if err != nil {
 		return nil, fmt.Errorf(
-			"read operator token secret %s/%s for CoderControlPlane %s/%s: %w",
-			controlPlane.Namespace,
-			secretName,
+			"read operator token for CoderControlPlane %s/%s: %w",
 			controlPlane.Namespace,
 			controlPlane.Name,
 			err,
-		)
-	}
-
-	tokenBytes, ok := tokenSecret.Data[secretKey]
-	if !ok {
-		return nil, apierrors.NewServiceUnavailable(
-			fmt.Sprintf(
-				"operator token secret %s/%s for CoderControlPlane %s/%s does not contain key %q",
-				controlPlane.Namespace,
-				secretName,
-				controlPlane.Namespace,
-				controlPlane.Name,
-				secretKey,
-			),
-		)
-	}
-
-	sessionToken := string(tokenBytes)
-	if sessionToken == "" {
-		return nil, apierrors.NewServiceUnavailable(
-			fmt.Sprintf(
-				"operator token secret %s/%s for CoderControlPlane %s/%s contains an empty value for key %q",
-				controlPlane.Namespace,
-				secretName,
-				controlPlane.Namespace,
-				controlPlane.Name,
-				secretKey,
-			),
 		)
 	}
 

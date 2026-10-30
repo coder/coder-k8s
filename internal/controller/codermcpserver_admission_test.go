@@ -29,7 +29,8 @@ const (
 // status write by a subject that RBAC allows, and allows the same write by
 // the operator ServiceAccount. Both subjects are impersonated, so the
 // envtest API server applies RBAC and the policy to them. The policy is
-// cluster-wide and denies the status writes of every other test, so this
+// cluster-wide and denies every CoderMCPServer status write that the
+// operator ServiceAccount does not send, also those of other tests, so this
 // test runs serially and waits until the policy is gone.
 func TestCoderMCPServerStatusPolicy(t *testing.T) {
 	ctx := context.Background()
