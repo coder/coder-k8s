@@ -15,6 +15,7 @@ package sameorigin
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -60,6 +61,21 @@ func Same(a, b *url.URL) bool {
 	return strings.EqualFold(a.Scheme, b.Scheme) &&
 		sameHostname(a.Hostname(), b.Hostname()) &&
 		effectivePort(a) == effectivePort(b)
+}
+
+// Key returns the same string for two URLs exactly when Same reports one origin,
+// so callers can index per-origin state by it.
+func Key(u *url.URL) string {
+	host, zone, hasZone := strings.Cut(u.Hostname(), "%")
+	lower := []byte(host)
+	for i := range lower {
+		lower[i] = asciiLower(lower[i])
+	}
+	host = string(lower)
+	if hasZone {
+		host += "%" + zone
+	}
+	return strings.ToLower(u.Scheme) + "://" + net.JoinHostPort(host, effectivePort(u))
 }
 
 // sameHostname folds ASCII case for the host but compares an IPv6 zone
