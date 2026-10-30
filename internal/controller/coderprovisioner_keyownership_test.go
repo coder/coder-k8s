@@ -37,6 +37,9 @@ func TestCoderProvisionerKey_OtherProvisionersKeyKept(t *testing.T) {
 		// dropKeyStatus removes the key fields from the status of P, as
 		// status that lost its key records.
 		dropKeyStatus bool
+		// staleRecord records a replaced key of P at another key name, whose
+		// delete Coder has not confirmed yet.
+		staleRecord bool
 		// resolveName resolves the conflict with this key name for P.
 		// Otherwise the key of Q goes.
 		resolveName string
@@ -44,6 +47,7 @@ func TestCoderProvisionerKey_OtherProvisionersKeyKept(t *testing.T) {
 		{name: "first key of P"},
 		{name: "key name change of P", holdsKey: true, resolveName: "p-own"},
 		{name: "key name change of P, reverted", holdsKey: true, resolveName: "p-key"},
+		{name: "key name change of P with a replaced key left", holdsKey: true, staleRecord: true, resolveName: "p-own"},
 		{name: "status without key records", holdsKey: true, dropKeyStatus: true, resolveName: "p-own"},
 	}
 
@@ -91,6 +95,22 @@ func TestCoderProvisionerKey_OtherProvisionersKeyKept(t *testing.T) {
 				f.reconcile(ctx, t, p)
 			}
 
+			if tt.staleRecord {
+				stale := slotOf("p-stale")
+				store.keys[stale] = uuid.New()
+				latest := f.get(ctx, t, p)
+				latest.Status.PendingKeys = append(latest.Status.PendingKeys, coderv1alpha1.CoderProvisionerKeyRecord{
+					ControlPlaneRefName: f.controlPlane.Name,
+					ControlPlaneUID:     string(f.controlPlane.UID),
+					CoderURL:            internalCoderURL(f),
+					OrganizationName:    "default",
+					KeyName:             "p-stale",
+					OrganizationID:      stale.organizationID().String(),
+					KeyID:               store.keys[stale].String(),
+				})
+				require.NoError(t, k8sClient.Status().Update(ctx, latest))
+			}
+
 			for range 2 {
 				result, err := f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: pName})
 				require.NoError(t, err)
@@ -106,6 +126,7 @@ func TestCoderProvisionerKey_OtherProvisionersKeyKept(t *testing.T) {
 			require.Contains(t, keyReady.Message, qKeyID.String())
 			require.Nil(t, meta.FindStatusCondition(latest.Status.Conditions, coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept))
 			require.Empty(t, latest.Status.PendingKeys, "P must record no create")
+			require.NotContains(t, store.keys, slotOf("p-stale"), "a key recorded at an earlier target must not wait for the conflict")
 			if tt.holdsKey {
 				require.Equal(t, pKeyID, store.keys[slotOf("p-key")], "the key of P must stay while its new key name is taken")
 				secret := &corev1.Secret{}

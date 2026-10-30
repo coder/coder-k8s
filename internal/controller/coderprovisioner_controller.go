@@ -347,6 +347,15 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			replacing = true
 		}
 		if existingKey != nil && !recordsKeyID(provisioner.Status, existingKey.ID) {
+			// Keys recorded at earlier targets do not wait for this name.
+			// Unpublished records stay, because the Secret can hold their key.
+			kept, _, revokeErr := r.revokePendingKeys(ctx, provisioner, provisioner.Status.PendingKeys, target, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
+				return record.Unpublished
+			})
+			if revokeErr != nil {
+				return ctrl.Result{}, revokeErr
+			}
+			provisioner.Status.PendingKeys = kept
 			return r.refuseKeyNameInUse(ctx, provisioner, coderURL, organizationName, keyName, existingKey.ID)
 		}
 	}
@@ -379,37 +388,13 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		pending = append(next, target)
 	}
-	var kept []coderv1alpha1.CoderProvisionerKeyRecord
-	var unverified, controlPlaneChanged []string
-	for _, record := range pending {
-		// The replacement below deletes the key that the target holds.
-		if sameKeySlot(record, target) || (existingKey != nil && isKeyID(record.KeyID, existingKey.ID)) {
-			kept = append(kept, record)
-			continue
-		}
-		cleanup, revokeErr := r.revokeKey(ctx, provisioner, record)
-		if revokeErr != nil {
-			return ctrl.Result{}, revokeErr
-		}
-		if cleanup == keyGone {
-			continue
-		}
-		kept = append(kept, record)
-		if cleanup == keyControlPlaneChanged {
-			controlPlaneChanged = append(controlPlaneChanged, fmt.Sprintf("key %q in organization %q at %s (control plane %q)",
-				record.KeyName, record.OrganizationName, record.CoderURL, record.ControlPlaneRefName))
-			continue
-		}
-		if _, _, ok := parseKeyIDs(record.OrganizationID, record.KeyID); !ok {
-			note := "the operator could not check Coder"
-			if cleanup == keyUnverified {
-				note = "Coder holds a key with this name that nothing shows this provisioner created"
-			}
-			unverified = append(unverified, fmt.Sprintf("key %q in organization %q at %s: %s", record.KeyName, record.OrganizationName, record.CoderURL, note))
-		}
+	// The replacement below deletes the key that the target holds.
+	kept, conditionChanged, err := r.revokePendingKeys(ctx, provisioner, pending, target, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
+		return existingKey != nil && isKeyID(record.KeyID, existingKey.ID)
+	})
+	if err != nil {
+		return ctrl.Result{}, err
 	}
-	conditionChanged := setUnverifiedKeyCondition(provisioner, unverified)
-	conditionChanged = setControlPlaneChangedKeyCondition(provisioner, controlPlaneChanged) || conditionChanged
 	if conditionChanged || !slices.Equal(kept, provisioner.Status.PendingKeys) {
 		provisioner.Status.PendingKeys = kept
 		if err := r.Status().Update(ctx, provisioner); err != nil {
@@ -964,6 +949,51 @@ func (r *CoderProvisionerReconciler) revokeKey(
 	// this provisioner: another provisioner or a person can use the name.
 	log.Info("leaving a provisioner key that this provisioner cannot show it created", "foundKeyID", key.ID)
 	return keyUnverified, nil
+}
+
+// revokePendingKeys deletes the keys of the records in pending outside the
+// target slot, and returns the records to keep: the target slot, the records
+// that keep reports, and the records whose key Coder did not confirm gone. It
+// sets the UnverifiedKeyKept and ControlPlaneChangedKeyKept conditions for the
+// records it tried, and reports whether the conditions changed.
+func (r *CoderProvisionerReconciler) revokePendingKeys(
+	ctx context.Context,
+	provisioner *coderv1alpha1.CoderProvisioner,
+	pending []coderv1alpha1.CoderProvisionerKeyRecord,
+	target coderv1alpha1.CoderProvisionerKeyRecord,
+	keep func(coderv1alpha1.CoderProvisionerKeyRecord) bool,
+) ([]coderv1alpha1.CoderProvisionerKeyRecord, bool, error) {
+	var kept []coderv1alpha1.CoderProvisionerKeyRecord
+	var unverified, controlPlaneChanged []string
+	for _, record := range pending {
+		if sameKeySlot(record, target) || keep(record) {
+			kept = append(kept, record)
+			continue
+		}
+		cleanup, err := r.revokeKey(ctx, provisioner, record)
+		if err != nil {
+			return nil, false, err
+		}
+		if cleanup == keyGone {
+			continue
+		}
+		kept = append(kept, record)
+		if cleanup == keyControlPlaneChanged {
+			controlPlaneChanged = append(controlPlaneChanged, fmt.Sprintf("key %q in organization %q at %s (control plane %q)",
+				record.KeyName, record.OrganizationName, record.CoderURL, record.ControlPlaneRefName))
+			continue
+		}
+		if _, _, ok := parseKeyIDs(record.OrganizationID, record.KeyID); !ok {
+			note := "the operator could not check Coder"
+			if cleanup == keyUnverified {
+				note = "Coder holds a key with this name that nothing shows this provisioner created"
+			}
+			unverified = append(unverified, fmt.Sprintf("key %q in organization %q at %s: %s", record.KeyName, record.OrganizationName, record.CoderURL, note))
+		}
+	}
+	conditionChanged := setUnverifiedKeyCondition(provisioner, unverified)
+	conditionChanged = setControlPlaneChangedKeyCondition(provisioner, controlPlaneChanged) || conditionChanged
+	return kept, conditionChanged, nil
 }
 
 // setUnverifiedKeyCondition sets the UnverifiedKeyKept condition for the
