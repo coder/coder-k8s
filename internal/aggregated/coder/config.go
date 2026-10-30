@@ -49,6 +49,7 @@ type transportRegistry struct {
 // twice maxConnsPerCoderHost connections.
 type registeredTransport struct {
 	registry  *transportRegistry
+	key       string
 	transport *http.Transport
 
 	// Guarded by registry.mu.
@@ -99,23 +100,25 @@ func (r *transportRegistry) forURL(coderURL *url.URL) (*registeredTransport, err
 	if transport == nil {
 		return nil, fmt.Errorf("assertion failed: new Coder transport is nil after successful construction")
 	}
-	entry := &registeredTransport{registry: r, transport: transport, lastUsed: now}
+	entry := &registeredTransport{registry: r, key: key, transport: transport, lastUsed: now}
 	r.byDeployment[key] = entry
 
 	return entry, nil
 }
 
-// RoundTrip counts the request as active until its response body is closed, because a
-// connection stays in use while the body (or an upgraded websocket) is open.
+// RoundTrip sends the request through the deployment's current entry, so a client that
+// outlived the eviction of its entry does not open a second pool. It counts the request
+// as active until its response body is closed, because a connection stays in use while
+// the body (or an upgraded websocket) is open.
 func (t *registeredTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	t.setActive(1)
-	res, err := t.transport.RoundTrip(req)
+	current := t.begin()
+	res, err := current.transport.RoundTrip(req)
 	if err != nil {
-		t.setActive(-1)
+		current.end()
 		return nil, err
 	}
 
-	done := sync.OnceFunc(func() { t.setActive(-1) })
+	done := sync.OnceFunc(current.end)
 	// codersdk's websocket dial needs the upgraded body to stay an io.ReadWriteCloser.
 	if rwc, ok := res.Body.(io.ReadWriteCloser); ok {
 		res.Body = &activeReadWriteCloser{ReadWriteCloser: rwc, done: done}
@@ -127,11 +130,28 @@ func (t *registeredTransport) RoundTrip(req *http.Request) (*http.Response, erro
 
 func (t *registeredTransport) CloseIdleConnections() { t.transport.CloseIdleConnections() }
 
-func (t *registeredTransport) setActive(delta int) {
+// begin returns the registry's entry for t's deployment, with the request counted. It
+// puts t back when the deployment has no entry.
+func (t *registeredTransport) begin() *registeredTransport {
+	r := t.registry
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	current, ok := r.byDeployment[t.key]
+	if !ok {
+		current = t
+		r.byDeployment[t.key] = t
+	}
+	current.active++
+	current.lastUsed = r.now()
+	return current
+}
+
+func (t *registeredTransport) end() {
 	t.registry.mu.Lock()
 	defer t.registry.mu.Unlock()
 
-	t.active += delta
+	t.active--
 	t.lastUsed = t.registry.now()
 }
 

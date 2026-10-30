@@ -498,3 +498,60 @@ func TestNewSDKClientCloseIdleConnectionsReachesTransport(t *testing.T) {
 		t.Fatal("expected CloseIdleConnections to close the idle connection")
 	}
 }
+
+func TestTransportRegistryRoutesEvictedTransportToCurrentEntry(t *testing.T) {
+	t.Parallel()
+
+	var newConns atomic.Int64
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			newConns.Add(1)
+		}
+	}
+	server.Start()
+	t.Cleanup(server.Close)
+
+	now := time.Unix(0, 0)
+	registry := newTransportRegistry(newCoderTransport)
+	registry.now = func() time.Time { return now }
+	forURL := func(rawURL string) *registeredTransport {
+		transport, err := registry.forURL(mustParseURL(t, rawURL))
+		if err != nil {
+			t.Fatalf("forURL(%q): %v", rawURL, err)
+		}
+		return transport
+	}
+	get := func(transport http.RoundTripper) {
+		res, err := (&http.Client{Transport: transport}).Get(server.URL)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		_, _ = io.Copy(io.Discard, res.Body)
+		_ = res.Body.Close()
+	}
+	evict := func() {
+		now = now.Add(transportIdleEviction + time.Second)
+		forURL("http://other.invalid")
+	}
+
+	held := forURL(server.URL)
+	evict()
+	current := forURL(server.URL)
+	if current == held {
+		t.Fatal("expected the unused deployment to get a new transport")
+	}
+	get(current)
+	get(held)
+	if got := newConns.Load(); got != 1 {
+		t.Fatalf("server accepted %d connections, want 1: a held transport must reuse the current pool", got)
+	}
+
+	evict()
+	get(held)
+	if forURL(server.URL) != held {
+		t.Fatal("expected a held transport to become the entry of a deployment without one")
+	}
+}
