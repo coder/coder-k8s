@@ -24,17 +24,29 @@ func init() {
 	legacyregistry.Registerer().MustRegister(connectionWait)
 }
 
-// connectionWaitRoundTripper observes connectionWait for every connection a request gets.
+// connectionWaitRoundTripper observes connectionWait for every connection a request
+// waits for, also when the request ends before it gets one.
 type connectionWaitRoundTripper struct {
 	base http.RoundTripper
 }
 
 func (rt connectionWaitRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	var start time.Time
+	var (
+		start   time.Time
+		waiting bool
+	)
+	observe := func() {
+		waiting = false
+		connectionWait.Observe(time.Since(start).Seconds())
+	}
 	trace := &httptrace.ClientTrace{
-		GetConn: func(string) { start = time.Now() },
-		GotConn: func(httptrace.GotConnInfo) { connectionWait.Observe(time.Since(start).Seconds()) },
+		GetConn: func(string) { start, waiting = time.Now(), true },
+		GotConn: func(httptrace.GotConnInfo) { observe() },
 	}
 
-	return rt.base.RoundTrip(req.WithContext(httptrace.WithClientTrace(req.Context(), trace)))
+	res, err := rt.base.RoundTrip(req.WithContext(httptrace.WithClientTrace(req.Context(), trace)))
+	if waiting {
+		observe()
+	}
+	return res, err
 }

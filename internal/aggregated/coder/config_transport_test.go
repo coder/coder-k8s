@@ -166,6 +166,32 @@ func TestNewSDKClientBoundsConnectionsPerHost(t *testing.T) {
 	}
 }
 
+// TestNewSDKClientRecordsConnectionWaitThatTimesOut is not parallel, so no other
+// test adds slow connection waits while it counts them.
+func TestNewSDKClientRecordsConnectionWaitThatTimesOut(t *testing.T) {
+	s := newBlockingCoderServer(t)
+	release, wait := s.startRound(t, maxConnsPerCoderHost, maxConnsPerCoderHost)
+	defer wait()
+	defer release()
+
+	slowBefore := slowConnectionWaits(t)
+	client, err := NewSDKClient(Config{
+		CoderURL:       mustParseURL(t, s.server.URL),
+		SessionToken:   "token-timeout",
+		RequestTimeout: 300 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("new SDK client: %v", err)
+	}
+	if res, err := client.Request(context.Background(), http.MethodGet, "/api/v2/buildinfo", nil); err == nil {
+		_ = res.Body.Close()
+		t.Fatalf("request beyond the %d-connection limit succeeded, want a timeout", maxConnsPerCoderHost)
+	}
+	if got := slowConnectionWaits(t) - slowBefore; got != 1 {
+		t.Fatalf("connection wait metric shows %d new waits over %vs, want 1 for the timed-out request", got, slowWaitSeconds)
+	}
+}
+
 const slowWaitSeconds = 0.1
 
 // slowConnectionWaits returns how many connection waits over slowWaitSeconds the

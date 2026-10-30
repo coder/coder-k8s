@@ -63,9 +63,9 @@ Most aggregated API calls then answer the caller with a `500` that says `the Cod
 
 ## Operator calls to Coder are slow or time out under load
 
-Each operator process opens at most 128 connections to one Coder deployment. A Coder call beyond that waits for a free connection, up to the request timeout. The controller uses 30 seconds. The aggregated API server uses `--coder-request-timeout` (default 30 seconds).
+The aggregated API server and most controllers share one connection pool per Coder deployment in each operator process. A pool opens at most 128 connections. A Coder call beyond that waits for a free connection, up to the request timeout. The controllers use 30 seconds. The aggregated API server uses `--coder-request-timeout` (default 30 seconds). Two kinds of controller calls use separate connections and are not in the pool or the metric: the license and entitlement calls of the `CoderControlPlane` controller, and the provisioner key calls of the `CoderProvisioner` controller.
 
-The histogram `coder_k8s_coder_connection_wait_seconds` shows how long each Coder call waited for a connection, including the dial of a new connection. Most samples fall in the lowest buckets. Samples near the request timeout mean that the 128 connections are in use.
+The histogram `coder_k8s_coder_connection_wait_seconds` shows how long each call through the pool waited for a connection, including the dial of a new connection. A call that times out before it gets a connection also counts, with the time it waited. Most samples fall in the lowest buckets. Samples near the request timeout mean that the 128 connections are in use.
 
 - The controller serves the metric at `/metrics` on port `8080`.
 - The aggregated API server serves the metric at `/metrics` on its secure port `6443`. The caller needs RBAC for the `get` verb on the non-resource URL `/metrics`.
