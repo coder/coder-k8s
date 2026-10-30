@@ -235,7 +235,7 @@ A write (create, update, patch, or delete) of a workspace or a template can also
 
 A write that did not reach Coder keeps the `500` that says that the server cannot reach Coder. Examples are a refused connection, a failed DNS lookup, and a rejected TLS certificate. Nothing changed in Coder, so you can retry it.
 
-A `get` or a `list` that gets a Coder object without its ID or the fields of its name, for example `{}`, returns `500` with a message that starts with `the Coder API answered`.
+A `get` or a `list` that gets a Coder object without its ID or the fields of its name, for example `{}`, returns `500` with a message that contains `the Coder API answered`.
 
 The message does not include the Coder URL. The same is true for a `403` that Coder answers, a `500` for a Coder server error, and a `500` when the server cannot reach Coder. These messages name only the resource, the object and the Coder status code. The server log keeps the full Coder error, on a line from the `coder-errors` logger.
 
