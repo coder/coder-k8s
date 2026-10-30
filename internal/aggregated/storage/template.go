@@ -786,7 +786,7 @@ func (s *TemplateStorage) Update(
 			// so a re-read that fails or shows another version leaves the result open.
 			verifyTemplate, err := sdk.Template(ctx, templateID)
 			if err != nil {
-				return nil, false, coder.UncertainWriteError(coder.WriteUpdate, aggregationv1alpha1.Resource("codertemplates"), name,
+				return nil, false, coder.UncertainWriteErrorFrom(err, coder.WriteUpdate, aggregationv1alpha1.Resource("codertemplates"), name,
 					"no re-read of the template from the Coder API after the activation")
 			}
 			if verifyTemplate.ActiveVersionID != newVersion.ID {

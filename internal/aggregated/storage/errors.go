@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/google/uuid"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -38,10 +40,17 @@ func uncertainCreateAnswer(resource schema.GroupResource, name string) error {
 	return coder.UncertainWriteError(coder.WriteCreate, resource, name, "an answer from the Coder API without the ID or name of the object")
 }
 
+// isRequestedBuild reports whether build, the answer to a build POST with transition, is a build
+// that Coder queued for it. Coder answers with the new build, which has an ID and the requested
+// transition. An answer from a proxy, for example {} or a body with only an ID, does not.
+func isRequestedBuild(build codersdk.WorkspaceBuild, transition codersdk.WorkspaceTransition) bool {
+	return build.ID != uuid.Nil && build.Transition == transition
+}
+
 // uncertainBuildAnswer is the error for a workspace update or delete whose build request Coder
-// answered with its success status, but without a build, for example with {} from a proxy.
+// answered with its success status, but without the requested build (see isRequestedBuild).
 func uncertainBuildAnswer(write coder.Write, name string) error {
-	return coder.UncertainWriteError(write, aggregationv1alpha1.Resource("coderworkspaces"), name, "an answer from the Coder API without the ID of the build")
+	return coder.UncertainWriteError(write, aggregationv1alpha1.Resource("coderworkspaces"), name, "an answer from the Coder API without the requested build")
 }
 
 func wrapClientError(err error) error {

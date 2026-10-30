@@ -482,7 +482,12 @@ func (s *WorkspaceStorage) Create(
 			Transition: codersdk.WorkspaceTransitionStop,
 		})
 		if stopErr == nil {
-			createdWorkspace.LatestBuild = stopBuild
+			if isRequestedBuild(stopBuild, codersdk.WorkspaceTransitionStop) {
+				createdWorkspace.LatestBuild = stopBuild
+			} else if current, err := sdk.Workspace(ctx, createdWorkspace.ID); err == nil && current.LatestBuild.ID != uuid.Nil {
+				// An answer without the stop build leaves it open whether Coder queued the stop.
+				createdWorkspace.LatestBuild = current.LatestBuild
+			}
 		}
 		// The workspace creation already succeeded. Returning a stop transition error here
 		// would cause client retries to fail with AlreadyExists, while the desired stop
@@ -692,7 +697,7 @@ func (s *WorkspaceStorage) Update(
 	if err != nil {
 		return nil, false, coder.MapCoderWriteError(err, coder.WriteUpdate, aggregationv1alpha1.Resource("coderworkspaces"), name)
 	}
-	if build.ID == uuid.Nil {
+	if !isRequestedBuild(build, req.Transition) {
 		return nil, false, uncertainBuildAnswer(coder.WriteUpdate, name)
 	}
 
@@ -777,7 +782,7 @@ func (s *WorkspaceStorage) Delete(
 	if err != nil {
 		return nil, false, coder.MapCoderWriteError(err, coder.WriteDelete, aggregationv1alpha1.Resource("coderworkspaces"), name)
 	}
-	if deleteBuild.ID == uuid.Nil {
+	if !isRequestedBuild(deleteBuild, codersdk.WorkspaceTransitionDelete) {
 		return nil, false, uncertainBuildAnswer(coder.WriteDelete, name)
 	}
 

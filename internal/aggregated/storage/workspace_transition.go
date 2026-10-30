@@ -144,7 +144,7 @@ func (s *WorkspaceTransitionStorage) Create(
 		}
 	}
 	newBuild, err := sdk.CreateWorkspaceBuild(callCtx, workspace.ID, req)
-	if err == nil && newBuild.ID != uuid.Nil {
+	if err == nil && isRequestedBuild(newBuild, req.Transition) {
 		return s.queued(namespace, name, workspace, newBuild)
 	}
 
@@ -154,7 +154,7 @@ func (s *WorkspaceTransitionStorage) Create(
 	case isCoderErr && coderErr.StatusCode() == http.StatusConflict:
 		return s.afterConflict(callCtx, sdk, namespace, name, workspace.ID, coderErr)
 	case !isCoderErr || coder.IsUncertainStatus(coderErr.StatusCode()):
-		// A timeout, a transport error, a gateway error, or an answer without the build ID
+		// A timeout, a transport error, a gateway error, or an answer without the requested build
 		// leaves it open whether Coder queued the build: a proxy in front of Coder can fail
 		// after Coder accepted it. Never POST again: one confirming re-read either finds the
 		// new build or reports the doubt. The re-read gets the rest of the budget, at least
