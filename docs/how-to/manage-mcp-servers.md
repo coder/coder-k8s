@@ -106,7 +106,7 @@ kubectl -n coder get codermcpservers
 kubectl -n coder get codermcpserver example -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}'
 ```
 
-The `ENABLED` column shows `status.enabled`: the enabled flag of the config in Coder at the operator's last read or update. It is empty while Coder holds no config of this object, for example when the credential Secret is refused before the create.
+The `ENABLED` column shows `status.enabled`: the enabled flag of the config in Coder at the operator's last read or update. It is empty while Coder holds no config of this object, for example when the credential Secret is refused before the create, and before the first read.
 
 The object has the conditions `Ready`, `Reconciling` and `Stalled`. A stalled object waits for a change of its spec or of an input.
 
