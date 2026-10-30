@@ -147,12 +147,13 @@ func TestReconcile_NotFound(t *testing.T) {
 func TestReconcile_ExistingResource(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 	replicas := int32(2)
 
 	cp := &coderv1alpha1.CoderControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-cp",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image:     "test-image:latest",
@@ -218,12 +219,13 @@ func TestReconcile_ExistingResource(t *testing.T) {
 func TestReconcile_StatusPersistence(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 	replicas := int32(1)
 
 	cp := &coderv1alpha1.CoderControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-status-persistence",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image:    "test-status-image:latest",
@@ -269,11 +271,12 @@ func TestReconcile_StatusPersistence(t *testing.T) {
 func TestReconcile_OwnerReferences(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp := &coderv1alpha1.CoderControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-owner-references",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-owner-image:latest",
@@ -308,12 +311,13 @@ func TestReconcile_OwnerReferences(t *testing.T) {
 func TestReconcile_SpecUpdatePropagates(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 	initialReplicas := int32(1)
 
 	cp := &coderv1alpha1.CoderControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-spec-update-propagates",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image:    "img:v1",
@@ -379,11 +383,12 @@ func TestReconcile_SpecUpdatePropagates(t *testing.T) {
 func TestReconcile_PhaseTransitionToReady(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp := &coderv1alpha1.CoderControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-phase-transition-ready",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-phase-image:latest",
@@ -439,11 +444,12 @@ func TestReconcile_PhaseTransitionToReady(t *testing.T) {
 func TestReconcile_LicenseSecretRefNil_DoesNotUpload(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp := &coderv1alpha1.CoderControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-license-no-ref",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			ExtraEnv: []corev1.EnvVar{{
@@ -504,9 +510,10 @@ func TestReconcile_LicenseSecretRefNil_DoesNotUpload(t *testing.T) {
 func TestReconcile_LicensePendingUntilControlPlaneReady(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	licenseSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-license-pending-secret", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-pending-secret", Namespace: testNamespace},
 		Data: map[string][]byte{
 			coderv1alpha1.DefaultLicenseSecretKey: []byte("license-pending"),
 		},
@@ -519,7 +526,7 @@ func TestReconcile_LicensePendingUntilControlPlaneReady(t *testing.T) {
 	})
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-license-pending", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-pending", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			ExtraEnv: []corev1.EnvVar{{
 				Name:  "CODER_PG_CONNECTION_URL",
@@ -567,9 +574,10 @@ func TestReconcile_LicensePendingUntilControlPlaneReady(t *testing.T) {
 func TestReconcile_LicenseAppliesOnceAndTracksHash(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	licenseSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-license-apply-secret", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-apply-secret", Namespace: testNamespace},
 		Data: map[string][]byte{
 			coderv1alpha1.DefaultLicenseSecretKey: []byte("  license-jwt-initial  \n"),
 		},
@@ -582,7 +590,7 @@ func TestReconcile_LicenseAppliesOnceAndTracksHash(t *testing.T) {
 	})
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-license-apply", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-apply", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			ExtraEnv: []corev1.EnvVar{{
 				Name:  "CODER_PG_CONNECTION_URL",
@@ -662,9 +670,10 @@ func TestReconcile_LicenseAppliesOnceAndTracksHash(t *testing.T) {
 func TestReconcile_LicenseUsesInternalHTTPURLWhenTLSEnabled(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	licenseSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-license-tls-internal-url-secret", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-tls-internal-url-secret", Namespace: testNamespace},
 		Data: map[string][]byte{
 			coderv1alpha1.DefaultLicenseSecretKey: []byte("license-jwt-tls-internal-url"),
 		},
@@ -677,7 +686,7 @@ func TestReconcile_LicenseUsesInternalHTTPURLWhenTLSEnabled(t *testing.T) {
 	})
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-license-tls-internal-url", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-tls-internal-url", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			ExtraEnv: []corev1.EnvVar{{
 				Name:  "CODER_PG_CONNECTION_URL",
@@ -724,8 +733,8 @@ func TestReconcile_LicenseUsesInternalHTTPURLWhenTLSEnabled(t *testing.T) {
 	if len(uploader.calls) != 1 {
 		t.Fatalf("expected one license upload call, got %d", len(uploader.calls))
 	}
-	if got := uploader.calls[0].coderURL; got != "http://test-license-tls-internal-url.default.svc.cluster.local:80" {
-		t.Fatalf("expected license upload URL %q, got %q", "http://test-license-tls-internal-url.default.svc.cluster.local:80", got)
+	if want := fmt.Sprintf("http://test-license-tls-internal-url.%s.svc.cluster.local:80", testNamespace); uploader.calls[0].coderURL != want {
+		t.Fatalf("expected license upload URL %q, got %q", want, uploader.calls[0].coderURL)
 	}
 
 	reconciled := &coderv1alpha1.CoderControlPlane{}
@@ -740,9 +749,10 @@ func TestReconcile_LicenseUsesInternalHTTPURLWhenTLSEnabled(t *testing.T) {
 func TestReconcile_LicenseUsesInternalHTTPURLWhenTLSAndServicePort443(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	licenseSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-license-tls-443-url-secret", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-tls-443-url-secret", Namespace: testNamespace},
 		Data: map[string][]byte{
 			coderv1alpha1.DefaultLicenseSecretKey: []byte("license-jwt-tls-443-url"),
 		},
@@ -755,7 +765,7 @@ func TestReconcile_LicenseUsesInternalHTTPURLWhenTLSAndServicePort443(t *testing
 	})
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-license-tls-443-url", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-tls-443-url", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			ExtraEnv: []corev1.EnvVar{{
 				Name:  "CODER_PG_CONNECTION_URL",
@@ -803,8 +813,8 @@ func TestReconcile_LicenseUsesInternalHTTPURLWhenTLSAndServicePort443(t *testing
 	if len(uploader.calls) != 1 {
 		t.Fatalf("expected one license upload call, got %d", len(uploader.calls))
 	}
-	if got := uploader.calls[0].coderURL; got != "http://test-license-tls-443-url.default.svc.cluster.local:80" {
-		t.Fatalf("expected license upload URL %q, got %q", "http://test-license-tls-443-url.default.svc.cluster.local:80", got)
+	if want := fmt.Sprintf("http://test-license-tls-443-url.%s.svc.cluster.local:80", testNamespace); uploader.calls[0].coderURL != want {
+		t.Fatalf("expected license upload URL %q, got %q", want, uploader.calls[0].coderURL)
 	}
 
 	reconciled := &coderv1alpha1.CoderControlPlane{}
@@ -819,9 +829,10 @@ func TestReconcile_LicenseUsesInternalHTTPURLWhenTLSAndServicePort443(t *testing
 func TestReconcile_LicenseReuploadsWhenBackendHasNoLicenses(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	licenseSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-license-backend-reset-secret", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-backend-reset-secret", Namespace: testNamespace},
 		Data: map[string][]byte{
 			coderv1alpha1.DefaultLicenseSecretKey: []byte("license-jwt-backend-reset"),
 		},
@@ -834,7 +845,7 @@ func TestReconcile_LicenseReuploadsWhenBackendHasNoLicenses(t *testing.T) {
 	})
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-license-backend-reset", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-backend-reset", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			ExtraEnv: []corev1.EnvVar{{
 				Name:  "CODER_PG_CONNECTION_URL",
@@ -895,9 +906,10 @@ func TestReconcile_LicenseReuploadsWhenBackendHasNoLicenses(t *testing.T) {
 func TestReconcile_LicenseRotationUploadsNewSecretValue(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	licenseSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-license-rotation-secret", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-rotation-secret", Namespace: testNamespace},
 		Data: map[string][]byte{
 			coderv1alpha1.DefaultLicenseSecretKey: []byte("license-jwt-v1"),
 		},
@@ -910,7 +922,7 @@ func TestReconcile_LicenseRotationUploadsNewSecretValue(t *testing.T) {
 	})
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-license-rotation", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-rotation", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			ExtraEnv: []corev1.EnvVar{{
 				Name:  "CODER_PG_CONNECTION_URL",
@@ -995,9 +1007,10 @@ func TestReconcile_LicenseRotationUploadsNewSecretValue(t *testing.T) {
 func TestReconcile_LicenseRollbackDuplicateUploadConverges(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	licenseSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-license-rollback-secret", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-rollback-secret", Namespace: testNamespace},
 		Data: map[string][]byte{
 			coderv1alpha1.DefaultLicenseSecretKey: []byte("license-jwt-a"),
 		},
@@ -1010,7 +1023,7 @@ func TestReconcile_LicenseRollbackDuplicateUploadConverges(t *testing.T) {
 	})
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-license-rollback", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-rollback", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			ExtraEnv: []corev1.EnvVar{{
 				Name:  "CODER_PG_CONNECTION_URL",
@@ -1122,9 +1135,10 @@ func TestReconcile_LicenseRollbackDuplicateUploadConverges(t *testing.T) {
 func TestReconcile_LicenseNotSupportedSetsConditionWithoutRequeue(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	licenseSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-license-not-supported-secret", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-not-supported-secret", Namespace: testNamespace},
 		Data: map[string][]byte{
 			coderv1alpha1.DefaultLicenseSecretKey: []byte("license-oss"),
 		},
@@ -1137,7 +1151,7 @@ func TestReconcile_LicenseNotSupportedSetsConditionWithoutRequeue(t *testing.T) 
 	})
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-license-not-supported", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-license-not-supported", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			ExtraEnv: []corev1.EnvVar{{
 				Name:  "CODER_PG_CONNECTION_URL",
@@ -1208,11 +1222,12 @@ func TestReconcile_LicenseNotSupportedSetsConditionWithoutRequeue(t *testing.T) 
 func TestReconcile_DefaultsApplied(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp := &coderv1alpha1.CoderControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-defaults-applied",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{},
 	}
@@ -1258,11 +1273,12 @@ func TestReconcile_DefaultsApplied(t *testing.T) {
 func TestReconcile_DefaultOperatorAccess_MissingPostgresURL(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp := &coderv1alpha1.CoderControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-operator-access-missing-postgres-url",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-operator-missing-postgres:latest",
@@ -1310,11 +1326,12 @@ func TestReconcile_DefaultOperatorAccess_MissingPostgresURL(t *testing.T) {
 func TestReconcile_OperatorAccess_Disabled(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp := &coderv1alpha1.CoderControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-operator-access-disabled",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-operator-disabled:latest",
@@ -1368,11 +1385,12 @@ func TestReconcile_OperatorAccess_Disabled(t *testing.T) {
 func TestReconcile_OperatorAccess_Disabled_DoesNotDeleteUnmanagedSecret(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp := &coderv1alpha1.CoderControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-operator-access-disabled-unmanaged-secret",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image:          "test-operator-disabled-unmanaged-secret:latest",
@@ -1438,11 +1456,12 @@ func TestReconcile_OperatorAccess_Disabled_DoesNotDeleteUnmanagedSecret(t *testi
 func TestReconcile_OperatorAccess_Disabled_RevokesWithoutStatusOrManagedSecret(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp := &coderv1alpha1.CoderControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-operator-access-disabled-revoke-without-status",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-operator-disabled-revoke-without-status:latest",
@@ -1495,11 +1514,12 @@ func TestReconcile_OperatorAccess_Disabled_RevokesWithoutStatusOrManagedSecret(t
 func TestReconcile_OperatorAccess_Disabled_RevokesTokenAndDeletesSecret(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp := &coderv1alpha1.CoderControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-operator-access-disabled-cleanup",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-operator-disabled-cleanup:latest",
@@ -1588,11 +1608,12 @@ func TestReconcile_OperatorAccess_Disabled_RevokesTokenAndDeletesSecret(t *testi
 func TestReconcile_OperatorAccess_Disabled_RetriesRevocationAfterFailure(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp := &coderv1alpha1.CoderControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-operator-access-disabled-retry-revoke",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-operator-disabled-retry-revoke:latest",
@@ -1687,11 +1708,12 @@ func TestReconcile_OperatorAccess_Disabled_RetriesRevocationAfterFailure(t *test
 func TestReconcile_OperatorAccess_MalformedManagedSecret_ReprovisionsToken(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp := &coderv1alpha1.CoderControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-operator-access-malformed-secret",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-operator-malformed-secret:latest",
@@ -1762,9 +1784,10 @@ func TestReconcile_OperatorAccess_MalformedManagedSecret_ReprovisionsToken(t *te
 func TestReconcile_OperatorAccess_UsesDistinctTokenNamesPerControlPlane(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp1 := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-operator-access-token-name-one", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-operator-access-token-name-one", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-operator-token-name-one:latest",
 			ExtraEnv: []corev1.EnvVar{{
@@ -1781,7 +1804,7 @@ func TestReconcile_OperatorAccess_UsesDistinctTokenNamesPerControlPlane(t *testi
 	})
 
 	cp2 := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-operator-access-token-name-two", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-operator-access-token-name-two", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-operator-token-name-two:latest",
 			ExtraEnv: []corev1.EnvVar{{
@@ -1829,11 +1852,12 @@ func TestReconcile_OperatorAccess_UsesDistinctTokenNamesPerControlPlane(t *testi
 func TestReconcile_OperatorAccess_ResolvesLiteralPostgresURLAndCreatesTokenSecret(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp := &coderv1alpha1.CoderControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-operator-access-literal-postgres-url",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-operator-literal:latest",
@@ -1917,11 +1941,12 @@ func TestReconcile_OperatorAccess_ResolvesLiteralPostgresURLAndCreatesTokenSecre
 func TestReconcile_OperatorAccess_ResolvesPostgresURLFromSecretRef(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	postgresURLSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-operator-postgres-url",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
@@ -1938,7 +1963,7 @@ func TestReconcile_OperatorAccess_ResolvesPostgresURLFromSecretRef(t *testing.T)
 	cp := &coderv1alpha1.CoderControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-operator-access-secret-postgres-url",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-operator-secret-ref:latest",
@@ -2006,6 +2031,7 @@ func TestReconcile_OperatorAccess_ResolvesPostgresURLFromSecretRef(t *testing.T)
 func TestReconcile_EntitlementsStatusFields(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	testCases := []struct {
 		name                       string
@@ -2071,7 +2097,7 @@ func TestReconcile_EntitlementsStatusFields(t *testing.T) {
 			cp := &coderv1alpha1.CoderControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      controlPlaneName,
-					Namespace: "default",
+					Namespace: testNamespace,
 				},
 				Spec: coderv1alpha1.CoderControlPlaneSpec{
 					Image: "test-entitlements:latest",
@@ -2155,6 +2181,7 @@ func TestReconcile_EntitlementsStatusFields(t *testing.T) {
 func TestReconcile_ServiceAccount(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	testCases := []struct {
 		name                string
@@ -2216,7 +2243,7 @@ func TestReconcile_ServiceAccount(t *testing.T) {
 		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			cp := &coderv1alpha1.CoderControlPlane{
-				ObjectMeta: metav1.ObjectMeta{Name: testCase.controlPlaneName, Namespace: "default"},
+				ObjectMeta: metav1.ObjectMeta{Name: testCase.controlPlaneName, Namespace: testNamespace},
 				Spec: coderv1alpha1.CoderControlPlaneSpec{
 					Image:          "test-serviceaccount:latest",
 					ServiceAccount: testCase.serviceAccount,
@@ -2273,7 +2300,7 @@ func TestReconcile_ServiceAccount(t *testing.T) {
 
 	t.Run("DisableCreateDetachesManagedServiceAccount", func(t *testing.T) {
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-serviceaccount-disable-detach", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-serviceaccount-disable-detach", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-serviceaccount:latest",
 				ServiceAccount: coderv1alpha1.ServiceAccountSpec{
@@ -2336,10 +2363,11 @@ func TestReconcile_ServiceAccount(t *testing.T) {
 func TestReconcile_WorkspaceRBAC(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	t.Run("RoleAndRoleBindingCreated", func(t *testing.T) {
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-workspace-rbac-default", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-workspace-rbac-default", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-workspace-rbac:latest",
 				ServiceAccount: coderv1alpha1.ServiceAccountSpec{
@@ -2399,7 +2427,7 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 	t.Run("LongServiceAccountNameKeepsRoleNameWithinKubernetesLimit", func(t *testing.T) {
 		serviceAccountName := strings.Repeat("a", 253)
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-workspace-rbac-long-role-name", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-workspace-rbac-long-role-name", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-workspace-rbac:latest",
 				ServiceAccount: coderv1alpha1.ServiceAccountSpec{
@@ -2450,7 +2478,7 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 
 	t.Run("DeploymentsRuleDisabled", func(t *testing.T) {
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-workspace-rbac-no-deployments", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-workspace-rbac-no-deployments", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-workspace-rbac:latest",
 				ServiceAccount: coderv1alpha1.ServiceAccountSpec{
@@ -2486,7 +2514,7 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 
 	t.Run("RBACDisabled", func(t *testing.T) {
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-workspace-rbac-disabled", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-workspace-rbac-disabled", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-workspace-rbac:latest",
 				RBAC: coderv1alpha1.RBACSpec{
@@ -2529,7 +2557,7 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 		}
 
 		serviceAccountName := "test-workspace-rbac-cleanup-disabled-sa"
-		cp := createCoderControlPlaneUnstructured(ctx, t, "test-workspace-rbac-cleanup-disabled", "default", map[string]any{
+		cp := createCoderControlPlaneUnstructured(ctx, t, "test-workspace-rbac-cleanup-disabled", testNamespace, map[string]any{
 			"image": "test-workspace-rbac:latest",
 			"serviceAccount": map[string]any{
 				"name": serviceAccountName,
@@ -2599,7 +2627,7 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 		}
 
 		serviceAccountName := "test-workspace-rbac-cleanup-delete-sa"
-		cp := createCoderControlPlaneUnstructured(ctx, t, "test-workspace-rbac-cleanup-delete", "default", map[string]any{
+		cp := createCoderControlPlaneUnstructured(ctx, t, "test-workspace-rbac-cleanup-delete", testNamespace, map[string]any{
 			"image": "test-workspace-rbac:latest",
 			"serviceAccount": map[string]any{
 				"name": serviceAccountName,
@@ -2660,7 +2688,7 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 
 		serviceAccountName := "test-workspace-rbac-finalizer-invalid-sa"
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-workspace-rbac-finalizer-invalid-sa", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-workspace-rbac-finalizer-invalid-sa", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-workspace-rbac:latest",
 				ServiceAccount: coderv1alpha1.ServiceAccountSpec{
@@ -2747,7 +2775,7 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 		}
 
 		serviceAccountName := "test-workspace-rbac-preserve-unmanaged-sa"
-		cp := createCoderControlPlaneUnstructured(ctx, t, "test-workspace-rbac-preserve-unmanaged", "default", map[string]any{
+		cp := createCoderControlPlaneUnstructured(ctx, t, "test-workspace-rbac-preserve-unmanaged", testNamespace, map[string]any{
 			"image": "test-workspace-rbac:latest",
 			"serviceAccount": map[string]any{
 				"name": serviceAccountName,
@@ -2847,7 +2875,7 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 			Verbs:     []string{"get", "list"},
 		}
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-workspace-rbac-extra-rules", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-workspace-rbac-extra-rules", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-workspace-rbac:latest",
 				ServiceAccount: coderv1alpha1.ServiceAccountSpec{
@@ -2886,10 +2914,11 @@ func TestReconcile_WorkspaceRBAC(t *testing.T) {
 func TestReconcile_DeploymentAlignment(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	t.Run("PortAndHAEnvAndDefaultAccessURL", func(t *testing.T) {
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-default", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-default", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-deployment-alignment:latest",
 				ServiceAccount: coderv1alpha1.ServiceAccountSpec{
@@ -2943,7 +2972,7 @@ func TestReconcile_DeploymentAlignment(t *testing.T) {
 
 	t.Run("DefaultAccessURLIncludesCustomServicePort", func(t *testing.T) {
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-custom-service-port", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-custom-service-port", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-deployment-alignment:latest",
 				Service: coderv1alpha1.ServiceSpec{
@@ -2976,7 +3005,7 @@ func TestReconcile_DeploymentAlignment(t *testing.T) {
 
 	t.Run("UserDefinedAccessURLTakesPrecedence", func(t *testing.T) {
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-custom-access-url", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-custom-access-url", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-deployment-alignment:latest",
 				ExtraEnv: []corev1.EnvVar{{
@@ -3012,7 +3041,7 @@ func TestReconcile_DeploymentAlignment(t *testing.T) {
 
 	t.Run("EnvFromAccessURLTakesPrecedence", func(t *testing.T) {
 		configMap := &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-access-url", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-access-url", Namespace: testNamespace},
 			Data: map[string]string{
 				"CODER_ACCESS_URL": "https://envfrom.example.test",
 			},
@@ -3025,7 +3054,7 @@ func TestReconcile_DeploymentAlignment(t *testing.T) {
 		})
 
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-access-url", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-access-url", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-deployment-alignment:latest",
 				EnvFrom: []corev1.EnvFromSource{{
@@ -3059,7 +3088,7 @@ func TestReconcile_DeploymentAlignment(t *testing.T) {
 
 	t.Run("EnvFromWithoutAccessURLKeepsDefault", func(t *testing.T) {
 		configMap := &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-unrelated", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-unrelated", Namespace: testNamespace},
 			Data: map[string]string{
 				"UNRELATED_ENV": "value",
 			},
@@ -3072,7 +3101,7 @@ func TestReconcile_DeploymentAlignment(t *testing.T) {
 		})
 
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-unrelated", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-unrelated", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-deployment-alignment:latest",
 				EnvFrom: []corev1.EnvFromSource{{
@@ -3111,7 +3140,7 @@ func TestReconcile_DeploymentAlignment(t *testing.T) {
 	t.Run("OptionalMissingEnvFromKeepsDefault", func(t *testing.T) {
 		optional := true
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-optional-missing", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-optional-missing", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-deployment-alignment:latest",
 				EnvFrom: []corev1.EnvFromSource{{
@@ -3147,7 +3176,7 @@ func TestReconcile_DeploymentAlignment(t *testing.T) {
 
 	t.Run("EnvFromPrefixEqualToAccessURLKeepsDefault", func(t *testing.T) {
 		configMap := &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-prefix-equal", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-prefix-equal", Namespace: testNamespace},
 			Data: map[string]string{
 				"UNRELATED_ENV": "value",
 			},
@@ -3160,7 +3189,7 @@ func TestReconcile_DeploymentAlignment(t *testing.T) {
 		})
 
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-prefix-equal", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-prefix-equal", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-deployment-alignment:latest",
 				EnvFrom: []corev1.EnvFromSource{{
@@ -3196,7 +3225,7 @@ func TestReconcile_DeploymentAlignment(t *testing.T) {
 
 	t.Run("EnvFromBinaryDataDoesNotSuppressDefault", func(t *testing.T) {
 		configMap := &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-binary", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-binary", Namespace: testNamespace},
 			BinaryData: map[string][]byte{
 				"CODER_ACCESS_URL": []byte("https://binary-data.example.test"),
 			},
@@ -3209,7 +3238,7 @@ func TestReconcile_DeploymentAlignment(t *testing.T) {
 		})
 
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-binary", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-binary", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-deployment-alignment:latest",
 				EnvFrom: []corev1.EnvFromSource{{
@@ -3244,7 +3273,7 @@ func TestReconcile_DeploymentAlignment(t *testing.T) {
 
 	t.Run("EnvFromWithConfigMapAndSecretRefsIsRejectedAtAdmission", func(t *testing.T) {
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-both-refs", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-envfrom-both-refs", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-deployment-alignment:latest",
 				EnvFrom: []corev1.EnvFromSource{{
@@ -3290,7 +3319,7 @@ func TestReconcile_DeploymentAlignment(t *testing.T) {
 		podSecurityContext := &corev1.PodSecurityContext{FSGroup: &fsGroup}
 
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-security", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deployment-alignment-security", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image:              "test-deployment-alignment:latest",
 				Resources:          resources,
@@ -3330,10 +3359,11 @@ func TestReconcile_DeploymentAlignment(t *testing.T) {
 func TestReconcile_ProbeConfiguration(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	t.Run("ReadinessEnabledByDefault", func(t *testing.T) {
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-probe-defaults", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-probe-defaults", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-probes:latest",
 			},
@@ -3382,7 +3412,7 @@ func TestReconcile_ProbeConfiguration(t *testing.T) {
 	})
 
 	t.Run("LivenessProbeDisabled", func(t *testing.T) {
-		cp := createCoderControlPlaneUnstructured(ctx, t, "test-probe-liveness-disabled", "default", map[string]any{
+		cp := createCoderControlPlaneUnstructured(ctx, t, "test-probe-liveness-disabled", testNamespace, map[string]any{
 			"image": "test-probes:latest",
 			"livenessProbe": map[string]any{
 				"enabled": false,
@@ -3405,7 +3435,7 @@ func TestReconcile_ProbeConfiguration(t *testing.T) {
 	})
 
 	t.Run("LivenessProbeEmptyObjectRemainsDisabled", func(t *testing.T) {
-		cp := createCoderControlPlaneUnstructured(ctx, t, "test-probe-liveness-empty-object", "default", map[string]any{
+		cp := createCoderControlPlaneUnstructured(ctx, t, "test-probe-liveness-empty-object", testNamespace, map[string]any{
 			"image":         "test-probes:latest",
 			"livenessProbe": map[string]any{},
 		})
@@ -3427,7 +3457,7 @@ func TestReconcile_ProbeConfiguration(t *testing.T) {
 
 	t.Run("BothProbesEnabledWithCustomTiming", func(t *testing.T) {
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-probe-custom", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-probe-custom", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-probes:latest",
 				ReadinessProbe: coderv1alpha1.ProbeSpec{
@@ -3480,9 +3510,10 @@ func TestReconcile_ProbeConfiguration(t *testing.T) {
 func TestReconcile_TLSAlignment(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-tls-alignment", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-tls-alignment", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-tls:latest",
 			TLS: coderv1alpha1.TLSSpec{
@@ -3528,7 +3559,7 @@ func TestReconcile_TLSAlignment(t *testing.T) {
 	if !containerHasVolumeMount(container, "tls-my-tls", "/etc/ssl/certs/coder/my-tls") {
 		t.Fatalf("expected container volume mount tls-my-tls at /etc/ssl/certs/coder/my-tls, got %+v", container.VolumeMounts)
 	}
-	if got := mustFindEnvVar(t, container.Env, "CODER_ACCESS_URL").Value; got != "https://test-tls-alignment.default.svc.cluster.local" {
+	if got := mustFindEnvVar(t, container.Env, "CODER_ACCESS_URL").Value; got != fmt.Sprintf("https://test-tls-alignment.%s.svc.cluster.local", testNamespace) {
 		t.Fatalf("expected default CODER_ACCESS_URL to use https, got %q", got)
 	}
 
@@ -3553,9 +3584,10 @@ func TestReconcile_TLSAlignment(t *testing.T) {
 func TestReconcile_TLSDeduplicatesSecretNames(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-tls-secret-dedup", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-tls-secret-dedup", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-tls-dedup:latest",
 			TLS: coderv1alpha1.TLSSpec{
@@ -3617,9 +3649,10 @@ func TestReconcile_TLSDeduplicatesSecretNames(t *testing.T) {
 func TestReconcile_TLSWithServicePort443(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-tls-service-port-443", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-tls-service-port-443", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-tls-443:latest",
 			Service: coderv1alpha1.ServiceSpec{
@@ -3668,9 +3701,10 @@ func TestReconcile_TLSWithServicePort443(t *testing.T) {
 func TestReconcile_TLSAndCertSecretVolumeNameSanitization(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-tls-cert-volume-sanitization", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-tls-cert-volume-sanitization", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-tls-sanitization:latest",
 			TLS: coderv1alpha1.TLSSpec{
@@ -3729,9 +3763,10 @@ func TestReconcile_TLSAndCertSecretVolumeNameSanitization(t *testing.T) {
 func TestReconcile_CertSecretsWithSharedSecretNameReuseVolume(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-cert-secret-shared-volume", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cert-secret-shared-volume", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-certs-shared-volume:latest",
 			Certs: coderv1alpha1.CertsSpec{
@@ -3800,9 +3835,10 @@ func TestReconcile_CertSecretsWithSharedSecretNameReuseVolume(t *testing.T) {
 func TestReconcile_CertSecretMountFileNormalizationAvoidsPathCollisions(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-cert-normalized-mount-collision", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cert-normalized-mount-collision", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-certs-mount-collision:latest",
 			Certs: coderv1alpha1.CertsSpec{
@@ -3852,6 +3888,7 @@ func TestReconcile_CertSecretMountFileNormalizationAvoidsPathCollisions(t *testi
 func TestReconcile_PassThroughConfiguration(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	affinity := &corev1.Affinity{
 		NodeAffinity: &corev1.NodeAffinity{
@@ -3870,7 +3907,7 @@ func TestReconcile_PassThroughConfiguration(t *testing.T) {
 	}
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-pass-through", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pass-through", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-pass-through:latest",
 			Volumes: []corev1.Volume{{
@@ -3939,11 +3976,12 @@ func TestReconcile_PassThroughConfiguration(t *testing.T) {
 func TestReconcile_IngressExposure(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 
 	t.Run("IngressCreated", func(t *testing.T) {
 		className := "nginx"
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-ingress-created", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-ingress-created", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-ingress:latest",
 				Expose: &coderv1alpha1.ExposeSpec{
@@ -4006,7 +4044,7 @@ func TestReconcile_IngressExposure(t *testing.T) {
 
 	t.Run("IngressTLSServicePort443UsesHTTPBackend", func(t *testing.T) {
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-ingress-tls-service-port-443-backend", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-ingress-tls-service-port-443-backend", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image:   "test-ingress:latest",
 				Service: coderv1alpha1.ServiceSpec{Port: 443},
@@ -4051,7 +4089,7 @@ func TestReconcile_IngressExposure(t *testing.T) {
 
 	t.Run("IngressTLSAndWildcardHost", func(t *testing.T) {
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-ingress-tls-wildcard", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-ingress-tls-wildcard", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-ingress:latest",
 				Expose: &coderv1alpha1.ExposeSpec{
@@ -4104,7 +4142,7 @@ func TestReconcile_IngressExposure(t *testing.T) {
 
 	t.Run("IngressCleanupOnRemoval", func(t *testing.T) {
 		cp := &coderv1alpha1.CoderControlPlane{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-ingress-cleanup", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-ingress-cleanup", Namespace: testNamespace},
 			Spec: coderv1alpha1.CoderControlPlaneSpec{
 				Image: "test-ingress:latest",
 				Expose: &coderv1alpha1.ExposeSpec{
@@ -4153,12 +4191,13 @@ func TestReconcile_IngressExposure(t *testing.T) {
 func TestReconcile_HTTPRouteExposure(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 	ensureHTTPRouteCRDInstalled(t)
 
-	gatewayNamespace := "default"
+	gatewayNamespace := testNamespace
 	sectionName := "https"
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-httproute-created", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-httproute-created", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-httproute:latest",
 			Expose: &coderv1alpha1.ExposeSpec{
@@ -4247,10 +4286,11 @@ func TestReconcile_HTTPRouteExposure(t *testing.T) {
 func TestReconcile_HTTPRouteExposure_TLSServicePort443UsesHTTPBackend(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 	ensureHTTPRouteCRDInstalled(t)
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-httproute-tls-443-backend-http", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-httproute-tls-443-backend-http", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-httproute:latest",
 			Service: coderv1alpha1.ServiceSpec{
@@ -4309,10 +4349,11 @@ func TestReconcile_HTTPRouteExposure_TLSServicePort443UsesHTTPBackend(t *testing
 func TestReconcile_HTTPRouteExposure_RequiresParentRefs(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 	ensureHTTPRouteCRDInstalled(t)
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-httproute-parentrefs-required", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-httproute-parentrefs-required", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-httproute:latest",
 			Expose: &coderv1alpha1.ExposeSpec{
@@ -4337,12 +4378,13 @@ func TestReconcile_HTTPRouteExposure_RequiresParentRefs(t *testing.T) {
 func TestReconcile_HTTPRouteExposure_CRDMissingIsGraceful(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
+	testNamespace := createTestNamespace(ctx, t, "test-cp")
 	if err := gatewayv1.Install(scheme); err != nil {
 		t.Fatalf("register gateway API types in scheme: %v", err)
 	}
 
 	cp := &coderv1alpha1.CoderControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-httproute-crd-missing", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-httproute-crd-missing", Namespace: testNamespace},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image: "test-httproute:latest",
 			Expose: &coderv1alpha1.ExposeSpec{
