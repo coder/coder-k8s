@@ -73,7 +73,7 @@ func (r *CoderAIProviderReconciler) createOrConfirm(
 	case err != nil:
 		return keepRejectedCreate(aiProviderWait(aiProviderRetry, "CoderUnavailable", "get provider %s: %s", provider.Name, coderErrorSummary(err)), rejected), nil
 	}
-	return recordAIProvider(ctx, provider, found)
+	return r.recordAIProvider(ctx, provider, found)
 }
 
 // keepRejectedCreate keeps the memory of a rejected create in the reason of a
@@ -103,7 +103,7 @@ func requireSiteOwner(ctx context.Context, sdk *codersdk.Client) *aiProviderStep
 // recordAIProvider decides whether found is the provider that this object
 // created. Only the nonce and the type prove it. Anything else is a provider
 // that the controller never touches (no adoption).
-func recordAIProvider(ctx context.Context, provider *coderv1alpha1.CoderAIProvider, found codersdk.AIProvider) (*aiProviderStep, error) {
+func (r *CoderAIProviderReconciler) recordAIProvider(ctx context.Context, provider *coderv1alpha1.CoderAIProvider, found codersdk.AIProvider) (*aiProviderStep, error) {
 	if err := coderAnswerFor("AI provider", provider.Name, found.Name); err != nil {
 		log.FromContext(ctx).Error(err, "Coder answered something other than the controller asked for")
 		return aiProviderStalled(aiProviderResync, "CoderAnswerMismatch", "%s", err.Error()), nil
@@ -122,9 +122,11 @@ func recordAIProvider(ctx context.Context, provider *coderv1alpha1.CoderAIProvid
 	// A key ID does not prove which key value Coder holds: a read can find a
 	// key that was changed in Coder after the create committed (#332), and a
 	// create can commit after its marker was cleared. An empty change token
-	// makes the sync step send the current key. Only a create answer proves
-	// the key, so createAIProvider sets the token again.
+	// makes the sync step send the current key, so the in-memory record of a
+	// sent key goes too. Only a create answer proves the key, so
+	// createAIProvider sets the token and that record again.
 	provider.Status.Credential = &coderv1alpha1.CoderAIProviderCredentialStatus{}
+	r.sentKeys.Delete(provider.UID)
 	if len(found.APIKeys) != 1 || found.APIKeys[0].ID == uuid.Nil {
 		return aiProviderStalled(0, "KeyChangedExternally",
 			"Provider %s has %d keys in Coder, but this resource created it with one. The controller does not change it until the spec changes.", provider.Name, len(found.APIKeys)), nil
@@ -166,7 +168,7 @@ func (r *CoderAIProviderReconciler) createAIProvider(
 	status := coderStatus(err)
 	switch {
 	case err == nil:
-		if step, err := recordAIProvider(ctx, provider, created); step != nil || err != nil {
+		if step, err := r.recordAIProvider(ctx, provider, created); step != nil || err != nil {
 			// A wrong answer leaves the marker, so a read decides.
 			if step != nil {
 				provider.Status.CreateAttemptTime, provider.Status.Credential = before.CreateAttemptTime, before.Credential
@@ -200,7 +202,7 @@ func (r *CoderAIProviderReconciler) confirmRejectedCreate(
 	switch {
 	case err == nil:
 		// Ours (the create committed) or someone else's (NameConflict).
-		return recordAIProvider(ctx, provider, found)
+		return r.recordAIProvider(ctx, provider, found)
 	case !isCoderResourceNotFound(err):
 		reason := "ConfirmingCreate"
 		if !aiProviderCreateRetryable(status) {
