@@ -159,7 +159,7 @@ func TestPoolMemberCleanupUseSharedWithReadySibling(t *testing.T) {
 	e.fake.setAgents(siblingBuild, agent("main", codersdk.WorkspaceAgentConnected, codersdk.WorkspaceAgentLifecycleReady))
 	e.clock.SetTime(flush.Add(10 * time.Second))
 	sibling := e.reconcileMember(t, siblingKey, 1)
-	require.True(t, sibling.Status.ReadyLastUsedAt.Time.Equal(flush.Truncate(time.Second)), "the sibling's baseline is the flush")
+	require.True(t, sibling.Status.ReadyLastUsedAt.Time.Equal(flush.Truncate(time.Microsecond)), "the sibling's baseline is the flush")
 	e.deleteMember(t, key)
 	require.Nil(t, e.reconcileMember(t, key, 1), "the member goes without deleting its workspace")
 	require.Zero(t, e.fake.requestCount(routeCreateBuild), "no delete build")

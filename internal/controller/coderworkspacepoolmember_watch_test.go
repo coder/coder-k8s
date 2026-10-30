@@ -91,7 +91,7 @@ func TestPoolMemberUseWithNewReadySiblings(t *testing.T) {
 		e.fake.setAgents(siblingBuild, agent("main", codersdk.WorkspaceAgentConnected, codersdk.WorkspaceAgentLifecycleReady))
 		e.clock.SetTime(flush.Add(10 * time.Second))
 		sibling := e.reconcileMember(t, siblingKey, 1)
-		require.True(t, sibling.Status.ReadyLastUsedAt.Time.Equal(flush.Truncate(time.Second)), "the sibling's baseline is the flush")
+		require.True(t, sibling.Status.ReadyLastUsedAt.Time.Equal(flush.Truncate(time.Microsecond)), "the sibling's baseline is the flush")
 		requireUsed(t, e.reconcileMember(t, key, 1), true)
 	}
 	e.deleteMember(t, key)

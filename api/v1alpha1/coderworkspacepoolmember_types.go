@@ -158,12 +158,12 @@ type CoderWorkspacePoolMemberStatus struct {
 	// ReadyTime is when the workspace became ready.
 	// +optional
 	ReadyTime *metav1.Time `json:"readyTime,omitempty"`
-	// ReadyLastUsedAt is the workspace's last_used_at when it became ready.
-	// A later value counts as use. It comes from use, or from a template
-	// schedule update with update_workspace_last_used_at, which looks the
-	// same.
+	// ReadyLastUsedAt is the workspace's last_used_at when it became ready,
+	// in microseconds like Coder. A later value counts as use. It comes from
+	// use, or from a template schedule update with
+	// update_workspace_last_used_at, which looks the same.
 	// +optional
-	ReadyLastUsedAt *metav1.Time `json:"readyLastUsedAt,omitempty"`
+	ReadyLastUsedAt *metav1.MicroTime `json:"readyLastUsedAt,omitempty"`
 	// LastExtendTime is when the controller last extended the autostop
 	// deadline of the unclaimed workspace.
 	// +optional

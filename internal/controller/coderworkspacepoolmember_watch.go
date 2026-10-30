@@ -80,12 +80,13 @@ func checkPoolMemberUse(member *coderv1alpha1.CoderWorkspacePoolMember, workspac
 	if baseline == nil {
 		return nil, fmt.Errorf("assertion failed: ready pool member %s/%s has no readyLastUsedAt", member.Namespace, member.Name)
 	}
-	// Status stores whole seconds. Both times come from Coder's clock.
-	lastUsed := workspace.LastUsedAt.Truncate(time.Second)
+	// Status stores microseconds, as Coder does. Both times come from
+	// Coder's clock.
+	lastUsed := workspace.LastUsedAt.Truncate(time.Microsecond)
 	if !lastUsed.After(baseline.Time) {
 		return nil, nil
 	}
-	step := coderWait("Used", "Someone may have used workspace %s without a claim: its last_used_at moved to %s. The pool releases it.", member.Status.WorkspaceName, lastUsed.UTC().Format(time.RFC3339))
+	step := coderWait("Used", "Someone may have used workspace %s without a claim: its last_used_at moved to %s. The pool releases it.", member.Status.WorkspaceName, lastUsed.UTC().Format(time.RFC3339Nano))
 	setPoolMemberCondition(member, now, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed, metav1.ConditionTrue, step.reason, step.message)
 	return step, nil
 }

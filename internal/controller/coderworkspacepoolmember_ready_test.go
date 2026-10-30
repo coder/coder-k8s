@@ -75,7 +75,7 @@ func TestPoolMemberBecomesReady(t *testing.T) {
 	require.Equal(t, "WorkspaceReady", member.Status.Reason)
 	require.True(t, meta.IsStatusConditionTrue(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionReady))
 	require.True(t, member.Status.ReadyTime.Time.Equal(deadline.Add(-time.Second)))
-	require.True(t, member.Status.ReadyLastUsedAt.Time.Equal(lastUsed.Truncate(time.Second)), "the baseline is last_used_at at ready")
+	require.True(t, member.Status.ReadyLastUsedAt.Time.Equal(lastUsed.Truncate(time.Microsecond)), "the baseline is last_used_at at ready")
 
 	// Past the deadline, a ready member stays ready.
 	e.clock.SetTime(member.CreationTimestamp.Add(time.Hour))

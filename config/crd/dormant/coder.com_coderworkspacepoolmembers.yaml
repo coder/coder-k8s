@@ -334,10 +334,10 @@ spec:
                 type: string
               readyLastUsedAt:
                 description: |-
-                  ReadyLastUsedAt is the workspace's last_used_at when it became ready.
-                  A later value counts as use. It comes from use, or from a template
-                  schedule update with update_workspace_last_used_at, which looks the
-                  same.
+                  ReadyLastUsedAt is the workspace's last_used_at when it became ready,
+                  in microseconds like Coder. A later value counts as use. It comes from
+                  use, or from a template schedule update with
+                  update_workspace_last_used_at, which looks the same.
                 format: date-time
                 type: string
               readyTime:
