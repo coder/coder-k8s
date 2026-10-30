@@ -541,6 +541,18 @@ func mcpServerWithSlug(configs []codersdk.MCPServerConfig, slug string, orgID uu
 	return nil, nil
 }
 
+// mcpServerWithDisplayName returns a config with displayName from configs, or
+// nil. A person can change the slug of the config of a lost create answer, so
+// its nonce can sit under another slug.
+func mcpServerWithDisplayName(configs []codersdk.MCPServerConfig, displayName string) *codersdk.MCPServerConfig {
+	for i := range configs {
+		if configs[i].DisplayName == displayName {
+			return &configs[i]
+		}
+	}
+	return nil
+}
+
 // patchFinalizer adds or removes the cleanup finalizer with a merge patch. The
 // optimistic lock turns a concurrent finalizer change into a conflict, not a
 // lost update.

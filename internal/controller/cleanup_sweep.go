@@ -50,7 +50,7 @@ var (
 	}, []string{"kind"})
 	cleanupRecordsUnmatched = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "coder_k8s_cleanup_records_unmatched",
-		Help: "Cleanup records of gone objects that no ready control plane of their Coder deployment reaches.",
+		Help: "Cleanup records of gone objects that no ready control plane of their Coder deployment reaches, or that wait for manual cleanup because nothing proves which Coder resource is theirs.",
 	}, []string{"kind"})
 )
 
@@ -64,8 +64,8 @@ func init() {
 // without a confirmed delete in Coder (#353). It acts only through a ready
 // control plane whose current Coder deployment ID equals the record's, and
 // it deletes only the recorded provider or MCP server config ID, the provider
-// or config with the recorded nonce, or the AI Gateway keys whose names
-// start with the recorded prefix.
+// with the recorded nonce, or the AI Gateway keys whose names start with the
+// recorded prefix.
 type CleanupRecordReconciler struct {
 	client.Client
 	// APIReader reads the object of a record live, so a stale cache never
@@ -75,7 +75,7 @@ type CleanupRecordReconciler struct {
 	Clock             clock.Clock
 	Recorder          events.EventRecorder
 
-	unmatched sync.Map // types.UID -> kind of a record that no deployment reaches.
+	unmatched sync.Map // types.UID -> kind of a record that no deployment reaches, or that waits for manual cleanup.
 }
 
 // SetupWithManager watches the records in the operator namespace. It wakes a
@@ -191,22 +191,29 @@ func (r *CleanupRecordReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			record.Namespace, record.DeploymentID, kind.what, record.Kind, record.Namespace, record.Name, kind.what)
 		return ctrl.Result{RequeueAfter: cleanupUnmatchedRecheck}, nil
 	}
-	r.setUnmatched(record.UID, record.Kind, false)
 	logger := log.FromContext(ctx).WithValues("record", configMap.Name, "deploymentID", record.DeploymentID, "object", record.Kind+" "+record.Namespace+"/"+record.Name)
 	// Each matching control plane has its own operator token, so a failure
 	// through one tries the next.
-	gone, why, through := false, "", logger
+	outcome, why, through := sweepRetry, "", logger
 	for _, m := range matches {
 		through = logger.WithValues("controlPlane", types.NamespacedName{Namespace: m.controlPlane.Namespace, Name: m.controlPlane.Name})
-		if gone, why, err = kind.sweep(ctx, m.sdk, record); err != nil {
+		if outcome, why, err = kind.sweep(ctx, m.sdk, record); err != nil {
 			return ctrl.Result{}, err
-		} else if gone {
+		} else if outcome != sweepRetry {
 			break
 		}
 		through.Info("The cleanup of a deleted object in Coder failed", "why", why)
 	}
-	if !gone {
+	r.setUnmatched(record.UID, record.Kind, outcome == sweepKept)
+	switch outcome {
+	case sweepRetry:
 		return ctrl.Result{RequeueAfter: cleanupRetry}, nil
+	case sweepKept:
+		r.Recorder.Eventf(configMap, nil, corev1.EventTypeWarning, "ManualCleanupNeeded", "Sweep",
+			"Coder deployment %s holds %s, and nothing proves that deleted %s %s/%s created it, so the sweep deletes nothing. If it is a leftover of that object, delete it in Coder. Then delete this ConfigMap.",
+			record.DeploymentID, why, record.Kind, record.Namespace, record.Name)
+		through.Info("Kept the cleanup record of a deleted object for manual cleanup", "why", why)
+		return ctrl.Result{RequeueAfter: cleanupUnmatchedRecheck}, nil
 	}
 	// Coder confirmed the delete in the matching deployment (invariant 7).
 	if err := deleteCleanupRecord(ctx, r.Client, r.APIReader, r.OperatorNamespace, record.UID); err != nil {
@@ -217,11 +224,25 @@ func (r *CleanupRecordReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return ctrl.Result{}, nil
 }
 
+// sweepOutcome is what a sweep of one record found in Coder.
+type sweepOutcome int
+
+const (
+	// sweepRetry: Coder confirmed nothing. The sweep tries again.
+	sweepRetry sweepOutcome = iota
+	// sweepGone: Coder holds nothing of the record, so the record goes.
+	sweepGone
+	// sweepKept: Coder holds a resource that can be the record's, but
+	// nothing proves it. The sweep deletes nothing, and the record stays
+	// for a person.
+	sweepKept
+)
+
 // cleanupSweepKind is how a sweep handles the records of one object kind.
 type cleanupSweepKind struct {
 	object func() client.Object
 	what   string // What the object holds in Coder, for the Event.
-	sweep  func(context.Context, *codersdk.Client, *cleanupRecord) (gone bool, why string, err error)
+	sweep  func(context.Context, *codersdk.Client, *cleanupRecord) (outcome sweepOutcome, why string, err error)
 }
 
 var cleanupRecordKinds = map[string]cleanupSweepKind{
@@ -291,47 +312,47 @@ func (r *CleanupRecordReconciler) matchingControlPlanes(ctx context.Context, rec
 // a site owner, or a provider of that name without the record's nonce. It
 // deletes only the recorded ID or the provider whose display name is the
 // recorded nonce (invariant 5).
-func sweepAIProvider(ctx context.Context, sdk *codersdk.Client, record *cleanupRecord) (gone bool, why string, err error) {
+func sweepAIProvider(ctx context.Context, sdk *codersdk.Client, record *cleanupRecord) (outcome sweepOutcome, why string, err error) {
 	if record.Nonce != aiProviderNoncePrefix+string(record.UID) {
-		return false, "", fmt.Errorf("assertion failed: cleanup record of %s has nonce %q, not the nonce of its UID", record.UID, record.Nonce)
+		return sweepRetry, "", fmt.Errorf("assertion failed: cleanup record of %s has nonce %q, not the nonce of its UID", record.UID, record.Nonce)
 	}
 	if step := requireSiteOwner(ctx, sdk); step != nil {
 		// Only a site owner can trust Coder's 404 for a provider.
-		return false, step.message, nil
+		return sweepRetry, step.message, nil
 	}
 	id := record.CoderID
 	if id != "" {
 		if parsed, err := uuid.Parse(id); err != nil || parsed == uuid.Nil || parsed.String() != id {
-			return false, "", fmt.Errorf("assertion failed: cleanup record of %s has coderID %q, which is not a canonical UUID", record.UID, id)
+			return sweepRetry, "", fmt.Errorf("assertion failed: cleanup record of %s has coderID %q, which is not a canonical UUID", record.UID, id)
 		}
 	} else {
 		found, err := sdk.AIProvider(ctx, record.Name)
 		switch {
 		case isCoderResourceNotFound(err):
-			return true, "no provider of that name", nil
+			return sweepGone, "no provider of that name", nil
 		case err != nil:
-			return false, "get provider: " + coderErrorSummary(err), nil
+			return sweepRetry, "get provider: " + coderErrorSummary(err), nil
 		}
 		if err := coderAnswerFor("AI provider", record.Name, found.Name); err != nil {
-			return false, err.Error(), nil //nolint:nilerr // A wrong answer retries the sweep.
+			return sweepRetry, err.Error(), nil //nolint:nilerr // A wrong answer retries the sweep.
 		}
 		if found.DisplayName != record.Nonce || string(found.Type) != record.Type {
 			// Another provider holds the name, so no create of this object
 			// committed after the settle window. The nonce and the type
 			// prove ownership, as on the controller's own paths.
-			return true, "the provider of that name is not this object's", nil
+			return sweepGone, "the provider of that name is not this object's", nil
 		}
 		if found.ID == uuid.Nil {
-			return false, "", errors.New("assertion failed: Coder answered an AI provider without an ID")
+			return sweepRetry, "", errors.New("assertion failed: Coder answered an AI provider without an ID")
 		}
 		id = found.ID.String()
 	}
 	if err := sdk.DeleteAIProvider(ctx, id); err != nil && !isCoderResourceNotFound(err) {
-		return false, "delete provider " + id + ": " + coderErrorSummary(err), nil
+		return sweepRetry, "delete provider " + id + ": " + coderErrorSummary(err), nil
 	} else if err != nil {
-		return true, "provider " + id + " was already gone", nil //nolint:nilerr // Coder's own 404 confirms the delete.
+		return sweepGone, "provider " + id + " was already gone", nil //nolint:nilerr // Coder's own 404 confirms the delete.
 	}
-	return true, "deleted provider " + id, nil
+	return sweepGone, "deleted provider " + id, nil
 }
 
 // sweepAIGatewayKeys deletes the keys of record in Coder: every key whose
@@ -339,93 +360,91 @@ func sweepAIProvider(ctx context.Context, sdk *codersdk.Client, record *cleanupR
 // object is gone, so no serial bound applies: the settle window has passed,
 // and no create of the object can still commit. It returns gone only when a
 // LIST, read by a site owner, shows no such key.
-func sweepAIGatewayKeys(ctx context.Context, sdk *codersdk.Client, record *cleanupRecord) (gone bool, why string, err error) {
+func sweepAIGatewayKeys(ctx context.Context, sdk *codersdk.Client, record *cleanupRecord) (outcome sweepOutcome, why string, err error) {
 	prefix, err := aiGatewayKeyNamePrefix(record.UID)
 	if err != nil {
-		return false, "", err
+		return sweepRetry, "", err
 	}
 	if record.Nonce != prefix {
-		return false, "", fmt.Errorf("assertion failed: cleanup record of %s has key prefix %q, not the prefix of its UID", record.UID, record.Nonce)
+		return sweepRetry, "", fmt.Errorf("assertion failed: cleanup record of %s has key prefix %q, not the prefix of its UID", record.UID, record.Nonce)
 	}
 	if step := requireSiteOwner(ctx, sdk); step != nil {
 		// Only a site owner's LIST shows every key.
-		return false, step.message, nil
+		return sweepRetry, step.message, nil
 	}
 	deleted := 0
 	for range 2 {
 		listed, err := sdk.ListAIGatewayKeys(ctx)
 		if err != nil {
-			return false, "list AI Gateway keys: " + coderErrorSummary(err), nil
+			return sweepRetry, "list AI Gateway keys: " + coderErrorSummary(err), nil
 		}
 		own := ownAIGatewayKeys(prefix, listed)
 		if len(own) == 0 {
-			return true, fmt.Sprintf("deleted %d keys, and a list shows none left", deleted), nil
+			return sweepGone, fmt.Sprintf("deleted %d keys, and a list shows none left", deleted), nil
 		}
 		for _, k := range own {
 			// Only Coder's own 404 proves that the key is gone (#325).
 			if err := sdk.DeleteAIGatewayKey(ctx, k.ID); err != nil && !isCoderResourceNotFound(err) {
-				return false, "delete key " + k.Name + ": " + coderErrorSummary(err), nil
+				return sweepRetry, "delete key " + k.Name + ": " + coderErrorSummary(err), nil
 			}
 			deleted++
 		}
 	}
-	return false, "Coder still lists keys of the object after their delete", nil
+	return sweepRetry, "Coder still lists keys of the object after their delete", nil
 }
 
-// sweepMCPServer deletes the MCP server config of record in Coder. It
-// returns gone when Coder confirms that it holds no config of the record: a
-// delete answered with success or Coder's own 404, or a list by a site owner
-// that shows no config of the record's slug with the record's nonce. It
-// deletes only the recorded ID or the config whose display name is the
-// recorded nonce (invariant 5).
-func sweepMCPServer(ctx context.Context, sdk *codersdk.Client, record *cleanupRecord) (gone bool, why string, err error) {
+// sweepMCPServer deletes the recorded config ID in Coder (invariant 5), and
+// returns gone when Coder answers that delete with success or its own 404.
+// Without a recorded ID it deletes nothing: a person can edit the slug and
+// the display name of a config, so neither proves that this object created
+// it. It then returns gone when a list by a site owner shows no config with
+// the record's slug and none with its nonce, and kept otherwise.
+func sweepMCPServer(ctx context.Context, sdk *codersdk.Client, record *cleanupRecord) (outcome sweepOutcome, why string, err error) {
 	if record.Nonce != mcpServerNoncePrefix+string(record.UID) {
-		return false, "", fmt.Errorf("assertion failed: cleanup record of %s has nonce %q, not the nonce of its UID", record.UID, record.Nonce)
+		return sweepRetry, "", fmt.Errorf("assertion failed: cleanup record of %s has nonce %q, not the nonce of its UID", record.UID, record.Nonce)
 	}
 	orgID, err := uuid.Parse(record.Organization)
 	if err != nil || orgID == uuid.Nil || orgID.String() != record.Organization || record.Slug == "" {
-		return false, "", fmt.Errorf("assertion failed: cleanup record of %s has organization ID %q and slug %q", record.UID, record.Organization, record.Slug)
+		return sweepRetry, "", fmt.Errorf("assertion failed: cleanup record of %s has organization ID %q and slug %q", record.UID, record.Organization, record.Slug)
 	}
 	if step := mcpServerRequireSiteOwner(ctx, sdk); step != nil {
 		// Only a site owner sees every config in the list.
-		return false, step.message, nil
+		return sweepRetry, step.message, nil
 	}
-	var id uuid.UUID
-	if record.CoderID != "" {
-		if id, err = uuid.Parse(record.CoderID); err != nil || id == uuid.Nil || id.String() != record.CoderID {
-			return false, "", fmt.Errorf("assertion failed: cleanup record of %s has coderID %q, which is not a canonical UUID", record.UID, record.CoderID)
-		}
-	} else {
+	if record.CoderID == "" {
 		configs, err := sdk.MCPServerConfigs(ctx, orgID)
 		switch {
 		case isCoderResourceNotFound(err):
-			return true, "the organization is gone", nil
+			return sweepGone, "the organization is gone", nil
 		case err != nil:
-			return false, "list MCP server configs: " + coderErrorSummary(err), nil
+			return sweepRetry, "list MCP server configs: " + coderErrorSummary(err), nil
 		}
 		found, step := mcpServerWithSlug(configs, record.Slug, orgID)
-		switch {
-		case step != nil:
-			return false, step.message, nil
-		case found == nil:
-			return true, "no config with that slug", nil
-		case found.DisplayName != record.Nonce:
-			// Another config holds the slug, so no create of this object
-			// committed after the settle window.
-			return true, "the config with that slug is not this object's", nil
+		if step != nil {
+			return sweepRetry, step.message, nil
 		}
-		id = found.ID
+		if found == nil {
+			found = mcpServerWithDisplayName(configs, record.Nonce)
+		}
+		if found == nil {
+			return sweepGone, "no config with that slug or display name", nil
+		}
+		return sweepKept, fmt.Sprintf("MCP server config %s (slug %q) in organization %s", found.ID, found.Slug, orgID), nil
+	}
+	id, err := uuid.Parse(record.CoderID)
+	if err != nil || id == uuid.Nil || id.String() != record.CoderID {
+		return sweepRetry, "", fmt.Errorf("assertion failed: cleanup record of %s has coderID %q, which is not a canonical UUID", record.UID, record.CoderID)
 	}
 	if err := sdk.DeleteMCPServerConfig(ctx, orgID, id); err != nil && !isCoderResourceNotFound(err) {
-		return false, "delete MCP server config " + id.String() + ": " + coderErrorSummary(err), nil
+		return sweepRetry, "delete MCP server config " + id.String() + ": " + coderErrorSummary(err), nil
 	} else if err != nil {
-		return true, "MCP server config " + id.String() + " was already gone", nil //nolint:nilerr // Coder's own 404 confirms the delete.
+		return sweepGone, "MCP server config " + id.String() + " was already gone", nil //nolint:nilerr // Coder's own 404 confirms the delete.
 	}
-	return true, "deleted MCP server config " + id.String(), nil
+	return sweepGone, "deleted MCP server config " + id.String(), nil
 }
 
 // setUnmatched keeps the unmatched gauge equal to the records that no
-// deployment reaches.
+// deployment reaches or that wait for manual cleanup.
 func (r *CleanupRecordReconciler) setUnmatched(uid types.UID, kind string, unmatched bool) {
 	if unmatched {
 		r.unmatched.Store(uid, kind)

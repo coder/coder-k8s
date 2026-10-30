@@ -123,7 +123,12 @@ func (r *CoderMCPServerReconciler) deleteStep(ctx context.Context, server *coder
 		}
 		recordedID = record.CoderID
 	}
-	step, err = deleteMCPServerInCoder(ctx, sdk, server, orgID, recordedID)
+	unproven, step, err := deleteMCPServerInCoder(ctx, sdk, server, orgID, recordedID)
+	if err == nil && step == nil && unproven {
+		// A config that can be this object's stays in Coder, so the record
+		// stays for a sweep, which reports it for manual cleanup (#353).
+		return true, nil, nil
+	}
 	if err == nil && step == nil {
 		// Coder confirmed that it holds no config of this object. Only then
 		// does the record go (#353 invariant 7).
@@ -144,17 +149,19 @@ func (r *CoderMCPServerReconciler) deleteStep(ctx context.Context, server *coder
 }
 
 // deleteMCPServerInCoder deletes the config of this object in Coder and
-// returns nil when Coder holds none. Without status.configID it deletes
+// returns a nil step when it is done. Without status.configID it deletes
 // recordedID, the config ID of the cleanup record: a failed status write
 // after the create can leave the ID only there. With only a create marker, a
 // read decides first: only the nonce proves that the config is this
-// object's. Only Coder's own 404 proves absence (#337).
-func deleteMCPServerInCoder(ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, orgID uuid.UUID, recordedID string) (*mcpServerStep, error) {
+// object's. Only Coder's own 404 proves absence (#337). unproven reports a
+// config that it leaves although it can be this object's: another config
+// with the slug, or a config with the nonce under another slug.
+func deleteMCPServerInCoder(ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, orgID uuid.UUID, recordedID string) (unproven bool, step *mcpServerStep, err error) {
 	var id uuid.UUID
 	if configID := cmp.Or(server.Status.ConfigID, recordedID); configID != "" {
 		parsed, err := uuid.Parse(configID)
 		if err != nil || parsed == uuid.Nil || parsed.String() != configID {
-			return nil, fmt.Errorf("assertion failed: MCP server %s/%s has config ID %q, which is not a canonical UUID", server.Namespace, server.Name, configID)
+			return false, nil, fmt.Errorf("assertion failed: MCP server %s/%s has config ID %q, which is not a canonical UUID", server.Namespace, server.Name, configID)
 		}
 		id = parsed
 	} else {
@@ -162,7 +169,7 @@ func deleteMCPServerInCoder(ctx context.Context, sdk *codersdk.Client, server *c
 		if err != nil && !isCoderResourceNotFound(err) {
 			step := mcpServerListFailed(err)
 			step.requeue = mcpServerDeletePoll
-			return step, nil
+			return false, step, nil
 		}
 		// Coder's own 404 means that the pinned organization is gone, and no
 		// config of it can be reached any more (#378).
@@ -170,32 +177,32 @@ func deleteMCPServerInCoder(ctx context.Context, sdk *codersdk.Client, server *c
 		switch {
 		case step != nil:
 			step.requeue = max(step.requeue, mcpServerDeletePoll)
-			return step, nil
+			return false, step, nil
 		case found == nil:
 			// A missing config proves absence only for a site owner. A role
 			// change in Coder has no watch, so the wait uses the delete poll.
 			if step := mcpServerRequireSiteOwner(ctx, sdk); step != nil {
 				step.requeue = mcpServerDeletePoll
-				return step, nil
+				return false, step, nil
 			}
 			if wait := mcpServerCreateSettle - time.Since(server.Status.CreateAttemptTime.Time); wait > 0 {
 				// A create sent moments ago can still commit after this read.
-				return mcpServerWait(wait, "ConfirmingCreate",
+				return false, mcpServerWait(wait, "ConfirmingCreate",
 					"MCP server config %s is not in Coder, but its create request was sent at %s and can still commit. The controller reads again before it releases the finalizer.",
 					server.Spec.Slug, server.Status.CreateAttemptTime.UTC().Format(time.RFC3339)), nil
 			}
-			return nil, nil
+			return mcpServerWithDisplayName(configs, mcpServerNonce(server)) != nil, nil, nil
 		case found.DisplayName != mcpServerNonce(server):
-			// Someone else's config holds the slug, so no create of this
-			// object committed. The controller never deletes it.
-			return nil, nil
+			// Someone else's config holds the slug, or a person renamed this
+			// object's config. The controller never deletes it.
+			return true, nil, nil
 		}
 		id = found.ID
 	}
 	if err := sdk.DeleteMCPServerConfig(ctx, orgID, id); err != nil && !isCoderResourceNotFound(err) {
-		return mcpServerWait(mcpServerDeletePoll, "CoderUnavailable", "delete MCP server config %s (ID %s): %s", server.Spec.Slug, id, coderErrorSummary(err)), nil
+		return false, mcpServerWait(mcpServerDeletePoll, "CoderUnavailable", "delete MCP server config %s (ID %s): %s", server.Spec.Slug, id, coderErrorSummary(err)), nil
 	}
-	return nil, nil
+	return false, nil, nil
 }
 
 // releaseWithoutDelete logs what can stay in Coder, because nothing can
