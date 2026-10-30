@@ -1,6 +1,7 @@
 package controller_test
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -73,6 +74,33 @@ func TestPoolMemberTemplateWideWrite(t *testing.T) {
 	e.fake.markUsed(secondWorkspace, started.Add(12*time.Minute))
 	requireUsed(t, e.reconcileMember(t, second, 1), true)
 	requireUsed(t, e.reconcileMember(t, first, 1), false)
+}
+
+// TestPoolMemberTemplateWideWriteNeedsWholeList (#349): no workspace below
+// the value proves something only for a list of the whole template. A list
+// without the member's own workspace, or shorter than its count, is no sign
+// of a template-wide write.
+func TestPoolMemberTemplateWideWriteNeedsWholeList(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	started := e.clock.Now()
+	first, firstWorkspace := e.readyMember(t)
+	second, _ := e.readyMember(t)
+	e.clock.SetTime(started.Add(10 * time.Minute))
+	e.fake.touchTemplateWorkspaces(e.tplID, e.clock.Now())
+	e.fake.failNext(routeWorkspaces, fakeFault{Rewrite: func(answer any) any {
+		res := answer.(codersdk.WorkspacesResponse)
+		res.Workspaces = slices.DeleteFunc(res.Workspaces, func(w codersdk.Workspace) bool { return w.ID == firstWorkspace })
+		res.Count = len(res.Workspaces)
+		return res
+	}})
+	requireUsed(t, e.reconcileMember(t, first, 1), true)
+	e.fake.failNext(routeWorkspaces, fakeFault{Rewrite: func(answer any) any {
+		res := answer.(codersdk.WorkspacesResponse)
+		res.Count++
+		return res
+	}})
+	requireUsed(t, e.reconcileMember(t, second, 1), true)
 }
 
 // TestPoolMemberTemplateWideWriteWithoutSibling (#349): in a one-member pool

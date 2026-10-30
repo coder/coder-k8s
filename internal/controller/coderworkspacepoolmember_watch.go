@@ -19,9 +19,11 @@ const (
 	// poolMemberAgentLostAfter is how long an agent of a ready unclaimed
 	// workspace can stay not ready before the member fails.
 	poolMemberAgentLostAfter = 5 * time.Minute
-	// poolMemberTemplateWriteWindow: a last_used_at this close to the
-	// template's updated_at comes from a template schedule update.
-	poolMemberTemplateWriteWindow = 5 * time.Second
+	// poolMemberTemplateWriteWindow: a template schedule update sets the
+	// template's updated_at, then last_used_at, in one transaction
+	// (EnterpriseTemplateScheduleStore.Set). So the write comes at most this
+	// long after updated_at.
+	poolMemberTemplateWriteWindow = time.Second
 )
 
 // watchReady runs the rules of a ready member on one read of its workspace:
@@ -92,22 +94,13 @@ func (r *CoderWorkspacePoolMemberReconciler) checkPoolMemberUse(
 	if err := coderAnswerFor("template", member.Spec.TemplateID, template.ID.String()); err != nil {
 		return nil, err
 	}
-	// A template schedule update sets one last_used_at on every workspace of
-	// the template, and moves the template's updated_at (plan 3.1 item 7).
-	templateWide := lastUsed.Sub(template.UpdatedAt).Abs() <= poolMemberTemplateWriteWindow
-	if !templateWide {
-		// The template can change again after the write. Another unclaimed
-		// member of the pool that moved its baseline to the same value
-		// shows the same write. This member's own baseline is earlier, so
-		// it never matches.
-		members := &coderv1alpha1.CoderWorkspacePoolMemberList{}
-		label := coderv1alpha1.CoderWorkspacePoolSelectorLabel
-		if err := r.List(ctx, members, client.InNamespace(member.Namespace), client.MatchingLabels{label: member.Labels[label]}); err != nil {
-			return nil, fmt.Errorf("list members of pool %s/%s: %w", member.Namespace, member.Spec.PoolName, err)
-		}
-		templateWide = slices.ContainsFunc(members.Items, func(m coderv1alpha1.CoderWorkspacePoolMember) bool {
-			return m.Spec.ClaimRef == nil && m.Status.ReadyLastUsedAt != nil && m.Status.ReadyLastUsedAt.Time.Equal(lastUsed)
-		})
+	list, err := sdk.Workspaces(ctx, codersdk.WorkspaceFilter{Template: template.Name, Organization: template.OrganizationID.String()})
+	if err != nil {
+		return coderStepUnavailable("list workspaces of the template", err), nil
+	}
+	templateWide, err := r.templateWideWrite(ctx, member, workspace, template, list)
+	if err != nil {
+		return nil, err
 	}
 	if templateWide {
 		member.Status.ReadyLastUsedAt = &metav1.Time{Time: lastUsed}
@@ -116,6 +109,64 @@ func (r *CoderWorkspacePoolMemberReconciler) checkPoolMemberUse(
 	step := coderWait("Used", "Someone used workspace %s at %s without a claim. The pool releases it.", member.Status.WorkspaceName, lastUsed.UTC().Format(time.RFC3339))
 	setPoolMemberCondition(member, now, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed, metav1.ConditionTrue, step.reason, step.message)
 	return step, nil
+}
+
+// templateWideWrite reports whether the workspace's new last_used_at comes
+// from a template schedule update with update_workspace_last_used_at, which
+// writes one value to every workspace of the template (plan 3.1 item 7). Use
+// can look the same: a usage flush writes one value to every workspace used
+// since the last flush (coderd/workspacestats/tracker.go). So it is a
+// template-wide write only when no workspace of the template is below the
+// value, as an idle one is after use, and a sign of the write remains that
+// this member's use cannot leave:
+//   - the template's updated_at, which the update moves just before;
+//   - a stopped workspace of the template with the same value;
+//   - an unclaimed member of the pool that moved its baseline to this value.
+//
+// What remains: use with no workspace of the template below it still counts
+// as a template-wide write in the second after a template edit, or in the
+// same flush as a workspace that stopped in the minute before, or as a
+// member that someone used before it was ready. No sign moves with later
+// flushes, so continued use is Used at the next flush, about a minute later:
+// only one short use can be missed. A template-wide write without a sign is
+// Used: the pool releases the member, and one warm workspace leaks.
+func (r *CoderWorkspacePoolMemberReconciler) templateWideWrite(
+	ctx context.Context, member *coderv1alpha1.CoderWorkspacePoolMember, workspace codersdk.Workspace, template codersdk.Template, list codersdk.WorkspacesResponse,
+) (bool, error) {
+	at := workspace.LastUsedAt
+	listed, stopped := false, false
+	same := map[string]bool{} // IDs of the other workspaces with this value.
+	for _, w := range list.Workspaces {
+		switch {
+		case w.TemplateID != template.ID:
+		case w.ID == workspace.ID:
+			listed = true
+		case w.LastUsedAt.Before(at):
+			return false, nil
+		case w.LastUsedAt.Equal(at):
+			same[w.ID.String()] = true
+			stopped = stopped || (w.LatestBuild.Transition == codersdk.WorkspaceTransitionStop && w.LatestBuild.Job.Status == codersdk.ProvisionerJobSucceeded)
+		}
+	}
+	if !listed || list.Count != len(list.Workspaces) {
+		return false, nil // The list does not show the whole template.
+	}
+	if since := at.Sub(template.UpdatedAt); stopped || (since >= 0 && since <= poolMemberTemplateWriteWindow) {
+		return true, nil
+	}
+	if len(same) == 0 {
+		return false, nil
+	}
+	members := &coderv1alpha1.CoderWorkspacePoolMemberList{}
+	label := coderv1alpha1.CoderWorkspacePoolSelectorLabel
+	if err := r.List(ctx, members, client.InNamespace(member.Namespace), client.MatchingLabels{label: member.Labels[label]}); err != nil {
+		return false, fmt.Errorf("list members of pool %s/%s: %w", member.Namespace, member.Spec.PoolName, err)
+	}
+	// Status keeps whole seconds, so Coder's value must match too.
+	return slices.ContainsFunc(members.Items, func(m coderv1alpha1.CoderWorkspacePoolMember) bool {
+		return m.Spec.ClaimRef == nil && same[m.Status.WorkspaceID] &&
+			m.Status.ReadyLastUsedAt != nil && m.Status.ReadyLastUsedAt.Time.Equal(at.Truncate(time.Second))
+	}), nil
 }
 
 // poolMemberAgentStep applies watch rule 3 to the start build: an agent that
