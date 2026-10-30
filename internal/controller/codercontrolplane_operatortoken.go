@@ -11,6 +11,8 @@ import (
 	"unicode"
 
 	"k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/client-go/util/retry"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
@@ -40,16 +42,28 @@ func (r *CoderControlPlaneReconciler) recordOperatorToken(
 	nextStatus.OperatorTokenSecretRef = ref
 	nextStatus.OperatorTokenDatabaseHash = databaseHash
 
-	stored := coderControlPlane.Status.DeepCopy()
-	if equality.Semantic.DeepEqual(stored.OperatorTokenSecretRef, ref) && stored.OperatorTokenDatabaseHash == databaseHash {
-		return nil
+	// Check the API server, not the cache: a cached status can still show a
+	// record that a delete already removed.
+	statusReader := r.APIReader
+	if statusReader == nil {
+		statusReader = r.Client
 	}
-	recorded := stored.DeepCopy()
-	recorded.OperatorTokenSecretRef = cloneSecretKeySelector(ref)
-	recorded.OperatorTokenDatabaseHash = databaseHash
-	// Generation 0 skips the stale-generation guard: the record must be stored
-	// before the create even when the spec changed meanwhile.
-	if err := r.reconcileStatusForGeneration(ctx, coderControlPlane, *stored, *recorded, 0); err != nil {
+	key := client.ObjectKeyFromObject(coderControlPlane)
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &coderv1alpha1.CoderControlPlane{}
+		if err := statusReader.Get(ctx, key, latest); err != nil {
+			return err
+		}
+		if latest.UID != coderControlPlane.UID {
+			return fmt.Errorf("control plane %s has UID %q, not %q", key, latest.UID, coderControlPlane.UID)
+		}
+		if equality.Semantic.DeepEqual(latest.Status.OperatorTokenSecretRef, ref) && latest.Status.OperatorTokenDatabaseHash == databaseHash {
+			return nil
+		}
+		latest.Status.OperatorTokenSecretRef = cloneSecretKeySelector(ref)
+		latest.Status.OperatorTokenDatabaseHash = databaseHash
+		return r.Status().Update(ctx, latest)
+	}); err != nil {
 		return fmt.Errorf("record operator token before provisioning: %w", err)
 	}
 	return nil
@@ -147,6 +161,17 @@ func keywordValueAsURL(dsn string) *url.URL {
 	}
 	options, ok := parseKeywordValue(dsn)
 	if !ok || len(options) == 0 {
+		return nil
+	}
+	// A URL cannot hold an empty value: lib/pq drops it and takes the
+	// default, for example PGHOST, which an empty key=value option overrides.
+	// A host with ":" and no port reads as host and port in the URL.
+	for key, value := range options {
+		if value == "" && key != "password" {
+			return nil
+		}
+	}
+	if _, hasPort := options["port"]; !hasPort && strings.Contains(options["host"], ":") {
 		return nil
 	}
 	parsed := &url.URL{Scheme: "postgres", Host: options["host"]}
