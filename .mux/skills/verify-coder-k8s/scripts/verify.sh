@@ -101,7 +101,9 @@ load_run() {
 	require_run_dir
 	[[ -f ${RUN_DIR}/run.env ]] || die "no run.env in ${RUN_DIR}: run launch first"
 	private_dir "${RUN_DIR}"
-	[[ -O ${RUN_DIR}/run.env ]] || die "refusing ${RUN_DIR}/run.env: another user owns it"
+	local env=${RUN_DIR}/run.env
+	[[ -f ${env} && ! -L ${env} && -O ${env} && $((8#$(stat -c %a -- "${env}") & 8#022)) == 0 ]] ||
+		die "refusing ${env}: it must be a regular file that this user owns and nobody else can write"
 	# shellcheck disable=SC1091
 	source "${RUN_DIR}/run.env"
 	[[ -n ${RUN_ID:-} && -n ${CLUSTER:-} ]] || die "assertion failed: run.env lacks RUN_ID or CLUSTER"
@@ -393,23 +395,23 @@ cmd_coder_api() {
 		[[ -n ${token} ]] || die "assertion failed: operator token is empty"
 		printf 'Coder-Session-Token: %s\n' "${token}" >"${SECRETS}/coder.hdr"
 	fi
-	local pf_log port="" pid i
-	pf_log=$(mktemp "${SECRETS}/port-forward.XXXXXX")
-	kw -n "${NS}" port-forward --address 127.0.0.1 svc/coder :80 >"${pf_log}" 2>&1 &
-	pid=$!
-	# shellcheck disable=SC2064
-	trap "kill ${pid} 2>/dev/null || true; rm -f '${pf_log}'" EXIT
+	local port="" i
+	# Globals, not locals: the EXIT trap runs after this function returns.
+	pf_log=$(mktemp "${SECRETS}/port-forward.XXXXXX") resp=""
+	# kubectl itself, not the kw function: $! of a backgrounded function is a
+	# subshell, and killing it leaves kubectl running.
+	kubectl --kubeconfig "${KCFG}" --context "${CTX}" -n "${NS}" port-forward --address 127.0.0.1 svc/coder :80 >"${pf_log}" 2>&1 &
+	pf_pid=$!
+	trap 'kill "${pf_pid}" 2>/dev/null || true; rm -f -- "${pf_log}" ${resp:+"${resp}"}' EXIT
 	for i in $(seq 1 100); do
 		port=$(sed -nE 's/^Forwarding from 127\.0\.0\.1:([0-9]+) .*/\1/p' "${pf_log}" | head -1)
 		[[ -n ${port} ]] && break
-		kill -0 "${pid}" 2>/dev/null || die "port-forward to svc/coder exited: $(cat "${pf_log}")"
+		kill -0 "${pf_pid}" 2>/dev/null || die "port-forward to svc/coder exited: $(cat "${pf_log}")"
 		sleep 0.1
 	done
 	[[ -n ${port} ]] || die "port-forward to svc/coder did not start in 10s (try ${i})"
-	local resp code
+	local code
 	resp=$(mktemp "${SECRETS}/response.XXXXXX")
-	# shellcheck disable=SC2064
-	trap "kill ${pid} 2>/dev/null || true; rm -f '${pf_log}' '${resp}'" EXIT
 	local args=(-sS --max-time 60 -o "${resp}" -w '%{http_code}' -X "${method}"
 		-H @"${SECRETS}/coder.hdr" -H 'Accept: application/json')
 	[[ -z ${body} ]] || args+=(-H 'Content-Type: application/json' --data @"${body}")
