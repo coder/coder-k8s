@@ -3,7 +3,6 @@ package controller_test
 import (
 	"encoding/json"
 	"net/http"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -20,7 +19,6 @@ const (
 	routeUpdateWorkspaceACL = "updateWorkspaceACL"
 	routeSharingSettings    = "workspaceSharingSettings"
 	routeVersionPresets     = "templateVersionPresets"
-	routeWorkspaces         = "workspaces"
 )
 
 // fakePoolState is the fake's state for the routes that CoderWorkspacePool
@@ -38,7 +36,6 @@ func (f *fakeCoder) registerPoolRoutes(mux *http.ServeMux) {
 		presets: map[uuid.UUID][]codersdk.Preset{}, maxDeadline: map[uuid.UUID]time.Duration{},
 		acls: map[uuid.UUID]map[uuid.UUID]codersdk.WorkspaceRole{}, sharing: map[uuid.UUID]codersdk.ShareableWorkspaceOwners{},
 	}
-	f.route(mux, "GET /api/v2/workspaces", routeWorkspaces, f.listWorkspaces)
 	f.route(mux, "PUT /api/v2/workspaces/{id}/extend", routeExtendWorkspace, f.extendWorkspace)
 	f.route(mux, "GET /api/v2/workspaces/{id}/acl", routeWorkspaceACL, f.getWorkspaceACL)
 	f.route(mux, "PATCH /api/v2/workspaces/{id}/acl", routeUpdateWorkspaceACL, f.patchWorkspaceACL)
@@ -119,27 +116,6 @@ func (f *fakeCoder) editTemplate(templateID uuid.UUID, at time.Time) {
 	require.True(f.t, ok, "assertion failed: unknown template %s", templateID)
 	tpl.UpdatedAt = at
 	f.templates[templateID] = tpl
-}
-
-// addTemplateWorkspace adds a workspace of the version's template outside
-// any pool, for example a user's own workspace. Its only build is a
-// succeeded start or stop, and it was last used at lastUsed.
-func (f *fakeCoder) addTemplateWorkspace(versionID uuid.UUID, transition codersdk.WorkspaceTransition, lastUsed time.Time) uuid.UUID {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	v, ok := f.versions[versionID]
-	require.True(f.t, ok, "assertion failed: unknown version %s", versionID)
-	tpl, owner, now := f.templates[*v.TemplateID], f.users[f.operatorID], f.now()
-	fw := &fakeWorkspace{workspace: codersdk.Workspace{
-		ID: uuid.New(), CreatedAt: now, UpdatedAt: now, OwnerID: owner.ID, OwnerName: owner.Username,
-		OrganizationID: tpl.OrganizationID, OrganizationName: tpl.OrganizationName,
-		TemplateID: tpl.ID, TemplateName: tpl.Name, AutomaticUpdates: codersdk.AutomaticUpdatesNever, LastUsedAt: lastUsed,
-	}}
-	fw.workspace.Name = "dev-" + fw.workspace.ID.String()[:8]
-	f.appendBuild(fw, versionID, transition)
-	f.setJob(&fw.builds[0], codersdk.ProvisionerJobSucceeded)
-	f.workspaces[fw.workspace.ID] = fw
-	return fw.workspace.ID
 }
 
 // setDormant sets dormant_at and deleting_at. Leaving dormancy (nil
@@ -248,50 +224,6 @@ func (f *fakeCoder) writableWorkspace(r *http.Request, aclWrite bool) (*fakeWork
 		return nil, status, resp
 	}
 	return fw, 0, nil
-}
-
-// fakeWorkspaceQueryTerm is one term of a workspace search query as codersdk
-// sends it: key:"value".
-var fakeWorkspaceQueryTerm = regexp.MustCompile(`^([a-z_]+):"([^"]*)"$`)
-
-// listWorkspaces mirrors the workspaces handler without a limit for the terms
-// the controllers send: template (a template name in any organization) and
-// organization (an ID, or a name that must exist). Coder lowercases the
-// query, answers live workspaces only, and counts every match.
-func (f *fakeCoder) listWorkspaces(r *http.Request) (int, any) {
-	query := r.URL.Query()
-	if query.Has("limit") || query.Has("offset") || query.Has("after_id") {
-		return fakeError(http.StatusBadRequest, "fake coder does not model workspace pages")
-	}
-	templateName, orgID := "", uuid.Nil
-	for _, term := range strings.Fields(strings.ToLower(query.Get("q"))) {
-		m := fakeWorkspaceQueryTerm.FindStringSubmatch(term)
-		switch {
-		case m != nil && m[1] == "template":
-			templateName = m[2]
-		case m != nil && m[1] == "organization":
-			id, err := uuid.Parse(m[2])
-			if err != nil {
-				o, ok := f.orgByIdent(m[2])
-				if !ok {
-					return fakeError(http.StatusBadRequest, "Invalid workspace search query.")
-				}
-				id = o.ID
-			}
-			orgID = id
-		default:
-			return fakeError(http.StatusBadRequest, "fake coder does not model the workspace query term %q", term)
-		}
-	}
-	res := codersdk.WorkspacesResponse{Workspaces: []codersdk.Workspace{}}
-	for _, fw := range f.workspaces {
-		if !fw.deleted && (templateName == "" || strings.EqualFold(f.templates[fw.workspace.TemplateID].Name, templateName)) &&
-			(orgID == uuid.Nil || fw.workspace.OrganizationID == orgID) {
-			res.Workspaces = append(res.Workspaces, fw.view())
-		}
-	}
-	res.Count = len(res.Workspaces)
-	return http.StatusOK, res
 }
 
 // extendWorkspace mirrors putExtendWorkspace.

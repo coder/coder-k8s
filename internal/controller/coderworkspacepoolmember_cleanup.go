@@ -115,14 +115,14 @@ func (r *CoderWorkspacePoolMemberReconciler) cleanupStep(
 		// workspace is better than lost work.
 		used := meta.IsStatusConditionTrue(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed)
 		if !used && member.Status.ReadyLastUsedAt != nil {
-			step, err := r.checkPoolMemberUse(ctx, sdk, member, workspace, now)
-			if err != nil || (step != nil && step.reason != "Used") {
-				return step, templateTestUnavailablePoll, false, err
+			step, err := checkPoolMemberUse(member, workspace, now)
+			if err != nil {
+				return nil, 0, false, err
 			}
 			used = step != nil
 		}
 		if used {
-			log.FromContext(ctx).Info("Someone used the workspace without a claim, so the controller releases the pool member without deleting it",
+			log.FromContext(ctx).Info("Someone may have used the workspace without a claim, so the controller releases the pool member without deleting it",
 				"workspaceID", member.Status.WorkspaceID, "workspaceName", member.Status.WorkspaceName)
 			return nil, 0, true, nil
 		}

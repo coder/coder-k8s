@@ -2,9 +2,7 @@ package controller_test
 
 import (
 	"context"
-	"maps"
 	"net/http"
-	"slices"
 	"testing"
 	"time"
 
@@ -252,42 +250,4 @@ func TestFakeCoderPoolLastUsed(t *testing.T) {
 	ws = read(a.ID)
 	require.Nil(t, ws.DormantAt)
 	require.True(t, ws.LastUsedAt.After(touched), "leaving dormancy sets last_used_at to now")
-}
-
-func TestFakeCoderPoolListWorkspaces(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	fx := newFakeCoderFixture(t)
-	list := func(filter codersdk.WorkspaceFilter) map[uuid.UUID]codersdk.Workspace {
-		t.Helper()
-		res, err := fx.client.Workspaces(ctx, filter)
-		require.NoError(t, err)
-		require.Len(t, res.Workspaces, res.Count, "no limit: the count is the answer")
-		byID := map[uuid.UUID]codersdk.Workspace{}
-		for _, ws := range res.Workspaces {
-			byID[ws.ID] = ws
-		}
-		return byID
-	}
-
-	running := fx.startedWorkspace(t, "kwp-a")
-	used := time.Now().Add(-time.Hour)
-	stopped := fx.fake.addTemplateWorkspace(fx.versionID, codersdk.WorkspaceTransitionStop, used)
-	fx.fake.markDeleted(fx.startedWorkspace(t, "kwp-deleted").ID)
-	otherOrg := fx.fake.addOrganization("other")
-	otherVersion := fx.fake.addVersion(fx.fake.addTemplate(otherOrg, "docker"), "v1", codersdk.ProvisionerJobSucceeded)
-	fx.fake.addTemplateWorkspace(otherVersion, codersdk.WorkspaceTransitionStart, used)
-
-	ws := list(codersdk.WorkspaceFilter{Template: "Docker", Organization: fx.orgID.String()})
-	require.ElementsMatch(t, []uuid.UUID{running.ID, stopped}, slices.Collect(maps.Keys(ws)), "live workspaces of the template only")
-	require.True(t, used.Equal(ws[stopped].LastUsedAt), "last_used_at keeps its sub-second part")
-	require.Equal(t, codersdk.WorkspaceTransitionStop, ws[stopped].LatestBuild.Transition)
-	require.Equal(t, codersdk.ProvisionerJobSucceeded, ws[stopped].LatestBuild.Job.Status)
-	require.Len(t, list(codersdk.WorkspaceFilter{Template: "docker"}), 3, "a template name matches in every organization")
-	require.Len(t, list(codersdk.WorkspaceFilter{Template: "docker", Organization: "Other"}), 1)
-
-	_, err := fx.client.Workspaces(ctx, codersdk.WorkspaceFilter{Template: "docker", Organization: "missing"})
-	requireCoderStatus(t, err, http.StatusBadRequest)
-	_, err = fx.client.Workspaces(ctx, codersdk.WorkspaceFilter{Template: "docker", Limit: 1})
-	requireCoderStatus(t, err, http.StatusBadRequest)
 }

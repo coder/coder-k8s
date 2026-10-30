@@ -23,8 +23,9 @@ const (
 
 	// CoderWorkspacePoolMemberConditionReady is True when the workspace is ready.
 	CoderWorkspacePoolMemberConditionReady = "Ready"
-	// CoderWorkspacePoolMemberConditionUsed is True when someone used the
-	// workspace without a claim. The pool then releases the member.
+	// CoderWorkspacePoolMemberConditionUsed is True when someone may have
+	// used the workspace without a claim: its last_used_at moved past the
+	// value at ready. The pool then releases the member.
 	CoderWorkspacePoolMemberConditionUsed = "Used"
 	// CoderWorkspacePoolMemberConditionWorkspaceDeleted reports whether the
 	// member's workspace is gone, with the CoderTemplateTest reasons.
@@ -158,7 +159,9 @@ type CoderWorkspacePoolMemberStatus struct {
 	// +optional
 	ReadyTime *metav1.Time `json:"readyTime,omitempty"`
 	// ReadyLastUsedAt is the workspace's last_used_at when it became ready.
-	// A later value means that someone used the workspace.
+	// A later value counts as use. It comes from use, or from a template
+	// schedule update with update_workspace_last_used_at, which looks the
+	// same.
 	// +optional
 	ReadyLastUsedAt *metav1.Time `json:"readyLastUsedAt,omitempty"`
 	// LastExtendTime is when the controller last extended the autostop

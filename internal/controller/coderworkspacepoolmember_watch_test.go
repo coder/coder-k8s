@@ -1,7 +1,6 @@
 package controller_test
 
 import (
-	"slices"
 	"testing"
 	"time"
 
@@ -98,110 +97,6 @@ func TestPoolMemberUseWithNewReadySiblings(t *testing.T) {
 	e.deleteMember(t, key)
 	require.Nil(t, e.reconcileMember(t, key, 1), "the member goes without deleting its workspace")
 	require.Zero(t, e.fake.requestCount(routeCreateBuild), "no delete build")
-}
-
-// TestPoolMemberTemplateWideWriteNeedsWholeList (#349): no workspace below
-// the value proves something only for a list of the whole template. A list
-// without the member's own workspace, or shorter than its count, is no sign
-// of a template-wide write.
-func TestPoolMemberTemplateWideWriteNeedsWholeList(t *testing.T) {
-	t.Parallel()
-	e := newPoolMemberEnv(t)
-	started := e.clock.Now()
-	first, firstWorkspace := e.readyMember(t)
-	second, _ := e.readyMember(t)
-	e.clock.SetTime(started.Add(10 * time.Minute))
-	e.fake.touchTemplateWorkspaces(e.tplID, e.clock.Now())
-	e.fake.failNext(routeWorkspaces, fakeFault{Rewrite: func(answer any) any {
-		res := answer.(codersdk.WorkspacesResponse)
-		res.Workspaces = slices.DeleteFunc(res.Workspaces, func(w codersdk.Workspace) bool { return w.ID == firstWorkspace })
-		res.Count = len(res.Workspaces)
-		return res
-	}})
-	requireUsed(t, e.reconcileMember(t, first, 1), true)
-	e.fake.failNext(routeWorkspaces, fakeFault{Rewrite: func(answer any) any {
-		res := answer.(codersdk.WorkspacesResponse)
-		res.Count++
-		return res
-	}})
-	requireUsed(t, e.reconcileMember(t, second, 1), true)
-}
-
-// TestPoolMemberUseNearTemplateEdit (#349): every template edit moves the
-// template's updated_at, for example a version promote. Use right after an
-// edit is still use when an idle workspace of the template stays below it,
-// or when it is not in the second after the edit.
-func TestPoolMemberUseNearTemplateEdit(t *testing.T) {
-	t.Parallel()
-	e := newPoolMemberEnv(t)
-	started := e.clock.Now()
-	key, workspaceID := e.readyMember(t)
-	e.readyMember(t)
-	edited := started.Add(10 * time.Minute)
-	e.fake.editTemplate(e.tplID, edited)
-	e.fake.markUsed(workspaceID, edited.Add(500*time.Millisecond))
-	e.clock.SetTime(started.Add(11 * time.Minute))
-	requireUsed(t, e.reconcileMember(t, key, 1), true)
-
-	// Without another workspace of the template, only the time tells.
-	for _, offset := range []time.Duration{-2 * time.Second, 2 * time.Second} {
-		e := newPoolMemberEnv(t)
-		started := e.clock.Now()
-		key, workspaceID := e.readyMember(t)
-		edited := started.Add(10 * time.Minute)
-		e.fake.editTemplate(e.tplID, edited)
-		e.fake.markUsed(workspaceID, edited.Add(offset))
-		e.clock.SetTime(started.Add(11 * time.Minute))
-		requireUsed(t, e.reconcileMember(t, key, 1), true)
-	}
-}
-
-// TestPoolMemberUseSharedWithOtherWorkspace (#349): Coder's usage tracker
-// writes one value to every workspace used since its last flush, and status
-// keeps whole seconds. Another workspace with the same value is no witness
-// of a template-wide write just for that.
-func TestPoolMemberUseSharedWithOtherWorkspace(t *testing.T) {
-	t.Parallel()
-	// A sibling that became ready later in the second of the use. A running
-	// workspace shares the flush, so the sibling is not below the value.
-	e := newPoolMemberEnv(t)
-	started := e.clock.Now()
-	key, workspaceID := e.readyMember(t)
-	flush := started.Add(10*time.Minute + 300*time.Millisecond)
-	e.fake.addTemplateWorkspace(e.v1, codersdk.WorkspaceTransitionStart, flush)
-	e.fake.markUsed(workspaceID, flush)
-	e.clock.SetTime(started.Add(10*time.Minute + 600*time.Millisecond))
-	e.readyMember(t)
-	e.clock.SetTime(started.Add(11 * time.Minute))
-	requireUsed(t, e.reconcileMember(t, key, 1), true)
-
-	// A sibling whose baseline came from the same flush: someone used it
-	// before it was ready. An idle member stays below the flush.
-	e = newPoolMemberEnv(t)
-	started = e.clock.Now()
-	key, workspaceID = e.readyMember(t)
-	e.readyMember(t)
-	siblingKey, siblingWorkspace, siblingBuild := e.createdMember(t, nil)
-	flush = started.Add(10*time.Minute + 300*time.Millisecond)
-	e.fake.markUsed(siblingWorkspace, flush)
-	e.fake.markUsed(workspaceID, flush)
-	e.fake.setBuildJob(siblingBuild, codersdk.ProvisionerJobSucceeded)
-	e.fake.setAgents(siblingBuild, agent("main", codersdk.WorkspaceAgentConnected, codersdk.WorkspaceAgentLifecycleReady))
-	require.True(t, e.reconcileMember(t, siblingKey, 1).Status.ReadyLastUsedAt.Time.Equal(flush.Truncate(time.Second)))
-	e.clock.SetTime(started.Add(11 * time.Minute))
-	requireUsed(t, e.reconcileMember(t, key, 1), true)
-
-	// A running or a stopped workspace can share every flush with this
-	// member: a client can post usage for either every minute.
-	e = newPoolMemberEnv(t)
-	started = e.clock.Now()
-	key, workspaceID = e.readyMember(t)
-	flush = started.Add(10*time.Minute + 300*time.Millisecond)
-	e.fake.addTemplateWorkspace(e.v1, codersdk.WorkspaceTransitionStart, flush)
-	e.fake.addTemplateWorkspace(e.v1, codersdk.WorkspaceTransitionStop, flush)
-	e.fake.markUsed(workspaceID, flush)
-	e.clock.SetTime(started.Add(11 * time.Minute))
-	requireUsed(t, e.reconcileMember(t, key, 1), true)
 }
 
 // TestPoolMemberWatchRules: an agent that stays not ready for 5 minutes, and
