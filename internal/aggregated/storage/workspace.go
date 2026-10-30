@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -483,12 +484,23 @@ func (s *WorkspaceStorage) Create(
 		})
 		if stopErr == nil && isRequestedBuild(stopBuild, codersdk.WorkspaceTransitionStop) {
 			createdWorkspace.LatestBuild = stopBuild
-		} else if current, err := sdk.Workspace(ctx, createdWorkspace.ID); err == nil && current.LatestBuild.ID != uuid.Nil {
+		} else {
 			// Without the stop build in the answer, Coder can still have queued the stop.
-			createdWorkspace.LatestBuild = current.LatestBuild
+			current, readErr := sdk.Workspace(ctx, createdWorkspace.ID)
+			switch {
+			case readErr == nil && current.LatestBuild.ID != uuid.Nil:
+				createdWorkspace.LatestBuild = current.LatestBuild
+			case stopErr == nil || apierrors.IsTimeout(coder.MapCoderWriteError(stopErr, coder.WriteCreate, aggregationv1alpha1.Resource("coderworkspaces"), workspaceObj.Name)):
+				// The start build of the create answer can be stale, so it is not a result.
+				if readErr == nil {
+					readErr = errors.New("the re-read of the workspace has no latest build")
+				}
+				return nil, coder.UncertainWriteErrorFrom(readErr, coder.WriteCreate, aggregationv1alpha1.Resource("coderworkspaces"), workspaceObj.Name,
+					"no confirmation of its stop build from the Coder API after the workspace was created")
+			}
 		}
-		// The workspace creation already succeeded. Returning a stop transition error here
-		// would cause client retries to fail with AlreadyExists, while the desired stop
+		// The workspace creation already succeeded. Returning an error for a stop that Coder
+		// refused would cause client retries to fail with AlreadyExists, while the desired stop
 		// transition can be retried safely via a subsequent Update.
 	}
 
