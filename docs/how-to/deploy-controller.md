@@ -140,7 +140,11 @@ The controller stores the API token of the `coder-k8s-operator` user in a Secret
 
 - When the Secret does not exist, the controller creates it, with the control plane as the controller owner.
 - When the control plane is the controller owner of the Secret (same UID), the controller reads and updates it.
-- When the Secret exists and another owner, or no owner, controls it, the controller does not read, change or adopt it. It also does not create or change the token in Coder. It sets `operatorAccessReady` to `false` and removes `status.operatorTokenSecretRef`, so that provisioners, template tests and the aggregated API server stop using operator access for this control plane. The Coder Deployment does not use this Secret, so it does not change.
+- When the Secret exists and another owner, or no owner, controls it, the controller does not read, change or adopt it. It also does not create a token in Coder. It sets `operatorAccessReady` to `false` and removes `status.operatorTokenSecretRef`, so that provisioners, template tests and the aggregated API server stop using operator access for this control plane. The Coder Deployment does not use this Secret, so it does not change.
+
+When `status.operatorTokenSecretRef` still names a Secret at that point, the controller provisioned an operator token for this control plane that can still work in Coder. The controller then deletes that token in Coder, so that a copy of the old Secret value stops working. Until the delete succeeds, for example while the Coder PostgreSQL database is not reachable, `status.operatorTokenSecretRef` stays set as the record of the pending delete, `operatorAccessReady` stays `false`, and the condition message says that the delete is pending. When the status names no Secret, the controller deletes no token, because it cannot prove that the token in Coder is its own.
+
+Provisioners, template tests and the aggregated API server read the Secret in `status.operatorTokenSecretRef` only when the control plane is its controller owner. So they do not use a Secret that someone replaced after the last reconcile of the control plane.
 
 The controller reports the `OperatorTokenSecretOwned` condition while operator access is on:
 
@@ -177,7 +181,10 @@ Do not set `CODER_REDIRECT_TO_ACCESS_URL` in `spec.extraEnv` of a `CoderControlP
 
 ### Upgrade from a version that took over the Secret
 
-Earlier versions set the control plane as the controller owner of this Secret on every reconcile. So a Secret that an earlier version used already has the right owner, and the control plane keeps working after the upgrade. A control plane fails the check only when its Secret lost that owner after the last reconcile of the earlier version.
+Earlier versions set the control plane as the controller owner of this Secret each time they wrote the token into it. So a Secret that an earlier version used already has the right owner, and the control plane keeps working after the upgrade. A control plane fails the check in two cases:
+
+- Its Secret lost that owner after the last reconcile of the earlier version. For example, you deleted the control plane with `--cascade=orphan` and created it again.
+- Someone created the Secret by hand before the earlier version wrote a token into it for the first time, for example while the PostgreSQL URL could not be resolved yet. That Secret never got an owner.
 
 Before you upgrade, list the operator token Secrets that the control plane does not own:
 
