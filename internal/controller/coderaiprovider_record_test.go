@@ -281,36 +281,43 @@ func TestCoderAIProviderSetupNeedsRecordDependencies(t *testing.T) {
 	}
 }
 
-// #374 review round 3: when the control plane reaches another Coder
-// deployment while the object lives, the provider looks gone, but the
-// record still locates it in the old deployment. The controller keeps the
-// record and creates nothing in the new deployment.
+// #374 review round 3, #422 item 4: when the control plane reaches another
+// Coder deployment while the object lives, the provider looks gone, but the
+// record still locates it in the old deployment. With or without a pending
+// spec edit, the controller stalls with CoderDeploymentChanged, not
+// DeletedExternally, keeps the record and creates nothing in the new
+// deployment.
 func TestCoderAIProviderDeploymentSwitchKeepsRecord(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	env, _, provider := newReadyAIProvider(ctx, t)
-	before := cleanupRecord(ctx, t, env.namespace, provider.UID)
-	env.fake.mu.Lock()
-	env.fake.deploymentID = uuid.NewString() // A new database behind the same control plane.
-	for id := range env.fake.aiProviders {
-		delete(env.fake.aiProviders, id)
-	}
-	env.fake.mu.Unlock()
-	provider.Spec.DisplayName = "OpenAI (edited)"
-	require.NoError(t, k8sClient.Update(ctx, provider))
-	got, _ := env.reconcile(ctx, t, provider)
-	got, _ = env.reconcile(ctx, t, got)
-	require.Contains(t, requireAIProviderStep(t, got, true, "CoderDeploymentChanged"), before["deploymentID"])
-	require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider), "no create in the new deployment")
-	require.Equal(t, before, cleanupRecord(ctx, t, env.namespace, provider.UID), "the record keeps the old locator")
+	for name, edit := range map[string]bool{"applied": false, "pending spec edit": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env, _, provider := newReadyAIProvider(ctx, t)
+			before := cleanupRecord(ctx, t, env.namespace, provider.UID)
+			env.fake.mu.Lock()
+			env.fake.deploymentID = uuid.NewString() // A new database behind the same control plane.
+			for id := range env.fake.aiProviders {
+				delete(env.fake.aiProviders, id)
+			}
+			env.fake.mu.Unlock()
+			if edit {
+				provider.Spec.DisplayName = "OpenAI (edited)"
+				require.NoError(t, k8sClient.Update(ctx, provider))
+			}
+			got, _ := env.reconcile(ctx, t, provider)
+			require.Contains(t, requireAIProviderStep(t, got, true, "CoderDeploymentChanged"), before["deploymentID"])
+			require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider), "no create in the new deployment")
+			require.Equal(t, before, cleanupRecord(ctx, t, env.namespace, provider.UID), "the record keeps the old locator")
 
-	// #374 review round 4: deleting the object in this state keeps the
-	// record too, so a sweep in the old deployment can still find it.
-	require.Empty(t, got.Status.ProviderID)
-	gone, _ := env.deleteAIProvider(ctx, t, got)
-	require.Nil(t, gone, "the finalizer goes without a delete")
-	require.Zero(t, env.fake.requestCount(routeDeleteAIProvider), "no delete in the new deployment")
-	require.Equal(t, before, cleanupRecord(ctx, t, env.namespace, provider.UID), "the record stays for a sweep")
+			// #374 review round 4: deleting the object in this state keeps the
+			// record too, so a sweep in the old deployment can still find it.
+			gone, _ := env.deleteAIProvider(ctx, t, got)
+			require.Nil(t, gone, "the finalizer goes without a delete")
+			require.Zero(t, env.fake.requestCount(routeDeleteAIProvider), "no delete in the new deployment")
+			require.Equal(t, before, cleanupRecord(ctx, t, env.namespace, provider.UID), "the record stays for a sweep")
+		})
+	}
 }
 
 // #353 (#362 follow-up 7): a create whose answer was lost leaves a record

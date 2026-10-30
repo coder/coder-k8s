@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
 	clocktesting "k8s.io/utils/clock/testing"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -131,8 +132,8 @@ func TestCleanupSweepAIProvider(t *testing.T) {
 }
 
 // #353 invariants 5 and 6: a sweep never touches the provider of a living
-// object, finds a provider without a recorded ID only by its nonce, and
-// leaves a provider of the same name that the object did not create.
+// object, and deletes only through a control plane of the record's
+// deployment.
 func TestCleanupSweepAIProviderCases(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -156,29 +157,6 @@ func TestCleanupSweepAIProviderCases(t *testing.T) {
 		_, ok := s.fake.aiProvider("openai")
 		require.False(t, ok, "only the UID decides that the object is gone")
 	})
-	for name, nonce := range map[string]bool{"nonce matches": true, "nonce differs": false} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			s := newSweepEnv(ctx, t)
-			createTestControlPlane(ctx, t, s.namespace, "coder-b", s.fake.server.URL)
-			configMap := &corev1.ConfigMap{}
-			require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: s.namespace, Name: "ck8s-cleanup-" + string(s.provider.UID)}, configMap))
-			configMap.Data["coderID"] = "" // The create committed, but its ID was never recorded.
-			require.NoError(t, k8sClient.Update(ctx, configMap))
-			if nonce {
-				s.fake.mu.Lock()
-				for _, p := range s.fake.aiProviders {
-					p.displayName = "coder-k8s:" + string(s.provider.UID)
-				}
-				s.fake.mu.Unlock()
-			}
-			s.clock.Step(6 * time.Minute)
-			require.Zero(t, s.sweep(ctx, t).RequeueAfter)
-			_, ok := s.fake.aiProvider("openai")
-			require.Equal(t, !nonce, ok, "only the provider with the record's nonce is deleted")
-			require.Nil(t, cleanupRecord(ctx, t, s.namespace, s.provider.UID), "Coder holds no provider of the record")
-		})
-	}
 	t.Run("delete fails", func(t *testing.T) {
 		t.Parallel()
 		s := newSweepEnv(ctx, t)
@@ -229,24 +207,6 @@ func TestCleanupSweepAIProviderCases(t *testing.T) {
 		require.Zero(t, s.sweep(ctx, t).RequeueAfter, "the next matching control plane sweeps")
 		_, ok := s.fake.aiProvider("openai")
 		require.False(t, ok)
-	})
-	t.Run("same name and nonce, another type", func(t *testing.T) {
-		t.Parallel()
-		s := newSweepEnv(ctx, t)
-		createTestControlPlane(ctx, t, s.namespace, "coder-b", s.fake.server.URL)
-		configMap := &corev1.ConfigMap{}
-		require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: s.namespace, Name: "ck8s-cleanup-" + string(s.provider.UID)}, configMap))
-		configMap.Data["coderID"] = ""
-		require.NoError(t, k8sClient.Update(ctx, configMap))
-		s.fake.mu.Lock()
-		for _, p := range s.fake.aiProviders {
-			p.displayName, p.providerType = "coder-k8s:"+string(s.provider.UID), codersdk.AIProviderTypeAnthropic
-		}
-		s.fake.mu.Unlock()
-		s.clock.Step(6 * time.Minute)
-		s.sweep(ctx, t)
-		_, ok := s.fake.aiProvider("openai")
-		require.True(t, ok, "only the nonce and the recorded type prove ownership")
 	})
 	t.Run("stale cache of the record", func(t *testing.T) {
 		t.Parallel()
@@ -319,4 +279,125 @@ func TestCleanupSweepAIProviderCases(t *testing.T) {
 		_, ok := s.fake.aiProvider("openai")
 		require.True(t, ok, "a ConfigMap that is not a valid record is never acted on")
 	})
+}
+
+// #422 item 1: without a recorded provider ID, a sweep deletes nothing. A
+// person can edit the display name of a provider, so the temporary display
+// name proves nothing. Coder cannot change a provider's name or type, so the
+// record goes only when Coder holds no provider of that name and type.
+// Otherwise it stays for manual cleanup.
+func TestCleanupSweepAIProviderWithoutProviderID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		committed bool                                                                           // The create commits, and its answer is lost.
+		person    func(context.Context, *testing.T, sweepEnv, *codersdk.CreateAIProviderRequest) // A person's change in Coder after the object went.
+		kept      bool
+	}{
+		"create never committed": {},
+		"lost create answer":     {committed: true, kept: true},
+		"lost create answer, display name edited": {committed: true, kept: true, person: func(ctx context.Context, t *testing.T, s sweepEnv, _ *codersdk.CreateAIProviderRequest) {
+			_, err := s.fake.client(t, 2*time.Second).UpdateAIProvider(ctx, "openai", codersdk.UpdateAIProviderRequest{DisplayName: ptr.To("Renamed by a person")})
+			require.NoError(t, err)
+		}},
+		"a person's provider with the temporary display name": {kept: true, person: createPersonsAIProvider},
+		"a person's provider of another type": {person: func(ctx context.Context, t *testing.T, s sweepEnv, req *codersdk.CreateAIProviderRequest) {
+			req.Type, req.DisplayName = codersdk.AIProviderTypeAnthropic, "Team Anthropic"
+			createPersonsAIProvider(ctx, t, s, req)
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s := leaveAIProviderWithoutID(ctx, t, tc.committed)
+			if tc.person != nil {
+				tc.person(ctx, t, s, &codersdk.CreateAIProviderRequest{
+					Type: codersdk.AIProviderTypeOpenAI, Name: "openai", DisplayName: "coder-k8s:" + string(s.provider.UID),
+					BaseURL: s.provider.Spec.BaseURL, APIKeys: []string{testAIProviderKey},
+				})
+			}
+			_, before := s.fake.aiProvider("openai")
+			deletes := s.fake.requestCount(routeDeleteAIProvider)
+			createTestControlPlane(ctx, t, s.namespace, "coder-b", s.fake.server.URL)
+			s.clock.Step(6 * time.Minute)
+
+			result := s.sweep(ctx, t)
+			require.Equal(t, deletes, s.fake.requestCount(routeDeleteAIProvider), "a record without a provider ID deletes nothing")
+			_, after := s.fake.aiProvider("openai")
+			require.Equal(t, before, after)
+			if !tc.kept {
+				require.Zero(t, result.RequeueAfter)
+				require.Nil(t, cleanupRecord(ctx, t, s.namespace, s.provider.UID), "Coder holds no provider that can be the object's")
+				require.Empty(t, s.recorder.Events)
+				return
+			}
+			require.Equal(t, 10*time.Minute, result.RequeueAfter)
+			require.NotNil(t, cleanupRecord(ctx, t, s.namespace, s.provider.UID), "a provider can still be the object's, so the record stays")
+			require.Len(t, s.recorder.Events, 1)
+			require.Contains(t, <-s.recorder.Events, "ManualCleanupNeeded")
+		})
+	}
+}
+
+// #422 item 1: an object with an unconfirmed create is deleted while a
+// person's provider of its name carries its temporary display name. The
+// delete and the sweep both leave that provider, the record waits for manual
+// cleanup, and it goes once the person deletes the provider. Not parallel: it
+// reads process-wide metrics.
+func TestCoderAIProviderTemporaryDisplayNameDeletesNothing(t *testing.T) {
+	ctx := context.Background()
+	env, _, provider := newAIProviderCreateEnv(ctx, t)
+	env.fake.failNext(routeCreateAIProvider, fakeFault{Reset: true})
+	got, _ := env.reconcile(ctx, t, provider)
+	requireAIProviderStep(t, got, false, "ConfirmingCreate")
+	_, committed := env.fake.aiProvider("openai")
+	require.False(t, committed, "the create never committed")
+	s := newSweeper(t, env, got)
+	createPersonsAIProvider(ctx, t, s, &codersdk.CreateAIProviderRequest{
+		Type: codersdk.AIProviderTypeOpenAI, Name: "openai", DisplayName: "coder-k8s:" + string(got.UID),
+		BaseURL: got.Spec.BaseURL, APIKeys: []string{testAIProviderKey},
+	})
+
+	gone, _ := env.deleteAIProvider(ctx, t, got)
+	require.Nil(t, gone, "the finalizer goes without a delete")
+	require.Zero(t, env.fake.requestCount(routeDeleteAIProvider), "a display name never proves ownership")
+	_, ok := env.fake.aiProvider("openai")
+	require.True(t, ok, "the person's provider stays")
+	require.NotNil(t, cleanupRecord(ctx, t, env.namespace, got.UID), "the record stays for a sweep")
+
+	s.clock.Step(6 * time.Minute)
+	require.Equal(t, 10*time.Minute, s.sweep(ctx, t).RequeueAfter)
+	require.Zero(t, env.fake.requestCount(routeDeleteAIProvider))
+	require.Contains(t, <-s.recorder.Events, "ManualCleanupNeeded")
+	require.Equal(t, 1.0, providerMetric(t, "coder_k8s_cleanup_records_unmatched"))
+
+	stored, _ := env.fake.aiProvider("openai")
+	require.NoError(t, env.fake.client(t, 2*time.Second).DeleteAIProvider(ctx, stored.id.String()))
+	require.Zero(t, s.sweep(ctx, t).RequeueAfter)
+	require.Nil(t, cleanupRecord(ctx, t, env.namespace, got.UID), "the provider is gone, so the record goes")
+	require.Zero(t, providerMetric(t, "coder_k8s_cleanup_records_unmatched"))
+}
+
+// leaveAIProviderWithoutID leaves the record of an object whose create answer
+// was lost, so the record has no provider ID: the control plane goes, then
+// the object. With committed, the create committed in Coder. Otherwise Coder
+// holds no provider.
+func leaveAIProviderWithoutID(ctx context.Context, t *testing.T, committed bool) sweepEnv {
+	t.Helper()
+	env, _, provider := newAIProviderCreateEnv(ctx, t)
+	env.fake.failNext(routeCreateAIProvider, fakeFault{AfterCommit: committed, Reset: true})
+	got, _ := env.reconcile(ctx, t, provider)
+	requireAIProviderStep(t, got, false, "ConfirmingCreate")
+	require.NoError(t, k8sClient.Delete(ctx, &coderv1alpha1.CoderControlPlane{ObjectMeta: metav1.ObjectMeta{Namespace: env.namespace, Name: "coder"}}))
+	gone, _ := env.deleteAIProvider(ctx, t, got)
+	require.Nil(t, gone)
+	require.Empty(t, cleanupRecord(ctx, t, env.namespace, got.UID)["coderID"])
+	_, ok := env.fake.aiProvider("openai")
+	require.Equal(t, committed, ok)
+	return newSweeper(t, env, got)
+}
+
+func createPersonsAIProvider(ctx context.Context, t *testing.T, s sweepEnv, req *codersdk.CreateAIProviderRequest) {
+	t.Helper()
+	_, err := s.fake.client(t, 2*time.Second).CreateAIProvider(ctx, *req)
+	require.NoError(t, err)
 }

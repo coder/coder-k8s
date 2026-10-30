@@ -116,18 +116,18 @@ func TestCoderAIProviderDelete(t *testing.T) {
 	})
 }
 
-// Plan S7: with only a create marker, a read decides. The controller deletes
-// a provider that carries this object's nonce, and never one that does not.
+// Plan S7, #422 item 1: with only a create marker, the controller deletes
+// nothing. A person can edit the display name of a provider, so not even the
+// temporary display name proves that this object created it.
 func TestCoderAIProviderDeletePendingCreate(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name        string
 		displayName string // of a provider that holds the name in Coder; empty for none
-		deletes     int
 	}{
-		{name: "create committed", displayName: "nonce", deletes: 1},
-		{name: "nothing created", deletes: 0},
-		{name: "someone else's provider", displayName: "Team OpenAI", deletes: 0},
+		{name: "a person's provider with the temporary display name", displayName: "nonce"},
+		{name: "nothing created"},
+		{name: "someone else's provider", displayName: "Team OpenAI"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -150,9 +150,9 @@ func TestCoderAIProviderDeletePendingCreate(t *testing.T) {
 			require.NoError(t, k8sClient.Status().Update(ctx, provider))
 			got, _ := env.deleteAIProvider(ctx, t, provider)
 			require.Nil(t, got, "the finalizer went")
-			require.Equal(t, tc.deletes, env.fake.requestCount(routeDeleteAIProvider))
+			require.Zero(t, env.fake.requestCount(routeDeleteAIProvider))
 			_, found := env.fake.aiProvider(provider.Name)
-			require.Equal(t, tc.displayName != "" && tc.deletes == 0, found, "only this object's provider is deleted")
+			require.Equal(t, tc.displayName != "", found, "the provider stays")
 		})
 	}
 }
@@ -177,8 +177,9 @@ func TestCoderAIProviderDeletePendingCreateNeedsSiteOwner(t *testing.T) {
 }
 
 // A 404 right after a create request does not prove absence: the request
-// can still commit. The finalizer stays until the settle window ends, and a
-// create that commits in the meantime is deleted.
+// can still commit. The finalizer stays until the settle window ends. A
+// create that commits in the meantime stays in Coder: without its ID, nothing
+// proves that it is this object's (#422 item 1).
 func TestCoderAIProviderDeleteRecentCreate(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -204,9 +205,9 @@ func TestCoderAIProviderDeleteRecentCreate(t *testing.T) {
 	require.NoError(t, k8sClient.Status().Update(ctx, got))
 	got, _ = env.reconcileDeleting(ctx, t, got)
 	require.Nil(t, got, "the finalizer went")
-	require.Equal(t, 1, env.fake.requestCount(routeDeleteAIProvider))
+	require.Zero(t, env.fake.requestCount(routeDeleteAIProvider))
 	_, found := env.fake.aiProvider(provider.Name)
-	require.False(t, found, "the late create was deleted")
+	require.True(t, found, "the late create stays")
 }
 
 // A name lookup that answers this object's provider without an ID is
