@@ -2,6 +2,7 @@
 package controller
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -55,6 +56,7 @@ const (
 
 	externalProvisionerEntitlementRetryInterval = 2 * time.Minute
 	provisionerOperatorAccessRetryInterval      = 15 * time.Second
+	provisionerPendingKeyRetryInterval          = 2 * time.Minute
 
 	// #nosec G101 -- this is a field index key, not a credential.
 	provisionerControlPlaneRefNameFieldIndex = ".spec.controlPlaneRef.name"
@@ -286,6 +288,91 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		provisionerKeyName = keyName
 	}
 
+	metadataMissing := status.OrganizationName == "" || status.TagsHash == "" || status.ControlPlaneRefName == "" || status.ControlPlaneURL == ""
+
+	// Every key that can exist in Coder has a record in status: the applied
+	// fields for the key in the Secret, status.pendingKeys for the others. A
+	// key to create is recorded by name before the create, because Coder
+	// returns its ID only in the create response. Keys recorded with IDs in
+	// another slot than the target are deleted here.
+	target := coderv1alpha1.CoderProvisionerKeyRecord{
+		ControlPlaneRefName: desiredControlPlaneRefName,
+		CoderURL:            coderURL,
+		OrganizationName:    organizationName,
+		KeyName:             keyName,
+		Unpublished:         true,
+	}
+	// An unpublished record names a key that an earlier reconcile created, or
+	// started to create, for the Secret and did not record as applied. The
+	// Secret can hold that key, or a key that the rotation already deleted,
+	// so a rotation replaces it with a key that status records.
+	rotate := !secretUsable || slices.ContainsFunc(provisioner.Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
+		return record.Unpublished
+	})
+	pending := slices.Clone(provisioner.Status.PendingKeys)
+	var replaced coderv1alpha1.CoderProvisionerKeyRecord
+	if driftDetected {
+		replaced, err = r.appliedKeyRecord(ctx, provisioner, organizationName, keyName)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !sameKeySlot(replaced, target) && !slices.Contains(pending, replaced) {
+			pending = append(pending, replaced)
+		}
+	}
+	if driftDetected || rotate || metadataMissing {
+		// The newest target record with IDs stays until a create at the
+		// target proves its key gone. Coder allows one key per name, so each
+		// earlier create at the target already proved the older ones gone.
+		newest := -1
+		for i, record := range pending {
+			if sameKeySlot(record, target) && record.KeyID != "" {
+				newest = i
+			}
+		}
+		var next []coderv1alpha1.CoderProvisionerKeyRecord
+		for i, record := range pending {
+			if !sameKeySlot(record, target) || i == newest {
+				next = append(next, record)
+			}
+		}
+		pending = append(next, target)
+	}
+	var kept []coderv1alpha1.CoderProvisionerKeyRecord
+	var unverified []string
+	for _, record := range pending {
+		if sameKeySlot(record, target) {
+			kept = append(kept, record)
+			continue
+		}
+		cleanup, revokeErr := r.revokeKey(ctx, provisioner, record)
+		if revokeErr != nil {
+			return ctrl.Result{}, revokeErr
+		}
+		if cleanup == keyGone {
+			continue
+		}
+		kept = append(kept, record)
+		if _, _, ok := parseKeyIDs(record.OrganizationID, record.KeyID); !ok {
+			note := "the operator could not check Coder"
+			if cleanup == keyUnverified {
+				note = "Coder holds a key with this name that nothing shows this provisioner created"
+			}
+			unverified = append(unverified, fmt.Sprintf("key %q in organization %q at %s: %s", record.KeyName, record.OrganizationName, record.CoderURL, note))
+		}
+	}
+	conditionChanged := setUnverifiedKeyCondition(provisioner, unverified)
+	if conditionChanged || !slices.Equal(kept, provisioner.Status.PendingKeys) {
+		provisioner.Status.PendingKeys = kept
+		if err := r.Status().Update(ctx, provisioner); err != nil {
+			return ctrl.Result{}, fmt.Errorf("record pending provisioner keys in status: %w", err)
+		}
+		statusSnapshot = provisioner.Status.DeepCopy()
+		if statusSnapshot == nil {
+			return ctrl.Result{}, fmt.Errorf("assertion failed: status snapshot must not be nil after pending key status update")
+		}
+	}
+
 	log := ctrl.LoggerFrom(ctx)
 	keyMaterial := ""
 	if driftDetected {
@@ -293,25 +380,19 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			"orgDrift", orgDrift, "keyNameDrift", keyNameDrift, "tagsDrift", tagsDrift,
 			"controlPlaneRefDrift", controlPlaneRefDrift, "controlPlaneURLDrift", controlPlaneURLDrift)
 
-		oldOrg := provisioner.Status.OrganizationName
-		if oldOrg == "" {
-			oldOrg = organizationName
-		}
-		oldKeyName := provisioner.Status.ProvisionerKeyName
-		if oldKeyName == "" {
-			oldKeyName = keyName
-		}
-		oldControlPlaneURL := recordedCoderAPIURL(provisioner.Status.ControlPlaneURL, controlPlane, coderURL)
-
-		if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
-			ctx,
-			oldControlPlaneURL,
-			sessionToken,
-			oldOrg,
-			oldKeyName,
-		); deleteErr != nil {
-			log.Info("failed to delete old provisioner key during drift rotation, creating new key anyway",
-				"oldKeyName", oldKeyName, "error", deleteErr)
+		// A replaced key in another slot was deleted above. One in the target
+		// slot is deleted here, so that the create below can use its name.
+		if sameKeySlot(replaced, target) {
+			if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
+				ctx,
+				coderURL,
+				sessionToken,
+				replaced.OrganizationName,
+				replaced.KeyName,
+			); deleteErr != nil {
+				log.Info("failed to delete old provisioner key during drift rotation, creating new key anyway",
+					"oldKeyName", replaced.KeyName, "error", deleteErr)
+			}
 		}
 
 		response, ensureErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
@@ -394,7 +475,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			"ProvisionerKeyReady",
 			"Provisioner key is available in coderd",
 		)
-	} else if !secretUsable {
+	} else if rotate {
 		response, ensureErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
 			CoderURL:         coderURL,
 			SessionToken:     sessionToken,
@@ -424,7 +505,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// deleted), coderd won't return plaintext again. Rotate the key
 		// by deleting and recreating it to obtain fresh material.
 		if keyMaterial == "" {
-			log.Info("provisioner key exists in coderd but secret is missing, rotating key to recover",
+			log.Info("provisioner key exists in coderd but its plaintext is not in the secret, rotating key to recover",
 				"keyName", keyName, "secretName", keySecretName)
 
 			if deleteErr := r.BootstrapClient.DeleteProvisionerKey(
@@ -479,7 +560,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			"ProvisionerKeyReady",
 			"Provisioner key is available in coderd",
 		)
-	} else if status.OrganizationName == "" || status.TagsHash == "" || status.ControlPlaneRefName == "" || status.ControlPlaneURL == "" {
+	} else if metadataMissing {
 		// Secret is usable and no drift detected, but status metadata is empty
 		// (e.g. upgrade from older version). Call EnsureProvisionerKey to populate
 		// IDs and key name. If coderd reports an existing key (no plaintext key
@@ -567,17 +648,20 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	if keyMaterial != "" {
-		// A new key exists in Coder. Record its IDs in status before its
-		// plaintext reaches the Secret, so that deletion can find the key to
-		// revoke (at status.controlPlaneURL or, during a control plane URL
-		// change, at the current control plane URL). Only the IDs: the applied spec values stay as they are
-		// until the Secret holds the key, so a failed Secret write is detected
-		// as drift (or missing metadata) and rotated again on the next try.
-		// A failed status write (for example a conflict because the
-		// provisioner is being deleted) revokes the new key before anyone can
-		// read it.
-		provisioner.Status.OrganizationID = organizationID
-		provisioner.Status.ProvisionerKeyID = provisionerKeyID
+		// A new key exists in Coder. Record its IDs in its pending record
+		// before its plaintext reaches the Secret, so that deletion and a
+		// later rotation delete it by ID at the target endpoint. The applied
+		// status fields stay as they are until the Secret holds the key, so a
+		// failed Secret write is detected as drift (or missing metadata) and
+		// rotated again on the next try. A failed status write (for example a
+		// conflict because the provisioner is being deleted) revokes the new
+		// key before anyone can read it.
+		i := slices.Index(provisioner.Status.PendingKeys, target)
+		if i < 0 {
+			return ctrl.Result{}, fmt.Errorf("assertion failed: status has no pending record of the new provisioner key %q", keyName)
+		}
+		provisioner.Status.PendingKeys[i].OrganizationID = organizationID
+		provisioner.Status.PendingKeys[i].KeyID = provisionerKeyID
 		if err := r.Status().Update(ctx, provisioner); err != nil {
 			r.revokeUnpublishedKey(ctx, coderURL, sessionToken, organizationID, provisionerKeyID)
 			return ctrl.Result{}, fmt.Errorf("record new provisioner key in status: %w", err)
@@ -619,6 +703,16 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	keyStatusSnapshot := provisioner.Status.DeepCopy()
 	if keyStatusSnapshot == nil {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: key status snapshot must not be nil")
+	}
+	// The Secret holds the key at the target, so the applied fields take over
+	// its record. Coder allows one key per name, so the create also proved
+	// that the keys of the other target records are gone. No other key is in
+	// the Secret now.
+	provisioner.Status.PendingKeys = slices.DeleteFunc(provisioner.Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
+		return sameKeySlot(record, target)
+	})
+	for i := range provisioner.Status.PendingKeys {
+		provisioner.Status.PendingKeys[i].Unpublished = false
 	}
 	recordAppliedKeyStatus(provisioner, organizationID, appliedOrgName, provisionerKeyID, provisionerKeyName,
 		appliedTagsHash, appliedControlPlaneRefName, appliedControlPlaneURL)
@@ -677,6 +771,9 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
+	if len(provisioner.Status.PendingKeys) > 0 {
+		return ctrl.Result{RequeueAfter: provisionerPendingKeyRetryInterval}, nil
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -687,78 +784,48 @@ func (r *CoderProvisionerReconciler) reconcileDeletion(ctx context.Context, prov
 
 	log := ctrl.LoggerFrom(ctx)
 
-	// Delete only the key that status records for this resource. A provisioner
-	// that never applied a key (refused, not entitled, never ready) must not
-	// delete a Coder key that happens to have the name from its spec.
-	organizationID, keyID, recorded := recordedProvisionerKey(provisioner.Status)
-	if !recorded {
+	// Delete only the keys that status records for this resource. A
+	// provisioner that never sent a key create (refused, not entitled, never
+	// ready) has no record, and must not delete a Coder key that happens to
+	// have the name from its spec.
+	records := slices.Clone(provisioner.Status.PendingKeys)
+	if _, _, ok := parseKeyIDs(provisioner.Status.OrganizationID, provisioner.Status.ProvisionerKeyID); ok {
+		applied, err := r.appliedKeyRecord(ctx, provisioner, provisioner.Status.OrganizationName, provisioner.Status.ProvisionerKeyName)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		records = append(records, applied)
+		// Before status.pendingKeys, the operator wrote the IDs of a new key
+		// before status.controlPlaneURL, so status from an older operator
+		// can name a key at the current endpoint under the old URL. The
+		// delete matches the key ID only.
+		current, err := r.currentEndpointRecord(ctx, provisioner, applied)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if current.CoderURL != applied.CoderURL {
+			records = append(records, current)
+		}
+	}
+	if len(records) == 0 {
 		log.Info("status records no Coder provisioner key, removing the finalizer without a Coder call")
 		return r.removeCleanupFinalizer(ctx, provisioner)
 	}
-	keyName := provisioner.Status.ProvisionerKeyName
 
-	// Best-effort remote key cleanup: if the referenced control plane,
-	// its URL, operator access token, or any other prerequisite is
-	// unavailable, log a warning and proceed to finalizer removal so the
-	// CR does not get stuck in Terminating. This is common during
-	// namespace teardown, when the control plane was never ready, or
-	// when operator access bootstrap has not completed.
-	controlPlaneURL := provisioner.Status.ControlPlaneURL
-	controlPlaneName := strings.TrimSpace(provisioner.Spec.ControlPlaneRef.Name)
-	var controlPlane *coderv1alpha1.CoderControlPlane
-	if controlPlaneName != "" {
-		controlPlane = &coderv1alpha1.CoderControlPlane{}
-		namespacedName := types.NamespacedName{Name: controlPlaneName, Namespace: provisioner.Namespace}
-		if err := r.Get(ctx, namespacedName, controlPlane); err != nil {
-			log.Info("unable to read referenced CoderControlPlane during deletion, skipping remote key cleanup",
-				"controlPlaneRef", controlPlaneName, "error", err)
-			controlPlane = nil
-		} else if controlPlane.Name != controlPlaneName || controlPlane.Namespace != provisioner.Namespace {
-			return ctrl.Result{}, fmt.Errorf("assertion failed: fetched control plane %s/%s does not match expected %s/%s",
-				controlPlane.Namespace, controlPlane.Name, provisioner.Namespace, controlPlaneName)
+	// Best-effort remote key cleanup: when a key's control plane, its
+	// operator access token, or Coder is unavailable, the key stays and the
+	// finalizer is still removed, so the CR does not get stuck in
+	// Terminating. This is common during namespace teardown, when the
+	// control plane was never ready, or when operator access bootstrap has
+	// not completed.
+	for _, record := range records {
+		cleanup, err := r.revokeKey(ctx, provisioner, record)
+		if err != nil {
+			return ctrl.Result{}, err
 		}
-	}
-	if controlPlaneURL == "" && controlPlane != nil {
-		controlPlaneURL = strings.TrimSpace(controlPlane.Status.URL)
-	}
-
-	if controlPlaneURL != "" && controlPlane != nil {
-		sessionToken, tokenResult, tokenReason, tokenMessage, tokenErr := r.readOperatorSessionToken(ctx, provisioner, controlPlane)
-		switch {
-		case tokenErr != nil:
-			log.Info("unable to resolve operator access token during deletion, skipping remote key cleanup",
-				"error", tokenErr)
-		case tokenResult.RequeueAfter > 0:
-			log.Info("operator access is not ready during deletion, skipping remote key cleanup",
-				"reason", tokenReason, "message", tokenMessage)
-		default:
-			currentURL, urlErr := coderAPIURL(controlPlane)
-			if urlErr != nil {
-				log.Info("unable to derive the Coder API URL during deletion, skipping remote key cleanup", "error", urlErr)
-				break
-			}
-			// During a control plane URL change, status can hold the new key's
-			// IDs while status.controlPlaneURL still names the old endpoint.
-			// Try the current endpoint too: the delete matches the key ID only.
-			coderURLs := []string{recordedCoderAPIURL(provisioner.Status.ControlPlaneURL, controlPlane, currentURL)}
-			if currentURL != coderURLs[0] {
-				coderURLs = append(coderURLs, currentURL)
-			}
-			for _, coderURL := range coderURLs {
-				if deleteErr := r.BootstrapClient.DeleteProvisionerKeyByID(ctx, coderbootstrap.DeleteProvisionerKeyByIDRequest{
-					CoderURL:       coderURL,
-					SessionToken:   sessionToken,
-					OrganizationID: organizationID,
-					KeyID:          keyID,
-				}); deleteErr != nil {
-					// Treat key deletion failures as best-effort so the
-					// finalizer is still removed. Transient errors, auth
-					// issues, or org-lookup failures should not block CR
-					// cleanup.
-					log.Info("failed to delete remote provisioner key during deletion, proceeding with finalizer removal",
-						"keyName", keyName, "keyID", keyID, "error", deleteErr)
-				}
-			}
+		if cleanup != keyGone {
+			log.Info("did not delete a recorded provisioner key during deletion, proceeding with finalizer removal",
+				"coderURL", record.CoderURL, "keyName", record.KeyName, "keyID", record.KeyID, "unverified", cleanup == keyUnverified)
 		}
 	}
 
@@ -777,18 +844,6 @@ func coderAPIURL(controlPlane *coderv1alpha1.CoderControlPlane) (string, error) 
 	return coderURL.String(), nil
 }
 
-// recordedCoderAPIURL maps a status.url that status.controlPlaneURL recorded
-// to the URL for Coder API calls. An empty recorded URL, or one equal to the
-// control plane's current status.url, maps to currentAPIURL. Any other URL
-// names an earlier endpoint and is used as recorded.
-func recordedCoderAPIURL(recordedURL string, controlPlane *coderv1alpha1.CoderControlPlane, currentAPIURL string) string {
-	recordedURL = strings.TrimSpace(recordedURL)
-	if recordedURL == "" || recordedURL == strings.TrimSpace(controlPlane.Status.URL) {
-		return currentAPIURL
-	}
-	return recordedURL
-}
-
 // recordAppliedKeyStatus sets the status fields that describe the key applied
 // in Coder.
 func recordAppliedKeyStatus(
@@ -805,7 +860,8 @@ func recordAppliedKeyStatus(
 }
 
 // revokeUnpublishedKey deletes a key whose plaintext was never written to a
-// Secret. It is best-effort: the key is unknown outside this reconcile.
+// Secret. It is best-effort: when it fails, the pending record without key
+// IDs still names the key.
 func (r *CoderProvisionerReconciler) revokeUnpublishedKey(ctx context.Context, coderURL, sessionToken, organizationID, keyID string) {
 	log := ctrl.LoggerFrom(ctx)
 	orgID, orgErr := uuid.Parse(organizationID)
@@ -833,20 +889,187 @@ func (r *CoderProvisionerReconciler) removeCleanupFinalizer(ctx context.Context,
 	return ctrl.Result{}, nil
 }
 
-// recordedProvisionerKey returns the organization and key IDs that status
-// records for the key this provisioner created. ok is false when status does
-// not record valid IDs.
-func recordedProvisionerKey(status coderv1alpha1.CoderProvisionerStatus) (organizationID, keyID uuid.UUID, ok bool) {
-	organizationID, err := uuid.Parse(status.OrganizationID)
+// parseKeyIDs parses the organization and key IDs of a recorded provisioner
+// key. ok is false when the record has no valid IDs.
+func parseKeyIDs(rawOrganizationID, rawKeyID string) (organizationID, keyID uuid.UUID, ok bool) {
+	organizationID, err := uuid.Parse(rawOrganizationID)
 	if err != nil || organizationID == uuid.Nil {
 		return uuid.Nil, uuid.Nil, false
 	}
-	keyID, err = uuid.Parse(status.ProvisionerKeyID)
+	keyID, err = uuid.Parse(rawKeyID)
 	if err != nil || keyID == uuid.Nil {
 		return uuid.Nil, uuid.Nil, false
 	}
 
 	return organizationID, keyID, true
+}
+
+// sameKeySlot reports whether two records name the same key name in the same
+// organization at the same Coder URL. Coder allows one key per name in an
+// organization, so both records refer to the same key.
+func sameKeySlot(a, b coderv1alpha1.CoderProvisionerKeyRecord) bool {
+	return a.CoderURL == b.CoderURL && a.OrganizationName == b.OrganizationName && a.KeyName == b.KeyName
+}
+
+// appliedKeyRecord returns a record of the key that the applied status fields
+// describe, at the Coder API URL that status.controlPlaneURL maps to for its
+// control plane (see coderAPIURL). When that control plane cannot be read,
+// the record keeps status.controlPlaneURL.
+func (r *CoderProvisionerReconciler) appliedKeyRecord(
+	ctx context.Context,
+	provisioner *coderv1alpha1.CoderProvisioner,
+	defaultOrganizationName, defaultKeyName string,
+) (coderv1alpha1.CoderProvisionerKeyRecord, error) {
+	status := provisioner.Status
+	record := coderv1alpha1.CoderProvisionerKeyRecord{
+		ControlPlaneRefName: cmp.Or(status.ControlPlaneRefName, provisioner.Spec.ControlPlaneRef.Name),
+		CoderURL:            strings.TrimSpace(status.ControlPlaneURL),
+		OrganizationName:    cmp.Or(status.OrganizationName, defaultOrganizationName),
+		KeyName:             cmp.Or(status.ProvisionerKeyName, defaultKeyName),
+		OrganizationID:      status.OrganizationID,
+		KeyID:               status.ProvisionerKeyID,
+	}
+	controlPlane, ok, err := r.readControlPlane(ctx, provisioner.Namespace, record.ControlPlaneRefName)
+	if err != nil || !ok {
+		return record, err
+	}
+	applied := controlPlane.DeepCopy()
+	applied.Status.URL = cmp.Or(record.CoderURL, controlPlane.Status.URL)
+	apiURL, err := coderAPIURL(applied)
+	if err != nil {
+		ctrl.LoggerFrom(ctx).Info("unable to derive the Coder API URL of the applied provisioner key", "error", err)
+		return record, nil
+	}
+	record.CoderURL = apiURL
+	return record, nil
+}
+
+// currentEndpointRecord returns applied at the current Coder API URL of the
+// control plane that spec.controlPlaneRef names, with that control plane's
+// operator token. It returns applied when that control plane cannot be read.
+func (r *CoderProvisionerReconciler) currentEndpointRecord(
+	ctx context.Context,
+	provisioner *coderv1alpha1.CoderProvisioner,
+	applied coderv1alpha1.CoderProvisionerKeyRecord,
+) (coderv1alpha1.CoderProvisionerKeyRecord, error) {
+	controlPlane, ok, err := r.readControlPlane(ctx, provisioner.Namespace, provisioner.Spec.ControlPlaneRef.Name)
+	if err != nil || !ok {
+		return applied, err
+	}
+	apiURL, urlErr := coderAPIURL(controlPlane)
+	if urlErr != nil {
+		ctrl.LoggerFrom(ctx).Info("unable to derive the current Coder API URL during deletion", "error", urlErr)
+		return applied, nil
+	}
+	current := applied
+	current.ControlPlaneRefName = controlPlane.Name
+	current.CoderURL = apiURL
+	return current, nil
+}
+
+// readControlPlane reads a control plane in namespace. ok is false when it
+// cannot be read.
+func (r *CoderProvisionerReconciler) readControlPlane(ctx context.Context, namespace, name string) (*coderv1alpha1.CoderControlPlane, bool, error) {
+	controlPlane := &coderv1alpha1.CoderControlPlane{}
+	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, controlPlane); err != nil {
+		ctrl.LoggerFrom(ctx).Info("unable to read CoderControlPlane", "controlPlaneRef", name, "error", err)
+		return nil, false, nil
+	}
+	if controlPlane.Name != name || controlPlane.Namespace != namespace {
+		return nil, false, fmt.Errorf("assertion failed: fetched control plane %s/%s does not match expected %s/%s",
+			controlPlane.Namespace, controlPlane.Name, namespace, name)
+	}
+	return controlPlane, true, nil
+}
+
+// keyCleanup is the result of the cleanup of one recorded provisioner key.
+type keyCleanup int
+
+const (
+	// keyKept: Coder did not confirm that the key is gone. The record stays,
+	// and the operator tries again.
+	keyKept keyCleanup = iota
+	// keyGone: Coder confirmed that the key is gone, or that no key other
+	// than the applied key holds the name of a record without key IDs.
+	keyGone
+	// keyUnverified: the record has no key IDs, and Coder holds a key with
+	// its name that nothing shows this provisioner created. The operator
+	// leaves that key, and the record stays.
+	keyUnverified
+)
+
+// revokeKey deletes the key that record names, at record.CoderURL with the
+// operator token of the control plane record.ControlPlaneRefName. A record
+// without key IDs deletes no key.
+func (r *CoderProvisionerReconciler) revokeKey(
+	ctx context.Context,
+	provisioner *coderv1alpha1.CoderProvisioner,
+	record coderv1alpha1.CoderProvisionerKeyRecord,
+) (keyCleanup, error) {
+	log := ctrl.LoggerFrom(ctx).WithValues("coderURL", record.CoderURL, "controlPlaneRef", record.ControlPlaneRefName,
+		"keyName", record.KeyName, "keyID", record.KeyID)
+	controlPlane, ok, err := r.readControlPlane(ctx, provisioner.Namespace, record.ControlPlaneRefName)
+	if err != nil || !ok {
+		return keyKept, err
+	}
+	sessionToken, tokenResult, tokenReason, tokenMessage, tokenErr := r.readOperatorSessionToken(ctx, provisioner, controlPlane)
+	if tokenErr != nil || tokenResult.RequeueAfter > 0 {
+		log.Info("operator access is not available, keeping the provisioner key record",
+			"reason", tokenReason, "message", tokenMessage, "error", tokenErr)
+		return keyKept, nil
+	}
+
+	if organizationID, keyID, ok := parseKeyIDs(record.OrganizationID, record.KeyID); ok {
+		if err := r.BootstrapClient.DeleteProvisionerKeyByID(ctx, coderbootstrap.DeleteProvisionerKeyByIDRequest{
+			CoderURL:       record.CoderURL,
+			SessionToken:   sessionToken,
+			OrganizationID: organizationID,
+			KeyID:          keyID,
+		}); err != nil {
+			log.Info("failed to delete the recorded provisioner key, keeping its record", "error", err)
+			return keyKept, nil
+		}
+		return keyGone, nil
+	}
+
+	key, err := r.BootstrapClient.ProvisionerKeyByName(ctx, coderbootstrap.ProvisionerKeyByNameRequest{
+		CoderURL:         record.CoderURL,
+		SessionToken:     sessionToken,
+		OrganizationName: record.OrganizationName,
+		KeyName:          record.KeyName,
+	})
+	if err != nil {
+		log.Info("failed to look up the recorded provisioner key, keeping its record", "error", err)
+		return keyKept, nil
+	}
+	// Coder allows one key per name in an organization, so no other key of
+	// this record exists when no key or the applied key holds the name. The
+	// applied key holds it when record.CoderURL reaches the same Coder.
+	_, appliedKeyID, _ := parseKeyIDs(provisioner.Status.OrganizationID, provisioner.Status.ProvisionerKeyID)
+	if key == nil || (appliedKeyID != uuid.Nil && key.ID == appliedKeyID) {
+		return keyGone, nil
+	}
+	// Without the key ID that the create returned, nothing ties this key to
+	// this provisioner: another provisioner or a person can use the name.
+	log.Info("leaving a provisioner key that this provisioner cannot show it created", "foundKeyID", key.ID)
+	return keyUnverified, nil
+}
+
+// setUnverifiedKeyCondition sets the UnverifiedKeyKept condition for the
+// pending entries without key IDs that unverified describes, or removes it
+// when there are none. It reports whether the conditions changed.
+func setUnverifiedKeyCondition(provisioner *coderv1alpha1.CoderProvisioner, unverified []string) bool {
+	if len(unverified) == 0 {
+		return meta.RemoveStatusCondition(&provisioner.Status.Conditions, coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept)
+	}
+	return meta.SetStatusCondition(&provisioner.Status.Conditions, metav1.Condition{
+		Type:               coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: provisioner.Generation,
+		Reason:             "KeyIDUnknown",
+		Message: "status.pendingKeys holds entries without key IDs, and the operator deletes no key for them, because another provisioner or a person can use the same name: " +
+			strings.Join(unverified, "; ") + ". Delete such a key in Coder if nothing uses it.",
+	})
 }
 
 func (r *CoderProvisionerReconciler) ensureCleanupFinalizer(ctx context.Context, provisioner *coderv1alpha1.CoderProvisioner) (bool, error) {

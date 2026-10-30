@@ -1,6 +1,7 @@
 package coderbootstrap
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"net/http"
@@ -140,6 +141,50 @@ func (c *SDKClient) DeleteProvisionerKey(ctx context.Context, coderURL, sessionT
 	return xerrors.Errorf("delete provisioner key %q: %w", keyName, err)
 }
 
+// ProvisionerKeyByNameRequest identifies a provisioner key by its name.
+type ProvisionerKeyByNameRequest struct {
+	CoderURL         string
+	SessionToken     string
+	OrganizationName string
+	KeyName          string
+}
+
+// ProvisionerKeyByName returns the provisioner key named req.KeyName in the
+// organization req.OrganizationName. It returns nil when Coder answers that
+// the organization or a key with that name does not exist.
+func (c *SDKClient) ProvisionerKeyByName(ctx context.Context, req ProvisionerKeyByNameRequest) (*codersdk.ProvisionerKey, error) {
+	if err := validateProvisionerKeyInputs(req.CoderURL, req.SessionToken, req.KeyName); err != nil {
+		return nil, err
+	}
+
+	client, err := newAuthenticatedClient(req.CoderURL, req.SessionToken)
+	if err != nil {
+		return nil, err
+	}
+
+	organization, err := resolveOrganizationByName(ctx, client, cmp.Or(req.OrganizationName, codersdk.DefaultOrganization))
+	if isNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	key, err := withOptionalRateLimitBypass(ctx, func(requestCtx context.Context) (*codersdk.ProvisionerKey, error) {
+		return findOrganizationProvisionerKey(requestCtx, client, organization.ID, req.KeyName)
+	})
+	if isNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if key != nil && key.ID == uuid.Nil {
+		return nil, xerrors.Errorf("assertion failed: provisioner key %q returned an empty ID", req.KeyName)
+	}
+
+	return key, nil
+}
+
 // DeleteProvisionerKeyByIDRequest identifies one provisioner key by the IDs
 // that the caller recorded when it applied the key.
 type DeleteProvisionerKeyByIDRequest struct {
@@ -208,9 +253,15 @@ func (c *SDKClient) DeleteProvisionerKeyByID(ctx context.Context, req DeleteProv
 	return nil
 }
 
+// coderNotFoundMessage is the message of the 404 that Coder answers for a
+// missing organization or provisioner key (coderd/httpapi/httpapi.go:149 and
+// coderd/httpmw/provisionerkey.go:45-46 in v2.37.3). Another 404, for example
+// from a proxy or for a wrong base URL, does not prove that the key is gone.
+const coderNotFoundMessage = "Resource not found or you do not have access to this resource"
+
 func isNotFound(err error) bool {
 	var apiErr *codersdk.Error
-	return errors.As(err, &apiErr) && apiErr.StatusCode() == http.StatusNotFound
+	return errors.As(err, &apiErr) && apiErr.StatusCode() == http.StatusNotFound && apiErr.Message == coderNotFoundMessage
 }
 
 // Entitlements returns deployment entitlements for the given coderd instance.

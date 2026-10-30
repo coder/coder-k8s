@@ -34,6 +34,9 @@ type fakeBootstrapClient struct {
 	deleteKeyRequests       []deleteKeyRequest
 	deleteKeyByIDErr        error
 	deleteKeyByIDRequests   []coderbootstrap.DeleteProvisionerKeyByIDRequest
+	// provisionerKeyByName answers ProvisionerKeyByName. When it is nil,
+	// Coder has no key with the name.
+	provisionerKeyByName func(coderbootstrap.ProvisionerKeyByNameRequest) *codersdk.ProvisionerKey
 
 	// Entitlements support.
 	entitlementsResponse codersdk.Entitlements
@@ -91,6 +94,13 @@ func (f *fakeBootstrapClient) DeleteProvisionerKey(_ context.Context, coderURL, 
 func (f *fakeBootstrapClient) DeleteProvisionerKeyByID(_ context.Context, req coderbootstrap.DeleteProvisionerKeyByIDRequest) error {
 	f.deleteKeyByIDRequests = append(f.deleteKeyByIDRequests, req)
 	return f.deleteKeyByIDErr
+}
+
+func (f *fakeBootstrapClient) ProvisionerKeyByName(_ context.Context, req coderbootstrap.ProvisionerKeyByNameRequest) (*codersdk.ProvisionerKey, error) {
+	if f.provisionerKeyByName == nil {
+		return nil, nil
+	}
+	return f.provisionerKeyByName(req), nil
 }
 
 func (f *fakeBootstrapClient) Entitlements(_ context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error) {
