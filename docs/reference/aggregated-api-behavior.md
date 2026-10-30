@@ -230,7 +230,7 @@ A write (create, update, patch, or delete) of a workspace or a template can also
 
 - A `502` or a `503`.
 - A `2xx` that Coder does not send: a status other than the expected one, or a body that is not the expected JSON. Examples on a create are a `201` with an HTML page, an empty body, invalid JSON, or a JSON array, and a `200` with an HTML page, invalid JSON, or the JSON of Coder.
-- A create answer without the name of the object, for example a `201` with `{}` or `null`.
+- A create answer without the name of the object, or a build answer of a workspace update or delete without the ID of the build. An example is a `201` with `{}` or `null`.
 - A connection that breaks after the server sent the request, before or while the server reads the answer.
 
 A write that did not reach Coder keeps the `500` that says that the server cannot reach Coder. Examples are a refused connection, a failed DNS lookup, and a rejected TLS certificate. Nothing changed in Coder, so you can retry it.
