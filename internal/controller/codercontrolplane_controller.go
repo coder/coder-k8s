@@ -42,6 +42,7 @@ import (
 	"github.com/coder/coder-k8s/internal/coderbootstrap"
 	"github.com/coder/coder-k8s/internal/controlplaneurl"
 	"github.com/coder/coder-k8s/internal/credentialsecret"
+	"github.com/coder/coder-k8s/internal/operatortoken"
 	"github.com/coder/coder-k8s/internal/sameorigin"
 )
 
@@ -1733,15 +1734,34 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 	if tokenSecret != nil && !isManagedOperatorTokenSecret(tokenSecret, coderControlPlane) {
 		// Another owner, or no owner, controls this Secret: do not read, write
 		// or adopt it, and stop publishing it to consumers of the status.
-		nextStatus.OperatorTokenSecretRef = nil
 		nextStatus.OperatorAccessReady = false
+		message := operatorTokenSecretNotOwnedMessage(coderControlPlane, operatorTokenSecretName)
+		// The stored status names a Secret only while a token that the operator
+		// provisioned for this control plane can still work in Coder. Without
+		// that record the token is not provably ours, so it stays. While the
+		// revoke fails, the reference stays as the record.
+		if coderControlPlane.Status.OperatorTokenSecretRef != nil {
+			postgresURL, err := r.resolveBootstrapPostgresURL(ctx, coderControlPlane)
+			if err == nil {
+				err = r.OperatorAccessProvisioner.RevokeOperatorToken(ctx, coderbootstrap.RevokeOperatorTokenRequest{
+					PostgresURL:      postgresURL,
+					OperatorUsername: defaultOperatorAccessUsername,
+					TokenName:        operatorTokenName,
+				})
+			}
+			if err != nil {
+				message += fmt.Sprintf(" The operator has not deleted its earlier operator token in Coder yet. It retries every %s.", operatorAccessRetryInterval)
+			} else {
+				nextStatus.OperatorTokenSecretRef = nil
+			}
+		}
 		if err := setControlPlaneCondition(
 			nextStatus,
 			coderControlPlane.Generation,
 			coderv1alpha1.CoderControlPlaneConditionOperatorTokenSecretOwned,
 			metav1.ConditionFalse,
 			reasonTokenSecretNotOwned,
-			operatorTokenSecretNotOwnedMessage(coderControlPlane, operatorTokenSecretName),
+			message,
 		); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -2316,7 +2336,7 @@ func (r *CoderControlPlaneReconciler) cleanupDisabledOperatorAccess(
 }
 
 func isManagedOperatorTokenSecret(secret *corev1.Secret, coderControlPlane *coderv1alpha1.CoderControlPlane) bool {
-	return isOwnedByCoderControlPlane(secret, coderControlPlane)
+	return operatortoken.ControlledBy(secret, coderControlPlane)
 }
 
 // resolveBootstrapPostgresURL returns the PostgreSQL URL used for operator

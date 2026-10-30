@@ -97,7 +97,7 @@ func TestControlPlaneCoderClient(t *testing.T) {
 			name:        "operator token Secret missing",
 			objects:     func() []client.Object { return []client.Object{readyControlPlane()} },
 			wantReason:  "OperatorAccessNotReady",
-			wantMessage: "The operator token Secret of CoderControlPlane coder has no token yet.",
+			wantMessage: `CoderControlPlane coder: operator token unavailable: Secret "coder-operator-token" does not exist.`,
 		},
 		{
 			name: "operator token key empty",
@@ -105,7 +105,7 @@ func TestControlPlaneCoderClient(t *testing.T) {
 				return []client.Object{readyControlPlane(), tokenSecret("token", "")}
 			},
 			wantReason:  "OperatorAccessNotReady",
-			wantMessage: "The operator token Secret of CoderControlPlane coder has no token yet.",
+			wantMessage: `CoderControlPlane coder: operator token unavailable: Secret "coder-operator-token" has no value for key "token".`,
 		},
 		{
 			name: "operator token Secret replaced by one without an owner",
