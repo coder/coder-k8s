@@ -6228,6 +6228,13 @@ spec:
                       description: OrganizationName is the Coder organization of the
                         key.
                       type: string
+                    unpublished:
+                      description: |-
+                        Unpublished is true from before the create until the operator records
+                        a key as applied. While it is true, the Secret can hold this key, or a
+                        key that a rotation deleted, so the operator replaces the key in the
+                        Secret.
+                      type: boolean
                   required:
                   - coderURL
                   - controlPlaneRefName

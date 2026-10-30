@@ -351,3 +351,77 @@ func TestCoderProvisionerKey_FailedRotationKeepsKeyIDs(t *testing.T) {
 	require.True(t, pendingKeyRecorded(f.get(ctx, t, provisioner), unpublished.KeyID),
 		"a failed rotation must keep the IDs of the unpublished key")
 }
+
+// setControlPlaneURL sets status.url of the fixture's control plane.
+func setControlPlaneURL(ctx context.Context, t *testing.T, f provisionerCredentialFixture, url string) {
+	t.Helper()
+	controlPlane := &coderv1alpha1.CoderControlPlane{}
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: f.controlPlane.Name, Namespace: f.namespace}, controlPlane))
+	controlPlane.Status.URL = url
+	require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
+}
+
+// TestCoderProvisionerKey_RevertAfterFailedRotation checks a rotation from
+// endpoint A to B that fails after its create, followed by a revert to A.
+// The Secret then holds key B, which is valid only at B, or key A, which the
+// rotation deleted. The next reconcile must delete key B and write a new key
+// for A.
+func TestCoderProvisionerKey_RevertAfterFailedRotation(t *testing.T) {
+	t.Parallel()
+
+	for _, secretWritten := range []bool{true, false} {
+		name := "status write after the Secret write fails"
+		if !secretWritten {
+			name = "Secret write fails"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			f := newProvisionerCredentialFixture(ctx, t, "cprov-revert")
+			first := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "provisioner", Key: "material-1"}
+			atB := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "provisioner", Key: "material-b"}
+			final := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: first.OrganizationID, KeyID: uuid.New(), KeyName: "provisioner", Key: "material-3"}
+			f.bootstrapClient.provisionerKeyResponses = []coderbootstrap.EnsureProvisionerKeyResponse{first, atB, final}
+			provisioner := f.createProvisioner(ctx, t, nil, nil)
+			name := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
+			keySecret := types.NamespacedName{Name: provisioner.Name + "-provisioner-key", Namespace: provisioner.Namespace}
+			f.reconcile(ctx, t, provisioner)
+			f.reconcile(ctx, t, provisioner)
+
+			const urlB = "http://coder-b.example.com"
+			setControlPlaneURL(ctx, t, f, urlB)
+			base, err := ctrlclient.NewWithWatch(cfg, ctrlclient.Options{Scheme: scheme})
+			require.NoError(t, err)
+			f.reconciler.Client = interceptor.NewClient(base, interceptor.Funcs{
+				SubResourceUpdate: func(ctx context.Context, c ctrlclient.Client, sub string, obj ctrlclient.Object, opts ...ctrlclient.SubResourceUpdateOption) error {
+					if p, ok := obj.(*coderv1alpha1.CoderProvisioner); ok && secretWritten && p.Status.ProvisionerKeyID == atB.KeyID.String() {
+						return apierrors.NewServiceUnavailable("injected status write failure")
+					}
+					return c.SubResource(sub).Update(ctx, obj, opts...)
+				},
+				Update: func(ctx context.Context, c ctrlclient.WithWatch, obj ctrlclient.Object, opts ...ctrlclient.UpdateOption) error {
+					if s, ok := obj.(*corev1.Secret); ok && !secretWritten && s.Name == keySecret.Name {
+						return apierrors.NewServiceUnavailable("injected Secret write failure")
+					}
+					return c.Update(ctx, obj, opts...)
+				},
+			})
+			_, err = f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			require.Error(t, err, "the injected failure must fail the rotation to B")
+
+			f.reconciler.Client = k8sClient
+			setControlPlaneURL(ctx, t, f, testCoderOrigin)
+			f.reconcile(ctx, t, provisioner)
+
+			require.Contains(t, keyDeletes(f.bootstrapClient), keyDelete{coderURL: urlB, token: testOperatorToken, keyID: atB.KeyID.String()},
+				"key B must be deleted at B")
+			secret := &corev1.Secret{}
+			require.NoError(t, k8sClient.Get(ctx, keySecret, secret))
+			require.Equal(t, "material-3", string(secret.Data[coderv1alpha1.DefaultProvisionerKeySecretKey]), "the Secret must hold a new key for A")
+			latest := f.get(ctx, t, provisioner)
+			require.Equal(t, final.KeyID.String(), latest.Status.ProvisionerKeyID)
+			require.Equal(t, testCoderOrigin, latest.Status.ControlPlaneURL)
+			require.Empty(t, latest.Status.PendingKeys)
+		})
+	}
+}

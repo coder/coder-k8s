@@ -300,15 +300,15 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		CoderURL:            coderURL,
 		OrganizationName:    organizationName,
 		KeyName:             keyName,
+		Unpublished:         true,
 	}
-	// A record in the target slot names a key that an earlier reconcile
-	// created there and did not publish. The Secret can hold that key while
-	// the applied fields name another one, or Coder can hold it without any
-	// plaintext. A rotation replaces it with a key that status records.
-	targetPending := slices.ContainsFunc(provisioner.Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
-		return sameKeySlot(record, target)
+	// An unpublished record names a key that an earlier reconcile created, or
+	// started to create, for the Secret and did not record as applied. The
+	// Secret can hold that key, or a key that the rotation already deleted,
+	// so a rotation replaces it with a key that status records.
+	rotate := !secretUsable || slices.ContainsFunc(provisioner.Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
+		return record.Unpublished
 	})
-	rotate := !secretUsable || targetPending
 	pending := slices.Clone(provisioner.Status.PendingKeys)
 	var replaced coderv1alpha1.CoderProvisionerKeyRecord
 	if driftDetected {
@@ -696,10 +696,14 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 	// The Secret holds the key at the target, so the applied fields take over
 	// its record. Coder allows one key per name, so the create also proved
-	// that the keys of the other target records are gone.
+	// that the keys of the other target records are gone. No other key is in
+	// the Secret now.
 	provisioner.Status.PendingKeys = slices.DeleteFunc(provisioner.Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
 		return sameKeySlot(record, target)
 	})
+	for i := range provisioner.Status.PendingKeys {
+		provisioner.Status.PendingKeys[i].Unpublished = false
+	}
 	recordAppliedKeyStatus(provisioner, organizationID, appliedOrgName, provisionerKeyID, provisionerKeyName,
 		appliedTagsHash, appliedControlPlaneRefName, appliedControlPlaneURL)
 	provisioner.Status.SecretRef = &coderv1alpha1.SecretKeySelector{Name: keySecretName, Key: keySecretKey}
@@ -781,6 +785,17 @@ func (r *CoderProvisionerReconciler) reconcileDeletion(ctx context.Context, prov
 			return ctrl.Result{}, err
 		}
 		records = append(records, applied)
+		// Before status.pendingKeys, the operator wrote the IDs of a new key
+		// before status.controlPlaneURL, so status from an older operator
+		// can name a key at the current endpoint under the old URL. The
+		// delete matches the key ID only.
+		current, err := r.currentEndpointRecord(ctx, provisioner, applied)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if current.CoderURL != applied.CoderURL {
+			records = append(records, current)
+		}
 	}
 	if len(records) == 0 {
 		log.Info("status records no Coder provisioner key, removing the finalizer without a Coder call")
@@ -917,6 +932,29 @@ func (r *CoderProvisionerReconciler) appliedKeyRecord(
 	}
 	record.CoderURL = apiURL
 	return record, nil
+}
+
+// currentEndpointRecord returns applied at the current Coder API URL of the
+// control plane that spec.controlPlaneRef names, with that control plane's
+// operator token. It returns applied when that control plane cannot be read.
+func (r *CoderProvisionerReconciler) currentEndpointRecord(
+	ctx context.Context,
+	provisioner *coderv1alpha1.CoderProvisioner,
+	applied coderv1alpha1.CoderProvisionerKeyRecord,
+) (coderv1alpha1.CoderProvisionerKeyRecord, error) {
+	controlPlane, ok, err := r.readControlPlane(ctx, provisioner.Namespace, provisioner.Spec.ControlPlaneRef.Name)
+	if err != nil || !ok {
+		return applied, err
+	}
+	apiURL, urlErr := coderAPIURL(controlPlane)
+	if urlErr != nil {
+		ctrl.LoggerFrom(ctx).Info("unable to derive the current Coder API URL during deletion", "error", urlErr)
+		return applied, nil
+	}
+	current := applied
+	current.ControlPlaneRefName = controlPlane.Name
+	current.CoderURL = apiURL
+	return current, nil
 }
 
 // readControlPlane reads a control plane in namespace. ok is false when it

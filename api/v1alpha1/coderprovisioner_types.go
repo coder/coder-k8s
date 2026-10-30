@@ -133,6 +133,11 @@ type CoderProvisionerKeyRecord struct {
 	OrganizationID string `json:"organizationID,omitempty"`
 	// KeyID is the provisioner key ID that Coder returned.
 	KeyID string `json:"keyID,omitempty"`
+	// Unpublished is true from before the create until the operator records
+	// a key as applied. While it is true, the Secret can hold this key, or a
+	// key that a rotation deleted, so the operator replaces the key in the
+	// Secret.
+	Unpublished bool `json:"unpublished,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

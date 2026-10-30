@@ -58,6 +58,7 @@ or was about to create, at one Coder endpoint.
 | `keyName` | string | KeyName is the provisioner key name in Coder. |
 | `organizationID` | string | OrganizationID is the organization ID that Coder returned for the key. Without organizationID and keyID, the operator deletes the key by name, unless that name holds the key in provisionerKeyID. |
 | `keyID` | string | KeyID is the provisioner key ID that Coder returned. |
+| `unpublished` | boolean | Unpublished is true from before the create until the operator records a key as applied. While it is true, the Secret can hold this key, or a key that a rotation deleted, so the operator replaces the key in the Secret. |
 
 ### CoderProvisionerKeySpec
 

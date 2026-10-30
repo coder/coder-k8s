@@ -244,3 +244,40 @@ func pendingKeyRecorded(provisioner *coderv1alpha1.CoderProvisioner, keyID uuid.
 		return record.KeyID == keyID.String()
 	})
 }
+
+// TestCoderProvisionerDeletion_TriesCurrentControlPlaneURL checks status that
+// an older operator wrote during a control plane URL change: the new key's
+// IDs under the old status.controlPlaneURL. Deletion must also try the
+// current URL.
+func TestCoderProvisionerDeletion_TriesCurrentControlPlaneURL(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newProvisionerCredentialFixture(ctx, t, "cprov-delete-urldrift")
+	const oldURL, newURL = "http://coder-old.example.com", "http://coder-new.example.com"
+	setControlPlaneURL(ctx, t, f, oldURL)
+	provisioner := f.createProvisioner(ctx, t, nil, nil)
+	f.reconcile(ctx, t, provisioner)
+	f.reconcile(ctx, t, provisioner)
+
+	newKey := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: uuid.New(), KeyID: uuid.New()}
+	latest := f.get(ctx, t, provisioner)
+	require.Equal(t, oldURL, latest.Status.ControlPlaneURL)
+	latest.Status.OrganizationID = newKey.OrganizationID.String()
+	latest.Status.ProvisionerKeyID = newKey.KeyID.String()
+	require.NoError(t, k8sClient.Status().Update(ctx, latest))
+	setControlPlaneURL(ctx, t, f, newURL)
+
+	require.NoError(t, k8sClient.Delete(ctx, f.get(ctx, t, provisioner)))
+	f.reconcile(ctx, t, provisioner)
+
+	require.Len(t, f.bootstrapClient.deleteKeyByIDRequests, 2)
+	require.Equal(t, oldURL, f.bootstrapClient.deleteKeyByIDRequests[0].CoderURL)
+	require.Equal(t, newURL, f.bootstrapClient.deleteKeyByIDRequests[1].CoderURL)
+	for _, req := range f.bootstrapClient.deleteKeyByIDRequests {
+		require.Equal(t, newKey.OrganizationID, req.OrganizationID)
+		require.Equal(t, newKey.KeyID, req.KeyID)
+		require.Equal(t, testOperatorToken, req.SessionToken)
+	}
+	require.Zero(t, f.bootstrapClient.deleteKeyCalls, "no name-based key deletion")
+	requireProvisionerGone(ctx, t, types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace})
+}
