@@ -1,8 +1,10 @@
 package controller_test
 
 import (
+	"cmp"
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"testing"
 
@@ -422,6 +424,127 @@ func TestCoderProvisionerKey_RevertAfterFailedRotation(t *testing.T) {
 			require.Equal(t, final.KeyID.String(), latest.Status.ProvisionerKeyID)
 			require.Equal(t, testCoderOrigin, latest.Status.ControlPlaneURL)
 			require.Empty(t, latest.Status.PendingKeys)
+		})
+	}
+}
+
+// keySlot is the place of a provisioner key in Coder: Coder allows one key
+// per name in an organization.
+type keySlot struct{ coderURL, organizationName, keyName string }
+
+// keyStoreClient is a Coder that keeps provisioner keys, one per slot.
+// failEnsureAt fails each key create at that URL before it reaches Coder.
+type keyStoreClient struct {
+	*fakeBootstrapClient
+	keys         map[keySlot]uuid.UUID
+	failEnsureAt string
+}
+
+func newKeySlot(coderURL, organizationName, keyName string) keySlot {
+	return keySlot{coderURL: coderURL, organizationName: cmp.Or(organizationName, "default"), keyName: keyName}
+}
+
+func (s keySlot) organizationID() uuid.UUID {
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(s.coderURL+"/"+s.organizationName))
+}
+
+func (c *keyStoreClient) EnsureProvisionerKey(_ context.Context, req coderbootstrap.EnsureProvisionerKeyRequest) (coderbootstrap.EnsureProvisionerKeyResponse, error) {
+	if req.CoderURL == c.failEnsureAt {
+		return coderbootstrap.EnsureProvisionerKeyResponse{}, errors.New("injected connection refused")
+	}
+	slot := newKeySlot(req.CoderURL, req.OrganizationName, req.KeyName)
+	response := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: slot.organizationID(), KeyName: req.KeyName}
+	if keyID, ok := c.keys[slot]; ok {
+		response.KeyID = keyID
+		return response, nil
+	}
+	response.KeyID = uuid.New()
+	response.Key = "material-" + response.KeyID.String()
+	c.keys[slot] = response.KeyID
+	return response, nil
+}
+
+func (c *keyStoreClient) DeleteProvisionerKey(_ context.Context, coderURL, _, organizationName, keyName string) error {
+	delete(c.keys, newKeySlot(coderURL, organizationName, keyName))
+	return nil
+}
+
+func (c *keyStoreClient) DeleteProvisionerKeyByID(_ context.Context, req coderbootstrap.DeleteProvisionerKeyByIDRequest) error {
+	maps.DeleteFunc(c.keys, func(slot keySlot, keyID uuid.UUID) bool {
+		return slot.coderURL == req.CoderURL && slot.organizationID() == req.OrganizationID && keyID == req.KeyID
+	})
+	return nil
+}
+
+func (c *keyStoreClient) DeleteProvisionerKeyByName(_ context.Context, req coderbootstrap.DeleteProvisionerKeyByNameRequest) error {
+	slot := newKeySlot(req.CoderURL, req.OrganizationName, req.KeyName)
+	if keyID, ok := c.keys[slot]; ok && keyID != req.KeepKeyID {
+		delete(c.keys, slot)
+	}
+	return nil
+}
+
+// TestCoderProvisionerKey_IDLessRecordKeepsOtherProvisionersKey checks a
+// provisioner P whose target moves to endpoint B, where provisioner Q holds
+// its key under the same key name. P records the create at B without key IDs,
+// and the create fails before it reaches Coder. Neither the cleanup after P
+// moves back nor the deletion of P may delete the key of Q.
+func TestCoderProvisionerKey_IDLessRecordKeepsOtherProvisionersKey(t *testing.T) {
+	t.Parallel()
+
+	for _, deleteP := range []bool{false, true} {
+		name := "P moves back to A"
+		if deleteP {
+			name = "P is deleted"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			f := newProvisionerCredentialFixture(ctx, t, "cprov-idless")
+			createControlPlaneWithToken(ctx, t, f.namespace, "coder-b", "https://coder-b.example.com", "operator-token-b")
+			urlB := "http://coder-b." + f.namespace + ".svc.cluster.local:80"
+			store := &keyStoreClient{fakeBootstrapClient: f.bootstrapClient, keys: map[keySlot]uuid.UUID{}}
+			f.reconciler.BootstrapClient = store
+
+			q := f.createKeyProvisioner(ctx, t, "q", "")
+			q.Spec.ControlPlaneRef.Name = "coder-b"
+			q.Spec.Key.Name = "provisioner"
+			require.NoError(t, k8sClient.Update(ctx, q))
+			f.reconcile(ctx, t, q)
+			f.reconcile(ctx, t, q)
+			slotB := newKeySlot(urlB, "", "provisioner")
+			qKeyID := f.get(ctx, t, q).Status.ProvisionerKeyID
+			require.Equal(t, store.keys[slotB].String(), qKeyID, "Q must hold the key named provisioner at B")
+
+			p := f.createProvisioner(ctx, t, nil, nil)
+			pName := types.NamespacedName{Name: p.Name, Namespace: p.Namespace}
+			f.reconcile(ctx, t, p)
+			f.reconcile(ctx, t, p)
+			moveTo := func(controlPlane string) {
+				latest := f.get(ctx, t, p)
+				latest.Spec.ControlPlaneRef.Name = controlPlane
+				require.NoError(t, k8sClient.Update(ctx, latest))
+			}
+
+			store.failEnsureAt = urlB
+			moveTo("coder-b")
+			_, err := f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: pName})
+			require.Error(t, err, "the create at B must fail")
+			require.True(t, slices.ContainsFunc(f.get(ctx, t, p).Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
+				return record.CoderURL == urlB && record.KeyName == "provisioner" && record.KeyID == ""
+			}), "P must record its create at B without key IDs")
+
+			if deleteP {
+				require.NoError(t, k8sClient.Delete(ctx, f.get(ctx, t, p)))
+				f.reconcile(ctx, t, p)
+				requireProvisionerGone(ctx, t, pName)
+			} else {
+				moveTo("coder")
+				_, err = f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: pName})
+				require.NoError(t, err)
+			}
+
+			require.Equal(t, qKeyID, store.keys[slotB].String(), "the key of Q at B must still exist")
 		})
 	}
 }
