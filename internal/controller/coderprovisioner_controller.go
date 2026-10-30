@@ -311,9 +311,11 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// An unpublished record names a key that an earlier reconcile created, or
 	// started to create, for the Secret and did not record as applied. The
 	// Secret can hold that key, or a key that the rotation already deleted,
-	// so a rotation replaces it with a key that status records.
+	// so a rotation replaces it with a key that status records. A published
+	// target record with IDs other than the applied key names a key that is
+	// not in the Secret and can still be valid, so a rotation deletes it by ID.
 	rotate := !secretUsable || slices.ContainsFunc(provisioner.Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
-		return record.Unpublished
+		return record.Unpublished || (sameKeySlot(record, target) && record.KeyID != "" && record.KeyID != status.ProvisionerKeyID)
 	})
 	replacing := driftDetected || rotate || metadataMissing
 	// Status from an operator that did not record the control plane UID does
@@ -395,22 +397,14 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		pending = append(pending, replaced)
 	}
 	if replacing {
-		// The newest target record with IDs stays until the replacement below
-		// deletes its key by ID. Each earlier replacement at the target
-		// already deleted the older ones by ID before its create.
-		newest := -1
-		for i, record := range pending {
-			if sameKeySlot(record, target) && record.KeyID != "" {
-				newest = i
-			}
-		}
-		var next []coderv1alpha1.CoderProvisionerKeyRecord
-		for i, record := range pending {
-			if !sameKeySlot(record, target) || i == newest {
-				next = append(next, record)
-			}
-		}
-		pending = append(next, target)
+		// Every target record with IDs stays until the replacement below
+		// deletes its key by ID. Status from an older operator can hold more
+		// than one, under organization IDs that a reused organization name
+		// once had, and each key can still be valid.
+		pending = slices.DeleteFunc(pending, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
+			return sameKeySlot(record, target) && record.KeyID == ""
+		})
+		pending = append(pending, target)
 	}
 	// The replacement below deletes the key that the target holds.
 	kept, conditionChanged, err := r.revokePendingKeys(ctx, provisioner, pending, target, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {

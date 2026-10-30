@@ -86,4 +86,9 @@ The same records apply while the provisioner runs. When `spec.controlPlaneRef`, 
 
 This cleanup is best-effort. When the operator cannot reach Coder, for example because the control plane or its operator token is gone, or when the delete call fails, the operator still removes its finalizer, and the key stays valid in Coder. Delete the provisioner while the control plane runs. If cleanup could not reach Coder, list the keys with `coder provisioner keys list --org <organization>`, and delete the key by hand with `coder provisioner keys delete <name> --org <organization>`.
 
+Two limits remain:
+
+- A record without a control plane UID, from an operator version that did not record it, cannot show which Coder backend holds its key. When its URL now reaches another Coder backend, that backend answers that it has no such key, and the operator removes the record. If that URL later reaches the old backend again, the key is still valid there. Delete such a key by hand.
+- Coder deletes a provisioner key only by name. The operator lists the keys of the recorded organization, finds the recorded key ID, and then deletes the key with that name. When someone deletes that key and creates another key with the same name between these two calls, the operator deletes the new key.
+
 To remove all the other resources, do the steps in [the control plane cleanup](getting-started.md#5-clean-up-optional).
