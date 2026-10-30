@@ -42,6 +42,13 @@ func (r *CoderAIProviderReconciler) writeAIProviderRecord(
 		Kind: cleanupRecordKindAIProvider, UID: provider.UID, Namespace: provider.Namespace, Name: provider.Name,
 		DeploymentID: deploymentID, Nonce: aiProviderNonce(provider), CoderID: provider.Status.ProviderID, Type: provider.Spec.Type,
 	}
+	if record.CoderID == "" && createAttempt == nil && previous != nil {
+		// A status without the ID does not prove that the provider is gone,
+		// and after the sync only the recorded ID finds it. A new create
+		// drops the ID: it follows Coder's 404 for the name, and Coder
+		// cannot rename a provider.
+		record.CoderID = previous.CoderID
+	}
 	if createAttempt != nil {
 		record.CreateAttemptTime = *createAttempt
 	} else if provider.Status.CreateAttemptTime != nil {

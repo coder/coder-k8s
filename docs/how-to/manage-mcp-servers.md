@@ -119,6 +119,7 @@ The object has the conditions `Ready`, `Reconciling` and `Stalled`. A stalled ob
 | `MCPServersNotAllowed`, `ForceOnNotAllowed` | The control plane does not allow this object. See [step 1](#1-allow-organizations-on-the-control-plane). |
 | `CredentialSecretNotFound`, `CredentialNotOptedIn`, `CredentialDestinationNotAllowed`, `CredentialRefused`, `CredentialKeyMissing`, `CredentialMalformed` | A credential Secret fails the contract. See [Credential kill switch](#credential-kill-switch). |
 | `SlugConflict` | The organization has a config with this slug that the operator did not create. |
+| `CoderDeploymentChanged` | The control plane now reaches another Coder deployment than the one that holds the config. See [Cleanup records](#cleanup-records). |
 | `CreatingConfig`, `ConfirmingCreate`, `CreateRetrying` | A create is in progress, or the operator reads Coder to learn whether a create committed. |
 | `GroupNotFound` | A name in `access.groups` is not a Coder group yet. See [Access](#access). |
 | `CoderRejected` | Coder rejected the request. Fix the spec. |
@@ -206,14 +207,35 @@ Disabling stops every chat from using the server, also chats that selected it ea
 
 Deleting the object deletes the config in Coder. Coder removes the server from every chat and deletes the users' OAuth2 tokens for it. The finalizer `coder.com/mcp-server-cleanup` keeps the object until then.
 
-- The operator deletes only a config that this object created. With only an unconfirmed create, it reads Coder first. It deletes a config that carries this object's temporary display name, and it never touches another config with the slug. A create can still commit for a short time, so within 2 minutes of the create request the operator reads again before it trusts that the config is absent.
+- The operator deletes only a config that this object created. With only an unconfirmed create, it reads Coder first. It deletes a config that carries this object's temporary display name, and it never touches another config with the slug. A create can still commit for a short time, so within 2 minutes of the create request the operator reads again before it trusts that the config is absent. When another config holds the slug, or a config with the temporary display name has another slug, the finalizer goes without a delete, and the [cleanup record](#cleanup-records) stays. A record without a config ID also stays when the object reports `SlugConflict` after a create: a person can have renamed the config of that create.
 - When Coder is unreachable, or the control plane has no operator access, the finalizer stays and the operator retries every 60 seconds. The operator trusts only Coder's own 404 as proof that the config is gone. A 404 from a proxy keeps the finalizer.
-- When the control plane is gone, nothing can delete the config. The finalizer goes at once. The operator logs the slug and the config ID with the reason `ControlPlaneGone`. Delete the config in the Coder dashboard.
+- When the control plane is gone, the operator cannot delete the config now. The finalizer goes at once. The operator logs the slug and the config ID with the reason `ControlPlaneGone`. The [cleanup record](#cleanup-records) stays, so a later sweep can delete the config.
 - When you delete the control plane while `CoderMCPServer` objects that use it are being deleted, the control plane waits for them for up to 10 minutes, plus a grace period for a last bounded attempt. It keeps its finalizer, so Coder keeps running, and the delete above runs with its retries. An object that you do not delete holds the control plane for only 30 seconds, so delete the objects together with the control plane. A foreground deletion (`kubectl delete --cascade=foreground`) does not wait.
-- When the control plane does not wait (its namespace is being deleted, it is deleted in the foreground, or the 10 minutes have passed) and its operator access still works, the operator sends one delete with a 10-second limit, then removes the finalizer, also when that delete fails. Without working access, the finalizer goes without a delete. So a namespace deletion finishes, but it can leave the config in Coder. The metric `coder_k8s_cleanup_released_without_delete_total` (label `kind`) counts each release without a delete.
+- When the control plane does not wait (its namespace is being deleted, it is deleted in the foreground, or the 10 minutes have passed) and its operator access still works, the operator sends one delete with a 10-second limit, then removes the finalizer, also when that delete fails. Without working access, the finalizer goes without a delete. So a namespace deletion finishes, but it can leave the config in Coder, and its cleanup record stays. The metric `coder_k8s_cleanup_released_without_delete_total` (label `kind`) counts each release without a delete.
 - A withdrawn opt-in never blocks a delete.
 
-Delete `CoderMCPServer` objects before their control plane and before their namespace.
+Delete `CoderMCPServer` objects before their control plane and before their namespace. A sweep deletes a leftover config only when the namespace comes back with a control plane of the same Coder deployment.
+
+### Cleanup records
+
+Before the operator creates a config in Coder, it writes a cleanup record: a ConfigMap named `ck8s-cleanup-<object UID>` with the label `coder.com/cleanup-record=CoderMCPServer` in the operator's namespace (`coder-system`). If it cannot write the record, it does not create the config. The record holds no credential: it holds the object's namespace, name and UID, Coder's deployment ID from `/api/v2/buildinfo`, the config's temporary display name, the pinned organization ID, the slug, and the config ID once the operator knows it. A config that an earlier operator version created gets its record on the next reconcile. A config that was left in Coder before that has no record: delete it in the dashboard.
+
+When the control plane later reaches another Coder deployment (for example after its database Secret changed), the record still locates the config in the old one. The operator then stalls the object with `CoderDeploymentChanged`, keeps the record and creates nothing in the new deployment. Delete the config in the old deployment, then delete the ConfigMap.
+
+The operator removes the record when Coder confirms that the config is deleted. When the finalizer goes without a delete, the record stays, and the operator sweeps it as for [AI providers](manage-ai-providers.md#cleanup-records): once the object is gone and 5 minutes have passed since the last create, through a ready control plane in the object's namespace whose Coder answers the record's deployment ID. The sweep deletes the recorded config ID. A record that no control plane reaches stays, with the gauge `coder_k8s_cleanup_records_unmatched` and a `NoMatchingDeployment` Warning Event. When that Coder deployment never comes back, delete the config in the Coder dashboard, then delete the ConfigMap.
+
+A record without a config ID is left by a create that the operator could not confirm. The sweep deletes nothing for such a record: a person can edit the slug and the display name of any config, so neither proves that the operator created it. When the organization has no config with the recorded slug and none with the temporary display name, the sweep removes the record. Otherwise the record stays, the gauge `coder_k8s_cleanup_records_unmatched` counts it, and the operator writes a `ManualCleanupNeeded` Warning Event on the ConfigMap that names the config. Clean up by hand:
+
+1. Read the record and its Event:
+
+    ```bash
+    kubectl -n coder-system get configmap ck8s-cleanup-<object UID> -o yaml
+    kubectl -n coder-system get events --field-selector reason=ManualCleanupNeeded
+    ```
+
+2. In the dashboard, open **AI settings > MCP servers** in the recorded organization and find the config that the Event names.
+3. When that config is a leftover of the deleted object, delete it. The next sweep, within 10 minutes, then removes the record.
+4. When a person owns that config, keep it and delete the ConfigMap.
 
 To release a stuck object by hand, remove the finalizer with a JSON patch whose `test` operation checks the index first, as for [AI providers](manage-ai-providers.md#stuck-finalizer). Then check **AI settings > MCP servers** in the dashboard for a leftover config with the slug.
 

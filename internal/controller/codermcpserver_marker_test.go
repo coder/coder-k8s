@@ -93,7 +93,7 @@ func TestCoderMCPServerDisableNeedsTheMarker(t *testing.T) {
 		SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {
 			return errors.New("lost status write")
 		},
-	}), Scheme: scheme}
+	}), Scheme: scheme, APIReader: k8sClient, OperatorNamespace: env.namespace}
 	mark := len(env.writeRoutes())
 	_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(got)})
 	require.ErrorContains(t, err, "lost status write")

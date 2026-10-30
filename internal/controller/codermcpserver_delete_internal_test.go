@@ -47,12 +47,13 @@ func TestMCPServerDeleteUnderHoldEndsAtHoldEnd(t *testing.T) {
 		Data: map[string][]byte{coderv1alpha1.DefaultTokenSecretKey: []byte("token")},
 	}
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns"}}
-	r := &CoderMCPServerReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(controlPlane, token, namespace).Build(), Scheme: scheme}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(controlPlane, token, namespace).Build()
+	r := &CoderMCPServerReconciler{Client: c, APIReader: c, Scheme: scheme, OperatorNamespace: "coder-system"}
 	held, err := controlPlaneHolds(context.Background(), r.Client, controlPlane, time.Now())
 	require.NoError(t, err)
 	require.True(t, held, "assertion failed: the test needs a control plane that holds")
 
-	server := &coderv1alpha1.CoderMCPServer{ObjectMeta: metav1.ObjectMeta{Name: "github", Namespace: "ns"}}
+	server := &coderv1alpha1.CoderMCPServer{ObjectMeta: metav1.ObjectMeta{Name: "github", Namespace: "ns", UID: "mcp-uid"}}
 	server.Spec.ControlPlaneRef.Name = "coder"
 	server.Spec.Slug = "github"
 	server.Status.OrganizationID = uuid.NewString()

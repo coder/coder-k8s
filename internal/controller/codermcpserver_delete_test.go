@@ -9,6 +9,7 @@ import (
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -143,7 +144,8 @@ func TestCoderMCPServerDeleteWithoutOperatorAccess(t *testing.T) {
 // Plan 4.10 item 2: with only a create marker, the slug read decides. A
 // config with this object's nonce is deleted. Someone else's config with the
 // slug is never touched. With no config, the controller waits until a late
-// create cannot commit any more, then releases.
+// create cannot commit any more, then releases. #353: the record goes only
+// when no config can still be the object's, as in a sweep.
 func TestCoderMCPServerDeletePendingCreate(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -152,10 +154,12 @@ func TestCoderMCPServerDeletePendingCreate(t *testing.T) {
 		age     time.Duration                                                                  // Age of the create marker.
 		release bool
 		deletes int
+		record  bool // The record stays.
 	}{
 		{name: "nonce found", create: createWithNonce, release: true, deletes: 1},
-		{name: "someone else's config", create: createOther, release: true},
-		{name: "no config, recent create", age: time.Second},
+		{name: "someone else's config", create: createOther, release: true, record: true},
+		{name: "nonce under another slug", create: createWithNonceUnderOtherSlug, age: 3 * time.Minute, release: true, record: true},
+		{name: "no config, recent create", age: time.Second, record: true},
 		{name: "no config, old create", age: 3 * time.Minute, release: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -167,6 +171,7 @@ func TestCoderMCPServerDeletePendingCreate(t *testing.T) {
 
 			kept, result := env.deleteMCPServer(ctx, t, server)
 			require.Equal(t, tc.deletes, env.fake.requestCount(routeDeleteMCPServer)-deletes)
+			require.Equal(t, tc.record, env.mcpServerRecord(ctx, t, server.UID) != nil, "record stays")
 			if tc.release {
 				require.Nil(t, kept)
 				require.Len(t, env.fake.mcpServers(), before-tc.deletes)
@@ -178,6 +183,32 @@ func TestCoderMCPServerDeletePendingCreate(t *testing.T) {
 			require.LessOrEqual(t, result.RequeueAfter, 2*time.Minute)
 		})
 	}
+}
+
+// #353: when a person renames the config of a lost create answer, the
+// controller reports SlugConflict and drops its create marker. A delete then
+// keeps the record, so a sweep can report the config for manual cleanup.
+func TestCoderMCPServerDeleteKeepsRecordAfterSlugConflict(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	env.fake.failNext(routeCreateMCPServer, fakeFault{AfterCommit: true, Reset: true})
+	got, _ := env.reconcile(ctx, t, env.create(ctx, t, nil))
+	requireMCPServerStep(t, got, false, "ConfirmingCreate")
+	configs := env.fake.mcpServers()
+	require.Len(t, configs, 1)
+	displayName := "Renamed by a person"
+	_, err := env.dashboard(t).UpdateMCPServerConfig(ctx, env.orgID, configs[0].view.ID, codersdk.UpdateMCPServerConfigRequest{DisplayName: &displayName})
+	require.NoError(t, err)
+	got, _ = env.reconcile(ctx, t, got)
+	requireMCPServerStep(t, got, true, "SlugConflict")
+	require.Nil(t, got.Status.CreateAttemptTime)
+
+	gone, _ := env.deleteMCPServer(ctx, t, got)
+	require.Nil(t, gone)
+	require.Len(t, env.fake.mcpServers(), 1, "the controller never deletes a config that it cannot prove its own")
+	require.NotNil(t, env.mcpServerRecord(ctx, t, got.UID), "the record stays for a sweep")
 }
 
 // pendingCreate returns an object with only a create marker of the given age.
@@ -198,6 +229,11 @@ func (env mcpServerEnv) pendingCreate(
 	server.Status.ConfigID = ""
 	server.Status.CreateAttemptTime = &metav1.Time{Time: time.Now().Add(-age)}
 	require.NoError(t, k8sClient.Status().Update(ctx, server))
+	// The record of a pending create has no config ID yet.
+	record := &corev1.ConfigMap{}
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: env.namespace, Name: "ck8s-cleanup-" + string(server.UID)}, record))
+	delete(record.Data, "coderID")
+	require.NoError(t, k8sClient.Update(ctx, record))
 	return server
 }
 
@@ -265,6 +301,16 @@ func createWithNonce(ctx context.Context, t *testing.T, env mcpServerEnv, server
 	require.NoError(t, err)
 }
 
+// createWithNonceUnderOtherSlug is the config of a lost create answer after a
+// person changed its slug in Coder.
+func createWithNonceUnderOtherSlug(ctx context.Context, t *testing.T, env mcpServerEnv, server *coderv1alpha1.CoderMCPServer) {
+	t.Helper()
+	req := apiKeyMCPRequest("renamed")
+	req.DisplayName = "coder-k8s:" + string(server.UID)
+	_, err := env.dashboard(t).CreateMCPServerConfig(ctx, env.orgID, req)
+	require.NoError(t, err)
+}
+
 func createOther(ctx context.Context, t *testing.T, env mcpServerEnv, server *coderv1alpha1.CoderMCPServer) {
 	t.Helper()
 	_, err := env.dashboard(t).CreateMCPServerConfig(ctx, env.orgID, apiKeyMCPRequest(server.Spec.Slug))
@@ -320,7 +366,7 @@ func TestCoderMCPServerReleasedWithoutDeleteMetric(t *testing.T) {
 		base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
 		require.NoError(t, err)
 		failed := false
-		env.r = &controller.CoderMCPServerReconciler{Scheme: scheme, Client: interceptor.NewClient(base, interceptor.Funcs{
+		env.r = &controller.CoderMCPServerReconciler{Scheme: scheme, APIReader: k8sClient, OperatorNamespace: env.namespace, Client: interceptor.NewClient(base, interceptor.Funcs{
 			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 				if _, ok := obj.(*coderv1alpha1.CoderMCPServer); ok && !failed {
 					failed = true

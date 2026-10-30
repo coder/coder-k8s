@@ -161,8 +161,10 @@ func SetupControllers(mgr manager.Manager) error {
 	}
 
 	mcpServerReconciler := &controller.CoderMCPServerReconciler{
-		Client: client,
-		Scheme: managerScheme,
+		Client:            client,
+		Scheme:            managerScheme,
+		APIReader:         mgr.GetAPIReader(),
+		OperatorNamespace: aiProviderReconciler.OperatorNamespace,
 	}
 	if err := mcpServerReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create MCP server controller: %w", err)

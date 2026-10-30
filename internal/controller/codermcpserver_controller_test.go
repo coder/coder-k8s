@@ -51,7 +51,7 @@ func newMCPServerEnv(ctx context.Context, t *testing.T, withControlPlane bool) m
 	t.Helper()
 	env := mcpServerEnv{namespace: createTestNamespace(ctx, t, "mcp"), fake: newFakeCoder(t)}
 	env.orgID = env.fake.addOrganization("coder")
-	env.r = &controller.CoderMCPServerReconciler{Client: k8sClient, Scheme: scheme}
+	env.r = &controller.CoderMCPServerReconciler{Client: k8sClient, Scheme: scheme, APIReader: k8sClient, OperatorNamespace: env.namespace}
 	if withControlPlane {
 		env.controlPlane = createTestControlPlane(ctx, t, env.namespace, "coder", env.fake.server.URL)
 		env.setOptIn(ctx, t, &coderv1alpha1.MCPServersSpec{Organizations: []string{"coder"}})
@@ -117,9 +117,10 @@ func (env mcpServerEnv) reconcile(ctx context.Context, t *testing.T, server *cod
 	return got, result
 }
 
-// mcpRequests counts the fake's requests other than organization lookups.
+// mcpRequests counts the fake's requests other than organization lookups
+// and deployment ID reads.
 func (env mcpServerEnv) mcpRequests() int {
-	return env.fake.totalRequests() - env.fake.requestCount(routeOrganization)
+	return env.fake.totalRequests() - env.fake.requestCount(routeOrganization) - env.fake.requestCount(routeBuildInfo)
 }
 
 // requireMCPServerStep checks the kstatus conditions of a wait, a stall, or
@@ -582,7 +583,7 @@ func TestCoderMCPServerWatches(t *testing.T) {
 		Controller: config.Controller{SkipNameValidation: ptrTo(true)},
 	})
 	require.NoError(t, err)
-	require.NoError(t, (&controller.CoderMCPServerReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr))
+	require.NoError(t, (&controller.CoderMCPServerReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), APIReader: mgr.GetAPIReader(), OperatorNamespace: env.namespace}).SetupWithManager(mgr))
 	mgrCtx, cancel := context.WithCancel(ctx)
 	mgrDone := make(chan error, 1)
 	go func() { mgrDone <- mgr.Start(mgrCtx) }()

@@ -292,7 +292,7 @@ func TestCoderMCPServerCreateRecovery(t *testing.T) {
 					u.Roles = []codersdk.SlimRole{{Name: codersdk.RoleOwner, OrganizationID: env.orgID.String()}, {Name: codersdk.RoleMember}}
 				})
 			}
-			env.r = &controller.CoderMCPServerReconciler{Client: k8sClient, Scheme: scheme}
+			env.r = &controller.CoderMCPServerReconciler{Client: k8sClient, Scheme: scheme, APIReader: k8sClient, OperatorNamespace: env.namespace}
 			base := env.posts() // Creates of the test setup.
 			got, _ := env.reconcile(ctx, t, server)
 			if tc.reason == "Applied" {
@@ -331,7 +331,7 @@ func TestCoderMCPServerMarkerConflictSendsNoCreate(t *testing.T) {
 	env := newMCPServerEnv(ctx, t, true)
 	env.keySecret(ctx, t, testMCPKey)
 	server := env.create(ctx, t, nil)
-	r := &controller.CoderMCPServerReconciler{Client: markerConflictMCPClient{k8sClient}, Scheme: scheme}
+	r := &controller.CoderMCPServerReconciler{Client: markerConflictMCPClient{k8sClient}, Scheme: scheme, APIReader: k8sClient, OperatorNamespace: env.namespace}
 	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(server)})
 	require.True(t, apierrors.IsConflict(err), "%v", err)
 	require.Zero(t, env.posts())

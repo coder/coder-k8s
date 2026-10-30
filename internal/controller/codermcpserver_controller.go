@@ -58,6 +58,10 @@ const (
 type CoderMCPServerReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// APIReader reads the cleanup records live, and OperatorNamespace holds
+	// them (#353).
+	APIReader         client.Reader
+	OperatorNamespace string
 
 	// sentCredentials maps types.NamespacedName -> sentCredentialSums: the
 	// object's UID, and credential field -> SHA-256 of the value that Coder
@@ -91,8 +95,8 @@ func mcpServerStalled(requeue time.Duration, reason, format string, args ...any)
 // A change of the referenced control plane or of a credential Secret requeues
 // the object.
 func (r *CoderMCPServerReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if mgr == nil || r.Client == nil || r.Scheme == nil {
-		return fmt.Errorf("assertion failed: MCP server reconciler needs a manager, a client, and a scheme")
+	if mgr == nil || r.Client == nil || r.Scheme == nil || r.APIReader == nil || r.OperatorNamespace == "" {
+		return fmt.Errorf("assertion failed: MCP server reconciler needs a manager, a client, a scheme, an API reader and the operator namespace")
 	}
 	indexes := map[string]func(*coderv1alpha1.CoderMCPServer) []string{
 		mcpServerControlPlaneRefIndex:   func(s *coderv1alpha1.CoderMCPServer) []string { return []string{s.Spec.ControlPlaneRef.Name} },
@@ -153,8 +157,8 @@ func (r *CoderMCPServerReconciler) serversWith(ctx context.Context, namespace, i
 
 // Reconcile runs the checks in order and reports the first one that fails.
 func (r *CoderMCPServerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	if r.Client == nil || r.Scheme == nil {
-		return ctrl.Result{}, fmt.Errorf("assertion failed: MCP server reconciler needs a client and a scheme")
+	if r.Client == nil || r.Scheme == nil || r.APIReader == nil || r.OperatorNamespace == "" {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: MCP server reconciler needs a client, a scheme, an API reader and the operator namespace")
 	}
 	server := &coderv1alpha1.CoderMCPServer{}
 	if err := r.Get(ctx, req.NamespacedName, server); apierrors.IsNotFound(err) {
@@ -223,6 +227,7 @@ func (r *CoderMCPServerReconciler) check(
 		// operator token Secret that appears later.
 		return mcpServerWait(mcpServerRetry, wait.reason, "%s", wait.message), nil
 	}
+	r.backfillMCPServerRecord(ctx, sdk, server)
 	org, step, err := resolveMCPServerOrganization(ctx, sdk, server.Spec.Organization)
 	if err != nil {
 		return nil, err
@@ -240,6 +245,11 @@ func (r *CoderMCPServerReconciler) check(
 				return optInStep, err
 			}
 		}
+		// A new Coder database can miss the organization too. The recovery
+		// then is the deployment's, so that stall goes first.
+		if switched, err := r.recordedDeploymentChanged(ctx, sdk, server); switched != nil || err != nil {
+			return switched, err
+		}
 		return step, nil
 	}
 	server.Status.OrganizationID = org.ID.String()
@@ -252,6 +262,11 @@ func (r *CoderMCPServerReconciler) check(
 		step, err = r.disableMCPServerWithoutConsent(ctx, sdk, server, before, org.ID, step)
 	}
 	if step != nil || err != nil {
+		return step, err
+	}
+	// The record carries the config ID before the sync replaces the nonce,
+	// so a later sweep can still find the config (#353).
+	if step, err := r.ensureMCPServerRecord(ctx, sdk, server); step != nil || err != nil {
 		return step, err
 	}
 	// A config that is gone before a full apply is created again once.
@@ -506,21 +521,21 @@ func findMCPServerSlug(
 	if err != nil {
 		return nil, mcpServerListFailed(err)
 	}
-	return mcpServerWithSlug(configs, server, orgID)
+	return mcpServerWithSlug(configs, server.Spec.Slug, orgID)
 }
 
 func mcpServerListFailed(err error) *mcpServerStep {
 	return mcpServerWait(mcpServerRetry, "CoderUnavailable", "list MCP server configs: %s", coderErrorSummary(err))
 }
 
-// mcpServerWithSlug returns the config with the spec's slug from configs, the
-// list of the organization orgID.
-func mcpServerWithSlug(configs []codersdk.MCPServerConfig, server *coderv1alpha1.CoderMCPServer, orgID uuid.UUID) (*codersdk.MCPServerConfig, *mcpServerStep) {
+// mcpServerWithSlug returns the config with slug from configs, the list of
+// the organization orgID.
+func mcpServerWithSlug(configs []codersdk.MCPServerConfig, slug string, orgID uuid.UUID) (*codersdk.MCPServerConfig, *mcpServerStep) {
 	for i, config := range configs {
 		if err := coderAnswerFor("MCP server config organization", orgID.String(), config.OrganizationID.String()); err != nil {
 			return nil, mcpServerStalled(mcpServerResync, "CoderAnswerMismatch", "%s", err.Error())
 		}
-		if config.Slug != server.Spec.Slug {
+		if config.Slug != slug {
 			continue
 		}
 		if config.ID == uuid.Nil {
@@ -529,6 +544,18 @@ func mcpServerWithSlug(configs []codersdk.MCPServerConfig, server *coderv1alpha1
 		return &configs[i], nil
 	}
 	return nil, nil
+}
+
+// mcpServerWithDisplayName returns a config with displayName from configs, or
+// nil. A person can change the slug of the config of a lost create answer, so
+// its nonce can sit under another slug.
+func mcpServerWithDisplayName(configs []codersdk.MCPServerConfig, displayName string) *codersdk.MCPServerConfig {
+	for i := range configs {
+		if configs[i].DisplayName == displayName {
+			return &configs[i]
+		}
+	}
+	return nil
 }
 
 // patchFinalizer adds or removes the cleanup finalizer with a merge patch. The

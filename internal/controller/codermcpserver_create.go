@@ -55,7 +55,11 @@ func (r *CoderMCPServerReconciler) createOrRecord(
 		return keepRejectedMCPServerCreate(step, rejected), nil
 	}
 	if found != nil {
-		return recordMCPServer(server, *found), nil
+		if step := recordMCPServer(server, *found); step != nil {
+			return step, nil
+		}
+		// Store the ID before the sync replaces the nonce (#353).
+		return r.ensureMCPServerRecord(ctx, sdk, server)
 	}
 	if server.Status.CreateAttemptTime != nil {
 		// A create of this object may have been sent. A missing config proves
@@ -68,7 +72,10 @@ func (r *CoderMCPServerReconciler) createOrRecord(
 			return mcpServerStalled(0, "CoderRejected", "Coder rejected the create request of MCP server config %s, and a read confirmed that nothing was created.", server.Spec.Slug), nil
 		}
 	}
-	return r.createMCPServer(ctx, sdk, server, orgID, values, before)
+	if step, err := r.createMCPServer(ctx, sdk, server, orgID, values, before); step != nil || err != nil {
+		return step, err
+	}
+	return r.ensureMCPServerRecord(ctx, sdk, server)
 }
 
 // keepRejectedMCPServerCreate keeps the memory of a rejected create in the
@@ -110,16 +117,23 @@ func recordMCPServer(server *coderv1alpha1.CoderMCPServer, found codersdk.MCPSer
 	return nil
 }
 
-// createMCPServer writes the create marker and the change tokens, then sends
-// the only create request of this attempt. A conflict on the marker write
-// ends the reconcile before any request. The config starts disabled with the
-// nonce as its display name, so members never see it and chats never use it
-// (plan F6) before the apply step.
+// createMCPServer writes the cleanup record, then the create marker and the
+// change tokens, then sends the only create request of this attempt. A failed
+// record write or a conflict on the marker write ends the reconcile before
+// any request. The config starts disabled with the nonce as its display name,
+// so members never see it and chats never use it (plan F6) before the apply
+// step.
 func (r *CoderMCPServerReconciler) createMCPServer(
 	ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, orgID uuid.UUID,
 	values map[string]credentialsecret.Value, before *coderv1alpha1.CoderMCPServerStatus,
 ) (*mcpServerStep, error) {
-	server.Status.CreateAttemptTime = &metav1.Time{Time: time.Now()}
+	now := time.Now()
+	// Without the record, a config that a namespace deletion leaves behind
+	// cannot be found again (#353 invariant 1).
+	if step, err := r.writeMCPServerRecord(ctx, sdk, server, &now); step != nil || err != nil {
+		return step, err
+	}
+	server.Status.CreateAttemptTime = &metav1.Time{Time: now}
 	server.Status.Credentials = mcpServerCredentialStatus(server.Spec.Auth, values)
 	applyMCPServerStep(server, mcpServerWait(0, "CreatingConfig", "Creating MCP server config %s in Coder.", server.Spec.Slug))
 	if err := r.writeStatus(ctx, server, before); err != nil {
