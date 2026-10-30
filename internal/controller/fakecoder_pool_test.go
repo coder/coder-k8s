@@ -141,6 +141,27 @@ func (f *fakeCoder) addExternalBuild(workspaceID, initiatorID uuid.UUID, transit
 	return b
 }
 
+// addRunningWorkspace stores a running workspace with the given ID, as a
+// member's create and start build would, unless the fake already has one. It
+// returns the start build ID and last_used_at, or ok false.
+func (f *fakeCoder) addRunningWorkspace(id, ownerID, versionID uuid.UUID, name string) (startBuildID uuid.UUID, lastUsedAt time.Time, ok bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, found := f.workspaces[id]; found {
+		return uuid.Nil, time.Time{}, false
+	}
+	owner, tpl, now := f.users[ownerID], f.templates[*f.versions[versionID].TemplateID], f.now()
+	fw := &fakeWorkspace{workspace: codersdk.Workspace{
+		ID: id, CreatedAt: now, UpdatedAt: now, OwnerID: owner.ID, OwnerName: owner.Username,
+		OrganizationID: tpl.OrganizationID, OrganizationName: tpl.OrganizationName,
+		TemplateID: tpl.ID, TemplateName: tpl.Name, Name: name, LastUsedAt: now,
+	}}
+	build := f.appendBuild(fw, versionID, codersdk.WorkspaceTransitionStart)
+	f.setJob(&fw.builds[0], codersdk.ProvisionerJobSucceeded)
+	f.workspaces[id] = fw
+	return build.ID, now, true
+}
+
 // The helpers and handlers below run with f.mu held.
 
 func (f *fakeCoder) mustWorkspace(workspaceID uuid.UUID) *fakeWorkspace {

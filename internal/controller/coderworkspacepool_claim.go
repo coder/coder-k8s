@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/coder/coder/v2/codersdk"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -128,8 +129,10 @@ func (r *CoderWorkspacePoolReconciler) refreshWaitingClaims(
 // moves the controller reference from the pool to the claim, with the
 // listed resourceVersion, so a member that changed after the list (for
 // example, someone used it) answers 409 and stays. A conflict ends the
-// reconcile. The bound members change in all, so the later steps see them
-// bound. The claims come from refreshWaitingClaims. Before each bind, the
+// reconcile. That status is the member's last read of Coder, up to a minute
+// old, so the pool reads the workspace again right before each bind and
+// skips a member that this read does not prove unused (#409). The bound
+// members change in all, so the later steps see them bound. The claims come from refreshWaitingClaims. Before each bind, the
 // pool stores ownerName in the claim status, so the name survives a crash
 // between the bind and the status. It also sets the pool label again, in
 // case it drifted.
@@ -164,6 +167,13 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 		}
 		return readyAt(a).Compare(readyAt(b))
 	})
+	if len(free) == 0 {
+		return nil
+	}
+	sdk, _, wait, err := controlPlaneCoderClient(ctx, r.Client, pool.Namespace, pool.Spec.ControlPlaneRef.Name)
+	if err != nil || wait != nil {
+		return err // No bind without a read of Coder.
+	}
 	for i := range claims {
 		claim := &claims[i]
 		if len(free) == 0 {
@@ -177,6 +187,19 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 			if err := r.Status().Update(ctx, claim); err != nil {
 				return fmt.Errorf("update status of workspace claim %s/%s: %w", claim.Namespace, claim.Name, err)
 			}
+		}
+		for len(free) > 0 {
+			unused, err := poolMemberUnusedNow(ctx, sdk, free[0], r.Clock.Now())
+			if err != nil {
+				return err
+			}
+			if unused {
+				break
+			}
+			free = free[1:]
+		}
+		if len(free) == 0 {
+			return nil
 		}
 		m := free[0]
 		current := poolMemberInputMismatch(m, pool) == ""
@@ -205,6 +228,19 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 		}
 	}
 	return nil
+}
+
+// poolMemberUnusedNow reads the member's workspace with the member's identity
+// guard and applies its use check. It reports false for a used workspace and
+// for any read that proves nothing. The member's own next read then marks it
+// Used or failed, and the pool releases or deletes it as usual.
+func poolMemberUnusedNow(ctx context.Context, sdk *codersdk.Client, member *coderv1alpha1.CoderWorkspacePoolMember, now time.Time) (bool, error) {
+	workspace, _, step, err := readPoolMemberWorkspace(ctx, sdk, member)
+	if step, err = memberWaitOnWrongAnswer(ctx, step, err); err != nil || step != nil {
+		return false, err
+	}
+	used, err := checkPoolMemberUse(member.DeepCopy(), workspace, now)
+	return used == nil, err
 }
 
 // writeClaimStatuses writes the status of every claim of the pool from the

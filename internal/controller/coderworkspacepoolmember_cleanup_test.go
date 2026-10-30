@@ -104,7 +104,7 @@ func TestPoolMemberCleanupGuardsDelete(t *testing.T) {
 	require.NoError(t, k8sClient.Update(e.ctx, member))
 }
 
-// TestPoolMemberCleanupLastUseCheck is mutation check 11: before the first
+// TestPoolMemberCleanupLastUseCheck is mutation check 11: before each
 // delete build of an unclaimed member, for example after its pool was
 // deleted, the member reads last_used_at again. A used workspace stays in
 // Coder, and the member releases its finalizer without a Coder write.

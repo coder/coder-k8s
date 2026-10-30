@@ -110,9 +110,12 @@ func (r *CoderWorkspacePoolMemberReconciler) cleanupStep(
 	if step != nil || err != nil {
 		return step, templateTestUnavailablePoll, false, err
 	}
-	if member.Spec.ClaimRef == nil && member.Status.DeleteBuildID == "" && member.Status.DeleteAttempts == 0 {
-		// The last use check, before the first delete build: a leaked
-		// workspace is better than lost work.
+	if member.Spec.ClaimRef == nil {
+		// The last use check runs on every delete step, so no delete build,
+		// a retry included, starts after a use (#409): a leaked workspace is
+		// better than lost work. In Coder v2.37.3 a failed or canceled delete
+		// build does not move last_used_at, so a failed delete alone never
+		// releases the member.
 		used := meta.IsStatusConditionTrue(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed)
 		if !used && member.Status.ReadyLastUsedAt != nil {
 			step, err := checkPoolMemberUse(member, workspace, now)
@@ -122,7 +125,7 @@ func (r *CoderWorkspacePoolMemberReconciler) cleanupStep(
 			used = step != nil
 		}
 		if used {
-			log.FromContext(ctx).Info("Someone may have used the workspace without a claim, so the controller releases the pool member without deleting it",
+			log.FromContext(ctx).Info("Someone may have used the workspace without a claim, so the controller releases the pool member and starts no delete build",
 				"workspaceID", member.Status.WorkspaceID, "workspaceName", member.Status.WorkspaceName)
 			return nil, 0, true, nil
 		}

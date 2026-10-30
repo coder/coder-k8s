@@ -141,8 +141,9 @@ func TestPoolBindsCurrentBeforeOutdated(t *testing.T) {
 
 // TestPoolBindSkipsUseAfterLastRead (#409): a member reads last_used_at once
 // a minute, so its status does not show use since that read. The bind reads
-// Coder again: the claim takes the next member, and the used member's next
-// read marks it Used, so the pool releases it.
+// Coder again: without an answer nothing binds, then the claim takes the next
+// member, and the used member's next read marks it Used, so the pool
+// releases it.
 func TestPoolBindSkipsUseAfterLastRead(t *testing.T) {
 	t.Parallel()
 	e := newPoolMemberEnv(t)
@@ -151,6 +152,11 @@ func TestPoolBindSkipsUseAfterLastRead(t *testing.T) {
 	unused, _ := e.readyMember(t)
 	e.fake.markUsed(usedID, e.clock.Now().Add(30*time.Second))
 	claim := e.createClaim(t, "build")
+
+	e.fake.failNext(routeWorkspace, fakeFault{Status: 502})
+	e.fake.failNext(routeWorkspace, fakeFault{Status: 502})
+	e.reconcilePool(t, 1)
+	requireClaim(t, e.claim(t, claim), coderv1alpha1.CoderWorkspaceClaimPhasePending, "WaitingForReadyWorkspace", false)
 
 	e.reconcilePool(t, 1)
 	e.requireBound(t, unused, claim)

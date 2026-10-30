@@ -39,11 +39,20 @@ func (e *poolMemberEnv) editPool(t *testing.T, edit func(*coderv1alpha1.CoderWor
 	require.NoError(t, k8sClient.Update(e.ctx, e.pool))
 }
 
-// setMemberStatus edits a member's status as its reconciler would.
+// setMemberStatus edits a member's status as its reconciler would. A ready
+// status whose workspace the fake does not have gets a running, unused one,
+// because the pool reads the workspace before a bind.
 func (e *poolMemberEnv) setMemberStatus(t *testing.T, key types.NamespacedName, edit func(*coderv1alpha1.CoderWorkspacePoolMemberStatus)) {
 	t.Helper()
 	member := e.reconcileMember(t, key, 0)
 	edit(&member.Status)
+	if st := &member.Status; st.Phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseReady && st.WorkspaceID != "" {
+		build, lastUsed, ok := e.fake.addRunningWorkspace(uuid.MustParse(st.WorkspaceID), uuid.MustParse(member.Spec.OwnerID),
+			uuid.MustParse(member.Spec.TemplateVersionID), st.WorkspaceName)
+		if ok {
+			st.StartBuildID, st.ReadyLastUsedAt = build.String(), &metav1.MicroTime{Time: lastUsed}
+		}
+	}
 	require.NoError(t, k8sClient.Status().Update(e.ctx, member))
 }
 
