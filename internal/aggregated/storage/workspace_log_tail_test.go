@@ -32,6 +32,7 @@ func TestLineTail(t *testing.T) {
 		{"byte cap drops the oldest lines", push(newLineTail(10, 5), "aa\n", "bb\n", "cc\n"), "cc\n", true},
 		{"lines that fit the byte cap exactly", push(newLineTail(10, 6), "aa\n", "bb\n"), "aa\nbb\n", false},
 		{"a line over the byte cap keeps its start", push(newLineTail(10, 4), "a\n", "üüü\n"), "üü", true},
+		{"each newline ends a line", push(newLineTail(2, 100), "a\n", "b1\nb2\nb3\n"), "b2\nb3\n", false},
 	}
 	for _, tc := range cases {
 		if got := tc.tail.String(); got != tc.want || tc.tail.cut != tc.wantsCut {
@@ -53,6 +54,7 @@ func TestWorkspaceLogTailLines(t *testing.T) {
 	f := newLogFakeCoder(t)
 	s := newTestLogStorage(t, f, nil)
 	entries := testLogEntries(5)
+	entries[4].Output = "first part\nsecond part"
 	f.setLogs(entries)
 
 	cases := []struct {
@@ -61,11 +63,12 @@ func TestWorkspaceLogTailLines(t *testing.T) {
 		want  string
 		calls int32
 	}{
-		{"last 2 lines", &aggregationv1alpha1.CoderWorkspaceLogOptions{TailLines: int64Ptr(2)}, renderedLog(entries[3:]), 2},
+		{"last 3 lines", &aggregationv1alpha1.CoderWorkspaceLogOptions{TailLines: int64Ptr(3)}, renderedLog(entries[3:]), 2},
+		{"an entry with a line break is 2 lines", &aggregationv1alpha1.CoderWorkspaceLogOptions{TailLines: int64Ptr(1)}, "second part\n", 2},
 		{"more lines than the log", &aggregationv1alpha1.CoderWorkspaceLogOptions{TailLines: int64Ptr(10)}, renderedLog(entries), 2},
 		{"zero lines", &aggregationv1alpha1.CoderWorkspaceLogOptions{TailLines: int64Ptr(0)}, "", 2},
 		// As for Pod logs, tailLines applies first and limitBytes to its result.
-		{"tail, then limitBytes", &aggregationv1alpha1.CoderWorkspaceLogOptions{TailLines: int64Ptr(2), LimitBytes: int64Ptr(30)}, renderedLog(entries[3:])[:30], 2},
+		{"tail, then limitBytes", &aggregationv1alpha1.CoderWorkspaceLogOptions{TailLines: int64Ptr(3), LimitBytes: int64Ptr(30)}, renderedLog(entries[3:])[:30], 2},
 	}
 	for _, tc := range cases {
 		before := f.requests.Load()

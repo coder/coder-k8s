@@ -21,12 +21,30 @@ func newLineTail(maxLines, maxBytes int64) *lineTail {
 	return &lineTail{maxLines: maxLines, maxBytes: maxBytes}
 }
 
-func (t *lineTail) push(line string) {
+// push adds text that ends with a newline. Each newline ends one line, as in kubectl logs --tail,
+// so an entry whose output has line breaks counts as several lines.
+func (t *lineTail) push(text string) {
 	if t.maxLines == 0 {
 		return
 	}
+	for text != "" {
+		end := strings.IndexByte(text, '\n') + 1
+		if end == 0 {
+			panic("assertion failed: log tail text must end with a newline")
+		}
+		line := text[:end]
+		if end < len(text) {
+			// A held substring would keep the whole entry in memory, beyond maxBytes.
+			line = strings.Clone(line)
+		}
+		t.pushLine(line)
+		text = text[end:]
+	}
+}
+
+func (t *lineTail) pushLine(line string) {
 	if int64(len(line)) > t.maxBytes {
-		line = runePrefix(line, t.maxBytes)
+		line = strings.Clone(runePrefix(line, t.maxBytes))
 		t.cut = true
 	}
 	if int64(len(t.lines)) == t.maxLines {
