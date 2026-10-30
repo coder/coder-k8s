@@ -135,6 +135,21 @@ type writeCase struct {
 	run       func(t *testing.T, provider coder.ClientProvider) error
 }
 
+// updateTemplateFiles changes the files of a template. The update creates a template version
+// and then activates it.
+func updateTemplateFiles(t *testing.T, provider coder.ClientProvider) error {
+	ctx := namespacedContext("control-plane")
+	templates := NewTemplateStorage(provider)
+	current, err := templates.Get(ctx, "acme.starter-template", nil)
+	if err != nil {
+		t.Fatalf("get template: %v", err)
+	}
+	desired := current.(*aggregationv1alpha1.CoderTemplate).DeepCopy()
+	desired.Spec.Files = map[string]string{"main.tf": `resource "null_resource" "changed" {}`}
+	_, _, err = templates.Update(ctx, desired.Name, rest.DefaultUpdatedObjectInfo(desired), nil, nil, false, nil)
+	return err
+}
+
 func writeCases() []writeCase {
 	ctx := func() context.Context { return namespacedContext("control-plane") }
 	isPost := func(suffix string) func(*http.Request) bool {
@@ -223,21 +238,18 @@ func writeCases() []writeCase {
 			},
 		},
 		{
+			name:         "template version of new files",
+			isWrite:      isPost("/templateversions"),
+			checksAnswer: true,
+			readsBody:    true,
+			run:          updateTemplateFiles,
+		},
+		{
 			name: "template activation of new files",
 			isWrite: func(r *http.Request) bool {
 				return r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/versions")
 			},
-			run: func(t *testing.T, provider coder.ClientProvider) error {
-				templates := NewTemplateStorage(provider)
-				current, err := templates.Get(ctx(), "acme.starter-template", nil)
-				if err != nil {
-					t.Fatalf("get template: %v", err)
-				}
-				desired := current.(*aggregationv1alpha1.CoderTemplate).DeepCopy()
-				desired.Spec.Files = map[string]string{"main.tf": `resource "null_resource" "changed" {}`}
-				_, _, err = templates.Update(ctx(), desired.Name, rest.DefaultUpdatedObjectInfo(desired), nil, nil, false, nil)
-				return err
-			},
+			run: updateTemplateFiles,
 		},
 		{
 			name:    "template delete",

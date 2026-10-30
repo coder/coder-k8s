@@ -54,6 +54,16 @@ func TestMapCoderWriteErrorRealTransport(t *testing.T) {
 		_ = conn.Close()
 	}))
 	t.Cleanup(brokenServer.Close)
+	// redirectServer gets the write, answers with a same-origin redirect, and stops listening, so
+	// the request that follows the redirect cannot connect.
+	var redirectServer *httptest.Server
+	redirectServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received.Add(1)
+		_ = redirectServer.Listener.Close()
+		w.Header().Set("Connection", "close")
+		http.Redirect(w, r, "/api/v2/moved", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirectServer.Close)
 	refusingProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodConnect {
 			t.Errorf("expected CONNECT, got %s", r.Method)
@@ -105,6 +115,7 @@ func TestMapCoderWriteErrorRealTransport(t *testing.T) {
 		{name: "server refuses the TLS version", coderURL: tls13Server.URL, configure: tls12With()},
 		{name: "server refuses the cipher suites", coderURL: cipherServer.URL, configure: tls12With(tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305, tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305)},
 		{name: "connection closed after the request", coderURL: brokenServer.URL, wantSent: true},
+		{name: "redirect, then the next connection is refused", coderURL: redirectServer.URL, wantSent: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			coderURL := mustParse(tc.coderURL)

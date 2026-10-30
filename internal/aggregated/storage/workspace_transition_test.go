@@ -485,20 +485,23 @@ func TestWorkspaceTransitionUncertainPost(t *testing.T) {
 		found         *found
 		status        int // a Coder status for the POST; 0 stalls it until the client times out
 		wantQueued    bool
+		jsonBody      string // with a 2xx status, a JSON body instead of an HTML page
 	}{
-		{"the build was queued", stop, false, &found{transition: stop}, 0, true},
-		{"nothing changed", stop, false, nil, 0, false},
-		{"a proxy answered 502", stop, false, nil, http.StatusBadGateway, false},
-		{"a proxy answered 503 after the build was queued", stop, false, &found{transition: stop}, http.StatusServiceUnavailable, true},
-		{"Coder answered 504", stop, false, nil, http.StatusGatewayTimeout, false},
+		{"the build was queued", stop, false, &found{transition: stop}, 0, true, ""},
+		{"nothing changed", stop, false, nil, 0, false, ""},
+		{"a proxy answered 502", stop, false, nil, http.StatusBadGateway, false, ""},
+		{"a proxy answered 503 after the build was queued", stop, false, &found{transition: stop}, http.StatusServiceUnavailable, true, ""},
+		{"Coder answered 504", stop, false, nil, http.StatusGatewayTimeout, false, ""},
 		// Coder answers the POST with 201. Since codersdk v2.37, a 201 without the build's JSON is a
 		// *codersdk.Error with status 201. Another 2xx always was one.
-		{"a proxy answered 201 with an HTML page after the build was queued", stop, false, &found{transition: stop}, http.StatusCreated, true},
-		{"a proxy answered 200 with an HTML page", stop, false, nil, http.StatusOK, false},
-		{"another user queued the same transition", stop, false, &found{transition: stop, byOther: true}, 0, false},
-		{"the new build has the other transition", stop, false, &found{transition: start}, 0, false},
-		{"a start with the requested version", start, true, &found{transition: start}, 0, true},
-		{"a start with another version", start, true, &found{transition: start, oldVersion: true}, 0, false},
+		{"a proxy answered 201 with an HTML page after the build was queued", stop, false, &found{transition: stop}, http.StatusCreated, true, ""},
+		{"a proxy answered 200 with an HTML page", stop, false, nil, http.StatusOK, false, ""},
+		{"a proxy answered 201 with {} after the build was queued", stop, false, &found{transition: stop}, http.StatusCreated, true, "{}"},
+		{"a proxy answered 201 with null", stop, false, nil, http.StatusCreated, false, "null"},
+		{"another user queued the same transition", stop, false, &found{transition: stop, byOther: true}, 0, false, ""},
+		{"the new build has the other transition", stop, false, &found{transition: start}, 0, false, ""},
+		{"a start with the requested version", start, true, &found{transition: start}, 0, true, ""},
+		{"a start with another version", start, true, &found{transition: start, oldVersion: true}, 0, false, ""},
 	} {
 		previous := codersdk.WorkspaceTransitionStart
 		if tc.transition == start {
@@ -526,6 +529,10 @@ func TestWorkspaceTransitionUncertainPost(t *testing.T) {
 					f.update(func(ws *codersdk.Workspace) { ws.LatestBuild = queued })
 				}
 				switch {
+				case tc.jsonBody != "":
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(tc.status)
+					_, _ = w.Write([]byte(tc.jsonBody))
 				case tc.status >= 200 && tc.status < 300:
 					w.Header().Set("Content-Type", "text/html")
 					w.WriteHeader(tc.status)
