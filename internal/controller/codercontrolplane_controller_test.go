@@ -1462,11 +1462,11 @@ func TestReconcile_OperatorAccess_Disabled_DeletesNoTokenWithoutRecord(t *testin
 
 	cp := &coderv1alpha1.CoderControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-operator-access-disabled-revoke-without-status",
+			Name:      "test-operator-access-disabled-no-record",
 			Namespace: testNamespace,
 		},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
-			Image: "test-operator-disabled-revoke-without-status:latest",
+			Image: "test-operator-disabled-no-record:latest",
 			ExtraEnv: []corev1.EnvVar{{
 				Name:  "CODER_PG_CONNECTION_URL",
 				Value: "postgres://example.disabled.revoke/coder",
