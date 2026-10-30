@@ -152,6 +152,34 @@ func TestCoderAIProviderCreateOutcomes(t *testing.T) {
 	}
 }
 
+// #332: a read that confirms a create does not prove which key Coder holds.
+// A key changed in the dashboard between the lost create answer and that
+// read is replaced by the Secret's key before the object reports Ready.
+func TestCoderAIProviderConfirmedCreateResendsKey(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newAIProviderCreateEnv(ctx, t)
+	env.fake.failNext(routeCreateAIProvider, fakeFault{AfterCommit: true, Reset: true})
+	got, _ := env.reconcile(ctx, t, provider)
+	requireAIProviderStep(t, got, false, "ConfirmingCreate")
+
+	stored, ok := env.fake.aiProvider("openai")
+	require.True(t, ok, "the create committed")
+	_, err := env.fake.client(t, 2*time.Second).UpdateAIProvider(ctx, stored.id.String(), codersdk.UpdateAIProviderRequest{
+		APIKeys: &[]codersdk.AIProviderKeyMutation{{APIKey: ptrTo("sk-dashboard-0123456789abcdef")}},
+	})
+	require.NoError(t, err)
+
+	env.restart()
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIProviderReady(t, got)
+	stored, _ = env.fake.aiProvider("openai")
+	require.Len(t, stored.keys, 1)
+	require.Equal(t, testAIProviderKey, stored.keys[0].plaintext, "the Secret's key replaced the dashboard key")
+	require.Equal(t, stored.keys[0].id.String(), got.Status.Credential.KeyID)
+	require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider))
+}
+
 // A create that hangs ends with the reconcile's context. The marker is
 // already stored, so the next reconcile reads Coder first.
 func TestCoderAIProviderCreateHangs(t *testing.T) {
