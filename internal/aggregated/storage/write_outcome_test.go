@@ -398,3 +398,44 @@ func TestTemplateFilesUpdateReReadAfterActivation(t *testing.T) {
 		})
 	}
 }
+
+// TestTemplateUpdateReadAfterChange checks the read of the template that ends an update. When it
+// fails after Coder applied the change, the update returns the uncertain 504.
+func TestTemplateUpdateReadAfterChange(t *testing.T) {
+	t.Parallel()
+
+	ran := 0
+	for _, wc := range writeCases() {
+		if wc.name != "template update" && wc.name != "template activation of new files" {
+			continue
+		}
+		ran++
+		t.Run(wc.name, func(t *testing.T) {
+			t.Parallel()
+			coderServer, _ := newMockCoderServer(t)
+			t.Cleanup(coderServer.Close)
+
+			var changed, finalRead atomic.Bool
+			isFinalRead := func(r *http.Request) bool {
+				if wc.isWrite(r) {
+					changed.Store(true)
+					return false
+				}
+				return changed.Load() && r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v2/organizations/") &&
+					finalRead.CompareAndSwap(false, true)
+			}
+			provider := newTestClientProvider(t, writeOutcomeServer(t, coderServer, isFinalRead, gatewayPage(http.StatusBadGateway)).URL)
+
+			err := wc.run(t, provider)
+			if !finalRead.Load() {
+				t.Fatal("the update did not read the template after the change")
+			}
+			if !apierrors.IsTimeout(err) || !strings.Contains(err.Error(), "uncertain") {
+				t.Fatalf("expected the uncertain 504, got %v", err)
+			}
+		})
+	}
+	if ran != 2 {
+		t.Fatalf("expected 2 template update cases, found %d", ran)
+	}
+}

@@ -3,6 +3,7 @@ package coder
 import (
 	"context"
 	"crypto/tls"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -54,6 +55,30 @@ func TestMapCoderWriteErrorRealTransport(t *testing.T) {
 		_ = conn.Close()
 	}))
 	t.Cleanup(brokenServer.Close)
+	// recordServer reads the whole write after the TLS handshake and answers with header, the
+	// header of a TLS record that the client rejects.
+	recordServer := func(header []byte) *httptest.Server {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, err := io.Copy(io.Discard, r.Body); err != nil {
+				t.Errorf("read body: %v", err)
+				return
+			}
+			received.Add(1)
+			conn, _, err := http.NewResponseController(w).Hijack()
+			if err != nil {
+				t.Errorf("hijack: %v", err)
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			if _, err := conn.(*tls.Conn).NetConn().Write(header); err != nil {
+				t.Errorf("write record header: %v", err)
+			}
+		}))
+		t.Cleanup(server.Close)
+		return server
+	}
+	wrongVersionServer := recordServer([]byte{23, 3, 1, 0, 0})
+	oversizedRecordServer := recordServer([]byte{23, 3, 3, 0xff, 0xff})
 	// redirectServer gets the write, answers with a same-origin redirect, and stops listening, so
 	// the request that follows the redirect cannot connect.
 	var redirectServer *httptest.Server
@@ -93,6 +118,11 @@ func TestMapCoderWriteErrorRealTransport(t *testing.T) {
 			tr.TLSClientConfig = &tls.Config{MaxVersion: tls.VersionTLS12, CipherSuites: suites} //nolint:gosec // G402: the test needs a TLS 1.2 client that the servers refuse.
 		}
 	}
+	trust := func(server *httptest.Server) func(*http.Transport) {
+		return func(tr *http.Transport) {
+			tr.TLSClientConfig = server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+		}
+	}
 	proxy := func(raw string) func(*http.Transport) {
 		return func(tr *http.Transport) { tr.Proxy = http.ProxyURL(mustParse(raw)) }
 	}
@@ -116,6 +146,8 @@ func TestMapCoderWriteErrorRealTransport(t *testing.T) {
 		{name: "server refuses the cipher suites", coderURL: cipherServer.URL, configure: tls12With(tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305, tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305)},
 		{name: "connection closed after the request", coderURL: brokenServer.URL, wantSent: true},
 		{name: "redirect, then the next connection is refused", coderURL: redirectServer.URL, wantSent: true},
+		{name: "TLS record with the wrong version after the request", coderURL: wrongVersionServer.URL, configure: trust(wrongVersionServer), wantSent: true},
+		{name: "oversized TLS record after the request", coderURL: oversizedRecordServer.URL, configure: trust(oversizedRecordServer), wantSent: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			coderURL := mustParse(tc.coderURL)
