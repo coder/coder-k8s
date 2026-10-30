@@ -79,6 +79,7 @@ The object has the conditions `Ready`, `Reconciling` and `Stalled`. A stalled ob
 | `NameConflict` | Coder has a provider with this name that the operator did not create. |
 | `NameReservedByEnv` | The control plane can seed a provider with this name. See [Seeding limits](#seeding-limits). |
 | `CoderRejected` | Coder rejected the create or update request. Fix the spec. |
+| `CoderDeploymentChanged` | The control plane now reaches another Coder deployment than the one that holds the provider. See [Cleanup records](#cleanup-records). |
 | `DisabledExternally`, `KeyChangedExternally`, `DeletedExternally` | Someone disabled the provider, changed its key or deleted it in Coder. `DisabledExternally` also follows the credential kill switch, after the Secret was repaired. See [Kill switches](#kill-switches). |
 
 ## Kill switches
@@ -122,7 +123,7 @@ These limits remain:
 
 ## Delete a provider
 
-Deleting the object deletes the provider in Coder. With only an unconfirmed create, the operator reads Coder first and deletes only a provider that this object created. A create request can still commit for a short time, so within 2 minutes of that request the operator reads again before it trusts that the provider is absent.
+Deleting the object deletes the provider in Coder. The operator deletes only the provider ID that it recorded. With only an unconfirmed create, it deletes nothing: a person can edit the display name of any provider, so not even the display-name nonce of the create proves that this object created a provider. When Coder has a provider of this name and type, the finalizer goes without a delete, and the [cleanup record](#cleanup-records) stays for manual cleanup. A create request can still commit for a short time, so within 2 minutes of that request the operator reads again before it trusts that the provider is absent.
 
 - When Coder is unreachable, or the control plane has no operator access, the finalizer `coder.com/ai-provider-cleanup` stays and the operator retries every 60 seconds. See [Stuck finalizer](#stuck-finalizer).
 - When the control plane is gone, the operator cannot delete the provider now. The finalizer goes at once, and the operator logs the provider ID. The [cleanup record](#cleanup-records) stays, so a later sweep can delete the provider.
@@ -141,10 +142,23 @@ The operator removes the record when Coder confirms that the provider is deleted
 
 1. It waits until the object with that UID is gone and 5 minutes have passed since the last create, so that a create still in flight commits first.
 2. It looks for a ready `CoderControlPlane` in the object's namespace whose Coder answers the record's deployment ID now. It never matches by URL or name: a new Coder database behind the same URL has another deployment ID and is never swept. A control plane in another namespace never sweeps the record, because Coder reports its deployment ID itself and a control plane that someone else runs could claim any ID.
-3. Through that control plane it deletes the recorded provider ID. Without a recorded ID, it deletes only the provider of that name whose display name is still the record's nonce.
+3. Through that control plane it deletes the recorded provider ID. Without a recorded ID, it deletes nothing (see below).
 4. It removes the record when Coder answers the delete with success or with its own 404. Any other answer keeps the record, and the operator retries every minute.
 
 So after a namespace deletion with an external database, the leftover provider goes once you create the namespace again with a control plane that uses the same database. The metric `coder_k8s_cleanup_records_swept_total` (label `kind`) counts the swept records.
+
+A record without a provider ID is left by a create that the operator could not confirm. The sweep deletes nothing for such a record: a person can edit the display name of any provider, so the nonce does not prove that the operator created it. Coder cannot change the name or the type of a provider, so when Coder has no provider of the object's name, or only one of another type, the sweep removes the record. Otherwise the record stays, the gauge `coder_k8s_cleanup_records_unmatched` counts it, and the operator writes a `ManualCleanupNeeded` Warning Event on the ConfigMap that names the provider. Clean up by hand:
+
+1. Read the record and its Event:
+
+    ```bash
+    kubectl -n coder-system get configmap ck8s-cleanup-<object UID> -o yaml
+    kubectl -n coder-system get events --field-selector reason=ManualCleanupNeeded
+    ```
+
+2. In the dashboard, open **AI settings > Providers** and find the provider that the Event names.
+3. When that provider is a leftover of the deleted object, delete it. The next sweep, within 10 minutes, then removes the record.
+4. When a person owns that provider, keep it and delete the ConfigMap.
 
 When no ready control plane reaches the record's deployment, the record stays. The gauge `coder_k8s_cleanup_records_unmatched` counts these records, and the operator writes a `NoMatchingDeployment` Warning Event on the ConfigMap every 10 minutes. When that Coder deployment never comes back, delete the provider in the Coder dashboard (the Event names the object, and the record holds the provider ID), then delete the ConfigMap. Find the records with `kubectl -n coder-system get configmaps -l coder.com/cleanup-record`. The operator gets write access to ConfigMaps only in that namespace (the Role `manager-role` and the RoleBinding `coder-k8s-cleanup-records`). Do not give other users write access to ConfigMaps there: a record names a Coder provider ID that a cleanup deletes. If you install the operator in another namespace, change the namespace of both.
 

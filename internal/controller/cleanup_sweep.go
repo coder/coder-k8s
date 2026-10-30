@@ -63,9 +63,8 @@ func init() {
 // CleanupRecordReconciler sweeps the cleanup records of objects that went
 // without a confirmed delete in Coder (#353). It acts only through a ready
 // control plane whose current Coder deployment ID equals the record's, and
-// it deletes only the recorded provider or MCP server config ID, the provider
-// with the recorded nonce, or the AI Gateway keys whose names start with the
-// recorded prefix.
+// it deletes only the recorded provider or MCP server config ID, or the AI
+// Gateway keys whose names start with the recorded prefix.
 type CleanupRecordReconciler struct {
 	client.Client
 	// APIReader reads the object of a record live, so a stale cache never
@@ -306,12 +305,13 @@ func (r *CleanupRecordReconciler) matchingControlPlanes(ctx context.Context, rec
 	return matches, unknown, nil
 }
 
-// sweepAIProvider deletes the provider of record in Coder. It returns gone
-// when Coder confirms that it holds no provider of the record: a delete
-// answered with success or Coder's own 404, a read with Coder's own 404 for
-// a site owner, or a provider of that name without the record's nonce. It
-// deletes only the recorded ID or the provider whose display name is the
-// recorded nonce (invariant 5).
+// sweepAIProvider deletes the recorded provider ID in Coder (invariant 5),
+// and returns gone when Coder answers that delete with success or its own
+// 404. Without a recorded ID it deletes nothing: a person can edit the display
+// name of a provider, so the nonce does not prove that this object created
+// it (#422). Coder cannot change the name or the type of a provider, so it
+// then returns gone when a read by a site owner finds no provider of that
+// name and type, and kept otherwise.
 func sweepAIProvider(ctx context.Context, sdk *codersdk.Client, record *cleanupRecord) (outcome sweepOutcome, why string, err error) {
 	if record.Nonce != aiProviderNoncePrefix+string(record.UID) {
 		return sweepRetry, "", fmt.Errorf("assertion failed: cleanup record of %s has nonce %q, not the nonce of its UID", record.UID, record.Nonce)
@@ -336,16 +336,13 @@ func sweepAIProvider(ctx context.Context, sdk *codersdk.Client, record *cleanupR
 		if err := coderAnswerFor("AI provider", record.Name, found.Name); err != nil {
 			return sweepRetry, err.Error(), nil //nolint:nilerr // A wrong answer retries the sweep.
 		}
-		if found.DisplayName != record.Nonce || string(found.Type) != record.Type {
-			// Another provider holds the name, so no create of this object
-			// committed after the settle window. The nonce and the type
-			// prove ownership, as on the controller's own paths.
-			return sweepGone, "the provider of that name is not this object's", nil
-		}
 		if found.ID == uuid.Nil {
 			return sweepRetry, "", errors.New("assertion failed: Coder answered an AI provider without an ID")
 		}
-		id = found.ID.String()
+		if string(found.Type) != record.Type {
+			return sweepGone, "the provider of that name has another type", nil
+		}
+		return sweepKept, fmt.Sprintf("AI provider %s (ID %s)", found.Name, found.ID), nil
 	}
 	if err := sdk.DeleteAIProvider(ctx, id); err != nil && !isCoderResourceNotFound(err) {
 		return sweepRetry, "delete provider " + id + ": " + coderErrorSummary(err), nil

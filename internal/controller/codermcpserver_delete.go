@@ -165,11 +165,12 @@ func (r *CoderMCPServerReconciler) deleteStep(ctx context.Context, server *coder
 // deleteMCPServerInCoder deletes the config of this object in Coder and
 // returns a nil step when it is done. Without status.configID it deletes
 // recordedID, the config ID of the cleanup record: a failed status write
-// after the create can leave the ID only there. With only a create marker, a
-// read decides first: only the nonce proves that the config is this
-// object's. Only Coder's own 404 proves absence (#337). unproven reports a
-// config that it leaves although it can be this object's: another config
-// with the slug, or a config with the nonce under another slug.
+// after the create can leave the ID only there. Without either ID it deletes
+// nothing: a person can edit the slug and the display name of a config, so
+// the nonce does not prove that this object created it (#422). Only Coder's
+// own 404 proves absence (#337). unproven reports a config that it leaves
+// although it can be this object's: a config with the slug, or one with the
+// nonce under another slug.
 func deleteMCPServerInCoder(ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, orgID uuid.UUID, recordedID string) (unproven bool, step *mcpServerStep, err error) {
 	var id uuid.UUID
 	if configID := cmp.Or(server.Status.ConfigID, recordedID); configID != "" {
@@ -206,12 +207,9 @@ func deleteMCPServerInCoder(ctx context.Context, sdk *codersdk.Client, server *c
 					server.Spec.Slug, server.Status.CreateAttemptTime.UTC().Format(time.RFC3339)), nil
 			}
 			return mcpServerWithDisplayName(configs, mcpServerNonce(server)) != nil, nil, nil
-		case found.DisplayName != mcpServerNonce(server):
-			// Someone else's config holds the slug, or a person renamed this
-			// object's config. The controller never deletes it.
+		default:
 			return true, nil, nil
 		}
-		id = found.ID
 	}
 	if err := sdk.DeleteMCPServerConfig(ctx, orgID, id); err != nil && !isCoderResourceNotFound(err) {
 		return false, mcpServerWait(mcpServerDeletePoll, "CoderUnavailable", "delete MCP server config %s (ID %s): %s", server.Spec.Slug, id, coderErrorSummary(err)), nil

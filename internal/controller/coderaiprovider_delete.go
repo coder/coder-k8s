@@ -140,7 +140,12 @@ func (r *CoderAIProviderReconciler) deleteStep(ctx context.Context, provider *co
 			return r.releaseWithoutDelete(ctx, provider, fmt.Sprintf("CoderControlPlane now reaches Coder deployment %s, but the provider is in deployment %s", id, record.DeploymentID)), nil, nil
 		}
 	}
-	step, err = r.deleteInCoder(ctx, sdk, provider)
+	unproven, step, err := r.deleteInCoder(ctx, sdk, provider)
+	if err == nil && step == nil && unproven {
+		// A provider that can be this object's stays in Coder, so the record
+		// stays for a sweep, which reports it for manual cleanup (#422).
+		return true, nil, nil
+	}
 	if err == nil && step == nil {
 		// Coder confirmed that it holds no provider of this object. Only
 		// then does the record go (#353 invariant 7). A failed record
@@ -161,29 +166,32 @@ func (r *CoderAIProviderReconciler) deleteStep(ctx context.Context, provider *co
 	return step == nil, step, nil
 }
 
-// deleteInCoder deletes the provider of this object in Coder and returns nil
-// when Coder holds none. With only a create marker, a read decides first:
-// only the nonce and the type prove that the provider is this object's.
-func (r *CoderAIProviderReconciler) deleteInCoder(ctx context.Context, sdk *codersdk.Client, provider *coderv1alpha1.CoderAIProvider) (*aiProviderStep, error) {
+// deleteInCoder deletes the provider of this object in Coder and returns a
+// nil step when it is done. Without a provider ID in the status or the record
+// it deletes nothing: a person can edit the display name of a provider, so
+// the nonce does not prove that this object created it (#422). unproven then
+// reports a provider of this name and type, which it leaves although it can
+// be this object's.
+func (r *CoderAIProviderReconciler) deleteInCoder(ctx context.Context, sdk *codersdk.Client, provider *coderv1alpha1.CoderAIProvider) (unproven bool, step *aiProviderStep, err error) {
 	id := provider.Status.ProviderID
 	if id == "" {
 		// A failed status write after the create can leave the provider ID
 		// only in the record. It proves ownership after the nonce is gone.
 		record, _, err := readCleanupRecord(ctx, r.APIReader, r.OperatorNamespace, provider.UID)
 		if err != nil {
-			return nil, err
+			return false, nil, err
 		}
 		if record != nil && record.CoderID != "" {
 			id = record.CoderID
 			if parsed, err := uuid.Parse(id); err != nil || parsed == uuid.Nil || parsed.String() != id {
-				return nil, fmt.Errorf("assertion failed: the cleanup record of AI provider %s/%s has coderID %q, which is not a canonical UUID", provider.Namespace, provider.Name, id)
+				return false, nil, fmt.Errorf("assertion failed: the cleanup record of AI provider %s/%s has coderID %q, which is not a canonical UUID", provider.Namespace, provider.Name, id)
 			}
 		}
 	}
 	if id != "" {
 		if provider.Status.ProviderID != "" {
 			if err := checkAIProviderID(provider); err != nil {
-				return nil, err
+				return false, nil, err
 			}
 		}
 	} else {
@@ -194,36 +202,33 @@ func (r *CoderAIProviderReconciler) deleteInCoder(ctx context.Context, sdk *code
 			// Coder has no watch, so the wait uses the delete poll.
 			if step := requireSiteOwner(ctx, sdk); step != nil {
 				step.requeue = aiProviderDeletePoll
-				return step, nil
+				return false, step, nil
 			}
 			if wait := aiProviderCreateSettle - time.Since(provider.Status.CreateAttemptTime.Time); wait > 0 {
 				// A create sent moments ago can still commit after this read.
-				return aiProviderWait(wait, "ConfirmingCreate",
+				return false, aiProviderWait(wait, "ConfirmingCreate",
 					"Provider %s is not in Coder, but its create request was sent at %s and can still commit. The controller reads again before it releases the finalizer.",
 					provider.Name, provider.Status.CreateAttemptTime.UTC().Format(time.RFC3339)), nil
 			}
-			return nil, nil
+			return false, nil, nil
 		case err != nil:
-			return aiProviderWait(aiProviderDeletePoll, "CoderUnavailable", "get provider %s: %s", provider.Name, coderErrorSummary(err)), nil
+			return false, aiProviderWait(aiProviderDeletePoll, "CoderUnavailable", "get provider %s: %s", provider.Name, coderErrorSummary(err)), nil
 		}
 		if err := coderAnswerFor("AI provider", provider.Name, found.Name); err != nil {
 			log.FromContext(ctx).Error(err, "Coder answered something other than the controller asked for")
-			return aiProviderWait(aiProviderDeletePoll, "CoderAnswerMismatch", "%s", err.Error()), nil
-		}
-		if found.DisplayName != aiProviderNonce(provider) || string(found.Type) != provider.Spec.Type {
-			// Someone else's provider holds the name, so no create of this
-			// object committed. The controller never deletes it.
-			return nil, nil
+			return false, aiProviderWait(aiProviderDeletePoll, "CoderAnswerMismatch", "%s", err.Error()), nil
 		}
 		if found.ID == uuid.Nil {
-			return nil, fmt.Errorf("assertion failed: Coder answered AI provider %s without an ID", provider.Name)
+			return false, nil, fmt.Errorf("assertion failed: Coder answered AI provider %s without an ID", provider.Name)
 		}
-		id = found.ID.String()
+		// Coder cannot change the type of a provider, so another type proves
+		// that no create of this object committed.
+		return string(found.Type) == provider.Spec.Type, nil, nil
 	}
 	if err := sdk.DeleteAIProvider(ctx, id); err != nil && !isCoderResourceNotFound(err) {
-		return aiProviderWait(aiProviderDeletePoll, "CoderUnavailable", "delete provider %s (ID %s): %s", provider.Name, id, coderErrorSummary(err)), nil
+		return false, aiProviderWait(aiProviderDeletePoll, "CoderUnavailable", "delete provider %s (ID %s): %s", provider.Name, id, coderErrorSummary(err)), nil
 	}
-	return nil, nil
+	return false, nil, nil
 }
 
 // releaseWithoutDelete logs what can stay in Coder, because nothing can

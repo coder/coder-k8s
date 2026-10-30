@@ -55,7 +55,16 @@ func (r *CoderMCPServerReconciler) createOrRecord(
 		return keepRejectedMCPServerCreate(step, rejected), nil
 	}
 	if found != nil {
-		if step := recordMCPServer(server, *found); step != nil {
+		// A status that lost the config ID still has it in the record (#422).
+		record, _, err := readCleanupRecord(ctx, r.APIReader, r.OperatorNamespace, server.UID)
+		if err != nil {
+			return nil, err
+		}
+		recordedID := ""
+		if record != nil {
+			recordedID = record.CoderID
+		}
+		if step := recordMCPServer(server, *found, recordedID); step != nil {
 			return step, nil
 		}
 		// Store the ID before the sync replaces the nonce (#353).
@@ -101,11 +110,12 @@ func mcpServerRequireSiteOwner(ctx context.Context, sdk *codersdk.Client) *mcpSe
 }
 
 // recordMCPServer decides whether found, the config with the spec's slug, is
-// the config that this object created. Only the nonce proves it. Anything
-// else is a config that the controller never touches (no adoption). It
-// returns nil when it recorded the ID.
-func recordMCPServer(server *coderv1alpha1.CoderMCPServer, found codersdk.MCPServerConfig) *mcpServerStep {
-	if found.DisplayName != mcpServerNonce(server) {
+// the config that this object created. Only the nonce or recordedID, the
+// config ID of the cleanup record, proves it. Anything else is a config that
+// the controller never touches (no adoption). It returns nil when it recorded
+// the ID.
+func recordMCPServer(server *coderv1alpha1.CoderMCPServer, found codersdk.MCPServerConfig, recordedID string) *mcpServerStep {
+	if found.DisplayName != mcpServerNonce(server) && found.ID.String() != recordedID {
 		// No create of this object can commit while another config holds the
 		// slug, so nothing of this object can exist in Coder.
 		server.Status.CreateAttemptTime, server.Status.Credentials = nil, nil
@@ -186,8 +196,9 @@ func confirmRejectedMCPServerCreate(
 	case step != nil:
 		return keepRejectedMCPServerCreate(step, !retryable)
 	case found != nil:
-		// Ours (the create committed) or someone else's (SlugConflict).
-		return recordMCPServer(server, *found)
+		// Ours (the create committed) or someone else's (SlugConflict). The
+		// create dropped the recorded ID, so only the nonce can prove it.
+		return recordMCPServer(server, *found, "")
 	}
 	if step := mcpServerRequireSiteOwner(ctx, sdk); step != nil {
 		return keepRejectedMCPServerCreate(step, !retryable)
