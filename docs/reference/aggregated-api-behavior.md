@@ -249,7 +249,7 @@ A write that the server knows did not reach Coder keeps the `500` that says that
 
 The server cannot tell other transport errors without a status apart from a connection that broke after the send. It treats them as uncertain and returns the `504`.
 
-A workspace create with `spec.running=false` creates the workspace and then requests a stop build. The create succeeds even when the stop request fails: retry the stop with an update. When the stop answer has no build ID or another transition, for example `201` with `{}`, the server re-reads the workspace and returns its latest build. If the re-read fails, the server returns the start build of the create.
+A workspace create with `spec.running=false` creates the workspace and then requests a stop build. The create succeeds even when the stop request fails: retry the stop with an update. When the stop request fails, or its answer has no build ID or another transition (for example `201` with `{}`), the server re-reads the workspace and returns its latest build. If the re-read fails, the server returns the start build of the create.
 
 ### Limits of the checks
 

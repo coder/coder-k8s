@@ -481,13 +481,11 @@ func (s *WorkspaceStorage) Create(
 		stopBuild, stopErr := sdk.CreateWorkspaceBuild(ctx, createdWorkspace.ID, codersdk.CreateWorkspaceBuildRequest{
 			Transition: codersdk.WorkspaceTransitionStop,
 		})
-		if stopErr == nil {
-			if isRequestedBuild(stopBuild, codersdk.WorkspaceTransitionStop) {
-				createdWorkspace.LatestBuild = stopBuild
-			} else if current, err := sdk.Workspace(ctx, createdWorkspace.ID); err == nil && current.LatestBuild.ID != uuid.Nil {
-				// An answer without the stop build leaves it open whether Coder queued the stop.
-				createdWorkspace.LatestBuild = current.LatestBuild
-			}
+		if stopErr == nil && isRequestedBuild(stopBuild, codersdk.WorkspaceTransitionStop) {
+			createdWorkspace.LatestBuild = stopBuild
+		} else if current, err := sdk.Workspace(ctx, createdWorkspace.ID); err == nil && current.LatestBuild.ID != uuid.Nil {
+			// Without the stop build in the answer, Coder can still have queued the stop.
+			createdWorkspace.LatestBuild = current.LatestBuild
 		}
 		// The workspace creation already succeeded. Returning a stop transition error here
 		// would cause client retries to fail with AlreadyExists, while the desired stop

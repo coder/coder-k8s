@@ -462,20 +462,21 @@ func captureCoderErrorLog() func() []string {
 }
 
 // TestWorkspaceCreateStoppedStopBuildAnswer checks a create with spec.running=false whose stop
-// build POST gets an answer without the requested build. The created object shows the latest build
-// that Coder has, whether or not the stop reached Coder.
+// build POST gets an error or an answer without the requested build. The create succeeds, and the
+// created object shows the latest build that Coder has, whether or not the stop reached Coder.
 func TestWorkspaceCreateStoppedStopBuildAnswer(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
 		name      string
-		body      string
+		answer    brokenAnswer
 		forwarded bool
 	}{
-		{"201 with an empty object", `{}`, true},
-		{"201 with null", `null`, true},
-		{"201 with only a build ID", fmt.Sprintf(`{"id":%q}`, uuid.NewString()), true},
-		{"201 with an empty object for a stop that did not reach Coder", `{}`, false},
+		{"201 with an empty object", jsonAnswer(http.StatusCreated, `{}`), true},
+		{"201 with null", jsonAnswer(http.StatusCreated, `null`), true},
+		{"201 with only a build ID", jsonAnswer(http.StatusCreated, fmt.Sprintf(`{"id":%q}`, uuid.NewString())), true},
+		{"proxy 502", gatewayPage(http.StatusBadGateway), true},
+		{"201 with an empty object for a stop that did not reach Coder", jsonAnswer(http.StatusCreated, `{}`), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -493,7 +494,7 @@ func TestWorkspaceCreateStoppedStopBuildAnswer(t *testing.T) {
 						t.Errorf("mock Coder answered the stop with %d: %s", recorder.Code, recorder.Body.String())
 					}
 				}
-				jsonAnswer(http.StatusCreated, tc.body)(t, w, nil)
+				tc.answer(t, w, nil)
 			}))
 			t.Cleanup(proxy.Close)
 
