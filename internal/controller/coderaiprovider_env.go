@@ -9,6 +9,8 @@ import (
 
 // coderd seeds AI providers from env and flags at startup (Coder v2.37.3
 // codersdk/deployment.go:1929-2021, :4440-4561 and cli/server.go:3174-3176).
+// TestCoderAIProviderSeedingFactsMatchVendoredCoder fails on a Coder bump
+// until these facts are checked again.
 // A seeded provider row with another config stops coderd from starting
 // (coderd/ai_providers_migrate.go:76-146).
 //
