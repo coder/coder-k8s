@@ -169,27 +169,65 @@ func TestCoderMCPServerPendingCreateAfterDeploymentSwitch(t *testing.T) {
 	require.Equal(t, before, env.mcpServerRecord(ctx, t, got.UID), "the record stays for a sweep")
 }
 
-// #353: a status without the config ID, but with a create marker, keeps the
-// recorded ID. After the sync the display name is no longer the nonce, so
-// only the recorded ID still finds the config for a delete.
+// #353, #422 item 5: a status without the config ID keeps the recorded ID.
+// After the sync the display name is no longer the nonce, so only the
+// recorded ID still proves that the config with the slug is this object's.
+// The controller takes it back instead of reporting SlugConflict, and a
+// delete uses it.
 func TestCoderMCPServerKeepsRecordedIDWithoutStatusID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for name, lose := range map[string]func(*coderv1alpha1.CoderMCPServerStatus){
+		"create marker kept": func(s *coderv1alpha1.CoderMCPServerStatus) {
+			s.ConfigID, s.CreateAttemptTime = "", &metav1.Time{Time: time.Now().Add(-time.Hour)}
+		},
+		"status lost everything": func(s *coderv1alpha1.CoderMCPServerStatus) { *s = coderv1alpha1.CoderMCPServerStatus{} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := newMCPServerEnv(ctx, t, true)
+			env.keySecret(ctx, t, testMCPKey)
+			got, id := env.applied(ctx, t, nil)
+			lose(&got.Status)
+			require.NoError(t, k8sClient.Status().Update(ctx, got))
+
+			got, _ = env.reconcile(ctx, t, got)
+			requireMCPServerApplied(t, got)
+			require.Equal(t, id.String(), got.Status.ConfigID, "the recorded ID proves the config")
+			require.Equal(t, 1, env.posts(), "no new create")
+			require.Equal(t, id.String(), env.mcpServerRecord(ctx, t, got.UID)["coderID"], "the record keeps the config ID")
+
+			gone, _ := env.deleteMCPServer(ctx, t, got)
+			require.Nil(t, gone)
+			require.Empty(t, env.fake.mcpServers(), "the delete used the recorded ID")
+			require.Nil(t, env.mcpServerRecord(ctx, t, got.UID))
+		})
+	}
+}
+
+// #422 item 5: the recorded ID proves a config only in the record's Coder
+// deployment. After a status loss and a switch to another deployment that
+// holds a config with the same ID, the controller stalls with
+// CoderDeploymentChanged and writes nothing.
+func TestCoderMCPServerRecordedIDNeedsRecordedDeployment(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	env := newMCPServerEnv(ctx, t, true)
 	env.keySecret(ctx, t, testMCPKey)
-	got, id := env.applied(ctx, t, nil)
-	got.Status.ConfigID = ""
-	got.Status.CreateAttemptTime = &metav1.Time{Time: time.Now().Add(-time.Hour)}
+	got, _ := env.applied(ctx, t, nil)
+	before := env.mcpServerRecord(ctx, t, got.UID)
+	got.Status = coderv1alpha1.CoderMCPServerStatus{}
 	require.NoError(t, k8sClient.Status().Update(ctx, got))
+	env.fake.mu.Lock()
+	env.fake.deploymentID = uuid.NewString() // A copy of the database under a new deployment ID.
+	env.fake.mu.Unlock()
+	mark := len(env.writeRoutes())
 
 	got, _ = env.reconcile(ctx, t, got)
-	requireMCPServerStep(t, got, true, "SlugConflict")
-	require.Equal(t, id.String(), env.mcpServerRecord(ctx, t, got.UID)["coderID"], "the record keeps the config ID")
-
-	gone, _ := env.deleteMCPServer(ctx, t, got)
-	require.Nil(t, gone)
-	require.Empty(t, env.fake.mcpServers(), "the delete used the recorded ID")
-	require.Nil(t, env.mcpServerRecord(ctx, t, got.UID))
+	require.Contains(t, requireMCPServerStep(t, got, true, "CoderDeploymentChanged"), before["deploymentID"])
+	require.Empty(t, got.Status.ConfigID)
+	require.Empty(t, env.writesSince(mark), "no write in another deployment")
+	require.Equal(t, before, env.mcpServerRecord(ctx, t, got.UID), "the record keeps the old locator")
 }
 
 // #353: a config from before records existed gets one, with the deployment
@@ -265,8 +303,9 @@ func TestCoderMCPServerRecordAfterLostCreateAnswer(t *testing.T) {
 }
 
 // #353: a config that is gone before a full apply is created again. The
-// record write before that create drops the old ID, so a delete finds the new
-// config by its nonce instead of trusting the 404 of the old ID.
+// record write before that create drops the old ID, so a delete does not
+// trust the 404 of the old ID. Without the new ID it deletes nothing (#422
+// item 1), and the record stays for a sweep.
 func TestCoderMCPServerRecreateDropsGoneID(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -285,8 +324,8 @@ func TestCoderMCPServerRecreateDropsGoneID(t *testing.T) {
 
 	gone, _ := env.deleteMCPServer(ctx, t, got)
 	require.Nil(t, gone)
-	require.Empty(t, env.fake.mcpServers(), "the delete found the new config by its nonce")
-	require.Nil(t, env.mcpServerRecord(ctx, t, got.UID))
+	require.Len(t, env.fake.mcpServers(), 1, "a display name never proves ownership")
+	require.NotNil(t, env.mcpServerRecord(ctx, t, got.UID), "the record stays for a sweep")
 }
 
 // #353: when the control plane reaches another Coder deployment while the

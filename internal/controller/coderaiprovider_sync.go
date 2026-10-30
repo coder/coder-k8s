@@ -43,7 +43,7 @@ func (r *CoderAIProviderReconciler) syncAIProvider(
 	case isCoderResourceNotFound(err):
 		// Only Coder's own 404 proves that the provider is gone. Any other
 		// error, a proxy 404 included, keeps ownership (#327).
-		return r.providerGone(provider, applied)
+		return r.providerGone(ctx, sdk, provider, applied)
 	case err != nil:
 		return aiProviderWait(aiProviderRetry, "CoderUnavailable", "get provider %s: %s", provider.Name, coderErrorSummary(err)), false, nil
 	}
@@ -130,7 +130,7 @@ func (r *CoderAIProviderReconciler) syncAIProvider(
 		} else if !isCoderResourceNotFound(readErr) {
 			return aiProviderWait(aiProviderRetry, "CoderUnavailable", "get provider %s after a 404 update: %s", provider.Name, coderErrorSummary(readErr)), false, nil
 		}
-		return r.providerGone(provider, applied)
+		return r.providerGone(ctx, sdk, provider, applied)
 	case isCoderAuthFailure(status) || status == http.StatusTooManyRequests:
 		// No Kubernetes event follows a repaired token or role, so retry.
 		return aiProviderWait(aiProviderRetry, "CoderUnavailable", "update provider %s: %s", provider.Name, coderErrorSummary(err)), false, nil
@@ -171,8 +171,13 @@ func (r *CoderAIProviderReconciler) syncAIProvider(
 
 // providerGone handles a provider that is missing in Coder. After a full
 // apply it is a kill switch. Before one, the object creates it again.
-func (r *CoderAIProviderReconciler) providerGone(provider *coderv1alpha1.CoderAIProvider, applied bool) (*aiProviderStep, bool, error) {
+func (r *CoderAIProviderReconciler) providerGone(ctx context.Context, sdk *codersdk.Client, provider *coderv1alpha1.CoderAIProvider, applied bool) (*aiProviderStep, bool, error) {
 	provider.Status.Enabled = nil
+	// The control plane can reach another Coder deployment now, which
+	// answers 404 for a provider of the old one (#422).
+	if step, err := r.recordedDeploymentChanged(ctx, sdk, provider); step != nil || err != nil {
+		return step, false, err
+	}
 	if applied {
 		return aiProviderStalled(aiProviderResync, "DeletedExternally",
 			"Provider %s (ID %s) was deleted in Coder. The controller does not create it again until the spec changes.", provider.Name, provider.Status.ProviderID), false, nil

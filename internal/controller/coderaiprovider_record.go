@@ -34,9 +34,7 @@ func (r *CoderAIProviderReconciler) writeAIProviderRecord(
 		// The control plane now reaches another Coder database. The record
 		// is the only locator of what this object made in the old one, so
 		// the controller neither overwrites it nor creates in the new one.
-		return aiProviderStalled(aiProviderResync, "CoderDeploymentChanged",
-			"Provider %s (ID %q) is in Coder deployment %s, but CoderControlPlane %s now reaches deployment %s. Delete the provider there, then delete ConfigMap %s/%s. Until then the controller creates nothing.",
-			provider.Name, previous.CoderID, previous.DeploymentID, provider.Spec.ControlPlaneRef.Name, deploymentID, r.OperatorNamespace, cleanupRecordObjectName(provider.UID)), nil
+		return r.aiProviderDeploymentChanged(provider, previous, deploymentID), nil
 	}
 	record := cleanupRecord{
 		Kind: cleanupRecordKindAIProvider, UID: provider.UID, Namespace: provider.Namespace, Name: provider.Name,
@@ -59,6 +57,34 @@ func (r *CoderAIProviderReconciler) writeAIProviderRecord(
 		record.CreateAttemptTime = previous.CreateAttemptTime
 	}
 	return nil, writeCleanupRecord(ctx, r.Client, r.OperatorNamespace, existing, record)
+}
+
+// aiProviderDeploymentChanged is the stall of an object whose record names
+// another Coder deployment than the one that the control plane reaches now.
+func (r *CoderAIProviderReconciler) aiProviderDeploymentChanged(provider *coderv1alpha1.CoderAIProvider, record *cleanupRecord, deploymentID string) *aiProviderStep {
+	return aiProviderStalled(aiProviderResync, "CoderDeploymentChanged",
+		"Provider %s (ID %q) is in Coder deployment %s, but CoderControlPlane %s now reaches deployment %s. Delete the provider there, then delete ConfigMap %s/%s. Until then the controller creates nothing.",
+		provider.Name, record.CoderID, record.DeploymentID, provider.Spec.ControlPlaneRef.Name, deploymentID, r.OperatorNamespace, cleanupRecordObjectName(provider.UID))
+}
+
+// recordedDeploymentChanged returns the CoderDeploymentChanged stall when the
+// record names another Coder deployment than the one that the control plane
+// reaches now, or a wait when the deployment ID read fails. Without a record
+// it returns nil. A provider that looks deleted can then still exist in the
+// old deployment.
+func (r *CoderAIProviderReconciler) recordedDeploymentChanged(ctx context.Context, sdk *codersdk.Client, provider *coderv1alpha1.CoderAIProvider) (*aiProviderStep, error) {
+	record, _, err := readCleanupRecord(ctx, r.APIReader, r.OperatorNamespace, provider.UID)
+	if err != nil || record == nil {
+		return nil, err
+	}
+	deploymentID, err := coderDeploymentID(ctx, sdk)
+	if err != nil {
+		return aiProviderWait(aiProviderRetry, "CoderUnavailable", "read the Coder deployment ID: %s", coderErrorSummary(err)), nil
+	}
+	if deploymentID != record.DeploymentID {
+		return r.aiProviderDeploymentChanged(provider, record, deploymentID), nil
+	}
+	return nil, nil
 }
 
 // backfillAIProviderRecord writes the missing record of a provider that

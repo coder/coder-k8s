@@ -141,11 +141,12 @@ func TestCoderMCPServerDeleteWithoutOperatorAccess(t *testing.T) {
 	require.Len(t, env.fake.mcpServers(), 1)
 }
 
-// Plan 4.10 item 2: with only a create marker, the slug read decides. A
-// config with this object's nonce is deleted. Someone else's config with the
-// slug is never touched. With no config, the controller waits until a late
-// create cannot commit any more, then releases. #353: the record goes only
-// when no config can still be the object's, as in a sweep.
+// Plan 4.10 item 2: with only a create marker, the slug read decides, and
+// the controller deletes nothing (#422 item 1): a person can edit the slug
+// and the display name of a config, so not even the temporary display name
+// proves that this object created it. With no config, the controller waits
+// until a late create cannot commit any more, then releases. #353: the
+// record goes only when no config can still be the object's, as in a sweep.
 func TestCoderMCPServerDeletePendingCreate(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -156,7 +157,7 @@ func TestCoderMCPServerDeletePendingCreate(t *testing.T) {
 		deletes int
 		record  bool // The record stays.
 	}{
-		{name: "nonce found", create: createWithNonce, release: true, deletes: 1},
+		{name: "a person's config with the temporary display name", create: createWithNonce, release: true, record: true},
 		{name: "someone else's config", create: createOther, release: true, record: true},
 		{name: "nonce under another slug", create: createWithNonceUnderOtherSlug, age: 3 * time.Minute, release: true, record: true},
 		{name: "no config, recent create", age: time.Second, record: true},
