@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -155,6 +156,30 @@ func TestCoderAIProviderDeletePendingCreate(t *testing.T) {
 			require.Equal(t, tc.displayName != "", found, "the provider stays")
 		})
 	}
+}
+
+// #422: when a person edits the display name of the provider of a lost
+// create answer, the controller reports NameConflict and drops its create
+// marker. A delete then keeps the record, so a sweep can report the provider
+// for manual cleanup.
+func TestCoderAIProviderDeleteKeepsRecordAfterNameConflict(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newAIProviderCreateEnv(ctx, t)
+	env.fake.failNext(routeCreateAIProvider, fakeFault{AfterCommit: true, Reset: true})
+	got, _ := env.reconcile(ctx, t, provider)
+	requireAIProviderStep(t, got, false, "ConfirmingCreate")
+	_, err := env.fake.client(t, 2*time.Second).UpdateAIProvider(ctx, "openai", codersdk.UpdateAIProviderRequest{DisplayName: ptr.To("Renamed by a person")})
+	require.NoError(t, err)
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIProviderStep(t, got, true, "NameConflict")
+	require.Nil(t, got.Status.CreateAttemptTime)
+
+	gone, _ := env.deleteAIProvider(ctx, t, got)
+	require.Nil(t, gone)
+	_, ok := env.fake.aiProvider("openai")
+	require.True(t, ok, "the controller never deletes a provider that it cannot prove its own")
+	require.NotNil(t, cleanupRecord(ctx, t, env.namespace, got.UID), "the record stays for a sweep")
 }
 
 // A 404 proves that no create of this object committed only when the

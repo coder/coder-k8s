@@ -205,6 +205,31 @@ func TestCoderMCPServerKeepsRecordedIDWithoutStatusID(t *testing.T) {
 	}
 }
 
+// #422 item 5: the recorded ID proves a config only in the record's Coder
+// deployment. After a status loss and a switch to another deployment that
+// holds a config with the same ID, the controller stalls with
+// CoderDeploymentChanged and writes nothing.
+func TestCoderMCPServerRecordedIDNeedsRecordedDeployment(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	got, _ := env.applied(ctx, t, nil)
+	before := env.mcpServerRecord(ctx, t, got.UID)
+	got.Status = coderv1alpha1.CoderMCPServerStatus{}
+	require.NoError(t, k8sClient.Status().Update(ctx, got))
+	env.fake.mu.Lock()
+	env.fake.deploymentID = uuid.NewString() // A copy of the database under a new deployment ID.
+	env.fake.mu.Unlock()
+	mark := len(env.writeRoutes())
+
+	got, _ = env.reconcile(ctx, t, got)
+	require.Contains(t, requireMCPServerStep(t, got, true, "CoderDeploymentChanged"), before["deploymentID"])
+	require.Empty(t, got.Status.ConfigID)
+	require.Empty(t, env.writesSince(mark), "no write in another deployment")
+	require.Equal(t, before, env.mcpServerRecord(ctx, t, got.UID), "the record keeps the old locator")
+}
+
 // #353: a config from before records existed gets one, with the deployment
 // ID that Coder answers now.
 func TestCoderMCPServerRecordBackfill(t *testing.T) {
