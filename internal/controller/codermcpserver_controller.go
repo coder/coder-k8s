@@ -13,6 +13,7 @@ import (
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -58,8 +59,10 @@ type CoderMCPServerReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
-	// sentCredentials maps types.UID -> credential field -> SHA-256 of the
-	// value that Coder holds. Memory only (plan 4.6 item 4).
+	// sentCredentials maps types.NamespacedName -> sentCredentialSums: the
+	// object's UID, and credential field -> SHA-256 of the value that Coder
+	// holds. Memory only (plan 4.6 item 4). The name key lets a reconcile
+	// that finds the object gone drop its entry (#378).
 	sentCredentials sync.Map
 }
 
@@ -154,8 +157,13 @@ func (r *CoderMCPServerReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, fmt.Errorf("assertion failed: MCP server reconciler needs a client and a scheme")
 	}
 	server := &coderv1alpha1.CoderMCPServer{}
-	if err := r.Get(ctx, req.NamespacedName, server); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+	if err := r.Get(ctx, req.NamespacedName, server); apierrors.IsNotFound(err) {
+		// The release drops the entry too, but a finalizer removed by hand
+		// skips the release.
+		r.sentCredentials.Delete(req.NamespacedName)
+		return ctrl.Result{}, nil
+	} else if err != nil {
+		return ctrl.Result{}, err
 	}
 	if server.Name != req.Name || server.Namespace != req.Namespace {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: fetched MCP server %s/%s does not match %s", server.Namespace, server.Name, req.NamespacedName)
@@ -172,7 +180,7 @@ func (r *CoderMCPServerReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{}, err
 		}
 		if release {
-			r.sentCredentials.Delete(server.UID)
+			r.sentCredentials.Delete(req.NamespacedName)
 			return ctrl.Result{}, r.patchFinalizer(ctx, server, false)
 		}
 		applyMCPServerStep(server, step)
@@ -491,8 +499,18 @@ func findMCPServerSlug(
 ) (*codersdk.MCPServerConfig, *mcpServerStep) {
 	configs, err := sdk.MCPServerConfigs(ctx, orgID)
 	if err != nil {
-		return nil, mcpServerWait(mcpServerRetry, "CoderUnavailable", "list MCP server configs: %s", coderErrorSummary(err))
+		return nil, mcpServerListFailed(err)
 	}
+	return mcpServerWithSlug(configs, server, orgID)
+}
+
+func mcpServerListFailed(err error) *mcpServerStep {
+	return mcpServerWait(mcpServerRetry, "CoderUnavailable", "list MCP server configs: %s", coderErrorSummary(err))
+}
+
+// mcpServerWithSlug returns the config with the spec's slug from configs, the
+// list of the organization orgID.
+func mcpServerWithSlug(configs []codersdk.MCPServerConfig, server *coderv1alpha1.CoderMCPServer, orgID uuid.UUID) (*codersdk.MCPServerConfig, *mcpServerStep) {
 	for i, config := range configs {
 		if err := coderAnswerFor("MCP server config organization", orgID.String(), config.OrganizationID.String()); err != nil {
 			return nil, mcpServerStalled(mcpServerResync, "CoderAnswerMismatch", "%s", err.Error())

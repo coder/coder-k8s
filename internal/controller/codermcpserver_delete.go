@@ -122,7 +122,15 @@ func deleteMCPServerInCoder(ctx context.Context, sdk *codersdk.Client, server *c
 		}
 		id = parsed
 	} else {
-		found, step := findMCPServerSlug(ctx, sdk, server, orgID)
+		configs, err := sdk.MCPServerConfigs(ctx, orgID)
+		if err != nil && !isCoderResourceNotFound(err) {
+			step := mcpServerListFailed(err)
+			step.requeue = mcpServerDeletePoll
+			return step, nil
+		}
+		// Coder's own 404 means that the pinned organization is gone, and no
+		// config of it can be reached any more (#378).
+		found, step := mcpServerWithSlug(configs, server, orgID)
 		switch {
 		case step != nil:
 			step.requeue = max(step.requeue, mcpServerDeletePoll)

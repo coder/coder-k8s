@@ -37,6 +37,10 @@ func SyncMCPServerACL(
 // HasSentCredentials reports whether the reconciler keeps credential hashes
 // for the object uid.
 func HasSentCredentials(r *CoderMCPServerReconciler, uid types.UID) bool {
-	_, ok := r.sentCredentials.Load(uid)
-	return ok
+	found := false
+	r.sentCredentials.Range(func(_, v any) bool {
+		found = v.(sentCredentialSums).uid == uid
+		return !found
+	})
+	return found
 }
