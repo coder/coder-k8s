@@ -34,7 +34,11 @@ cmd_name() {
   [[ $version =~ ^[a-zA-Z0-9]+([_.-][a-zA-Z0-9]+)*$ && ${#version} -le 64 ]] ||
     die "not a valid Coder version name: ${version}"
   # The hash keeps names apart that differ only in case, '_' or '.'.
-  hash=$(printf '%s' "$version" | sha256sum | cut -c1-8)
+  if command -v sha256sum >/dev/null; then
+    hash=$(printf '%s' "$version" | sha256sum | cut -c1-8)
+  else
+    hash=$(printf '%s' "$version" | shasum -a 256 | cut -c1-8)
+  fi
   slug=$(printf '%s' "$version" | tr 'A-Z_.' 'a-z--')
   slug=${slug:0:$((63 - ${#prefix} - 10))}
   slug=${slug%-}
@@ -51,8 +55,8 @@ if (.spec | norm) != ($want.spec | norm) then "SpecMismatch"
 elif .metadata.deletionTimestamp != null then "Deleting"
 elif (.status.observedGeneration // 0) != .metadata.generation then "Pending"
 elif .status.phase == "Failed" then "Failed"
-elif .status.phase == "Succeeded" and any(.status.conditions[]?; .type == "Ready" and .status == "True") then "Succeeded"
-else .status.phase // "Pending"
+elif .status.phase == "Succeeded" and any(.status.conditions[]?; .type == "Ready" and .status == "True") then "Passed"
+else "phase \(.status.phase // "none"), Ready=\(first(.status.conditions[]? | select(.type == "Ready") | .status) // "none")"
 end'
 
 cmd_promote() {
@@ -76,7 +80,7 @@ cmd_promote() {
       case $verdict in
       SpecMismatch) die "refusing to promote: the spec of ${ns}/${name} differs from $1" ;;
       Failed) die "test ${ns}/${name} failed: $(jq -r '"\(.status.reason): \(.status.message)"' <<<"$obj")" ;;
-      Succeeded) break ;;
+      Passed) break ;;
       esac
       echo "promote: waiting for test ${ns}/${name}: ${verdict}" >&2
     fi

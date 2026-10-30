@@ -5,9 +5,10 @@ metadata:
   namespace: coder
   annotations:
     # Argo CD runs the Job as a sync hook after the test (wave 1) is healthy,
-    # waits for it, and fails the sync when the Job fails.
+    # waits for it, and fails the sync when the Job fails. It deletes the Job
+    # after a success, because each version gets a Job with a new name.
     argocd.argoproj.io/hook: Sync
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
     argocd.argoproj.io/sync-wave: "2"
 spec:
   # A failed promotion must not run again on its own: another writer can have

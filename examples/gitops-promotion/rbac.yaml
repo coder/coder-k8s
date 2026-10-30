@@ -18,7 +18,7 @@ rules:
     verbs: ["get"]
   - apiGroups: ["aggregation.coder.com"]
     resources: ["codertemplates/promote"]
-    resourceNames: ["default.docker"]
+    resourceNames: ["set-by-kustomization"]
     verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

@@ -113,15 +113,15 @@ Any promotion step must check these points. The [promotion example](#run-the-pro
 
 ### Run the promotion example
 
-The directory `examples/gitops-promotion/` in this repository is a Kustomize directory for one template, `default.docker`. Argo CD and Flux both render it with Kustomize. It holds:
+The directory `examples/gitops-promotion/` in this repository is a Kustomize directory for one template, `default.docker` in namespace `coder`. Argo CD and Flux both render it with Kustomize. It holds:
 
 | File | Content |
 | --- | --- |
 | `codertemplatetest.json` | The test of one version, in sync wave 1. It is JSON, so the Job can read it with `jq`. |
-| `promote.sh` | The promotion script. It needs `bash`, `kubectl`, and `jq`. |
-| `promote-job.yaml` | A Job that runs `promote.sh promote`. For Argo CD, it is a `Sync` hook in wave 2. |
-| `rbac.yaml` | A ServiceAccount that can `get` only this test and `create` only `codertemplates/promote` of `default.docker`. |
-| `kustomization.yaml` | Puts `promote.sh` and `codertemplatetest.json` into a ConfigMap for the Job, and copies the test name to the Job and the Role. |
+| `promote.sh` | The promotion script. It needs `bash`, `kubectl`, and `jq`. `promote.sh name` also needs `sha256sum` or `shasum`. |
+| `promote-job.yaml` | A Job that runs `promote.sh promote`. For Argo CD, it is a `Sync` hook in wave 2, and Argo CD deletes it after a success. |
+| `rbac.yaml` | A ServiceAccount that can `get` only this test and `create` only `codertemplates/promote` of the test's template. |
+| `kustomization.yaml` | Puts `promote.sh` and `codertemplatetest.json` into a ConfigMap for the Job. Copies the test name to the Job and the Role, the template to the Role, and the namespace to every object. |
 | `argocd-application.yaml`, `flux-kustomization.yaml` | An Argo CD Application and a Flux Kustomization for the directory. Apply one of them, not both. |
 
 The Job reads the test in Git from its ConfigMap. It reads the test in the cluster with one `get` every 30 s, and then does one of these:
@@ -133,14 +133,14 @@ The Job reads the test in Git from its ConfigMap. It reads the test in the clust
 | `Failed` | The Job fails and does not promote. Its log shows `status.reason` and `status.message`. |
 | `Succeeded` with `Ready=True` | The Job promotes `status.templateVersionID` of that object and completes when the answer is `Promoted` or `AlreadyActive`. |
 
-The Job waits at most the test's `timeoutSeconds` plus 900 s for the controller to start the test. The controller writes `Succeeded` only after the workspace delete, and `Failed` at the latest at the test deadline, so this wait covers the delete. The Job's `activeDeadlineSeconds` is 8400: 7200 s, the longest `timeoutSeconds`, plus the 900 s, plus 300 s for the promotion. The Flux Kustomization has `wait: true` and `timeout: 2h30m`, so Flux is ready only after the Job completed, and it fails when the Job fails. Argo CD waits for the hook Job and fails the sync when the Job fails.
+The Job waits at most the test's `timeoutSeconds` plus 900 s for the controller to start the test. The controller writes `Succeeded` only after the workspace delete, and `Failed` at the latest at the test deadline, so this wait covers the delete. The Job's `activeDeadlineSeconds` is 8400: 7200 s, the longest `timeoutSeconds`, plus the 900 s, plus 300 s for the promotion. The Flux Kustomization has `wait: true` and `timeout: 2h30m`, so Flux is ready only after the Job completed, and it fails when the Job fails. It also has `force: true`: a change of `promote.sh` changes the pod template of the Job, which Kubernetes cannot update, so Flux replaces the Job, and the new Job promotes again. Argo CD waits for the hook Job and fails the sync when the Job fails.
 
 The Job has `backoffLimit: 0`, and `promote.sh` sends the promotion only once. After a failed promotion, read the active version before you sync again.
 
 To use the example:
 
 1. Install the [Argo CD health check](#install-the-argo-cd-health-check) if you use Argo CD. With Flux, the Job is the gate.
-2. Copy the directory into your Git repository. Set the control plane, the template, the namespace, and the parameters of your test in `codertemplatetest.json`, and the template in `rbac.yaml`. Set `repoURL` or `sourceRef` and `path` in the Argo CD or Flux manifest, and apply it.
+2. Copy the directory into your Git repository. Set the control plane, the template, the namespace, and the parameters of your test in `codertemplatetest.json`. `spec.template` must be the exact name that `kubectl get codertemplates` shows, because the promote subresource refuses other casing with `400`. For a second template in the same namespace, also replace the name `docker-promote` in `rbac.yaml`, `promote-job.yaml`, and `kustomization.yaml`. Set `repoURL` or `sourceRef` and `path` in the Argo CD or Flux manifest, and apply it.
 3. For each new version, CI pushes the version without activating it, sets the version and the test name in `codertemplatetest.json`, and commits the file. Git then holds a new test and a new Job, both with the new name.
 
 The CI commands for step 3, in the copied directory:

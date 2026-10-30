@@ -12,8 +12,9 @@ configMapGenerator:
     files:
       - promote.sh
       - codertemplatetest.json
-# codertemplatetest.json is the only file to change for a new version. These
-# copy its name to the Job and to the Role.
+# codertemplatetest.json is the only file to change for a new version, another
+# template, or another namespace. These copy its name to the Job and to the
+# Role, its template to the Role, and its namespace to every object.
 replacements:
   - source:
       kind: CoderTemplateTest
@@ -27,3 +28,36 @@ replacements:
           kind: Role
         fieldPaths:
           - rules.0.resourceNames.0
+  - source:
+      kind: CoderTemplateTest
+      fieldPath: spec.template
+    targets:
+      - select:
+          kind: Role
+        fieldPaths:
+          - rules.1.resourceNames.0
+  - source:
+      kind: CoderTemplateTest
+      fieldPath: metadata.namespace
+    targets:
+      - select:
+          kind: ServiceAccount
+        fieldPaths:
+          - metadata.namespace
+      - select:
+          kind: Role
+        fieldPaths:
+          - metadata.namespace
+      - select:
+          kind: RoleBinding
+        fieldPaths:
+          - metadata.namespace
+          - subjects.0.namespace
+      - select:
+          kind: ConfigMap
+        fieldPaths:
+          - metadata.namespace
+      - select:
+          kind: Job
+        fieldPaths:
+          - metadata.namespace

@@ -36,20 +36,24 @@ var dnsLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
 // rendered holds the objects of `kustomize build` of the example.
 type rendered struct {
-	test      map[string]any
-	job       batchv1.Job
-	role      rbacv1.Role
-	configMap corev1.ConfigMap
+	test        map[string]any
+	job         batchv1.Job
+	role        rbacv1.Role
+	roleBinding rbacv1.RoleBinding
+	configMap   corev1.ConfigMap
+	// namespaces maps each object ID to its namespace.
+	namespaces map[string]string
 }
 
-func render(t *testing.T) rendered {
+func render(t *testing.T, fs filesys.FileSystem) rendered {
 	t.Helper()
-	resMap, err := krusty.MakeKustomizer(krusty.MakeDefaultOptions()).Run(filesys.MakeFsOnDisk(), ".")
+	resMap, err := krusty.MakeKustomizer(krusty.MakeDefaultOptions()).Run(fs, ".")
 	if err != nil {
 		t.Fatalf("kustomize build: %v", err)
 	}
-	var out rendered
+	out := rendered{namespaces: map[string]string{}}
 	for _, res := range resMap.Resources() {
+		out.namespaces[res.CurId().String()] = res.GetNamespace()
 		data, err := res.AsYAML()
 		if err != nil {
 			t.Fatalf("render %s: %v", res.CurId(), err)
@@ -62,6 +66,8 @@ func render(t *testing.T) rendered {
 			target = &out.job
 		case "Role":
 			target = &out.role
+		case "RoleBinding":
+			target = &out.roleBinding
 		case "ConfigMap":
 			target = &out.configMap
 		default:
@@ -71,8 +77,8 @@ func render(t *testing.T) rendered {
 			t.Fatalf("decode %s: %v", res.CurId(), err)
 		}
 	}
-	if out.test == nil || out.job.Name == "" || out.role.Name == "" || out.configMap.Name == "" {
-		t.Fatal("assertion failed: the example must render a test, a Job, a Role, and a ConfigMap")
+	if out.test == nil || out.job.Name == "" || out.role.Name == "" || out.roleBinding.Name == "" || out.configMap.Name == "" {
+		t.Fatal("assertion failed: the example must render a test, a Job, a Role, a RoleBinding, and a ConfigMap")
 	}
 	return out
 }
@@ -124,7 +130,7 @@ func TestObjectNames(t *testing.T) {
 }
 
 func TestExampleWiring(t *testing.T) {
-	r := render(t)
+	r := render(t, filesys.MakeFsOnDisk())
 	spec := r.test["spec"].(map[string]any)
 	name := r.test["metadata"].(map[string]any)["name"].(string)
 	version := spec["version"].(map[string]any)["name"].(string)
@@ -170,6 +176,7 @@ func TestExampleWiring(t *testing.T) {
 	var flux struct {
 		Spec struct {
 			Wait    bool   `json:"wait"`
+			Force   bool   `json:"force"`
 			Timeout string `json:"timeout"`
 		} `json:"spec"`
 	}
@@ -186,6 +193,42 @@ func TestExampleWiring(t *testing.T) {
 	}
 	if !flux.Spec.Wait || deadline == nil || timeout <= time.Duration(*deadline)*time.Second {
 		t.Errorf("Flux wait %v and timeout %s: want wait and a timeout above the Job deadline", flux.Spec.Wait, timeout)
+	}
+	if !flux.Spec.Force {
+		t.Error("Flux force is off: a change of promote.sh would leave the Job unchangeable")
+	}
+}
+
+// TestCopyForAnotherTemplate renders a copy whose test names another template
+// in another namespace.
+func TestCopyForAnotherTemplate(t *testing.T) {
+	fs := filesys.MakeFsInMemory()
+	for _, file := range []string{"kustomization.yaml", "rbac.yaml", "promote-job.yaml", "promote.sh", "codertemplatetest.json"} {
+		data, err := os.ReadFile(file) //nolint:gosec // Tests read fixed files of this example.
+		if err != nil {
+			t.Fatal(err)
+		}
+		if file == "codertemplatetest.json" {
+			data = []byte(strings.NewReplacer(`"namespace": "coder"`, `"namespace": "ci"`, `"default.docker"`, `"acme.web"`).Replace(string(data)))
+		}
+		if err := fs.WriteFile(file, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := render(t, fs)
+	if r.test["metadata"].(map[string]any)["namespace"] != "ci" {
+		t.Fatal("assertion failed: the copy must move the test to namespace ci")
+	}
+	for id, ns := range r.namespaces {
+		if ns != "ci" {
+			t.Errorf("%s is in namespace %q, want the test namespace ci", id, ns)
+		}
+	}
+	if got := r.roleBinding.Subjects[0].Namespace; got != "ci" {
+		t.Errorf("RoleBinding subject namespace %q, want ci", got)
+	}
+	if got := r.role.Rules[1].ResourceNames; len(got) != 1 || got[0] != "acme.web" {
+		t.Errorf("Role may promote %v, want only the test template acme.web", got)
 	}
 }
 
@@ -371,7 +414,7 @@ func promoted(result string) string {
 }
 
 func TestPromote(t *testing.T) {
-	example := render(t).test
+	example := render(t, filesys.MakeFsOnDisk()).test
 	withParams := clone(t, example)
 	withParams["spec"].(map[string]any)["parameters"] = []any{
 		map[string]any{"name": "region", "value": "eu"},
@@ -385,6 +428,8 @@ func TestPromote(t *testing.T) {
 	setTimeout(maxTestTimeoutSeconds)(longTest["spec"].(map[string]any))
 	shortTest := clone(t, example)
 	setTimeout(60)(shortTest["spec"].(map[string]any))
+	notReady := status("Succeeded")
+	notReady["conditions"] = []any{map[string]any{"type": "Ready", "status": "False"}}
 	stale := status("Succeeded")
 	stale["observedGeneration"] = 0
 	deleting := inCluster(t, example, status("Succeeded"), nil)
@@ -402,6 +447,14 @@ func TestPromote(t *testing.T) {
 				6: inCluster(t, example, status("Succeeded"), nil),
 			},
 			promoteAnswer: promoted("Promoted"), wantOK: true, wantPromotions: 1, wantMinGets: 6, wantOutput: "Promoted version " + versionID,
+		},
+		{
+			name: "waits while Succeeded has no Ready=True",
+			gets: map[int]map[string]any{
+				1: inCluster(t, example, notReady, nil),
+				3: inCluster(t, example, status("Succeeded"), nil),
+			},
+			promoteAnswer: promoted("Promoted"), wantOK: true, wantPromotions: 1, wantMinGets: 3, wantOutput: "phase Succeeded, Ready=False",
 		},
 		{
 			name:          "accepts AlreadyActive",
