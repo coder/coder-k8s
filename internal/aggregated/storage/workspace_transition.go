@@ -163,9 +163,7 @@ func (s *WorkspaceTransitionStorage) Create(
 		if rereadErr == nil && confirmsPost(budgetCtx, sdk, workspace.LatestBuild.ID, current.LatestBuild, req) {
 			return s.queued(namespace, name, current, current.LatestBuild)
 		}
-		return nil, apierrors.NewTimeoutError(fmt.Sprintf(
-			"the result is uncertain: the Coder API did not confirm the %s build in time; re-read the workspace's latest build before you retry",
-			s.transition), 0)
+		return nil, s.uncertain()
 	default:
 		return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), name)
 	}
@@ -211,13 +209,21 @@ func (s *WorkspaceTransitionStorage) afterConflict(
 		fmt.Errorf("%s; retry after the active build ends", coderErr.Message))
 }
 
+// uncertain is the 504 for a build request that Coder can have applied without a confirmation.
+func (s *WorkspaceTransitionStorage) uncertain() error {
+	return apierrors.NewTimeoutError(fmt.Sprintf(
+		"the result is uncertain: the Coder API did not confirm the %s build; re-read the workspace's latest build before you retry",
+		s.transition), 0)
+}
+
 // queued answers Queued for a build that this request queued. Like an update of spec.running, it
-// sends a Modified watch event for the workspace with that build as the latest build.
+// sends a Modified watch event for the workspace with that build as the latest build. The build
+// request was sent, so a workspace that does not convert leaves the result open.
 func (s *WorkspaceTransitionStorage) queued(namespace, name string, workspace codersdk.Workspace, build codersdk.WorkspaceBuild) (runtime.Object, error) {
 	workspace.LatestBuild = build
 	obj, err := convert.WorkspaceToK8s(namespace, workspace)
 	if err != nil {
-		return nil, apierrors.NewInternalError(err)
+		return nil, s.uncertain()
 	}
 	s.workspaces.enqueueWatchEvent(watch.Modified, obj)
 	return s.result(namespace, name, transitionOutcomeQueued, false, &build), nil
