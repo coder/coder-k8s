@@ -32,10 +32,10 @@ func rejectDryRun(resource string, dryRun []string) error {
 }
 
 // uncertainCreateAnswer is the error for a create that Coder answered with its success status,
-// but without the fields of the object, for example with {} from a proxy. Coder can have created
+// but without the ID or name of the object, for example with {} from a proxy. Coder can have created
 // the object.
 func uncertainCreateAnswer(resource schema.GroupResource, name string) error {
-	return coder.UncertainWriteError(coder.WriteCreate, resource, name, "an answer from the Coder API without the name of the object")
+	return coder.UncertainWriteError(coder.WriteCreate, resource, name, "an answer from the Coder API without the ID or name of the object")
 }
 
 // uncertainBuildAnswer is the error for a workspace update or delete whose build request Coder

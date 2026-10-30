@@ -30,7 +30,7 @@ const (
 // any returned field changes, including the active flag, which Coder does not reflect in the
 // version's own updated_at. Compare it only for equality.
 //
-// It returns an error when tpl or v lack the fields of the name and labels.
+// It returns an error when v lacks its ID, or tpl or v lack the fields of the name and labels.
 func TemplateVersionToK8s(namespace string, tpl codersdk.Template, v codersdk.TemplateVersion) (*aggregationv1alpha1.CoderTemplateVersion, error) {
 	if namespace == "" {
 		panic("assertion failed: namespace must not be empty")
@@ -38,7 +38,7 @@ func TemplateVersionToK8s(namespace string, tpl codersdk.Template, v codersdk.Te
 	if v.TemplateID == nil || *v.TemplateID != tpl.ID {
 		panic(fmt.Sprintf("assertion failed: template version %s must belong to template %s", v.ID, tpl.ID))
 	}
-	if err := requireNameFields("template version",
+	if err := requireIdentity("template version", v.ID,
 		nameField{"organization", tpl.OrganizationName}, nameField{"template", tpl.Name}); err != nil {
 		return nil, err
 	}

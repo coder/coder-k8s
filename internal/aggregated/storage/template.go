@@ -794,9 +794,13 @@ func (s *TemplateStorage) Update(
 	// the template unchanged (#117). The Coder calls are not atomic: if this call fails after a promotion,
 	// the new source stays active with the old metadata.
 	if metadataChanged {
-		_, err := sdk.UpdateTemplateMeta(ctx, templateID, convert.TemplateUpdateMetaRequestFromK8s(updatedTemplate))
+		updatedMeta, err := sdk.UpdateTemplateMeta(ctx, templateID, convert.TemplateUpdateMetaRequestFromK8s(updatedTemplate))
 		if err != nil {
 			return nil, false, coder.MapCoderWriteError(err, coder.WriteUpdate, aggregationv1alpha1.Resource("codertemplates"), name)
+		}
+		if updatedMeta.ID != templateID {
+			return nil, false, coder.UncertainWriteError(coder.WriteUpdate, aggregationv1alpha1.Resource("codertemplates"), name,
+				"an answer from the Coder API without the updated template")
 		}
 	}
 

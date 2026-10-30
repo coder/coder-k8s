@@ -16,9 +16,12 @@ import (
 // nameField is a field of a Coder answer that becomes a segment of the Kubernetes name.
 type nameField struct{ segment, value string }
 
-// requireNameFields returns an error when a field cannot be a segment of the name, for example in
-// the {} that a proxy answers instead of Coder.
-func requireNameFields(object string, fields ...nameField) error {
+// requireIdentity returns an error when id is zero or a field cannot be a segment of the name,
+// for example in the {} that a proxy answers instead of Coder.
+func requireIdentity(object string, id uuid.UUID, fields ...nameField) error {
+	if id == uuid.Nil {
+		return fmt.Errorf("the Coder API answered a %s without an ID", object)
+	}
 	for _, field := range fields {
 		if err := coder.NameSegmentError(field.segment, field.value); err != nil {
 			return fmt.Errorf("the Coder API answered a %s without a valid name: %w", object, err)
@@ -28,12 +31,12 @@ func requireNameFields(object string, fields ...nameField) error {
 }
 
 // TemplateToK8s converts a codersdk.Template to an aggregated API CoderTemplate. It returns an
-// error when t lacks the fields of the name.
+// error when t lacks its ID or the fields of the name.
 func TemplateToK8s(namespace string, t codersdk.Template) (*aggregationv1alpha1.CoderTemplate, error) {
 	if namespace == "" {
 		panic("assertion failed: namespace must not be empty")
 	}
-	if err := requireNameFields("template", nameField{"organization", t.OrganizationName}, nameField{"template", t.Name}); err != nil {
+	if err := requireIdentity("template", t.ID, nameField{"organization", t.OrganizationName}, nameField{"template", t.Name}); err != nil {
 		return nil, err
 	}
 

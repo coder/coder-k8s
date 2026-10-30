@@ -48,9 +48,9 @@ func TestConvertersRejectAnswersWithoutNames(t *testing.T) {
 		convert func() error
 		want    string
 	}{
-		{"empty template", func() error { _, err := TemplateToK8s("ns", codersdk.Template{}); return err }, "organization must not be empty"},
+		{"empty template", func() error { _, err := TemplateToK8s("ns", codersdk.Template{}); return err }, "without an ID"},
 		{"template name with a dot", func() error {
-			_, err := TemplateToK8s("ns", codersdk.Template{OrganizationName: "acme", Name: "a.b"})
+			_, err := TemplateToK8s("ns", codersdk.Template{ID: templateID, OrganizationName: "acme", Name: "a.b"})
 			return err
 		}, `template must not contain "."`},
 		{"template without an ID", func() error {
@@ -65,17 +65,17 @@ func TestConvertersRejectAnswersWithoutNames(t *testing.T) {
 			_, err := TemplateVersionToK8s("ns", codersdk.Template{ID: templateID, OrganizationName: "acme", Name: "docker"}, codersdk.TemplateVersion{TemplateID: &templateID, Name: "v1"})
 			return err
 		}, "without an ID"},
-		{"empty workspace", func() error { _, err := WorkspaceToK8s("ns", codersdk.Workspace{}); return err }, "organization must not be empty"},
+		{"empty workspace", func() error { _, err := WorkspaceToK8s("ns", codersdk.Workspace{}); return err }, "without an ID"},
 		{"workspace without an owner", func() error {
-			_, err := WorkspaceToK8s("ns", codersdk.Workspace{OrganizationName: "acme", Name: "dev"})
+			_, err := WorkspaceToK8s("ns", codersdk.Workspace{ID: uuid.New(), OrganizationName: "acme", Name: "dev"})
 			return err
 		}, "user must not be empty"},
 		{"template version without a name", func() error {
-			_, err := TemplateVersionToK8s("ns", codersdk.Template{ID: templateID, OrganizationName: "acme", Name: "docker"}, codersdk.TemplateVersion{TemplateID: &templateID})
+			_, err := TemplateVersionToK8s("ns", codersdk.Template{ID: templateID, OrganizationName: "acme", Name: "docker"}, codersdk.TemplateVersion{ID: uuid.New(), TemplateID: &templateID})
 			return err
 		}, "version must not be empty"},
 		{"template version of a template without an organization", func() error {
-			_, err := TemplateVersionToK8s("ns", codersdk.Template{ID: templateID, Name: "docker"}, codersdk.TemplateVersion{TemplateID: &templateID, Name: "v1"})
+			_, err := TemplateVersionToK8s("ns", codersdk.Template{ID: templateID, Name: "docker"}, codersdk.TemplateVersion{ID: uuid.New(), TemplateID: &templateID, Name: "v1"})
 			return err
 		}, "organization must not be empty"},
 	} {
