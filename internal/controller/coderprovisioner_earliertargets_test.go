@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -22,13 +23,14 @@ import (
 	"github.com/coder/coder-k8s/internal/controller"
 )
 
-// coderCallLog records the Coder URL of every call, and can fail the deletes
-// of one key.
+// coderCallLog records the Coder URL of every call, can fail the deletes of
+// one key, and can fail every key lookup by name.
 type coderCallLog struct {
 	coderbootstrap.Client
 	urls          []string
 	failDelete    uuid.UUID
 	failedDeletes int
+	failLookup    bool
 }
 
 func (c *coderCallLog) EnsureProvisionerKey(ctx context.Context, req coderbootstrap.EnsureProvisionerKeyRequest) (coderbootstrap.EnsureProvisionerKeyResponse, error) {
@@ -52,6 +54,9 @@ func (c *coderCallLog) ProvisionerKeyByID(ctx context.Context, req coderbootstra
 
 func (c *coderCallLog) ProvisionerKeyByName(ctx context.Context, req coderbootstrap.ProvisionerKeyByNameRequest) (*codersdk.ProvisionerKey, error) {
 	c.urls = append(c.urls, req.CoderURL)
+	if c.failLookup {
+		return nil, errors.New("injected lookup failure")
+	}
 	return c.Client.ProvisionerKeyByName(ctx, req)
 }
 
@@ -65,7 +70,8 @@ func (c *coderCallLog) Entitlements(ctx context.Context, coderURL, sessionToken 
 // When the provisioner moves on to a control plane C that is not ready, the
 // key at A must still be deleted at A with the operator token of A, and C must
 // get no request. Key B, which the Secret holds, must stay. A failed delete is
-// retried at the pending key cadence, not on every reconcile. When the Secret
+// retried at the pending key cadence, not on every reconcile, also by the
+// rotation to a ready C. When the Secret
 // write at B failed instead, the unpublished key B, which the Secret can hold,
 // must stay until C is ready.
 func TestCoderProvisionerKey_EarlierTargetRevokedWhileTargetNotReady(t *testing.T) {
@@ -73,7 +79,8 @@ func TestCoderProvisionerKey_EarlierTargetRevokedWhileTargetNotReady(t *testing.
 
 	tests := []struct {
 		name string
-		// notReady makes control plane C fail one of its checks.
+		// notReady makes control plane C fail one of its checks. When it is
+		// nil, C is ready.
 		notReady func(ctx context.Context, t *testing.T, namespace string)
 		// deleteFails fails every delete of key A at C.
 		deleteFails bool
@@ -84,6 +91,7 @@ func TestCoderProvisionerKey_EarlierTargetRevokedWhileTargetNotReady(t *testing.
 		{name: "target not entitled", notReady: markNotEntitled},
 		{name: "target operator token missing", notReady: deleteOperatorToken},
 		{name: "delete fails at the earlier target", notReady: markNotEntitled, deleteFails: true},
+		{name: "delete fails at the earlier target, target ready", deleteFails: true},
 		{name: "unpublished key at the earlier target", notReady: markNotEntitled, unpublishedAtB: true},
 	}
 
@@ -99,7 +107,8 @@ func TestCoderProvisionerKey_EarlierTargetRevokedWhileTargetNotReady(t *testing.
 			}
 			keyA := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "provisioner", Key: "material-a"}
 			keyB := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "provisioner", Key: "material-b"}
-			f.bootstrapClient.provisionerKeyResponses = []coderbootstrap.EnsureProvisionerKeyResponse{keyA, keyB}
+			keyC := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "provisioner", Key: "material-c"}
+			f.bootstrapClient.provisionerKeyResponses = []coderbootstrap.EnsureProvisionerKeyResponse{keyA, keyB, keyC}
 			calls := &coderCallLog{Client: f.bootstrapClient}
 			f.reconciler.BootstrapClient = calls
 
@@ -152,30 +161,37 @@ func TestCoderProvisionerKey_EarlierTargetRevokedWhileTargetNotReady(t *testing.
 			calls.failedDeletes = 0
 			calls.urls = nil
 			f.bootstrapClient.deleteKeyByIDRequests = nil
-			tt.notReady(ctx, t, f.namespace)
+			if tt.notReady != nil {
+				tt.notReady(ctx, t, f.namespace)
+			}
 			moveTo("coder-c")
 			reconcile()
 			if tt.deleteFails {
 				reconcile()
 			}
 
-			require.NotContains(t, calls.urls, apiURL("coder-c"), "control plane C must get no request while it is not ready")
-			require.NotContains(t, keyDeletes(f.bootstrapClient), keyDelete{coderURL: apiURL("coder-b"), token: "operator-token-b", keyID: keyB.KeyID.String()},
-				"nothing may delete key B, which the Secret holds or can hold")
+			if tt.notReady != nil {
+				require.NotContains(t, calls.urls, apiURL("coder-c"), "control plane C must get no request while it is not ready")
+				require.NotContains(t, keyDeletes(f.bootstrapClient), keyDelete{coderURL: apiURL("coder-b"), token: "operator-token-b", keyID: keyB.KeyID.String()},
+					"nothing may delete key B, which the Secret holds or can hold, while C is not ready")
+			}
 			final := f.get(ctx, t, provisioner)
 			if tt.unpublishedAtB {
 				require.Empty(t, keyDeletes(f.bootstrapClient))
 				require.True(t, pendingKeyRecorded(final, keyB.KeyID), "the record of the unpublished key B must stay")
 				return
 			}
-			require.Equal(t, keyB.KeyID.String(), final.Status.ProvisionerKeyID)
+			applied := keyB
+			if tt.notReady == nil {
+				applied = keyC
+			}
+			require.Equal(t, applied.KeyID.String(), final.Status.ProvisionerKeyID)
 			if tt.deleteFails {
 				require.Equal(t, 1, calls.failedDeletes, "a failed delete must wait for the pending key cadence")
 				require.True(t, pendingKeyRecorded(final, keyA.KeyID), "a failed delete must keep the record of key A")
 				controller.ElapseEarlierKeyRetryInterval(f.reconciler, final.UID)
 				reconcile()
 				require.Equal(t, 2, calls.failedDeletes, "the delete must be tried again after the pending key cadence")
-				require.NotContains(t, calls.urls, apiURL("coder-c"))
 				return
 			}
 			require.Equal(t, []keyDelete{{coderURL: apiURL("coder"), token: testOperatorToken, keyID: keyA.KeyID.String()}}, keyDeletes(f.bootstrapClient),
@@ -183,6 +199,79 @@ func TestCoderProvisionerKey_EarlierTargetRevokedWhileTargetNotReady(t *testing.
 			require.False(t, pendingKeyRecorded(final, keyA.KeyID), "the record of key A must go once Coder confirmed the delete")
 		})
 	}
+}
+
+// TestCoderProvisionerKey_EarlierTargetReportsBesideUnpublishedKey checks the
+// reports of earlier target records while an unpublished record waits for a
+// control plane C that is not ready. A record whose control plane was created
+// again must be reported, and the report of a record without key IDs must go
+// once Coder has no key with its name.
+func TestCoderProvisionerKey_EarlierTargetReportsBesideUnpublishedKey(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newProvisionerCredentialFixture(ctx, t, "cprov-earlier-reports")
+	createControlPlaneWithToken(ctx, t, f.namespace, "coder-b", "https://coder-b.example.com", "operator-token-b")
+	createControlPlaneWithToken(ctx, t, f.namespace, "coder-c", "https://coder-c.example.com", "operator-token-c")
+	calls := &coderCallLog{Client: f.bootstrapClient}
+	f.reconciler.BootstrapClient = calls
+	provisioner := f.createProvisioner(ctx, t, nil, nil)
+	name := types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}
+	f.reconcile(ctx, t, provisioner)
+	f.reconcile(ctx, t, provisioner)
+	calls.failLookup = true
+
+	controlPlaneB := &coderv1alpha1.CoderControlPlane{}
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: "coder-b", Namespace: f.namespace}, controlPlaneB))
+	record := func(keyName string, withIDs bool) coderv1alpha1.CoderProvisionerKeyRecord {
+		record := coderv1alpha1.CoderProvisionerKeyRecord{
+			ControlPlaneRefName: "coder-b",
+			ControlPlaneUID:     string(controlPlaneB.UID),
+			CoderURL:            "http://coder-b." + f.namespace + ".svc.cluster.local:80",
+			OrganizationName:    "default",
+			KeyName:             keyName,
+		}
+		if withIDs {
+			record.OrganizationID = uuid.NewString()
+			record.KeyID = uuid.NewString()
+		}
+		return record
+	}
+	recreated := record("recreated", true)
+	recreated.ControlPlaneUID = uuid.NewString()
+	unpublished := record("unpublished", true)
+	unpublished.Unpublished = true
+	idLess := record("id-less", false)
+	latest := f.get(ctx, t, provisioner)
+	latest.Status.PendingKeys = []coderv1alpha1.CoderProvisionerKeyRecord{recreated, unpublished, idLess}
+	require.NoError(t, k8sClient.Status().Update(ctx, latest))
+	markNotEntitled(ctx, t, f.namespace)
+	latest = f.get(ctx, t, provisioner)
+	latest.Spec.ControlPlaneRef.Name = "coder-c"
+	require.NoError(t, k8sClient.Update(ctx, latest))
+	reconcile := func() *coderv1alpha1.CoderProvisioner {
+		_, err := f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+		require.NoError(t, err)
+		return f.get(ctx, t, provisioner)
+	}
+
+	got := reconcile()
+	require.Equal(t, []coderv1alpha1.CoderProvisionerKeyRecord{recreated, unpublished, idLess}, got.Status.PendingKeys)
+	changed := meta.FindStatusCondition(got.Status.Conditions, coderv1alpha1.CoderProvisionerConditionControlPlaneChangedKeyKept)
+	require.NotNil(t, changed, "the record whose control plane was created again must be reported")
+	require.Contains(t, changed.Message, `"recreated"`)
+	require.NotContains(t, changed.Message, `"unpublished"`)
+	unverified := meta.FindStatusCondition(got.Status.Conditions, coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept)
+	require.NotNil(t, unverified, "the record without key IDs must be reported")
+	require.Contains(t, unverified.Message, `"id-less"`)
+
+	calls.failLookup = false
+	controller.ElapseEarlierKeyRetryInterval(f.reconciler, got.UID)
+	got = reconcile()
+	require.Equal(t, []coderv1alpha1.CoderProvisionerKeyRecord{recreated, unpublished}, got.Status.PendingKeys,
+		"the record without key IDs must go once Coder has no key with its name")
+	require.Nil(t, meta.FindStatusCondition(got.Status.Conditions, coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept))
+	require.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, coderv1alpha1.CoderProvisionerConditionControlPlaneChangedKeyKept))
+	require.Empty(t, keyDeletes(f.bootstrapClient), "no recorded key may be deleted: one has another control plane, one is unpublished")
 }
 
 func markNotEntitled(ctx context.Context, t *testing.T, namespace string) {
