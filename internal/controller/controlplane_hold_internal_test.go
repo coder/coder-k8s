@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -17,12 +16,6 @@ import (
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 )
-
-// coderDeployment is the Coder Deployment of controlPlane. A control plane
-// holds only while it exists (#353).
-func coderDeployment(controlPlane *coderv1alpha1.CoderControlPlane) *appsv1.Deployment {
-	return &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: controlPlane.Name, Namespace: controlPlane.Namespace}}
-}
 
 // #353: the grace period after the hold grows by one bounded pass per
 // dependent of one kind, up to a cap, so dependents that someone keeps

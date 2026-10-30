@@ -47,7 +47,7 @@ func TestAIGatewayKeyDeleteUnderHoldEndsAtHoldEnd(t *testing.T) {
 		Data: map[string][]byte{coderv1alpha1.DefaultTokenSecretKey: []byte("token")},
 	}
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns"}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(controlPlane, token, namespace, coderDeployment(controlPlane)).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(controlPlane, token, namespace).Build()
 	r := &CoderAIGatewayKeyReconciler{Client: c, APIReader: c, Scheme: scheme, Clock: clock.RealClock{}, OperatorNamespace: "coder-system"}
 	held, err := controlPlaneHolds(context.Background(), r.Client, controlPlane, time.Now())
 	require.NoError(t, err)

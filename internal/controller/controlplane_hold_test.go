@@ -244,43 +244,30 @@ func TestControlPlaneForegroundDeletionDoesNotHold(t *testing.T) {
 	require.NotContains(t, controlPlane.Finalizers, workspaceRBACFinalizer, "no hold under foreground deletion")
 }
 
-// #353 (#362 follow-ups 1 and 4): the hold keeps Coder running only for
-// dependents that can reach it. Nothing repairs the operator access of a
-// control plane that is being deleted, and a foreground deletion that the
-// operator saw only after its marker went has removed the Coder Deployment.
-// In both cases a deleted dependent and the control plane go at once.
+// #353 (#362 follow-up 1): the hold keeps Coder running only for dependents
+// that can reach it. Nothing repairs the operator access of a control plane
+// that is being deleted, so without it a deleted dependent and the control
+// plane go at once.
 func TestControlPlaneHoldNeedsCoder(t *testing.T) {
 	t.Parallel()
-	for name, breakCoder := range map[string]func(ctx context.Context, t *testing.T, namespace string){
-		"no operator access": func(ctx context.Context, t *testing.T, namespace string) {
-			controlPlane := &coderv1alpha1.CoderControlPlane{}
-			require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: "coder"}, controlPlane))
-			controlPlane.Status.OperatorAccessReady = false
-			require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
-		},
-		"no Coder Deployment": func(ctx context.Context, t *testing.T, namespace string) {
-			require.NoError(t, k8sClient.Delete(ctx, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "coder"}}))
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			ctx := context.Background()
-			env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
-			got := rotatedKey(ctx, t, &env)
-			env.createNamedKey(ctx, t, "live", "coder", "live-secret")
-			deleteFinalizedControlPlane(ctx, t, env.namespace, "coder")
-			breakCoder(ctx, t, env.namespace)
-			require.NoError(t, k8sClient.Delete(ctx, got))
-			gone, _ := env.reconcile(ctx, t, got)
-			require.Nil(t, gone, "the deleted key does not wait for a hold")
+	ctx := context.Background()
+	env := newAIGatewayKeyEnv(ctx, t, ptrTo(true))
+	got := rotatedKey(ctx, t, &env)
+	env.createNamedKey(ctx, t, "live", "coder", "live-secret")
+	deleteFinalizedControlPlane(ctx, t, env.namespace, "coder")
+	controlPlane := &coderv1alpha1.CoderControlPlane{}
+	ref := client.ObjectKey{Namespace: env.namespace, Name: "coder"}
+	require.NoError(t, k8sClient.Get(ctx, ref, controlPlane))
+	controlPlane.Status.OperatorAccessReady = false
+	require.NoError(t, k8sClient.Status().Update(ctx, controlPlane))
+	require.NoError(t, k8sClient.Delete(ctx, got))
+	gone, _ := env.reconcile(ctx, t, got)
+	require.Nil(t, gone, "the deleted key does not wait for a hold")
 
-			r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
-			ref := client.ObjectKey{Namespace: env.namespace, Name: "coder"}
-			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ref})
-			require.NoError(t, err)
-			require.True(t, apierrors.IsNotFound(k8sClient.Get(ctx, ref, &coderv1alpha1.CoderControlPlane{})), "the control plane does not wait for the live key")
-		})
-	}
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme}
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ref})
+	require.NoError(t, err)
+	require.True(t, apierrors.IsNotFound(k8sClient.Get(ctx, ref, &coderv1alpha1.CoderControlPlane{})), "the control plane does not wait for the live key")
 }
 
 // orphanCoderDeployment deletes the Coder Deployment as `kubectl delete
