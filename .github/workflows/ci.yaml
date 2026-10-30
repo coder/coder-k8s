@@ -720,6 +720,12 @@ jobs:
           echo "=== Coder deployment logs ==="
           kubectl -n coder logs deploy/coder --tail=200 || true
           echo ""
+          echo "=== CoderMCPServers ==="
+          kubectl -n coder get codermcpservers -o yaml || true
+          echo ""
+          echo "=== MCP stub logs ==="
+          kubectl -n coder logs deploy/mcp-stub --tail=200 || true
+          echo ""
           echo "=== CNPG controller logs ==="
           kubectl -n cnpg-system logs deploy/cnpg-controller-manager --tail=200 || true
           echo ""
