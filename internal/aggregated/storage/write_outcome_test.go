@@ -137,6 +137,19 @@ type writeCase struct {
 	run       func(t *testing.T, provider coder.ClientProvider) error
 }
 
+// createTemplate creates a template with files. The create creates a template version and then
+// the template.
+func createTemplate(_ *testing.T, provider coder.ClientProvider) error {
+	_, err := NewTemplateStorage(provider).Create(namespacedContext("control-plane"), &aggregationv1alpha1.CoderTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme.proxied"},
+		Spec: aggregationv1alpha1.CoderTemplateSpec{
+			Organization: "acme",
+			Files:        map[string]string{"main.tf": `resource "null_resource" "proxied" {}`},
+		},
+	}, rest.ValidateAllObjectFunc, nil)
+	return err
+}
+
 // updateTemplateFiles changes the files of a template. The update creates a template version
 // and then activates it.
 func updateTemplateFiles(t *testing.T, provider coder.ClientProvider) error {
@@ -209,16 +222,14 @@ func writeCases() []writeCase {
 			isWrite:      isPost("/templates"),
 			checksAnswer: true,
 			readsBody:    true,
-			run: func(_ *testing.T, provider coder.ClientProvider) error {
-				_, err := NewTemplateStorage(provider).Create(ctx(), &aggregationv1alpha1.CoderTemplate{
-					ObjectMeta: metav1.ObjectMeta{Name: "acme.proxied"},
-					Spec: aggregationv1alpha1.CoderTemplateSpec{
-						Organization: "acme",
-						Files:        map[string]string{"main.tf": `resource "null_resource" "proxied" {}`},
-					},
-				}, rest.ValidateAllObjectFunc, nil)
-				return err
-			},
+			run:          createTemplate,
+		},
+		{
+			name:         "template version of a create",
+			isWrite:      isPost("/templateversions"),
+			checksAnswer: true,
+			readsBody:    true,
+			run:          createTemplate,
 		},
 		{
 			name: "template update",
