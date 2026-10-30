@@ -55,13 +55,17 @@ func (r *CoderMCPServerReconciler) createOrRecord(
 		return keepRejectedMCPServerCreate(step, rejected), nil
 	}
 	if found != nil {
-		// A status that lost the config ID still has it in the record (#422).
+		// A status that lost the config ID still has it in the record, which
+		// proves the config only in the record's deployment (#422).
 		record, _, err := readCleanupRecord(ctx, r.APIReader, r.OperatorNamespace, server.UID)
 		if err != nil {
 			return nil, err
 		}
 		recordedID := ""
-		if record != nil {
+		if record != nil && record.CoderID == found.ID.String() {
+			if step, err := r.recordedDeploymentChanged(ctx, sdk, server); step != nil || err != nil {
+				return step, err
+			}
 			recordedID = record.CoderID
 		}
 		if step := recordMCPServer(server, *found, recordedID); step != nil {

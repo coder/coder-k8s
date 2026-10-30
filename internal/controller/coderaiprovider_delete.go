@@ -61,14 +61,17 @@ func (r *CoderAIProviderReconciler) deleteStep(ctx context.Context, provider *co
 	if provider.Status.ProviderID == "" && provider.Status.CreateAttemptTime == nil {
 		// Earlier Coder answers cleared the create marker. A record with a
 		// provider ID still locates a provider, for example in a deployment
-		// that the control plane no longer reaches (CoderDeploymentChanged),
-		// so only a record without one proves that nothing exists.
+		// that the control plane no longer reaches (CoderDeploymentChanged).
+		// A record without one stays too: a NameConflict clears the marker
+		// also when a person edited the display name of the provider of a
+		// lost create answer. The sweep removes it once Coder holds no
+		// provider of that name and type (#422).
 		record, _, err := readCleanupRecord(ctx, r.APIReader, r.OperatorNamespace, provider.UID)
 		if err != nil && !errors.Is(err, errNotACleanupRecord) {
 			return false, nil, err
 		}
 		if record == nil || record.CoderID == "" {
-			return true, nil, deleteCleanupRecord(ctx, r.Client, r.APIReader, r.OperatorNamespace, provider.UID)
+			return true, nil, nil
 		}
 	}
 	ref := types.NamespacedName{Namespace: provider.Namespace, Name: provider.Spec.ControlPlaneRef.Name}
