@@ -170,7 +170,8 @@ func sentTokens(client *fakeBootstrapClient, lookups []urlToken) []urlToken {
 // for the key of the old one: the record of the old key stays, and the
 // provisioner reports it. The provisioner must create a new key. A record
 // from an operator that did not record control plane UIDs may use the token
-// of its control plane only at that control plane's current URL.
+// of its control plane only at that control plane's current URL, and its
+// applied key stays only when the current backend holds it.
 func TestCoderProvisionerKey_ControlPlaneRecreated(t *testing.T) {
 	t.Parallel()
 
@@ -179,11 +180,20 @@ func TestCoderProvisionerKey_ControlPlaneRecreated(t *testing.T) {
 		newURL   = "http://coder-new.example.com"
 		newToken = "operator-token-new"
 	)
+	// What a rotation after the change leaves of the old key.
+	const (
+		oldKeyKept    = "kept"    // its record stays, and the provisioner reports it
+		oldKeyDeleted = "deleted" // deleted where Coder holds it, no record left
+		oldKeyDropped = "dropped" // the current backend has no such key, no record left
+	)
 	tests := []struct {
 		name string
 		// legacy removes the control plane UID from status, as an operator
 		// before UID records wrote it.
 		legacy bool
+		// verifyFirst reconciles once before the recreate, while the backend
+		// holds the old key.
+		verifyFirst bool
 		// keep keeps the control plane and moves P to another one instead.
 		keep bool
 		// sameURL creates the control plane again at its old URL.
@@ -192,15 +202,19 @@ func TestCoderProvisionerKey_ControlPlaneRecreated(t *testing.T) {
 		// old one, which still holds the old key.
 		sameBackend bool
 		deleteP     bool
+		// oldKey is what a rotation leaves of the old key.
+		oldKey string
 	}{
-		{name: "rotation after the recreate"},
+		{name: "rotation after the recreate", oldKey: oldKeyKept},
 		{name: "deletion after the recreate", deleteP: true},
-		{name: "rotation after the recreate at the same URL", sameURL: true},
+		{name: "rotation after the recreate at the same URL", sameURL: true, oldKey: oldKeyKept},
 		{name: "deletion after the recreate at the same URL", sameURL: true, deleteP: true},
-		{name: "rotation after the recreate at the same URL and backend", sameURL: true, sameBackend: true},
-		{name: "status without control plane UID, rotation after the recreate", legacy: true},
+		{name: "rotation after the recreate at the same URL and backend", sameURL: true, sameBackend: true, oldKey: oldKeyDeleted},
+		{name: "status without control plane UID, rotation after the recreate", legacy: true, oldKey: oldKeyKept},
 		{name: "status without control plane UID, deletion after the recreate", legacy: true, deleteP: true},
-		{name: "status without control plane UID, control plane kept", legacy: true, keep: true},
+		{name: "status without control plane UID, recreate at the same URL", legacy: true, sameURL: true, oldKey: oldKeyDropped},
+		{name: "status without control plane UID, verified before the recreate at the same URL", legacy: true, verifyFirst: true, sameURL: true, oldKey: oldKeyKept},
+		{name: "status without control plane UID, control plane kept", legacy: true, keep: true, oldKey: oldKeyDeleted},
 	}
 
 	for _, tt := range tests {
@@ -213,10 +227,11 @@ func TestCoderProvisionerKey_ControlPlaneRecreated(t *testing.T) {
 			keyNew := coderbootstrap.EnsureProvisionerKeyResponse{OrganizationID: uuid.New(), KeyID: uuid.New(), KeyName: "provisioner", Key: "material-new"}
 			f.bootstrapClient.provisionerKeyResponses = []coderbootstrap.EnsureProvisionerKeyResponse{keyOld, keyNew}
 			var lookups []urlToken
-			var recreated bool
+			// oldKeyInCoder: the backend at oldURL holds the old key.
+			oldKeyInCoder := false
 			f.bootstrapClient.provisionerKeyByName = func(req coderbootstrap.ProvisionerKeyByNameRequest) *codersdk.ProvisionerKey {
 				lookups = append(lookups, urlToken{req.CoderURL, req.SessionToken})
-				if !tt.sameBackend || !recreated || req.CoderURL != oldURL || len(f.bootstrapClient.deleteKeyByIDRequests) > 0 {
+				if !oldKeyInCoder || req.CoderURL != oldURL || len(f.bootstrapClient.deleteKeyByIDRequests) > 0 {
 					return nil
 				}
 				return &codersdk.ProvisionerKey{ID: keyOld.KeyID, OrganizationID: keyOld.OrganizationID, Name: keyOld.KeyName}
@@ -231,6 +246,14 @@ func TestCoderProvisionerKey_ControlPlaneRecreated(t *testing.T) {
 				require.NoError(t, k8sClient.Status().Patch(ctx, f.get(ctx, t, p),
 					ctrlclient.RawPatch(types.MergePatchType, []byte(`{"status":{"controlPlaneUID":null}}`))))
 			}
+			if tt.verifyFirst {
+				oldKeyInCoder = true
+				f.reconcile(ctx, t, p)
+				latest := f.get(ctx, t, p)
+				require.Equal(t, keyOld.KeyID.String(), latest.Status.ProvisionerKeyID, "a key that the backend holds must stay")
+				require.NotEmpty(t, latest.Status.ControlPlaneUID, "the operator must bind the verified key to its control plane")
+			}
+			oldKeyInCoder = tt.sameBackend
 
 			currentURL := newURL
 			if tt.sameURL {
@@ -246,14 +269,15 @@ func TestCoderProvisionerKey_ControlPlaneRecreated(t *testing.T) {
 				require.NoError(t, k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "coder-operator-token", Namespace: f.namespace}}))
 				createControlPlaneWithToken(ctx, t, f.namespace, "coder", currentURL, newToken)
 			}
-			recreated = true
 
 			requireNoLeak := func() {
 				t.Helper()
-				// A record without a UID is bound at the current URL, so
-				// only a recorded UID keeps the new token from the old key.
+				// A record without a UID is bound at the current URL, so only
+				// a recorded UID keeps the new token from the old key.
+				bound := !tt.legacy || tt.verifyFirst
 				for _, d := range keyDeletes(f.bootstrapClient) {
-					require.False(t, !tt.legacy && !tt.sameBackend && d.keyID == keyOld.KeyID.String() && d.token == newToken, "the new control plane's token must not be used for the old key, sent %+v", keyDeletes(f.bootstrapClient))
+					require.False(t, bound && !tt.sameBackend && d.keyID == keyOld.KeyID.String() && d.token == newToken,
+						"the new control plane's token must not be used for the old key, sent %+v", keyDeletes(f.bootstrapClient))
 				}
 				if tt.sameURL {
 					return
@@ -268,38 +292,43 @@ func TestCoderProvisionerKey_ControlPlaneRecreated(t *testing.T) {
 				f.reconcile(ctx, t, p)
 				requireNoLeak()
 				requireProvisionerGone(ctx, t, pName)
-			} else {
-				result, err := f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: pName})
-				require.NoError(t, err)
-				requireNoLeak()
-				latest := f.get(ctx, t, p)
-				require.Equal(t, keyNew.KeyID.String(), latest.Status.ProvisionerKeyID, "P must create a new key")
-				require.Equal(t, currentURL, latest.Status.ControlPlaneURL)
-				kept := slices.ContainsFunc(latest.Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
-					return record.KeyID == keyOld.KeyID.String() && record.CoderURL == oldURL
-				})
-				report := meta.FindStatusCondition(latest.Status.Conditions, coderv1alpha1.CoderProvisionerConditionControlPlaneChangedKeyKept)
-				switch {
-				case tt.sameBackend:
-					require.Contains(t, keyDeletes(f.bootstrapClient), keyDelete{coderURL: oldURL, token: newToken, keyID: keyOld.KeyID.String()},
-						"the rotation must delete the old key that the current backend holds")
-					require.False(t, kept, "a key that the current backend deleted must not stay recorded")
-					require.Nil(t, report)
-				case tt.keep:
-					require.False(t, kept, "the old key must be deleted at its URL")
-					require.Nil(t, report)
-				default:
-					require.True(t, kept, "the record of the old key must stay")
-					require.Positive(t, result.RequeueAfter, "P must check the kept record again")
-					require.NotNil(t, report, "P must report the record that it keeps")
-					require.Equal(t, metav1.ConditionTrue, report.Status)
-					require.Contains(t, report.Message, oldURL)
-				}
+				return
 			}
 
-			if tt.keep {
-				require.Contains(t, keyDeletes(f.bootstrapClient), keyDelete{coderURL: oldURL, token: testOperatorToken, keyID: keyOld.KeyID.String()},
-					"the old key must be deleted at its URL with the token of its control plane")
+			result, err := f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: pName})
+			require.NoError(t, err)
+			requireNoLeak()
+			latest := f.get(ctx, t, p)
+			require.Equal(t, keyNew.KeyID.String(), latest.Status.ProvisionerKeyID, "P must create a new key")
+			require.Equal(t, currentURL, latest.Status.ControlPlaneURL)
+			kept := slices.ContainsFunc(latest.Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
+				return record.KeyID == keyOld.KeyID.String() && record.CoderURL == oldURL
+			})
+			report := meta.FindStatusCondition(latest.Status.Conditions, coderv1alpha1.CoderProvisionerConditionControlPlaneChangedKeyKept)
+			oldKeyDeletes := slices.DeleteFunc(keyDeletes(f.bootstrapClient), func(d keyDelete) bool { return d.keyID != keyOld.KeyID.String() })
+			switch tt.oldKey {
+			case oldKeyKept:
+				require.True(t, kept, "the record of the old key must stay")
+				require.Positive(t, result.RequeueAfter, "P must check the kept record again")
+				require.NotNil(t, report, "P must report the record that it keeps")
+				require.Equal(t, metav1.ConditionTrue, report.Status)
+				require.Contains(t, report.Message, oldURL)
+				require.Empty(t, oldKeyDeletes)
+			case oldKeyDeleted:
+				token := newToken
+				if tt.keep {
+					token = testOperatorToken
+				}
+				require.Equal(t, []keyDelete{{coderURL: oldURL, token: token, keyID: keyOld.KeyID.String()}}, oldKeyDeletes,
+					"the old key must be deleted once, where Coder holds it, with the token of the control plane that serves it")
+				require.False(t, kept, "a deleted key must not stay recorded")
+				require.Nil(t, report)
+			case oldKeyDropped:
+				require.Empty(t, oldKeyDeletes)
+				require.False(t, kept)
+				require.Nil(t, report)
+			default:
+				t.Fatalf("assertion failed: unknown oldKey %q", tt.oldKey)
 			}
 		})
 	}
