@@ -431,53 +431,92 @@ func (c *renamedOrgCoder) serveHTTP(t *testing.T, w http.ResponseWriter, r *http
 	w.WriteHeader(http.StatusNotFound)
 }
 
-// TestCoderProvisionerKey_StatusWithoutUIDOrganizationRenamed checks status
-// without a control plane UID whose applied key is in organization A, named
-// team. A is renamed, and another organization takes the name team, at the
-// same control plane. Coder still holds the key in A, so the deletion of the
-// provisioner must delete it there by its recorded IDs.
-func TestCoderProvisionerKey_StatusWithoutUIDOrganizationRenamed(t *testing.T) {
+// TestCoderProvisionerKey_OrganizationRenamed checks a provisioner whose
+// applied key is in organization A, named team. A is renamed, and another
+// organization takes the name team, at the same control plane. A lookup of
+// the name team then does not find the key. Coder still holds the key in A,
+// so a rotation must delete it there by its recorded IDs, and so must the
+// deletion of the provisioner.
+func TestCoderProvisionerKey_OrganizationRenamed(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	f := newProvisionerCredentialFixture(ctx, t, "cprov-orgrename")
-	orgA, orgB := uuid.New(), uuid.New()
-	keyA, keyB := uuid.New(), uuid.New()
-	coder := &renamedOrgCoder{
-		SDKClient: coderbootstrap.NewSDKClient(),
-		fake:      f.bootstrapClient,
-		keys:      map[uuid.UUID]codersdk.ProvisionerKey{},
-		team:      orgA,
+
+	tests := []struct {
+		name string
+		// legacy removes the control plane UID from status, as an operator
+		// before UID records wrote it.
+		legacy bool
+		// loseSecret deletes the provisioner key Secret after the rename.
+		loseSecret bool
+		// changeTags changes spec.tags after the rename.
+		changeTags bool
+	}{
+		{name: "status without control plane UID", legacy: true},
+		{name: "Secret loss", loseSecret: true},
+		{name: "status without control plane UID, Secret loss", legacy: true, loseSecret: true},
+		{name: "tags change", changeTags: true},
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { coder.serveHTTP(t, w, r) }))
-	t.Cleanup(server.Close)
-	setControlPlaneURL(ctx, t, f, server.URL)
-	f.bootstrapClient.provisionerKeyResponses = []coderbootstrap.EnsureProvisionerKeyResponse{
-		{OrganizationID: orgA, KeyID: keyA, KeyName: "provisioner", Key: "material-a"},
-		{OrganizationID: orgB, KeyID: keyB, KeyName: "provisioner", Key: "material-b"},
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			f := newProvisionerCredentialFixture(ctx, t, "cprov-orgrename")
+			orgA, orgB := uuid.New(), uuid.New()
+			keyA, keyB := uuid.New(), uuid.New()
+			coder := &renamedOrgCoder{
+				SDKClient: coderbootstrap.NewSDKClient(),
+				fake:      f.bootstrapClient,
+				keys:      map[uuid.UUID]codersdk.ProvisionerKey{},
+				team:      orgA,
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { coder.serveHTTP(t, w, r) }))
+			t.Cleanup(server.Close)
+			setControlPlaneURL(ctx, t, f, server.URL)
+			f.bootstrapClient.provisionerKeyResponses = []coderbootstrap.EnsureProvisionerKeyResponse{
+				{OrganizationID: orgA, KeyID: keyA, KeyName: "provisioner", Key: "material-a"},
+				{OrganizationID: orgB, KeyID: keyB, KeyName: "provisioner", Key: "material-b"},
+			}
+			f.reconciler.BootstrapClient = coder
+
+			p := f.createProvisioner(ctx, t, nil, nil)
+			p.Spec.OrganizationName = "team"
+			require.NoError(t, k8sClient.Update(ctx, p))
+			f.reconcile(ctx, t, p)
+			f.reconcile(ctx, t, p)
+			require.Equal(t, keyA.String(), f.get(ctx, t, p).Status.ProvisionerKeyID)
+			if tt.legacy {
+				require.NoError(t, k8sClient.Status().Patch(ctx, f.get(ctx, t, p),
+					ctrlclient.RawPatch(types.MergePatchType, []byte(`{"status":{"controlPlaneUID":null}}`))))
+			}
+
+			coder.mu.Lock()
+			coder.team = orgB
+			coder.mu.Unlock()
+			if tt.loseSecret {
+				require.NoError(t, k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: p.Name + "-provisioner-key", Namespace: p.Namespace}}))
+			}
+			if tt.changeTags {
+				latest := f.get(ctx, t, p)
+				latest.Spec.Tags = map[string]string{"scope": "organization"}
+				require.NoError(t, k8sClient.Update(ctx, latest))
+			}
+			f.reconcile(ctx, t, p)
+			if tt.loseSecret || tt.changeTags {
+				require.Equal(t, keyB.String(), f.get(ctx, t, p).Status.ProvisionerKeyID, "the rotation must create a new key")
+				coder.mu.Lock()
+				require.NotContains(t, coder.keys, keyA, "the rotation must delete the replaced key in the renamed organization by ID")
+				coder.mu.Unlock()
+			}
+			require.NoError(t, k8sClient.Delete(ctx, f.get(ctx, t, p)))
+			f.reconcile(ctx, t, p)
+			requireProvisionerGone(ctx, t, types.NamespacedName{Name: p.Name, Namespace: p.Namespace})
+
+			coder.mu.Lock()
+			defer coder.mu.Unlock()
+			require.NotContains(t, coder.keys, keyA, "deleting the provisioner must revoke its recorded key in the renamed organization by ID")
+			require.Empty(t, coder.keys, "deleting the provisioner must leave none of its keys in Coder")
+		})
 	}
-	f.reconciler.BootstrapClient = coder
-
-	p := f.createProvisioner(ctx, t, nil, nil)
-	p.Spec.OrganizationName = "team"
-	require.NoError(t, k8sClient.Update(ctx, p))
-	f.reconcile(ctx, t, p)
-	f.reconcile(ctx, t, p)
-	require.Equal(t, keyA.String(), f.get(ctx, t, p).Status.ProvisionerKeyID)
-	require.NoError(t, k8sClient.Status().Patch(ctx, f.get(ctx, t, p),
-		ctrlclient.RawPatch(types.MergePatchType, []byte(`{"status":{"controlPlaneUID":null}}`))))
-
-	coder.mu.Lock()
-	coder.team = orgB
-	coder.mu.Unlock()
-	f.reconcile(ctx, t, p)
-	require.NoError(t, k8sClient.Delete(ctx, f.get(ctx, t, p)))
-	f.reconcile(ctx, t, p)
-	requireProvisionerGone(ctx, t, types.NamespacedName{Name: p.Name, Namespace: p.Namespace})
-
-	coder.mu.Lock()
-	defer coder.mu.Unlock()
-	require.NotContains(t, coder.keys, keyA, "deleting the provisioner must revoke its recorded key in the renamed organization by ID")
-	require.Empty(t, coder.keys, "deleting the provisioner must leave none of its keys in Coder")
 }
 
 // TestCoderProvisionerKey_StatusWithoutUIDReplacedKeyBound checks status
