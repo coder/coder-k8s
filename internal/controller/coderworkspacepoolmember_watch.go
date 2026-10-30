@@ -120,21 +120,25 @@ func (r *CoderWorkspacePoolMemberReconciler) checkPoolMemberUse(
 // value, as an idle one is after use, and a sign of the write remains that
 // this member's use cannot leave:
 //   - the template's updated_at, which the update moves just before;
-//   - a stopped workspace of the template with the same value;
 //   - an unclaimed member of the pool that moved its baseline to this value.
+//
+// Another workspace with the same value is no sign, whatever its state: a
+// client can post usage for any workspace every minute, and Coder tracks it
+// without a check (codersdk UpdateWorkspaceUsageWithBodyContext).
 //
 // What remains: use with no workspace of the template below it still counts
 // as a template-wide write in the second after a template edit, or in the
-// same flush as a workspace that stopped in the minute before, or as a
-// member that someone used before it was ready. No sign moves with later
-// flushes, so continued use is Used at the next flush, about a minute later:
-// only one short use can be missed. A template-wide write without a sign is
-// Used: the pool releases the member, and one warm workspace leaks.
+// same flush as a member that someone used before it was ready. No sign
+// moves with later flushes, so continued use is Used at the next flush,
+// about a minute later: only one short use can be missed. A template-wide
+// write without a sign is Used, for example when the template changes again
+// before any member of the pool reads it: the pool releases the member, and
+// one warm workspace leaks.
 func (r *CoderWorkspacePoolMemberReconciler) templateWideWrite(
 	ctx context.Context, member *coderv1alpha1.CoderWorkspacePoolMember, workspace codersdk.Workspace, template codersdk.Template, list codersdk.WorkspacesResponse,
 ) (bool, error) {
 	at := workspace.LastUsedAt
-	listed, stopped := false, false
+	listed := false
 	same := map[string]bool{} // IDs of the other workspaces with this value.
 	for _, w := range list.Workspaces {
 		switch {
@@ -145,13 +149,12 @@ func (r *CoderWorkspacePoolMemberReconciler) templateWideWrite(
 			return false, nil
 		case w.LastUsedAt.Equal(at):
 			same[w.ID.String()] = true
-			stopped = stopped || (w.LatestBuild.Transition == codersdk.WorkspaceTransitionStop && w.LatestBuild.Job.Status == codersdk.ProvisionerJobSucceeded)
 		}
 	}
 	if !listed || list.Count != len(list.Workspaces) {
 		return false, nil // The list does not show the whole template.
 	}
-	if since := at.Sub(template.UpdatedAt); stopped || (since >= 0 && since <= poolMemberTemplateWriteWindow) {
+	if since := at.Sub(template.UpdatedAt); since >= 0 && since <= poolMemberTemplateWriteWindow {
 		return true, nil
 	}
 	if len(same) == 0 {

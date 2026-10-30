@@ -103,28 +103,6 @@ func TestPoolMemberTemplateWideWriteNeedsWholeList(t *testing.T) {
 	requireUsed(t, e.reconcileMember(t, second, 1), true)
 }
 
-// TestPoolMemberTemplateWideWriteWithoutSibling (#349): in a one-member pool
-// no other member sees a template-wide write. After the template changes
-// again, a stopped workspace of the template with the same last_used_at
-// still shows the write: no usage flush can reach it.
-func TestPoolMemberTemplateWideWriteWithoutSibling(t *testing.T) {
-	t.Parallel()
-	e := newPoolMemberEnv(t)
-	started := e.clock.Now()
-	key, workspaceID := e.readyMember(t)
-	e.fake.addTemplateWorkspace(e.v1, codersdk.WorkspaceTransitionStop, started.Add(-time.Hour))
-	written := started.Add(10*time.Minute + 250*time.Millisecond)
-	e.fake.touchTemplateWorkspaces(e.tplID, written)
-	e.fake.editTemplate(e.tplID, written.Add(30*time.Second))
-	e.clock.SetTime(started.Add(11 * time.Minute))
-	member := e.reconcileMember(t, key, 1)
-	requireUsed(t, member, false)
-	require.True(t, member.Status.ReadyLastUsedAt.Time.Equal(written.Truncate(time.Second)), "the baseline moves to the template-wide value")
-
-	e.fake.markUsed(workspaceID, started.Add(12*time.Minute))
-	requireUsed(t, e.reconcileMember(t, key, 1), true)
-}
-
 // TestPoolMemberUseNearTemplateEdit (#349): every template edit moves the
 // template's updated_at, for example a version promote. Use right after an
 // edit is still use when an idle workspace of the template stays below it,
@@ -160,13 +138,16 @@ func TestPoolMemberUseNearTemplateEdit(t *testing.T) {
 // of a template-wide write just for that.
 func TestPoolMemberUseSharedWithOtherWorkspace(t *testing.T) {
 	t.Parallel()
-	// A sibling that became ready in the same second as the use.
+	// A sibling that became ready later in the second of the use. A running
+	// workspace shares the flush, so the sibling is not below the value.
 	e := newPoolMemberEnv(t)
 	started := e.clock.Now()
 	key, workspaceID := e.readyMember(t)
-	e.clock.SetTime(started.Add(10*time.Minute + 100*time.Millisecond))
+	flush := started.Add(10*time.Minute + 300*time.Millisecond)
+	e.fake.addTemplateWorkspace(e.v1, codersdk.WorkspaceTransitionStart, flush)
+	e.fake.markUsed(workspaceID, flush)
+	e.clock.SetTime(started.Add(10*time.Minute + 600*time.Millisecond))
 	e.readyMember(t)
-	e.fake.markUsed(workspaceID, started.Add(10*time.Minute+300*time.Millisecond))
 	e.clock.SetTime(started.Add(11 * time.Minute))
 	requireUsed(t, e.reconcileMember(t, key, 1), true)
 
@@ -177,7 +158,7 @@ func TestPoolMemberUseSharedWithOtherWorkspace(t *testing.T) {
 	key, workspaceID = e.readyMember(t)
 	e.readyMember(t)
 	siblingKey, siblingWorkspace, siblingBuild := e.createdMember(t, nil)
-	flush := started.Add(10*time.Minute + 300*time.Millisecond)
+	flush = started.Add(10*time.Minute + 300*time.Millisecond)
 	e.fake.markUsed(siblingWorkspace, flush)
 	e.fake.markUsed(workspaceID, flush)
 	e.fake.setBuildJob(siblingBuild, codersdk.ProvisionerJobSucceeded)
@@ -186,12 +167,14 @@ func TestPoolMemberUseSharedWithOtherWorkspace(t *testing.T) {
 	e.clock.SetTime(started.Add(11 * time.Minute))
 	requireUsed(t, e.reconcileMember(t, key, 1), true)
 
-	// A running workspace in use can share every flush with this member.
+	// A running or a stopped workspace can share every flush with this
+	// member: a client can post usage for either every minute.
 	e = newPoolMemberEnv(t)
 	started = e.clock.Now()
 	key, workspaceID = e.readyMember(t)
 	flush = started.Add(10*time.Minute + 300*time.Millisecond)
 	e.fake.addTemplateWorkspace(e.v1, codersdk.WorkspaceTransitionStart, flush)
+	e.fake.addTemplateWorkspace(e.v1, codersdk.WorkspaceTransitionStop, flush)
 	e.fake.markUsed(workspaceID, flush)
 	e.clock.SetTime(started.Add(11 * time.Minute))
 	requireUsed(t, e.reconcileMember(t, key, 1), true)
