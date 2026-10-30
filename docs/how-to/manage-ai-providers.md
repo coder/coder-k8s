@@ -91,6 +91,8 @@ The object stalls with the credential reason. Repairing the Secret does not enab
 
 A disable, a key change or a delete in the Coder dashboard is a kill switch too. The object stalls with `DisabledExternally`, `KeyChangedExternally` or `DeletedExternally`, and the operator does not undo the change until the spec changes. A spec edit then enables the provider, sends the Secret's key, or creates the provider again.
 
+The kill switch holds once the operator has fully applied the current spec. Until then, the operator replaces a key that it did not send with the Secret's key. For example, when a create answer is lost and someone changes the key in the dashboard before the operator reads the provider, the operator sends the Secret's key and only then reports `Ready`.
+
 Coder sends no events, so the operator notices a dashboard change at its next read of the provider: at the resync, about every 10 minutes, or at once when the object, its key Secret or its control plane changes. Until then the object can still show `Ready=True`.
 
 To revoke a key in an emergency:

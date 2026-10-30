@@ -61,6 +61,17 @@ Coder answered an operator call with a redirect to another origin. The operator 
 
 Most aggregated API calls then answer the caller with a `500` that says `the Coder API could not be reached`. The `coder-errors` line in the aggregated API server log shows the refusal. When Coder or a proxy redirects only the websocket request of the workspace build log stream (`coderworkspaces/log?follow=true`), that line shows `refusing request to a different origin than the coder URL` instead.
 
+## Operator calls to Coder are slow or time out under load
+
+The aggregated API server and most controllers share one connection pool per Coder deployment in each operator process. A pool opens at most 128 connections. A Coder call beyond that waits for a free connection, up to the request timeout. The controllers use 30 seconds. The aggregated API server uses `--coder-request-timeout` (default 30 seconds). Two kinds of controller calls use separate connections and are not in the pool or the metric: the license and entitlement calls of the `CoderControlPlane` controller, and the provisioner key calls of the `CoderProvisioner` controller.
+
+The histogram `coder_k8s_coder_connection_wait_seconds` shows how long each call through the pool waited for a connection, including the dial of a new connection. A call that times out before it gets a connection also counts, with the time it waited. Most samples fall in the lowest buckets. Samples near the request timeout have two usual causes: all 128 connections are in use, or Coder is slow to reach (DNS, TCP connect, proxy or TLS handshake). A slow network usually also shows dial or TLS errors in the logs.
+
+- The controller serves the metric at `/metrics` on port `8080`.
+- The aggregated API server serves the metric at `/metrics` on its secure port `6443`. The caller needs RBAC for the `get` verb on the non-resource URL `/metrics`.
+
+A process keeps one connection pool per Coder deployment, identified by URL scheme, host and port. `https://coder.example.com` and `https://coder.example.com:443` are the same deployment. The process drops a pool after 10 minutes without an open call, for example after a control plane changed its URL or went away. A workspace build log stream counts as an open call until it ends.
+
 ## APIService is `False` / `Unavailable`
 
 ```bash

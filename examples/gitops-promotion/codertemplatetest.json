@@ -1,0 +1,21 @@
+{
+  "apiVersion": "coder.com/v1alpha1",
+  "kind": "CoderTemplateTest",
+  "metadata": {
+    "name": "docker-v2-0-rc1-1c72012b",
+    "namespace": "coder",
+    "annotations": {
+      "argocd.argoproj.io/sync-wave": "1"
+    }
+  },
+  "spec": {
+    "controlPlaneRef": {
+      "name": "coder"
+    },
+    "template": "default.docker",
+    "version": {
+      "name": "V2.0_rc1"
+    },
+    "timeoutSeconds": 1800
+  }
+}

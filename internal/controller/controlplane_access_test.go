@@ -25,17 +25,19 @@ func TestControlPlaneCoderClient(t *testing.T) {
 	require.NoError(t, coderv1alpha1.AddToScheme(scheme))
 
 	readyControlPlane := func() *coderv1alpha1.CoderControlPlane {
-		cp := &coderv1alpha1.CoderControlPlane{ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: "ns"}}
+		cp := &coderv1alpha1.CoderControlPlane{ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: "ns", UID: "cp-uid"}}
 		cp.Status.URL = "http://coder.ns.svc.cluster.local:80"
 		cp.Status.OperatorAccessReady = true
 		cp.Status.OperatorTokenSecretRef = &coderv1alpha1.SecretKeySelector{Name: "coder-operator-token"}
 		return cp
 	}
 	tokenSecret := func(key, value string) *corev1.Secret {
-		return &corev1.Secret{
+		secret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: "coder-operator-token", Namespace: "ns"},
 			Data:       map[string][]byte{key: []byte(value)},
 		}
+		secret.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(readyControlPlane(), coderv1alpha1.GroupVersion.WithKind("CoderControlPlane"))}
+		return secret
 	}
 
 	tests := []struct {
@@ -95,7 +97,7 @@ func TestControlPlaneCoderClient(t *testing.T) {
 			name:        "operator token Secret missing",
 			objects:     func() []client.Object { return []client.Object{readyControlPlane()} },
 			wantReason:  "OperatorAccessNotReady",
-			wantMessage: "The operator token Secret of CoderControlPlane coder has no token yet.",
+			wantMessage: `CoderControlPlane coder: operator token unavailable: Secret "coder-operator-token" does not exist.`,
 		},
 		{
 			name: "operator token key empty",
@@ -103,7 +105,17 @@ func TestControlPlaneCoderClient(t *testing.T) {
 				return []client.Object{readyControlPlane(), tokenSecret("token", "")}
 			},
 			wantReason:  "OperatorAccessNotReady",
-			wantMessage: "The operator token Secret of CoderControlPlane coder has no token yet.",
+			wantMessage: `CoderControlPlane coder: operator token unavailable: Secret "coder-operator-token" has no value for key "token".`,
+		},
+		{
+			name: "operator token Secret replaced by one without an owner",
+			objects: func() []client.Object {
+				secret := tokenSecret("token", "foreign-token")
+				secret.OwnerReferences = nil
+				return []client.Object{readyControlPlane(), secret}
+			},
+			wantReason:  "OperatorAccessNotReady",
+			wantMessage: `CoderControlPlane coder: operator token unavailable: the control plane is not the controller owner of Secret "coder-operator-token".`,
 		},
 		{
 			name: "unusable status URL",

@@ -37,6 +37,7 @@ import (
 	"github.com/coder/coder-k8s/internal/coderbootstrap"
 	"github.com/coder/coder-k8s/internal/controlplaneurl"
 	"github.com/coder/coder-k8s/internal/credentialsecret"
+	"github.com/coder/coder-k8s/internal/operatortoken"
 )
 
 const (
@@ -923,12 +924,14 @@ func (r *CoderProvisionerReconciler) readOperatorSessionToken(
 		operatorTokenSecretKey = coderv1alpha1.DefaultTokenSecretKey
 	}
 
-	token, err := r.readSecretValue(ctx, provisioner.Namespace, operatorTokenSecretName, operatorTokenSecretKey)
-	if err != nil {
+	token, err := operatortoken.Read(ctx, r.Client, controlPlane)
+	if errors.Is(err, operatortoken.ErrUnavailable) {
 		return "", ctrl.Result{RequeueAfter: provisionerOperatorAccessRetryInterval},
 			"OperatorTokenSecretUnavailable",
 			fmt.Sprintf("Failed to read operator token Secret %q/%q key %q from referenced control plane status: %v", provisioner.Namespace, operatorTokenSecretName, operatorTokenSecretKey, err),
 			nil
+	} else if err != nil {
+		return "", ctrl.Result{}, "", "", err
 	}
 
 	return token, ctrl.Result{}, "OperatorAccessReady", "Operator-managed access token from referenced control plane is available", nil
@@ -1424,23 +1427,6 @@ func (r *CoderProvisionerReconciler) reconcileStatus(
 	}
 
 	return nil
-}
-
-func (r *CoderProvisionerReconciler) readSecretValue(ctx context.Context, namespace, name, key string) (string, error) {
-	secret := &corev1.Secret{}
-	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret); err != nil {
-		return "", err
-	}
-
-	value, ok := secret.Data[key]
-	if !ok {
-		return "", fmt.Errorf("secret %q does not contain key %q", name, key)
-	}
-	if len(value) == 0 {
-		return "", fmt.Errorf("secret %q key %q is empty", name, key)
-	}
-
-	return string(value), nil
 }
 
 func indexProvisionerByControlPlaneRefName(obj client.Object) []string {

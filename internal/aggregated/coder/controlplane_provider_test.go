@@ -10,6 +10,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 
@@ -29,9 +30,9 @@ func TestControlPlaneClientProviderClientForNamespaceHappyPath(t *testing.T) {
 		t,
 		[]coderv1alpha1.CoderControlPlane{controlPlane},
 		[]corev1.Secret{
-			secretWithStringData("team-a", "operator-token", map[string]string{
+			ownedBy(secretWithStringData("team-a", "operator-token", map[string]string{
 				"api-token": "session-token",
-			}),
+			}), controlPlane),
 		},
 	)
 
@@ -67,7 +68,7 @@ func TestControlPlaneClientProviderClientForNamespaceTLSUsesInternalHTTPURL(t *t
 		t,
 		[]coderv1alpha1.CoderControlPlane{controlPlane},
 		[]corev1.Secret{
-			secretWithStringData("team-a", "operator-token", map[string]string{"token": "session-token"}),
+			ownedBy(secretWithStringData("team-a", "operator-token", map[string]string{"token": "session-token"}), controlPlane),
 		},
 	)
 
@@ -459,9 +460,9 @@ func TestControlPlaneClientProviderClientForNamespaceDefaultsSecretKeyToToken(t 
 		t,
 		[]coderv1alpha1.CoderControlPlane{controlPlane},
 		[]corev1.Secret{
-			secretWithStringData("team-a", "operator-token", map[string]string{
+			ownedBy(secretWithStringData("team-a", "operator-token", map[string]string{
 				coderv1alpha1.DefaultTokenSecretKey: "default-token",
-			}),
+			}), controlPlane),
 		},
 	)
 
@@ -474,6 +475,40 @@ func TestControlPlaneClientProviderClientForNamespaceDefaultsSecretKeyToToken(t 
 	}
 	if got, want := resolvedClient.SessionToken(), "default-token"; got != want {
 		t.Fatalf("expected session token %q, got %q", want, got)
+	}
+}
+
+// The status of a control plane can still name a Secret that was replaced
+// since its last reconcile. The provider must not send that Secret's value.
+func TestControlPlaneClientProviderClientForNamespaceRefusesTokenSecretNotOwnedByControlPlane(t *testing.T) {
+	t.Parallel()
+
+	controlPlane := eligibleControlPlane("team-a", "coder")
+	other := eligibleControlPlane("team-a", "coder")
+	other.UID = "uid-of-an-earlier-coder"
+	foreign := secretWithStringData("team-a", "operator-token", map[string]string{"token": "foreign-token"})
+	notController := ownedBy(foreign, controlPlane)
+	notController.OwnerReferences[0].Controller = nil
+
+	for name, secret := range map[string]corev1.Secret{
+		"no owner":                         foreign,
+		"same name, another UID":           ownedBy(foreign, other),
+		"owner that is not the controller": notController,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			provider, _ := newControlPlaneProviderForTest(t, []coderv1alpha1.CoderControlPlane{controlPlane}, []corev1.Secret{secret})
+			resolvedClient, err := provider.ClientForNamespace(context.Background(), "team-a")
+			if resolvedClient != nil {
+				t.Fatalf("expected no client, got one with session token %q", resolvedClient.SessionToken())
+			}
+			if !apierrors.IsServiceUnavailable(err) {
+				t.Fatalf("expected ServiceUnavailable, got %v", err)
+			}
+			if !strings.Contains(err.Error(), `not the controller owner of Secret "operator-token"`) || strings.Contains(err.Error(), "foreign-token") {
+				t.Fatalf("unexpected error message %q", err.Error())
+			}
+		})
 	}
 }
 
@@ -523,6 +558,7 @@ func eligibleControlPlane(namespace, name string) coderv1alpha1.CoderControlPlan
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace,
 			Name:      name,
+			UID:       types.UID("uid-" + namespace + "-" + name),
 		},
 		Status: coderv1alpha1.CoderControlPlaneStatus{
 			URL:                 "https://coder.example.com",
@@ -548,6 +584,11 @@ func secretWithStringData(namespace, name string, data map[string]string) corev1
 		},
 		Data: secretData,
 	}
+}
+
+func ownedBy(secret corev1.Secret, controlPlane coderv1alpha1.CoderControlPlane) corev1.Secret {
+	secret.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(&controlPlane, coderv1alpha1.GroupVersion.WithKind("CoderControlPlane"))}
+	return secret
 }
 
 type countingReader struct {

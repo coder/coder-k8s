@@ -1,0 +1,36 @@
+# The promotion Job may read its own test and promote versions of one
+# template, nothing else.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: docker-promote
+  namespace: coder
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: docker-promote
+  namespace: coder
+rules:
+  - apiGroups: ["coder.com"]
+    resources: ["codertemplatetests"]
+    resourceNames: ["set-by-kustomization"]
+    verbs: ["get"]
+  - apiGroups: ["aggregation.coder.com"]
+    resources: ["codertemplates/promote"]
+    resourceNames: ["set-by-kustomization"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: docker-promote
+  namespace: coder
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: docker-promote
+subjects:
+  - kind: ServiceAccount
+    name: docker-promote
+    namespace: coder

@@ -2,8 +2,10 @@ package controller_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/controller"
@@ -149,6 +152,90 @@ func TestCoderAIProviderCreateOutcomes(t *testing.T) {
 			require.Equal(t, stored.keys[0].id.String(), got.Status.Credential.KeyID)
 			require.Zero(t, env.fake.requestCount(routeDeleteAIProvider))
 		})
+	}
+}
+
+// #332: a read that confirms a create does not prove which key Coder holds.
+// A key changed in the dashboard between the lost create answer and that
+// read is replaced by the Secret's key before the object reports Ready.
+func TestCoderAIProviderConfirmedCreateResendsKey(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newAIProviderCreateEnv(ctx, t)
+	env.fake.failNext(routeCreateAIProvider, fakeFault{AfterCommit: true, Reset: true})
+	got, _ := env.reconcile(ctx, t, provider)
+	requireAIProviderStep(t, got, false, "ConfirmingCreate")
+
+	stored, ok := env.fake.aiProvider("openai")
+	require.True(t, ok, "the create committed")
+	_, err := env.fake.client(t, 2*time.Second).UpdateAIProvider(ctx, stored.id.String(), codersdk.UpdateAIProviderRequest{
+		APIKeys: &[]codersdk.AIProviderKeyMutation{{APIKey: ptrTo("sk-dashboard-0123456789abcdef")}},
+	})
+	require.NoError(t, err)
+
+	env.restart()
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIProviderReady(t, got)
+	stored, _ = env.fake.aiProvider("openai")
+	require.Len(t, stored.keys, 1)
+	require.Equal(t, testAIProviderKey, stored.keys[0].plaintext, "the Secret's key replaced the dashboard key")
+	require.Equal(t, stored.keys[0].id.String(), got.Status.Credential.KeyID)
+	require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider))
+}
+
+// #332: the in-memory record of a sent key does not survive a read that
+// confirms the create. When the status write after a create answer fails and
+// the key changes in the dashboard before the retry, the Secret's key
+// replaces the dashboard key in one PATCH, and the steady state writes nothing.
+func TestCoderAIProviderConfirmedCreateAfterStatusFailureResendsKey(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, secret, provider := newAIProviderCreateEnv(ctx, t)
+	base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+	statusErr := errors.New("injected status write failure")
+	var failed atomic.Bool
+	env.r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subresource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if p, ok := obj.(*coderv1alpha1.CoderAIProvider); ok && p.Status.ProviderID != "" && failed.CompareAndSwap(false, true) {
+				return statusErr
+			}
+			return c.SubResource(subresource).Update(ctx, obj, opts...)
+		},
+	})
+	_, err = env.r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(provider)})
+	require.ErrorIs(t, err, statusErr)
+	got := &coderv1alpha1.CoderAIProvider{}
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(provider), got))
+	require.Empty(t, got.Status.ProviderID, "the create answer was not stored")
+
+	stored, ok := env.fake.aiProvider("openai")
+	require.True(t, ok, "the create committed")
+	_, err = env.fake.client(t, 2*time.Second).UpdateAIProvider(ctx, stored.id.String(), codersdk.UpdateAIProviderRequest{
+		APIKeys: &[]codersdk.AIProviderKeyMutation{{APIKey: ptrTo("sk-dashboard-0123456789abcdef")}},
+	})
+	require.NoError(t, err)
+
+	updates := env.fake.requestCount(routeUpdateAIProvider)
+	got, _ = env.reconcile(ctx, t, got)
+	requireAIProviderReady(t, got)
+	stored, _ = env.fake.aiProvider("openai")
+	require.Len(t, stored.keys, 1)
+	require.Equal(t, testAIProviderKey, stored.keys[0].plaintext, "the Secret's key replaced the dashboard key")
+	require.Equal(t, stored.keys[0].id.String(), got.Status.Credential.KeyID)
+	require.Equal(t, secret.ResourceVersion, got.Status.Credential.SecretResourceVersion)
+	require.Equal(t, updates+1, env.fake.requestCount(routeUpdateAIProvider), "one PATCH applies the spec and the key")
+	require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider))
+
+	writes, resourceVersion := env.writes(), got.ResourceVersion
+	for i := range 3 {
+		if i == 2 {
+			env.restart()
+		}
+		got, _ = env.reconcile(ctx, t, got)
+		requireAIProviderReady(t, got)
+		require.Equal(t, resourceVersion, got.ResourceVersion, "the steady state writes no status")
+		require.Equal(t, writes, env.writes(), "the steady state sends no write to Coder")
 	}
 }
 
