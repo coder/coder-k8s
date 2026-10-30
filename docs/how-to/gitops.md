@@ -119,7 +119,7 @@ The directory `examples/gitops-promotion/` in this repository is a Kustomize dir
 | --- | --- |
 | `codertemplatetest.json` | The test of one version, in sync wave 1. It is JSON, so the Job can read it with `jq`. |
 | `promote.sh` | The promotion script. It needs `bash`, `kubectl`, and `jq`. `promote.sh name` also needs `sha256sum` or `shasum`. |
-| `promote-job.yaml` | A Job that runs `promote.sh promote`. For Argo CD, it is a `Sync` hook in wave 2, and Argo CD deletes it after a success. |
+| `promote-job.yaml` | A Job that runs `promote.sh promote`, in sync wave 2. |
 | `rbac.yaml` | A ServiceAccount that can `get` only this test and `create` only `codertemplates/promote` of the test's template. |
 | `kustomization.yaml` | Puts `promote.sh` and `codertemplatetest.json` into a ConfigMap for the Job. Copies the test name to the Job and the Role, the template to the Role, and the namespace to every object. |
 | `argocd-application.yaml`, `flux-kustomization.yaml` | An Argo CD Application and a Flux Kustomization for the directory. Apply one of them, not both. |
@@ -133,9 +133,9 @@ The Job reads the test in Git from its ConfigMap. It reads the test in the clust
 | `Failed` | The Job fails and does not promote. Its log shows `status.reason` and `status.message`. |
 | `Succeeded` with `Ready=True` | The Job promotes `status.templateVersionID` of that object and completes when the answer is `Promoted` or `AlreadyActive`. |
 
-The Job waits at most the test's `timeoutSeconds` plus 900 s for the controller to start the test. The controller writes `Succeeded` only after the workspace delete, and `Failed` at the latest at the test deadline, so this wait covers the delete. The Job's `activeDeadlineSeconds` is 8400: 7200 s, the longest `timeoutSeconds`, plus the 900 s, plus 300 s for the promotion. The Flux Kustomization has `wait: true` and `timeout: 2h30m`, so Flux is ready only after the Job completed, and it fails when the Job fails. It also has `force: true`: a change of `promote.sh` changes the pod template of the Job, which Kubernetes cannot update, so Flux replaces the Job, and the new Job promotes again. Argo CD waits for the hook Job and fails the sync when the Job fails.
+The Job waits at most the test's `timeoutSeconds` plus 900 s for the controller to start the test. The controller writes `Succeeded` only after the workspace delete, and `Failed` at the latest at the test deadline, so this wait covers the delete. The Job's `activeDeadlineSeconds` is 8400: 7200 s, the longest `timeoutSeconds`, plus the 900 s, plus 300 s for the promotion. The Flux Kustomization has `wait: true` and `timeout: 2h30m`, so Flux is ready only after the Job completed, and it fails when the Job fails. Argo CD creates the Job in wave 2 after the test is healthy, waits until the Job is healthy, and fails the sync when the Job fails. The Job is not an Argo CD sync hook, because a hook runs on every sync and promotes the version again, even after another writer activated a newer one.
 
-The Job has `backoffLimit: 0`, and `promote.sh` sends the promotion only once. After a failed promotion, read the active version before you sync again.
+Each Job promotes once. The Job has `backoffLimit: 0`, and `promote.sh` sends the promotion only once. After a failed promotion, read the active version, and then delete the Job to run it again. A change of `promote.sh` changes the pod template of the Job, which Kubernetes cannot update, so the sync fails until the next version gets a new Job, or until you delete the Job. Do not set Flux `force: true` or the Argo CD sync option `Replace=true` for the Job: a replaced Job promotes again.
 
 To use the example:
 
@@ -154,7 +154,7 @@ jq --arg name "$name" --arg version V2.0_rc1 \
 mv codertemplatetest.json.new codertemplatetest.json
 ```
 
-The Job promotes with the rights of its ServiceAccount. Anyone who can change ConfigMaps, Jobs, or Pods in the namespace can change what it runs. A test creator who has only the test rights from [Test templates](test-templates.md) cannot change it.
+CAUTION: Install the example only in a namespace where only the GitOps tool creates Pods, Jobs, and ConfigMaps. Anyone who can create a Pod there can run it as the ServiceAccount `docker-promote` and promote any version of the template without a test. A test creator who has only the test rights from [Test templates](test-templates.md) cannot. To isolate the promoter, move the ServiceAccount, the ConfigMap, and the Job to a namespace that only the GitOps tool writes, and keep the Role and the RoleBinding in the namespace of the test.
 
 ### Check after promotion
 

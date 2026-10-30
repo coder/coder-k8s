@@ -12,9 +12,6 @@ spec:
   wait: true
   # Longer than activeDeadlineSeconds of the promotion Job (8400 s).
   timeout: 2h30m
-  # A change of promote.sh changes the Job's pod template, which Kubernetes
-  # cannot update. Flux then replaces the Job, and the new Job promotes again.
-  force: true
   sourceRef:
     kind: GitRepository
     name: flux-system

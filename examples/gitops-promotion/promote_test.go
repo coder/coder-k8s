@@ -169,8 +169,11 @@ func TestExampleWiring(t *testing.T) {
 		t.Errorf("Job activeDeadlineSeconds %v, want above %d", deadline, maxTestTimeoutSeconds+startGraceSeconds)
 	}
 	testWave := r.test["metadata"].(map[string]any)["annotations"].(map[string]any)["argocd.argoproj.io/sync-wave"].(string)
-	if atoi(t, testWave) >= atoi(t, r.job.Annotations["argocd.argoproj.io/sync-wave"]) || r.job.Annotations["argocd.argoproj.io/hook"] != "Sync" {
-		t.Errorf("Job annotations %v: want an Argo CD Sync hook in a later wave than the test (%s)", r.job.Annotations, testWave)
+	if atoi(t, testWave) >= atoi(t, r.job.Annotations["argocd.argoproj.io/sync-wave"]) {
+		t.Errorf("Job annotations %v: want a later Argo CD sync wave than the test (%s)", r.job.Annotations, testWave)
+	}
+	if hook, ok := r.job.Annotations["argocd.argoproj.io/hook"]; ok {
+		t.Errorf("Job is an Argo CD %s hook: a hook runs on every sync and promotes again", hook)
 	}
 
 	var flux struct {
@@ -194,8 +197,8 @@ func TestExampleWiring(t *testing.T) {
 	if !flux.Spec.Wait || deadline == nil || timeout <= time.Duration(*deadline)*time.Second {
 		t.Errorf("Flux wait %v and timeout %s: want wait and a timeout above the Job deadline", flux.Spec.Wait, timeout)
 	}
-	if !flux.Spec.Force {
-		t.Error("Flux force is off: a change of promote.sh would leave the Job unchangeable")
+	if flux.Spec.Force {
+		t.Error("Flux force is on: a replaced Job would promote again")
 	}
 }
 
@@ -265,7 +268,7 @@ case "$*" in
   fi
   echo "$reply"
   ;;
-"create --raw "*)
+*" create --raw "*)
   cat >>"$FAKE/promotions"
   echo >>"$FAKE/promotions"
   cat "$FAKE/promote-answer"
@@ -350,9 +353,9 @@ func runPromote(t *testing.T, c promoteCase, example map[string]any) (output str
 		gets = atoi(t, strings.TrimSpace(string(raw)))
 	}
 	calls, _ := os.ReadFile(filepath.Join(fake, "calls")) //nolint:gosec // The test wrote this path.
-	wantGet := "-n coder get codertemplatetest " + want["metadata"].(map[string]any)["name"].(string) + " -o json"
+	wantGet := "--request-timeout=30s -n coder get codertemplatetest " + want["metadata"].(map[string]any)["name"].(string) + " -o json"
 	for _, call := range strings.Split(strings.TrimSpace(string(calls)), "\n") {
-		if call != wantGet && call != "create --raw /apis/aggregation.coder.com/v1alpha1/namespaces/coder/codertemplates/default.docker/promote -f -" {
+		if call != wantGet && call != "--request-timeout=60s create --raw /apis/aggregation.coder.com/v1alpha1/namespaces/coder/codertemplates/default.docker/promote -f -" {
 			t.Errorf("kubectl %s, want only %q or the promote subresource of coder/default.docker", call, wantGet)
 		}
 	}

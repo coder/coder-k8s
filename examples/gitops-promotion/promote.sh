@@ -75,7 +75,7 @@ cmd_promote() {
 
   while :; do
     # One GET: the spec check and the result come from the same object.
-    if obj=$(kubectl -n "$ns" get codertemplatetest "$name" -o json); then
+    if obj=$(kubectl --request-timeout=30s -n "$ns" get codertemplatetest "$name" -o json); then
       # --slurpfile, not --argjson: a test can be larger than one argument may be.
       verdict=$(jq -r --slurpfile want "$1" --argjson defaultTimeout "$DEFAULT_TIMEOUT_SECONDS" "$VERDICT" <<<"$obj")
       case $verdict in
@@ -96,7 +96,7 @@ cmd_promote() {
   # Never retry here: after a failed or unconfirmed promotion, another writer
   # can have activated a third version, and the last writer wins.
   answer=$(jq -cn --arg id "$id" '{spec: {versionID: $id}}' |
-    kubectl create --raw "/apis/aggregation.coder.com/v1alpha1/namespaces/${ns}/codertemplates/${template}/promote" -f -) ||
+    kubectl --request-timeout=60s create --raw "/apis/aggregation.coder.com/v1alpha1/namespaces/${ns}/codertemplates/${template}/promote" -f -) ||
     die "the promotion of version ${id} of ${template} failed. Read the active version before you promote again."
   jq -e --arg id "$id" '(.status.result == "Promoted" or .status.result == "AlreadyActive")
     and .status.activeVersionID == $id' <<<"$answer" >/dev/null ||
