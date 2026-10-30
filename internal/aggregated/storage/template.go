@@ -776,17 +776,17 @@ func (s *TemplateStorage) Update(
 				return nil, false, coder.MapCoderWriteError(err, coder.WriteUpdate, aggregationv1alpha1.Resource("codertemplates"), name)
 			}
 
-			// Post-condition: verify that the active version changed.
+			// Post-condition: verify that the active version changed. Coder accepted the activation,
+			// so a re-read that fails or shows another version leaves the result open.
 			verifyTemplate, err := sdk.Template(ctx, templateID)
 			if err != nil {
-				return nil, false, coder.MapCoderError(err, aggregationv1alpha1.Resource("codertemplates"), name)
+				return nil, false, coder.UncertainWriteError(coder.WriteUpdate, aggregationv1alpha1.Resource("codertemplates"), name,
+					"no re-read of the template from the Coder API after the activation")
 			}
 			if verifyTemplate.ActiveVersionID != newVersion.ID {
-				return nil, false, fmt.Errorf(
-					"assertion failed: active version promotion did not take effect: expected %q, got %q",
-					newVersion.ID.String(),
-					verifyTemplate.ActiveVersionID.String(),
-				)
+				return nil, false, coder.UncertainWriteError(coder.WriteUpdate, aggregationv1alpha1.Resource("codertemplates"), name,
+					fmt.Sprintf("a re-read from the Coder API with active version %s instead of %s after the activation",
+						verifyTemplate.ActiveVersionID, newVersion.ID))
 			}
 		}
 	}
