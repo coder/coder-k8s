@@ -123,16 +123,60 @@ func (r *CoderWorkspacePoolReconciler) checkShareClaims(
 	}
 	shareGroupIDs := workspacePoolOwner(controlPlane, ownerID).ShareGroupIDs
 	orgID := uuid.MustParse(pool.Status.Resolved.OrganizationID) // It equals what resolve read from Coder in this reconcile.
-	for _, claim := range waiting {
-		_, step, err := checkWorkspaceShareUser(ctx, sdk, orgID, shareGroupIDs, claim.Spec.Share.User)
+	// Any claim author can add claims that the policy refuses. So each group
+	// is read once per reconcile, a refusal holds for one poll, and a 429
+	// ends the checks: such claims cost Coder at most one user read each per
+	// poll.
+	type groupAnswer struct {
+		group codersdk.Group
+		err   error
+	}
+	groups := map[uuid.UUID]groupAnswer{}
+	readGroup := func(ctx context.Context, id uuid.UUID) (codersdk.Group, error) {
+		if a, ok := groups[id]; ok {
+			return a.group, a.err
+		}
+		group, err := sdk.Group(ctx, id, codersdk.GroupRequest{})
+		groups[id] = groupAnswer{group, err}
+		return group, err
+	}
+	now := r.Clock.Now()
+	r.shareRefusals.Range(func(uid, refusal any) bool {
+		if !now.Before(refusal.(poolShareRefusal).until) {
+			r.shareRefusals.Delete(uid)
+		}
+		return true
+	})
+	for i, claim := range waiting {
+		if refusal, ok := r.shareRefusals.Load(claim.UID); ok {
+			steps[claim.UID] = refusal.(poolShareRefusal).step
+			continue
+		}
+		_, step, err := checkWorkspaceShareUser(ctx, sdk, readGroup, orgID, shareGroupIDs, claim.Spec.Share.User)
 		if step, err = memberWaitOnWrongAnswer(ctx, step, err); err != nil {
 			return err
 		}
-		if step != nil {
-			steps[claim.UID] = step
+		if step == nil {
+			continue
+		}
+		steps[claim.UID] = step
+		switch {
+		case step.rateLimited:
+			for _, rest := range waiting[i+1:] {
+				steps[rest.UID] = step
+			}
+			return nil
+		case step.reason != "CoderUnavailable" && step.reason != "CoderAnswerMismatch":
+			r.shareRefusals.Store(claim.UID, poolShareRefusal{step: step, until: now.Add(poolResolvePoll)})
 		}
 	}
 	return nil
+}
+
+// poolShareRefusal is a Share claim's refusal until its next check.
+type poolShareRefusal struct {
+	step  *coderStep
+	until time.Time
 }
 
 // reconcileOrphanClaims writes the status of the claims of a pool that is

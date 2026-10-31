@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
@@ -43,6 +44,8 @@ type CoderWorkspacePoolReconciler struct {
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
 	Clock     clock.PassiveClock
+
+	shareRefusals sync.Map // Claim UID -> poolShareRefusal.
 }
 
 const poolControlPlaneRefIndex = ".spec.controlPlaneRef.name"

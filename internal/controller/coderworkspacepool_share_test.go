@@ -280,6 +280,47 @@ func TestPoolChecksShareGroupsWithoutCache(t *testing.T) {
 	require.Nil(t, e.reconcileMember(t, member, 0).Spec.ClaimRef, "no bind on withdrawn groups")
 }
 
+// TestPoolBoundsShareChecksOfRefusedClaims: any claim author can add claims
+// that the policy refuses, so they must not multiply Coder reads. The pool
+// reads each listed group once per reconcile, keeps a refusal for one poll,
+// and stops checking at Coder's 429.
+func TestPoolBoundsShareChecksOfRefusedClaims(t *testing.T) {
+	t.Parallel()
+	e := newShareEnv(t)
+	e.fake.setLicensed(true)
+	var groups []string
+	for _, name := range []string{"a", "b", "c"} {
+		groups = append(groups, e.fake.addGroup(e.orgID, name, name, e.tester).String())
+	}
+	e.setShareGroups(t, groups...)
+	e.readyMember(t)
+	var claims []types.NamespacedName
+	for _, name := range []string{"c1", "c2", "c3", "c4"} {
+		claims = append(claims, e.createShareClaim(t, name, "bob"))
+	}
+	r := &controller.CoderWorkspacePoolReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	reconcile := func() {
+		t.Helper()
+		_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}})
+		require.NoError(t, err)
+	}
+	reconcile()
+	require.Equal(t, 3, e.fake.requestCount(routeGroup), "each group once for 4 claims")
+	for _, key := range claims {
+		requireShareClaim(t, e.claim(t, key), coderv1alpha1.CoderWorkspaceClaimPhasePending, "ShareUserNotEligible", false, false)
+	}
+	reconcile()
+	require.Equal(t, 3, e.fake.requestCount(routeGroup), "a refusal holds until the next poll")
+
+	e.clock.SetTime(e.clock.Now().Add(time.Minute))
+	e.fake.failNext(routeGroup, fakeFault{Status: http.StatusTooManyRequests})
+	reconcile()
+	require.Equal(t, 4, e.fake.requestCount(routeGroup), "Coder's 429 ends the checks")
+	for _, key := range claims {
+		requireShareClaim(t, e.claim(t, key), coderv1alpha1.CoderWorkspaceClaimPhasePending, "CoderUnavailable", false, false)
+	}
+}
+
 // TestPoolKeepsDemandWhileShareCheckFails: a group read that fails for
 // another reason than a license or a missing group proves nothing. The claim
 // waits with CoderUnavailable and still counts as demand, so a pool at

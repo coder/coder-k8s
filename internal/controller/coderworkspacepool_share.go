@@ -50,10 +50,21 @@ func checkWorkspaceSharePolicy(ctx context.Context, sdk *codersdk.Client, orgID 
 	}
 }
 
+// readCoderGroup reads a Coder group with its members.
+type readCoderGroup func(ctx context.Context, id uuid.UUID) (codersdk.Group, error)
+
+func coderGroupReader(sdk *codersdk.Client) readCoderGroup {
+	return func(ctx context.Context, id uuid.UUID) (codersdk.Group, error) {
+		return sdk.Group(ctx, id, codersdk.GroupRequest{})
+	}
+}
+
 // checkWorkspaceShareUser applies plan 6.8 item 3 to the user that a Share
 // claim names (ident, a username or a UUID) and returns that user. A nil step
 // means the user can get the share.
-func checkWorkspaceShareUser(ctx context.Context, sdk *codersdk.Client, orgID uuid.UUID, shareGroupIDs []string, ident string) (codersdk.User, *coderStep, error) {
+func checkWorkspaceShareUser(
+	ctx context.Context, sdk *codersdk.Client, readGroup readCoderGroup, orgID uuid.UUID, shareGroupIDs []string, ident string,
+) (codersdk.User, *coderStep, error) {
 	user, err := sdk.User(ctx, ident)
 	if isCoderNotFound(err) {
 		return user, coderWait("ShareUserNotFound", "Coder user %q does not exist.", ident), nil
@@ -92,7 +103,7 @@ func checkWorkspaceShareUser(ctx context.Context, sdk *codersdk.Client, orgID uu
 		if groupID == orgID {
 			return user, nil, nil
 		}
-		group, err := sdk.Group(ctx, groupID, codersdk.GroupRequest{})
+		group, err := readGroup(ctx, groupID)
 		switch status := coderStatus(err); {
 		case err == nil:
 		case status == http.StatusForbidden || status == http.StatusNotFound:
@@ -244,5 +255,5 @@ func (r *CoderWorkspacePoolMemberReconciler) checkSharePolicy(
 	if s := checkWorkspaceSharePolicy(ctx, sdk, orgID, owner, entry.ShareGroupIDs); s != nil {
 		return user, s, nil
 	}
-	return checkWorkspaceShareUser(ctx, sdk, orgID, entry.ShareGroupIDs, ident)
+	return checkWorkspaceShareUser(ctx, sdk, coderGroupReader(sdk), orgID, entry.ShareGroupIDs, ident)
 }
