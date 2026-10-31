@@ -117,7 +117,7 @@ func TestOperatorTLS(t *testing.T) {
 		{name: "ConfigMap missing", want: `CA bundle ConfigMap "coder-ca" does not exist`},
 		{name: "ConfigMap in another namespace", objects: []client.Object{caConfigMap("team-b", map[string]string{"ca.crt": string(ca.PEM)})}, want: `CA bundle ConfigMap "coder-ca" does not exist`},
 		{name: "key missing", objects: []client.Object{caConfigMap("team-a", map[string]string{"other": string(ca.PEM)})}, want: `CA bundle ConfigMap "coder-ca" has no key "ca.crt"`},
-		{name: "invalid bundle", objects: []client.Object{caConfigMap("team-a", map[string]string{"ca.crt": "not a certificate"})}, want: `CA bundle ConfigMap "coder-ca" key "ca.crt": no PEM certificate`},
+		{name: "invalid bundle", objects: []client.Object{caConfigMap("team-a", map[string]string{"ca.crt": "not a certificate"})}, want: `CA bundle ConfigMap "coder-ca" key "ca.crt": the bundle does not start with a PEM block`},
 	}
 	for _, tt := range unavailable {
 		t.Run(tt.name, func(t *testing.T) {
