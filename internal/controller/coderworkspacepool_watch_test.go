@@ -132,3 +132,29 @@ func TestPoolMemberSetupWithManager(t *testing.T) {
 	require.Eventually(t, func() bool { return e.reconcileMember(t, key, 0).Status.WorkspaceID != "" },
 		watchStepTimeout, 50*time.Millisecond, "the control plane watch wakes the member")
 }
+
+// TestPoolMemberReleasedWhenControlPlaneDeleted runs the member reconciler in
+// a manager. A deleted member that stopped with OwnershipUnknown keeps its
+// finalizer. Once its control plane is deleted, the control plane watch wakes
+// it, and it releases its finalizer without a Coder call: nothing can reach
+// Coder any more. OwnershipUnknown schedules no poll, so only the watch can
+// release it.
+func TestPoolMemberReleasedWhenControlPlaneDeleted(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	key, workspaceID := e.readyMember(t)
+	e.fake.renameWorkspace(workspaceID, "renamed")
+	e.deleteMember(t, key)
+	requireDeletedCondition(t, e.reconcileMember(t, key, 1), metav1.ConditionUnknown, "OwnershipUnknown")
+	e.startPoolManager(t, false, true)
+	settleWatchStep()
+	require.NotNil(t, e.reconcileMember(t, key, 0), "the finalizer stays")
+
+	requests := e.fake.totalRequests()
+	cp := &coderv1alpha1.CoderControlPlane{}
+	require.NoError(t, k8sClient.Get(e.ctx, types.NamespacedName{Namespace: e.ns, Name: "coder"}, cp))
+	require.NoError(t, k8sClient.Delete(e.ctx, cp))
+	require.Eventually(t, func() bool { return e.reconcileMember(t, key, 0) == nil }, watchStepTimeout, 50*time.Millisecond,
+		"the control plane watch wakes the member, and it releases its finalizer")
+	require.Equal(t, requests, e.fake.totalRequests(), "no Coder call")
+}

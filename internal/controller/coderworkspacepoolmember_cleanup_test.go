@@ -104,27 +104,6 @@ func TestPoolMemberCleanupGuardsDelete(t *testing.T) {
 	require.NoError(t, k8sClient.Update(e.ctx, member))
 }
 
-// TestPoolMemberCleanupOwnershipUnknownControlPlaneGone: a deleted member
-// that stopped with OwnershipUnknown keeps its finalizer until its control
-// plane is gone. Then nothing can reach Coder, so the member is released
-// without a Coder call, as a CoderTemplateTest is.
-func TestPoolMemberCleanupOwnershipUnknownControlPlaneGone(t *testing.T) {
-	t.Parallel()
-	e := newPoolMemberEnv(t)
-	key, workspaceID := e.readyMember(t)
-	e.fake.renameWorkspace(workspaceID, "renamed")
-	e.deleteMember(t, key)
-	requireDeletedCondition(t, e.reconcileMember(t, key, 1), metav1.ConditionUnknown, "OwnershipUnknown")
-	require.NotNil(t, e.reconcileMember(t, key, 1), "the finalizer stays")
-
-	cp := &coderv1alpha1.CoderControlPlane{}
-	require.NoError(t, k8sClient.Get(e.ctx, types.NamespacedName{Namespace: e.ns, Name: "coder"}, cp))
-	require.NoError(t, k8sClient.Delete(e.ctx, cp))
-	requests := e.fake.totalRequests()
-	require.Nil(t, e.reconcileMember(t, key, 1), "the member is released")
-	require.Equal(t, requests, e.fake.totalRequests(), "no Coder call")
-}
-
 // TestPoolMemberCleanupLastUseCheck is mutation check 11: before each
 // delete build of an unclaimed member, for example after its pool was
 // deleted, the member reads last_used_at again. A used workspace stays in
