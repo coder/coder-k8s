@@ -116,17 +116,11 @@ func (rt refusingWrites) RoundTrip(r *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(r)
 }
 
-func closedAddress(t *testing.T) string {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return addr
+// closedAddress returns an address that refuses connections. Port 1 is outside the ephemeral
+// port range, so a server of a parallel test cannot take it, as it can take a port that a test
+// closed.
+func closedAddress(_ *testing.T) string {
+	return "127.0.0.1:1"
 }
 
 type writeCase struct {
@@ -409,9 +403,9 @@ func TestTemplateFilesUpdateReReadAfterActivation(t *testing.T) {
 			// logMarker is a unique part of the re-read error.
 			logMarker := coderMessage
 			if tc.refused {
-				logMarker = closedAddress(t)
+				logMarker = coderServer.URL + "/api/v2/templates/"
 				client := newTestSDKClient(t, coderServer.URL)
-				client.HTTPClient = &http.Client{Transport: refusingWrites{isWrite: isReRead, closedAddr: logMarker}}
+				client.HTTPClient = &http.Client{Transport: refusingWrites{isWrite: isReRead, closedAddr: closedAddress(t)}}
 				provider = &coder.StaticClientProvider{Client: client, Namespace: "control-plane"}
 			}
 			readLog := captureCoderErrorLog()
