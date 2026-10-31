@@ -44,6 +44,7 @@ type fakeOperatorAccessProvisioner struct {
 	revokeErr      error
 	revokeCalls    int
 	revokeRequests []coderbootstrap.RevokeOperatorTokenRequest
+	onRevoke       func()
 }
 
 func (f *fakeOperatorAccessProvisioner) EnsureOperatorToken(_ context.Context, req coderbootstrap.EnsureOperatorTokenRequest) (string, error) {
@@ -55,6 +56,9 @@ func (f *fakeOperatorAccessProvisioner) EnsureOperatorToken(_ context.Context, r
 func (f *fakeOperatorAccessProvisioner) RevokeOperatorToken(_ context.Context, req coderbootstrap.RevokeOperatorTokenRequest) error {
 	f.revokeCalls++
 	f.revokeRequests = append(f.revokeRequests, req)
+	if f.onRevoke != nil {
+		f.onRevoke()
+	}
 	return f.revokeErr
 }
 

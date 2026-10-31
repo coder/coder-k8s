@@ -791,6 +791,45 @@ func TestReconcile_OperatorAccess_Disabled_DatabaseChanged(t *testing.T) {
 	require.Empty(t, cleared.Status.OperatorTokenDatabaseHash)
 }
 
+// TestReconcile_OperatorAccess_Disabled_SecretReplacedDuringRevoke checks that
+// disabling operator access deletes only the owned Secret whose token it
+// deleted in Coder, not a Secret that replaced it during that delete.
+func TestReconcile_OperatorAccess_Disabled_SecretReplacedDuringRevoke(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: createTestNamespace(ctx, t, "operator-token-disabled-replaced")},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image:          "test-operator-token-disabled-replaced:latest",
+			ExtraEnv:       []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: losesOwnerPostgresURL}},
+			OperatorAccess: coderv1alpha1.OperatorAccessSpec{Disabled: true},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, cp))
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), cp) })
+	secretName := cp.Name + "-operator-token"
+	owned := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: cp.Namespace, OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: coderv1alpha1.GroupVersion.String(), Kind: "CoderControlPlane", Name: cp.Name, UID: cp.UID, Controller: ptrTo(true),
+		}}},
+		Data: map[string][]byte{coderv1alpha1.DefaultTokenSecretKey: []byte("unrecorded-operator-token")},
+	}
+	require.NoError(t, k8sClient.Create(ctx, owned))
+
+	provisioner := &fakeOperatorAccessProvisioner{onRevoke: func() {
+		replaceOperatorTokenSecret(ctx, t, cp)
+	}}
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}})
+	require.NoError(t, err)
+	require.Positive(t, result.RequeueAfter)
+	require.Equal(t, 1, provisioner.revokeCalls)
+
+	stored := &corev1.Secret{}
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: cp.Namespace}, stored), "the replacement Secret must stay")
+	require.Equal(t, "foreign-token", string(stored.Data[coderv1alpha1.DefaultTokenSecretKey]))
+}
+
 // TestReconcile_OperatorAccess_TokenSecretLosesOwner_KeywordValueDSN checks
 // that a key=value PostgreSQL connection string records the database like a
 // URL does, so that the operator deletes its token after the Secret was
