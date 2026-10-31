@@ -28,12 +28,8 @@ const poolMemberUnknownOutcomePoll = 10 * time.Minute
 // finalizer, and the controller never touches it.
 func (r *CoderWorkspacePoolMemberReconciler) cleanup(ctx context.Context, member *coderv1alpha1.CoderWorkspacePoolMember) (ctrl.Result, error) {
 	deleted := meta.FindStatusCondition(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionWorkspaceDeleted)
-	switch {
-	case !poolMemberMayHaveWorkspace(member), deleted != nil && deleted.Status == metav1.ConditionTrue:
+	if !poolMemberMayHaveWorkspace(member) || (deleted != nil && deleted.Status == metav1.ConditionTrue) {
 		return ctrl.Result{}, r.releaseFinalizer(ctx, member)
-	case deleted != nil && deleted.Reason == "OwnershipUnknown":
-		// Only a person who removes the finalizer releases the member.
-		return ctrl.Result{}, nil
 	}
 	gone, err := controlPlaneGone(ctx, r.Client, member.Namespace, member.Spec.ControlPlaneRef.Name)
 	if err != nil {
@@ -45,6 +41,10 @@ func (r *CoderWorkspacePoolMemberReconciler) cleanup(ctx context.Context, member
 		log.FromContext(ctx).Info("The control plane is gone, so the controller releases the pool member without deleting its workspace",
 			"workspaceID", member.Status.WorkspaceID, "workspaceName", member.Status.WorkspaceName)
 		return ctrl.Result{}, r.releaseFinalizer(ctx, member)
+	}
+	if deleted != nil && deleted.Reason == "OwnershipUnknown" {
+		// Only a person who removes the finalizer releases the member.
+		return ctrl.Result{}, nil
 	}
 
 	before := member.Status.DeepCopy()
