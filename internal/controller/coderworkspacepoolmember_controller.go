@@ -58,6 +58,9 @@ func (r *CoderWorkspacePoolMemberReconciler) SetupWithManager(mgr ctrl.Manager) 
 	if mgr == nil || r.Client == nil || r.APIReader == nil || r.Scheme == nil || r.Clock == nil {
 		return errors.New("assertion failed: pool member reconciler needs a manager, a client, an API reader, a scheme, and a clock")
 	}
+	if err := startControlPlaneAccessInformers(mgr); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&coderv1alpha1.CoderWorkspacePoolMember{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).

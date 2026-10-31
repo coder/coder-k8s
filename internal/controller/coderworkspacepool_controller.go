@@ -10,6 +10,7 @@ import (
 
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -60,6 +61,9 @@ func (r *CoderWorkspacePoolReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	if mgr == nil || r.Client == nil || r.APIReader == nil || r.Scheme == nil || r.Clock == nil {
 		return errors.New("assertion failed: pool reconciler needs a manager, a client, an API reader, a scheme, and a clock")
 	}
+	if err := startControlPlaneAccessInformers(mgr); err != nil {
+		return err
+	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &coderv1alpha1.CoderWorkspacePool{}, poolControlPlaneRefIndex,
 		func(obj client.Object) []string {
 			if pool, ok := obj.(*coderv1alpha1.CoderWorkspacePool); ok && pool.Spec.ControlPlaneRef.Name != "" {
@@ -89,6 +93,19 @@ func (r *CoderWorkspacePoolReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Named("coderworkspacepool").
 		Complete(r)
+}
+
+// startControlPlaneAccessInformers starts the informers of the kinds that
+// controlPlaneCoderClient reads through the cache: the CoderControlPlane and
+// its operator token Secret. Without them, a cache that starts informers only
+// for watched kinds refuses those reads.
+func startControlPlaneAccessInformers(mgr ctrl.Manager) error {
+	for _, obj := range []client.Object{&coderv1alpha1.CoderControlPlane{}, &corev1.Secret{}} {
+		if _, err := mgr.GetCache().GetInformer(context.Background(), obj); err != nil {
+			return fmt.Errorf("start the %T informer: %w", obj, err)
+		}
+	}
+	return nil
 }
 
 func (r *CoderWorkspacePoolReconciler) poolsForControlPlane(ctx context.Context, obj client.Object) []reconcile.Request {
