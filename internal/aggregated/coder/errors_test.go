@@ -282,6 +282,8 @@ func TestMapCoderWriteError(t *testing.T) {
 		// answered got the write.
 		{"300", sdkErr(http.StatusMultipleChoices), uncertain},
 		{"307 without Location", sdkErr(http.StatusTemporaryRedirect), uncertain},
+		// Without a message, the error answer is not Coder's own, for example a proxy page.
+		{"500 without a Coder message", sdkErr(http.StatusInternalServerError), uncertain},
 		{"body breaks off", fmt.Errorf("read response body: %w", io.ErrUnexpectedEOF), uncertain},
 		{"malformed JSON on an unexpected 2xx", fmt.Errorf("decode body: %w", &json.SyntaxError{}), uncertain},
 		{"connection closed without an answer", afterSend(io.EOF), uncertain},
@@ -323,9 +325,9 @@ func TestMapCoderWriteError(t *testing.T) {
 		}
 	}
 
-	// A Coder answer with a status that leaves no doubt maps as in MapCoderError.
+	// A Coder error answer with a status that leaves no doubt maps as in MapCoderError.
 	for _, status := range []int{http.StatusConflict, http.StatusBadRequest, http.StatusInternalServerError} {
-		err := sdkErr(status)
+		err := withCoderMessage(codersdk.NewTestError(status, http.MethodPost, coderURL), "Coder refused the write.")
 		got, want := MapCoderWriteError(err, WriteCreate, resource, name), MapCoderError(err, resource, name)
 		if got.Error() != want.Error() || apierrors.ReasonForError(got) != apierrors.ReasonForError(want) {
 			t.Fatalf("%d: expected the MapCoderError mapping %v, got %v", status, want, got)

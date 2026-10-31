@@ -199,8 +199,18 @@ func runTransition(t *testing.T, s *WorkspaceTransitionStorage, dryRun bool) (*a
 	return result, nil
 }
 
+// build returns a build with the job status and a workspace status that matches it.
 func build(transition codersdk.WorkspaceTransition, status codersdk.ProvisionerJobStatus) codersdk.WorkspaceBuild {
-	return codersdk.WorkspaceBuild{Transition: transition, Job: codersdk.ProvisionerJob{Status: status}}
+	workspaceStatus := codersdk.WorkspaceStatusPending
+	switch {
+	case status == codersdk.ProvisionerJobSucceeded && transition == codersdk.WorkspaceTransitionStart:
+		workspaceStatus = codersdk.WorkspaceStatusRunning
+	case status == codersdk.ProvisionerJobSucceeded && transition == codersdk.WorkspaceTransitionStop:
+		workspaceStatus = codersdk.WorkspaceStatusStopped
+	case status == codersdk.ProvisionerJobFailed:
+		workspaceStatus = codersdk.WorkspaceStatusFailed
+	}
+	return codersdk.WorkspaceBuild{Transition: transition, Status: workspaceStatus, Job: codersdk.ProvisionerJob{Status: status}}
 }
 
 const (
@@ -639,33 +649,63 @@ func TestWorkspaceTransitionUncertainPost(t *testing.T) {
 }
 
 // TestWorkspaceTransitionMalformedConfirmingReRead: Coder queued the build, the POST answer leaves
-// it open, and the confirming re-read finds the new build in a workspace without its name. The
-// re-read does not confirm the build, so the result is the uncertain 504, not a 500.
+// it open, and the confirming re-read fails or does not show a usable new build: a workspace
+// without its name, a latest build without its ID or its status. The re-read does not confirm the
+// build, so the result is the uncertain 504, not a 500 and not Queued. A 409 that is not Coder's own
+// answer leaves the result open in the same way.
 func TestWorkspaceTransitionMalformedConfirmingReRead(t *testing.T) {
-	for _, postStatus := range []int{http.StatusTemporaryRedirect, http.StatusBadGateway} {
+	writeWorkspace := func(change func(*codersdk.Workspace)) func(http.ResponseWriter, codersdk.Workspace) {
+		return func(w http.ResponseWriter, current codersdk.Workspace) {
+			change(&current)
+			writeLogFakeJSON(w, current)
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		post   func(http.ResponseWriter)
+		reRead func(http.ResponseWriter, codersdk.Workspace)
+	}{
+		{"307, workspace without its name", gatewayPageWriter(http.StatusTemporaryRedirect), writeWorkspace(func(ws *codersdk.Workspace) { ws.Name = "" })},
+		{"502, workspace without its name", gatewayPageWriter(http.StatusBadGateway), writeWorkspace(func(ws *codersdk.Workspace) { ws.Name = "" })},
+		{"307, latest build without its ID", gatewayPageWriter(http.StatusTemporaryRedirect), writeWorkspace(func(ws *codersdk.Workspace) { ws.LatestBuild.ID = uuid.Nil })},
+		{"502, latest build without its ID", gatewayPageWriter(http.StatusBadGateway), writeWorkspace(func(ws *codersdk.Workspace) { ws.LatestBuild.ID = uuid.Nil })},
+		{"307, latest build without its status", gatewayPageWriter(http.StatusTemporaryRedirect), writeWorkspace(func(ws *codersdk.Workspace) { ws.LatestBuild.Status = "" })},
+		{"502, latest build without its status", gatewayPageWriter(http.StatusBadGateway), writeWorkspace(func(ws *codersdk.Workspace) { ws.LatestBuild.Status = "" })},
+		{"proxy 409 page, re-read 502", gatewayPageWriter(http.StatusConflict), func(w http.ResponseWriter, _ codersdk.Workspace) { writeLogFakeError(w, http.StatusBadGateway) }},
+		{"409 that looks like Coder's, re-read 502", func(w http.ResponseWriter) { writeLogFakeError(w, http.StatusConflict) }, func(w http.ResponseWriter, _ codersdk.Workspace) {
+			writeLogFakeError(w, http.StatusBadGateway)
+		}},
+	} {
 		f := newTransitionFakeCoder(t, build(codersdk.WorkspaceTransitionStart, codersdk.ProvisionerJobSucceeded))
 		queued := build(codersdk.WorkspaceTransitionStop, codersdk.ProvisionerJobPending)
 		queued.ID, queued.BuildNumber, queued.InitiatorID = uuid.New(), 8, f.operatorID
 		f.set(func(f *transitionFakeCoder) {
 			f.onPost = func(w http.ResponseWriter, _ *http.Request) {
 				f.update(func(ws *codersdk.Workspace) { ws.LatestBuild = queued })
-				writeLogFakeError(w, postStatus)
+				tc.post(w)
 			}
 			f.onReread = func(w http.ResponseWriter, _ *http.Request) {
 				f.mu.Lock()
 				current := f.ws
 				f.mu.Unlock()
-				current.Name = ""
-				writeLogFakeJSON(w, current)
+				tc.reRead(w, current)
 			}
 		})
-		_, err := runTransition(t, newTestTransitionStorage(t, f, codersdk.WorkspaceTransitionStop), false)
-		if posts, _ := f.recordedPosts(); len(posts) != 1 || f.rereads.Load() != 1 || f.meCalls.Load() != 1 {
-			t.Fatalf("POST %d: POSTs=%d rereads=%d me calls=%d, want 1, 1 and 1", postStatus, len(posts), f.rereads.Load(), f.meCalls.Load())
+		result, err := runTransition(t, newTestTransitionStorage(t, f, codersdk.WorkspaceTransitionStop), false)
+		if posts, _ := f.recordedPosts(); len(posts) != 1 || f.rereads.Load() != 1 {
+			t.Fatalf("%s: POSTs=%d rereads=%d, want 1 and 1", tc.name, len(posts), f.rereads.Load())
 		}
 		if !apierrors.IsTimeout(err) || !strings.Contains(err.Error(), "uncertain") || !strings.Contains(err.Error(), "re-read") {
-			t.Fatalf("POST %d: err=%v, want an uncertain 504", postStatus, err)
+			t.Fatalf("%s: result=%v err=%v, want an uncertain 504", tc.name, result, err)
 		}
+	}
+}
+
+func gatewayPageWriter(status int) func(http.ResponseWriter) {
+	return func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte("<html>proxy page</html>"))
 	}
 }
 

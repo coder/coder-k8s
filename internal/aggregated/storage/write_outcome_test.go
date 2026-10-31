@@ -309,6 +309,9 @@ func TestWriteOutcomes(t *testing.T) {
 		{"201 with null", jsonAnswer(http.StatusCreated, `null`), checksAnswer},
 		{"answer without the ID", answerWithoutID, checksAnswer},
 		{"proxy 307 without Location", gatewayPage(http.StatusTemporaryRedirect), always},
+		{"proxy 400 page", gatewayPage(http.StatusBadRequest), always},
+		{"proxy 500 page", gatewayPage(http.StatusInternalServerError), always},
+		{"409 with an empty JSON object", jsonAnswer(http.StatusConflict, `{}`), always},
 		{"201 with only a build ID", jsonAnswer(http.StatusCreated, fmt.Sprintf(`{"id":%q}`, uuid.NewString())), postsBuild},
 	}
 
@@ -556,6 +559,10 @@ func TestWorkspaceCreateStoppedFailedReRead(t *testing.T) {
 		{"201 with an empty object, re-read with only a build ID", jsonAnswer(http.StatusCreated, `{}`), true, latestBuildOnlyID, true},
 		{"proxy 502, re-read 502", gatewayPage(http.StatusBadGateway), true, gatewayPage(http.StatusBadGateway), true},
 		{"proxy 502, re-read 404", gatewayPage(http.StatusBadGateway), true, jsonAnswer(http.StatusNotFound, `{"message":"not found"}`), true},
+		{"proxy 400 page, re-read 502", gatewayPage(http.StatusBadRequest), true, gatewayPage(http.StatusBadGateway), true},
+		{"proxy 400 page, re-read 404", gatewayPage(http.StatusBadRequest), true, jsonAnswer(http.StatusNotFound, `{"message":"not found"}`), true},
+		{"proxy 500 page, re-read 502", gatewayPage(http.StatusInternalServerError), true, gatewayPage(http.StatusBadGateway), true},
+		{"proxy 500 page, re-read 404", gatewayPage(http.StatusInternalServerError), true, jsonAnswer(http.StatusNotFound, `{"message":"not found"}`), true},
 		{"Coder 400 without the stop, re-read 502", jsonAnswer(http.StatusBadRequest, `{"message":"bad stop"}`), false, gatewayPage(http.StatusBadGateway), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
