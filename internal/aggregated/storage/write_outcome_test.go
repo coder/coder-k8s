@@ -306,6 +306,10 @@ func TestWriteOutcomes(t *testing.T) {
 		{"proxy 400 page", gatewayPage(http.StatusBadRequest), always},
 		{"proxy 500 page", gatewayPage(http.StatusInternalServerError), always},
 		{"409 with an empty JSON object", jsonAnswer(http.StatusConflict, `{}`), always},
+		{"500 with an empty body", jsonAnswer(http.StatusInternalServerError, ``), always},
+		{"201 with an empty body", jsonAnswer(http.StatusCreated, ``), readsBody},
+		{"201 with a JSON array", jsonAnswer(http.StatusCreated, `[]`), readsBody},
+		{"201 with malformed JSON", jsonAnswer(http.StatusCreated, `{"id":`), readsBody},
 		{"201 with only a build ID", jsonAnswer(http.StatusCreated, fmt.Sprintf(`{"id":%q}`, uuid.NewString())), postsBuild},
 	}
 
@@ -618,6 +622,44 @@ func TestWorkspaceCreateStoppedFailedReRead(t *testing.T) {
 				t.Fatalf("created object has build %s running=%t, Coder has the start build %s", created.Status.LatestBuildID, created.Spec.Running, inCoder.Status.LatestBuildID)
 			}
 		})
+	}
+}
+
+// TestWorkspaceCreateStoppedStopNotSent: the stop build POST of a create with spec.running=false
+// is refused before it is sent, and so is the re-read. The stop did not reach Coder, so the create
+// succeeds with the start build.
+func TestWorkspaceCreateStoppedStopNotSent(t *testing.T) {
+	t.Parallel()
+
+	coderServer, _ := newMockCoderServer(t)
+	t.Cleanup(coderServer.Close)
+	var stopTried atomic.Bool
+	refused := func(r *http.Request) bool {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/builds") {
+			stopTried.Store(true)
+			return true
+		}
+		return stopTried.Load() && r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v2/workspaces/")
+	}
+	client := newTestSDKClient(t, coderServer.URL)
+	client.HTTPClient = &http.Client{Transport: refusingWrites{isWrite: refused, closedAddr: closedAddress(t)}}
+
+	ctx := namespacedContext("control-plane")
+	createdObj, err := NewWorkspaceStorage(&coder.StaticClientProvider{Client: client, Namespace: "control-plane"}).Create(ctx, &aggregationv1alpha1.CoderWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme.alice.stopped"},
+		Spec:       aggregationv1alpha1.CoderWorkspaceSpec{Organization: "acme", TemplateName: "starter-template", Running: false},
+	}, rest.ValidateAllObjectFunc, nil)
+	if err != nil || !stopTried.Load() {
+		t.Fatalf("create: err=%v, stop tried=%t; want success after a stop attempt", err, stopTried.Load())
+	}
+	coderObj, err := NewWorkspaceStorage(newTestClientProvider(t, coderServer.URL)).Get(ctx, "acme.alice.stopped", nil)
+	if err != nil {
+		t.Fatalf("get from Coder: %v", err)
+	}
+	created, inCoder := createdObj.(*aggregationv1alpha1.CoderWorkspace), coderObj.(*aggregationv1alpha1.CoderWorkspace)
+	if !inCoder.Spec.Running || !created.Spec.Running || created.Status.LatestBuildID != inCoder.Status.LatestBuildID {
+		t.Fatalf("created object has build %s running=%t, Coder has the start build %s running=%t",
+			created.Status.LatestBuildID, created.Spec.Running, inCoder.Status.LatestBuildID, inCoder.Spec.Running)
 	}
 }
 

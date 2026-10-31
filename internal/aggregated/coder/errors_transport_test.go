@@ -315,3 +315,60 @@ func h2ResetServer(t *testing.T, received *atomic.Int32) (string, *tls.Config) {
 	}()
 	return "https://" + listener.Addr().String(), clientTLS
 }
+
+// TestMapCoderWriteErrorPartlyWrittenHeaders: the server reads a part of the request headers and
+// resets the connection before net/http records the headers as written. The write error is not one
+// that proves the request was not sent, so the write returns the uncertain 504.
+func TestMapCoderWriteErrorPartlyWrittenHeaders(t *testing.T) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	received := make(chan int, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			received <- -1
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		n, _ := io.ReadFull(conn, make([]byte, 4096))
+		received <- n
+		_ = conn.(*net.TCPConn).SetLinger(0)
+	}()
+
+	base, err := url.Parse("http://" + listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, err := newCoderTransport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.Proxy = nil
+	t.Cleanup(transport.CloseIdleConnections)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, base.String()+"/api/v2/workspaces", strings.NewReader(`{"name":"dev"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A header far larger than what the server reads, so the reset comes while net/http writes it.
+	req.Header.Set(codersdk.SessionTokenHeader, strings.Repeat("x", 16<<20))
+	resp, err := newCoderHTTPClient(base, transport, 10*time.Second).Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("expected the reset connection to fail the request")
+	}
+	if n := <-received; n <= 0 {
+		t.Fatalf("the server received %d bytes of the request, want some", n)
+	}
+	mapped := MapCoderWriteError(err, WriteCreate, aggregationv1alpha1.Resource("coderworkspaces"), "acme.alice.dev")
+	if !apierrors.IsTimeout(mapped) || !strings.Contains(mapped.Error(), "uncertain") {
+		t.Fatalf("expected the uncertain 504, got %v (from %v)", mapped, err)
+	}
+}
