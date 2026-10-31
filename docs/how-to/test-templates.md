@@ -11,7 +11,7 @@ You need:
 
 Every start build hands the owner's token to Terraform, so the controller refuses an owner whose token is worth more than a plain workspace user's. The tester must:
 
-- have status `active`. Coder creates users through its API as `dormant` and refuses a dormant owner's agents, so activate the tester first,
+- have status `active`. Coder creates users through its API as `dormant` and refuses a dormant owner's agents, so activate the tester first. Then log in as the tester once: every 15 minutes, Coder marks active users dormant that it has not seen for 90 days, and an activation does not count,
 - be a service account or a password user (login type `password` or `none`), never a person's OIDC or GitHub login,
 - have no site role other than `member`,
 - have only the `organization-member` or `organization-workspace-access` role in each of its organizations, and no organization may grant other roles by default.

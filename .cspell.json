@@ -103,7 +103,18 @@
     "cabundle",
     "cephfs",
     "iscsi",
-    "storageos"
+    "storageos",
+    "autoscalers",
+    "autostop",
+    "coderworkspaceclaim",
+    "coderworkspaceclaims",
+    "coderworkspacepool",
+    "coderworkspacepools",
+    "coderworkspacepoolmember",
+    "coderworkspacepoolmembers",
+    "scaledobjects",
+    "admissionregistration",
+    "horizontalpodautoscalers"
   ],
   "ignorePaths": [
     ".git/**",

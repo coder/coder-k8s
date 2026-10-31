@@ -38,9 +38,7 @@ const (
 )
 
 // CoderWorkspacePoolMemberReconciler makes the Coder workspace of one
-// CoderWorkspacePoolMember (#153 plan 6.2). Nothing registers it yet. This
-// version runs the steps up to the create request: readiness, the watch
-// rules, and cleanup follow before activation.
+// CoderWorkspacePoolMember (#153 plan 6.2).
 type CoderWorkspacePoolMemberReconciler struct {
 	client.Client
 	// APIReader reads the pool and the control plane's consent without the
@@ -52,13 +50,16 @@ type CoderWorkspacePoolMemberReconciler struct {
 	rateLimited coderBackoff // Keyed by types.NamespacedName.
 }
 
-// SetupWithManager wires the reconciler into controller-runtime. Nothing
-// calls it until activation (#153 plan PR 12). One worker: the owner cap
-// check before the create marker counts the owner's members, which is exact
-// only while no other member reconciles at the same time. A control plane
-// change wakes its members, so a member that waits for its control plane, or
-// whose cleanup ends once the control plane is gone, does not wait for its
-// next poll.
+// +kubebuilder:rbac:groups=coder.com,resources=coderworkspacepoolmembers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=coder.com,resources=coderworkspacepoolmembers/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=coder.com,resources=coderworkspacepoolmembers/finalizers,verbs=update
+
+// SetupWithManager wires the reconciler into controller-runtime. One
+// worker: the owner cap check before the create marker counts the owner's
+// members, which is exact only while no other member reconciles at the same
+// time. A control plane change wakes its members, so a member that waits
+// for its control plane, or whose cleanup ends once the control plane is
+// gone, does not wait for its next poll.
 func (r *CoderWorkspacePoolMemberReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if mgr == nil || r.Client == nil || r.APIReader == nil || r.Scheme == nil || r.Clock == nil {
 		return errors.New("assertion failed: pool member reconciler needs a manager, a client, an API reader, a scheme, and a clock")

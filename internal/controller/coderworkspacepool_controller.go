@@ -35,8 +35,7 @@ import (
 const poolResolvePoll = 60 * time.Second
 
 // CoderWorkspacePoolReconciler resolves the inputs of one CoderWorkspacePool,
-// creates its members, and reports them (#153 plan 6.3). Nothing registers
-// it yet.
+// creates its members, and reports them (#153 plan 6.3).
 type CoderWorkspacePoolReconciler struct {
 	client.Client
 	// APIReader reads members without the cache, so a stale cache never
@@ -48,11 +47,16 @@ type CoderWorkspacePoolReconciler struct {
 
 const poolControlPlaneRefIndex = ".spec.controlPlaneRef.name"
 
-// SetupWithManager wires the reconciler into controller-runtime. Nothing
-// calls it until activation (#153 plan PR 12), which also adds the RBAC
-// markers. Besides the verbs that the pool uses, they need update on
-// coderworkspacepools/finalizers and coderworkspaceclaims/finalizers: a
-// member's controller reference to its pool or claim sets blockOwnerDeletion.
+// The finalizers rights let a member's controller reference to its pool or
+// claim set blockOwnerDeletion.
+// +kubebuilder:rbac:groups=coder.com,resources=coderworkspacepools,verbs=get;list;watch
+// +kubebuilder:rbac:groups=coder.com,resources=coderworkspacepools/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=coder.com,resources=coderworkspacepools/finalizers,verbs=update
+// +kubebuilder:rbac:groups=coder.com,resources=coderworkspaceclaims,verbs=get;list;watch
+// +kubebuilder:rbac:groups=coder.com,resources=coderworkspaceclaims/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=coder.com,resources=coderworkspaceclaims/finalizers,verbs=update
+
+// SetupWithManager wires the reconciler into controller-runtime.
 // One worker serializes counting and binding (plan 6.1). Members map to
 // their pool by spec.poolName, because a bound member's controller is its
 // claim. A claim wakes its pool, so a pool that is Ready, and so does not

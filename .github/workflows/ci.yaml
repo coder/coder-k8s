@@ -107,6 +107,10 @@ jobs:
               - 'deploy/**'
               - 'examples/cloudnativepg/**'
               - 'hack/e2e-workspace-lifecycle*.sh'
+              - 'internal/controller/coderworkspace*'
+              - 'hack/e2e-workspace-pool*.sh'
+              - 'config/samples/coder_v1alpha1_coderworkspacepool.yaml'
+              - 'config/samples/coder_v1alpha1_coderworkspaceclaim.yaml'
               - 'hack/e2e/mcpstub/**'
               - '.github/workflows/ci.yaml'
               # Coder SDK bumps change how every aggregated-API call reaches the backend.
@@ -171,54 +175,6 @@ jobs:
           if [[ -n "${UNTRACKED_GENERATED}" ]]; then
             echo "assertion failed: generated installer artifacts must be tracked" >&2
             printf '%s\n' "${UNTRACKED_GENERATED}" >&2
-            exit 1
-          fi
-
-      - name: Verify the dormant CoderWorkspacePool CRD is not installed
-        # Remove this step when the CoderWorkspacePool controller ships (#153).
-        run: |
-          # grep exits 1 when nothing matches. Any other status (for example a missing file) fails the step.
-          status=0
-          # The third pattern matches the CRD path entry in config/default/kustomization.yaml.
-          grep -n -E '^[[:space:]]+kind: CoderWorkspacePool$|coderworkspacepools\.coder\.com|coder\.com_coderworkspacepools\.yaml' \
-            dist/install.yaml config/default/kustomization.yaml config/crd/bases/*.yaml || status=$?
-          if [[ "${status}" -eq 0 ]]; then
-            echo "assertion failed: the CoderWorkspacePool CRD must not ship before its controller" >&2
-            exit 1
-          elif [[ "${status}" -ne 1 ]]; then
-            echo "assertion failed: the CoderWorkspacePool CRD guard could not read the install manifests (grep exit ${status})" >&2
-            exit 1
-          fi
-
-      - name: Verify the dormant CoderWorkspacePoolMember CRD is not installed
-        # Remove this step when the CoderWorkspacePoolMember controller ships (#153).
-        run: |
-          # grep exits 1 when nothing matches. Any other status (for example a missing file) fails the step.
-          status=0
-          # The third pattern matches the CRD path entry in config/default/kustomization.yaml.
-          grep -n -E '^[[:space:]]+kind: CoderWorkspacePoolMember$|coderworkspacepoolmembers\.coder\.com|coder\.com_coderworkspacepoolmembers\.yaml' \
-            dist/install.yaml config/default/kustomization.yaml config/crd/bases/*.yaml || status=$?
-          if [[ "${status}" -eq 0 ]]; then
-            echo "assertion failed: the CoderWorkspacePoolMember CRD must not ship before its controller" >&2
-            exit 1
-          elif [[ "${status}" -ne 1 ]]; then
-            echo "assertion failed: the CoderWorkspacePoolMember CRD guard could not read the install manifests (grep exit ${status})" >&2
-            exit 1
-          fi
-
-      - name: Verify the dormant CoderWorkspaceClaim CRD is not installed
-        # Remove this step when the CoderWorkspaceClaim controller ships (#153).
-        run: |
-          # grep exits 1 when nothing matches. Any other status (for example a missing file) fails the step.
-          status=0
-          # The third pattern matches the CRD path entry in config/default/kustomization.yaml.
-          grep -n -E '^[[:space:]]+kind: CoderWorkspaceClaim$|coderworkspaceclaims\.coder\.com|coder\.com_coderworkspaceclaims\.yaml' \
-            dist/install.yaml config/default/kustomization.yaml config/crd/bases/*.yaml || status=$?
-          if [[ "${status}" -eq 0 ]]; then
-            echo "assertion failed: the CoderWorkspaceClaim CRD must not ship before its controller" >&2
-            exit 1
-          elif [[ "${status}" -ne 1 ]]; then
-            echo "assertion failed: the CoderWorkspaceClaim CRD guard could not read the install manifests (grep exit ${status})" >&2
             exit 1
           fi
 
@@ -352,6 +308,10 @@ jobs:
       - name: Offline workspace lifecycle driver tests
         if: env.E2E_FULL == 'true'
         run: bash ./hack/e2e-workspace-lifecycle_test.sh
+
+      - name: Offline workspace pool driver tests
+        if: env.E2E_FULL == 'true'
+        run: bash ./hack/e2e-workspace-pool_test.sh
 
       - name: Setup Go
         if: env.E2E_FULL == 'true'
@@ -723,6 +683,14 @@ jobs:
           kubectl -n coder delete secret coder-tls
           kubectl -n coder delete configmap coder-ca
 
+      # CoderWorkspacePool phases P1-P5 (#153). It runs before the lifecycle driver, which deletes namespace coder at
+      # its end, imports its own template e2e-pool-agent from the agent fixture, and removes its objects when it passes.
+      - name: Workspace pool (create, scale, claim, operator restart)
+        if: env.E2E_FULL == 'true'
+        env:
+          E2E_WORKDIR: ${{ runner.temp }}/workspace-pool
+        run: bash ./hack/e2e-workspace-pool.sh
+
       # The driver creates the CoderTemplates itself (kubectl apply of config/e2e/codertemplate*.yaml) after its setup checks.
       # Its last phase scales Coder to zero and deletes namespace coder: later steps must not need either.
       - name: Template and workspace lifecycle (apply, re-apply, watch, rename, delete, recreate, tester, agent, template tests)
@@ -809,6 +777,12 @@ jobs:
           echo ""
           echo "=== CNPG controller logs ==="
           kubectl -n cnpg-system logs deploy/cnpg-controller-manager --tail=200 || true
+          echo ""
+          echo "=== CoderWorkspacePools, members, and claims ==="
+          kubectl -n coder get coderworkspacepools,coderworkspacepoolmembers,coderworkspaceclaims -o yaml || true
+          echo ""
+          echo "=== Workspace pool driver files ==="
+          tail -n 50 "$RUNNER_TEMP"/workspace-pool/*.err "$RUNNER_TEMP"/workspace-pool/*.log || true
           echo ""
           echo "=== Workspace lifecycle driver files ==="
           tail -n 50 "$RUNNER_TEMP"/workspace-lifecycle/*.err "$RUNNER_TEMP"/workspace-lifecycle/*.log || true

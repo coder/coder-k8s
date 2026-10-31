@@ -43,6 +43,7 @@ nav:
       - Configure credential Secrets for proxies and provisioners: how-to/workspace-proxy-credentials.md
       - Start, stop, and read logs of workspaces: how-to/start-stop-workspaces.md
       - Test a template version: how-to/test-templates.md
+      - Keep ready workspaces with pools: how-to/workspace-pools.md
       - Manage AI providers: how-to/manage-ai-providers.md
       - Manage AI Gateway keys: how-to/manage-ai-gateway-keys.md
       - Manage MCP servers: how-to/manage-mcp-servers.md
@@ -59,6 +60,9 @@ nav:
           - CoderMCPServer: reference/api/codermcpserver.md
           - CoderProvisioner: reference/api/coderprovisioner.md
           - CoderTemplateTest: reference/api/codertemplatetest.md
+          - CoderWorkspaceClaim: reference/api/coderworkspaceclaim.md
+          - CoderWorkspacePool: reference/api/coderworkspacepool.md
+          - CoderWorkspacePoolMember: reference/api/coderworkspacepoolmember.md
           - CoderWorkspaceProxy: reference/api/coderworkspaceproxy.md
           - CoderTemplate: reference/api/codertemplate.md
           - CoderTemplateVersion: reference/api/codertemplateversion.md

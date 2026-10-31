@@ -27,6 +27,7 @@ test-integration: $(VENDOR_STAMP) setup-envtest
 test-scripts:
 	bash ./scripts/check_codex_comments_test.sh
 	bash ./hack/e2e-workspace-lifecycle_test.sh
+	bash ./hack/e2e-workspace-pool_test.sh
 
 build: $(VENDOR_STAMP)
 	GOFLAGS=$(GOFLAGS) go build ./...

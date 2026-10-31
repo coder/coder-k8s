@@ -41,9 +41,6 @@ type WorkspacePoolsSpec struct {
 	// this owner. Every start build gives the owner's API token to the
 	// template's Terraform. A pool whose owner or template is not listed
 	// creates no workspace.
-	//
-	// This field has no effect yet: the CoderWorkspacePool controller is not
-	// shipped.
 	// +kubebuilder:validation:MaxItems=16
 	// +listType=map
 	// +listMapKey=userID
@@ -288,9 +285,9 @@ type CoderWorkspacePoolStatus struct {
 	// +optional
 	PendingClaims int32 `json:"pendingClaims,omitempty"`
 	// Selector is the label selector of the scale subresource, in string
-	// form: coder.com/workspace-pool-uid=<pool UID>. It matches no pods
-	// unless a template sets that label, so autoscalers must use External or
-	// Object metrics with target type AverageValue.
+	// form: the label coder.com/workspace-pool-uid equal to the pool's UID.
+	// It matches no pods unless a template sets that label, so autoscalers
+	// must use External or Object metrics with target type AverageValue.
 	// +optional
 	Selector string `json:"selector,omitempty"`
 	// Resolved holds the inputs that the controller resolved in Coder.

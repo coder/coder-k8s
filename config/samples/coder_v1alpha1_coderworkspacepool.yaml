@@ -1,0 +1,27 @@
+# Keeps ready Coder workspaces from one template for one Coder owner, and hands
+# them out through CoderWorkspaceClaim objects. See docs/how-to/workspace-pools.md.
+#
+# Prerequisites:
+# - CoderControlPlane codercontrolplane-sample with status.operatorAccessReady
+#   true, and the owner below in its spec.workspacePools.owners with the
+#   template in its templates list.
+# - The template below exists in Coder.
+apiVersion: coder.com/v1alpha1
+kind: CoderWorkspacePool
+metadata:
+  name: coderworkspacepool-sample
+  namespace: coder
+spec:
+  controlPlaneRef:
+    name: codercontrolplane-sample
+  # The Coder user ID of the pool owner. It owns every workspace of the pool.
+  ownerUserID: "00000000-0000-4000-8000-000000000001"
+  # <organization>.<template>
+  template: "coder.docker"
+  version:
+    # Exactly one of active, name, or id.
+    active: true
+  # Unclaimed ready workspaces to keep. kubectl scale, HPA, and KEDA change it.
+  replicas: 2
+  claims:
+    mode: Reserve

@@ -23,8 +23,9 @@ import (
 // against the envtest API server: no field index is registered twice, every
 // watched kind is served, and the caches sync. The test runs serially, and
 // its cache sees only an empty namespace, so its reconcilers never touch
-// the objects of other tests. A CoderMCPServer in that namespace gets its
-// finalizer and a status from the registered controller.
+// the objects of other tests. A CoderMCPServer, a CoderWorkspacePool, and a
+// CoderWorkspacePoolMember in that namespace get a status from their
+// registered controllers.
 func TestSetupControllersStartsEveryController(t *testing.T) {
 	ctx := context.Background()
 	namespace := createTestNamespace(ctx, t, "setup")
@@ -65,6 +66,45 @@ func TestSetupControllersStartsEveryController(t *testing.T) {
 		return controllerutil.ContainsFinalizer(got, coderv1alpha1.CoderMCPServerCleanupFinalizer) &&
 			ready != nil && ready.Reason == "ControlPlaneNotReady"
 	}, 30*time.Second, 100*time.Millisecond, "the CoderMCPServer controller reconciles the object")
+
+	pool := &coderv1alpha1.CoderWorkspacePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "runners", Namespace: namespace},
+		Spec: coderv1alpha1.CoderWorkspacePoolSpec{
+			ControlPlaneRef: coderv1alpha1.CoderControlPlaneReference{Name: "coder"},
+			OwnerUserID:     "5f0c3c4e-0000-4000-8000-000000000001",
+			Template:        "default.ci-runner",
+			Version:         coderv1alpha1.CoderWorkspacePoolVersion{Active: ptrTo(true)},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, pool))
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), pool) })
+	require.Eventually(t, func() bool {
+		got := &coderv1alpha1.CoderWorkspacePool{}
+		return k8sClient.Get(ctx, client.ObjectKeyFromObject(pool), got) == nil && got.Status.Reason == "ControlPlaneNotReady"
+	}, 30*time.Second, 100*time.Millisecond, "the CoderWorkspacePool controller reconciles the pool")
+
+	// A member that no pool controls never creates a workspace.
+	member := &coderv1alpha1.CoderWorkspacePoolMember{
+		ObjectMeta: metav1.ObjectMeta{Name: "runners-handmade", Namespace: namespace},
+		Spec: coderv1alpha1.CoderWorkspacePoolMemberSpec{
+			ControlPlaneRef: coderv1alpha1.CoderControlPlaneReference{Name: "coder"}, PoolName: pool.Name,
+			OwnerID: pool.Spec.OwnerUserID, OrganizationID: "5f0c3c4e-0000-4000-8000-000000000002",
+			TemplateID: "5f0c3c4e-0000-4000-8000-000000000003", TemplateVersionID: "5f0c3c4e-0000-4000-8000-000000000004",
+			ParametersHash: parametersHash(), ReadyTimeoutSeconds: 900,
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, member))
+	t.Cleanup(func() {
+		_ = k8sClient.Get(context.Background(), client.ObjectKeyFromObject(member), member)
+		member.Finalizers = nil
+		_ = k8sClient.Update(context.Background(), member)
+		_ = k8sClient.Delete(context.Background(), member)
+	})
+	require.Eventually(t, func() bool {
+		got := &coderv1alpha1.CoderWorkspacePoolMember{}
+		return k8sClient.Get(ctx, client.ObjectKeyFromObject(member), got) == nil &&
+			got.Status.Phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed && got.Status.Reason == "NotOwned"
+	}, 30*time.Second, 100*time.Millisecond, "the CoderWorkspacePoolMember controller reconciles the member")
 
 	cancel()
 	require.NoError(t, <-done)
