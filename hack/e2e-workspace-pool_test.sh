@@ -56,13 +56,13 @@ run_scenario() {
   mkdir -p "$dir"
   : >"$dir/calls.log"
   (cd "$ROOT" && PATH="$STUBS:$PATH" STUB_STATE=$dir SCENARIO=$name E2E_WORKDIR=$dir/work E2E_POLL_SECONDS=0.1 \
-    E2E_TIMEOUT_SECONDS=5 timeout 60 bash "$DRIVER") >"$dir/out.log" 2>&1 || rc=$?
+    E2E_TIMEOUT_SECONDS=5 GITHUB_ACTIONS=true timeout 60 bash "$DRIVER") >"$dir/out.log" 2>&1 || rc=$?
   local problem=""
   if ((rc == 0)); then problem="driver passed"
   elif ! grep -qF "FAIL: $want" "$dir/out.log"; then problem="want FAIL: $want"
   elif grep -E '^kubectl .*( create | apply | patch | delete | scale )' "$dir/calls.log" >/dev/null; then problem="sent a Kubernetes write"
   elif grep -E '^curl .*-X (PUT|PATCH|DELETE) ' "$dir/calls.log" >/dev/null; then problem="sent a Coder write"
-  elif grep -qF stub-token "$dir/out.log"; then problem="printed the token"
+  elif grep -F stub-token "$dir/out.log" | grep -vqx '::add-mask::stub-token'; then problem="printed the token outside its mask command"
   fi
   if [[ -n $problem ]]; then
     echo "FAIL $name: $problem (exit $rc)"
