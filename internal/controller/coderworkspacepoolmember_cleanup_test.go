@@ -2,17 +2,20 @@ package controller_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/controller"
@@ -209,6 +212,67 @@ func TestPoolMemberCleanupDeletesReleasedUsedMember(t *testing.T) {
 		e.fake.setBuildJob(uuid.MustParse(member.Status.DeleteBuildID), codersdk.ProvisionerJobSucceeded)
 		require.Nil(t, e.reconcileMember(t, key, 1), "the finalizer goes once the delete build succeeded")
 	}
+}
+
+// releasedUsedMember runs a member to Used=True and lets the pool release it.
+func (e *poolMemberEnv) releasedUsedMember(t *testing.T) types.NamespacedName {
+	t.Helper()
+	key, workspaceID := e.readyMember(t)
+	e.fake.markUsed(workspaceID, e.clock.Now().Add(time.Minute))
+	e.clock.SetTime(e.clock.Now().Add(2 * time.Minute))
+	requireUsed(t, e.reconcileMember(t, key, 1), true)
+	e.reconcilePool(t, 1)
+	require.Nil(t, metav1.GetControllerOf(e.reconcileMember(t, key, 0)), "the pool released the used member")
+	return key
+}
+
+// TestPoolMemberCleanupKeepsReleasedWorkspaceInDeletedNamespace (#445): the
+// namespace controller deletes members and the control plane in no fixed
+// order, and a namespace deletion is no deliberate delete of a used
+// workspace. A released used member in a deleting namespace goes without a
+// Coder write, also while the control plane is not marked yet. A failed
+// namespace read keeps the finalizer.
+func TestPoolMemberCleanupKeepsReleasedWorkspaceInDeletedNamespace(t *testing.T) {
+	t.Parallel()
+	for _, controlPlaneFirst := range []bool{false, true} {
+		t.Run(map[bool]string{false: "member first", true: "control plane first"}[controlPlaneFirst], func(t *testing.T) {
+			t.Parallel()
+			e := newPoolMemberEnv(t)
+			key := e.releasedUsedMember(t)
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: e.ns}}
+			require.NoError(t, k8sClient.Delete(e.ctx, ns))
+			if controlPlaneFirst {
+				require.NoError(t, k8sClient.Delete(e.ctx, &coderv1alpha1.CoderControlPlane{ObjectMeta: metav1.ObjectMeta{Namespace: e.ns, Name: "coder"}}))
+			}
+			builds := e.fake.requestCount(routeCreateBuild)
+			e.deleteMember(t, key)
+			require.Nil(t, e.reconcileMember(t, key, 1), "the member goes")
+			require.Equal(t, builds, e.fake.requestCount(routeCreateBuild), "no delete build")
+		})
+	}
+
+	t.Run("namespace read fails", func(t *testing.T) {
+		t.Parallel()
+		e := newPoolMemberEnv(t)
+		key := e.releasedUsedMember(t)
+		e.deleteMember(t, key)
+		base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+		require.NoError(t, err)
+		failing := interceptor.NewClient(base, interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.Namespace); ok {
+					return errors.New("namespace read failed")
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		})
+		builds := e.fake.requestCount(routeCreateBuild)
+		r := &controller.CoderWorkspacePoolMemberReconciler{Client: k8sClient, APIReader: failing, Scheme: scheme, Clock: e.clock}
+		_, err = r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+		require.ErrorContains(t, err, "namespace read failed")
+		require.NotNil(t, e.reconcileMember(t, key, 0), "the finalizer stays")
+		require.Equal(t, builds, e.fake.requestCount(routeCreateBuild), "no delete build")
+	})
 }
 
 // TestPoolMemberCleanupUseBeforeDeleteRetry (#409): the last use check runs
