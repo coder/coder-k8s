@@ -154,6 +154,13 @@ func TestPoolShareNotAllowed(t *testing.T) {
 			e.fake.setSharing(e.orgID, codersdk.ShareableWorkspaceOwnersServiceAccounts)
 		}},
 		{name: "no shareGroupIDs", wantMessage: "lists no shareGroupIDs", edit: func(t *testing.T, e *shareEnv) { e.setShareGroups(t) }},
+		{name: "deployment disables sharing", wantMessage: "deployment disables workspace sharing", edit: func(_ *testing.T, e *shareEnv) {
+			e.fake.failNext(routeSharingSettings, fakeFault{Rewrite: func(answer any) any {
+				settings := answer.(codersdk.WorkspaceSharingSettings)
+				settings.SharingGloballyDisabled = true
+				return settings
+			}})
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -251,6 +258,26 @@ func TestPoolChecksShareUserBeforeBind(t *testing.T) {
 			require.Zero(t, e.fake.requestCount(routeUpdateWorkspaceACL))
 		})
 	}
+}
+
+// TestPoolChecksShareGroupsWithoutCache: a bind cannot be undone, so the
+// pool checks the claim's user against the control plane read without the
+// cache. Groups that an admin just withdrew refuse the claim, although the
+// cache still lists them.
+func TestPoolChecksShareGroupsWithoutCache(t *testing.T) {
+	t.Parallel()
+	e := newShareEnv(t)
+	member, _ := e.readyMember(t)
+	e.setShareGroups(t)
+	claimKey := e.createShareClaim(t, "build", "bob")
+	stale := staleControlPlaneClient{Client: k8sClient, stale: func(o *coderv1alpha1.WorkspacePoolOwner) { o.ShareGroupIDs = []string{e.orgID.String()} }}
+	r := &controller.CoderWorkspacePoolReconciler{Client: stale, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}})
+	require.NoError(t, err)
+	claim := e.claim(t, claimKey)
+	requireShareClaim(t, claim, coderv1alpha1.CoderWorkspaceClaimPhasePending, "ShareUserNotEligible", false, false)
+	require.Contains(t, claim.Status.Message, "in none of the groups")
+	require.Nil(t, e.reconcileMember(t, member, 0).Spec.ClaimRef, "no bind on withdrawn groups")
 }
 
 // TestPoolKeepsDemandWhileShareCheckFails: a group read that fails for

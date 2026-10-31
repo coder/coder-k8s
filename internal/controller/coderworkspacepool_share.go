@@ -33,6 +33,10 @@ func checkWorkspaceSharePolicy(ctx context.Context, sdk *codersdk.Client, orgID 
 	if err != nil {
 		return coderStepUnavailable("get workspace sharing settings", err)
 	}
+	// Coder v2.37 also answers none then, but the flag alone suffices.
+	if settings.SharingGloballyDisabled {
+		return coderWait("ShareNotAllowed", "The Coder deployment disables workspace sharing.")
+	}
 	switch settings.ShareableWorkspaceOwners {
 	case codersdk.ShareableWorkspaceOwnersEveryone:
 		return nil

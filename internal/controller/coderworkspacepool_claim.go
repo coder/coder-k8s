@@ -106,8 +106,13 @@ func (r *CoderWorkspacePoolReconciler) checkShareClaims(
 	if wait != nil {
 		step = coderWait(wait.reason, "%s", wait.message)
 	} else {
-		// The cached control plane can be older than the uncached read of
-		// freshOwnerCap, and so lack the owner.
+		// Uncached, as in freshOwnerCap: a bind cannot be undone, so consent
+		// or groups that an admin just withdrew win over the cache.
+		controlPlane = &coderv1alpha1.CoderControlPlane{}
+		key := types.NamespacedName{Namespace: pool.Namespace, Name: pool.Spec.ControlPlaneRef.Name}
+		if err := r.APIReader.Get(ctx, key, controlPlane); err != nil {
+			return fmt.Errorf("get CoderControlPlane %s: %w", key, err)
+		}
 		step = workspacePoolConsent(controlPlane, ownerID, pool.Spec.Template)
 	}
 	if step != nil {
