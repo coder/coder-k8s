@@ -2,6 +2,7 @@ package controlplaneurl_test
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"testing"
 
@@ -25,7 +26,9 @@ func TestNewTLS(t *testing.T) {
 	ca := tlstest.NewCA(t)
 	trust, err := controlplaneurl.NewTLS(ca.PEM, "")
 	require.NoError(t, err)
-	require.NotNil(t, trust.ClientConfig().RootCAs)
+	bundleOnly := x509.NewCertPool()
+	require.True(t, bundleOnly.AppendCertsFromPEM(ca.PEM))
+	require.True(t, trust.ClientConfig().RootCAs.Equal(bundleOnly), "a custom bundle replaces the system roots, with no fallback to them")
 	require.Empty(t, trust.ClientConfig().ServerName, "the default server name is the URL host")
 
 	trust, err = controlplaneurl.NewTLS(nil, "coder.example.com")

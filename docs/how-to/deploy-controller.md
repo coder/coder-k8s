@@ -208,7 +208,10 @@ Provisioner pods are not affected. They still connect to `status.url`.
           # serverName: coder.example.com
     ```
 
-Without `caBundleRef`, the operator verifies the certificate with the public roots of its image. That works only with a public certificate and `serverName` set to its DNS name.
+The operator trusts exactly one set of roots:
+
+- With `caBundleRef`, it trusts only the CA certificates in the bundle. It never falls back to the public roots of its image, so a certificate from a public CA fails unless its CA is in the bundle.
+- Without `caBundleRef`, it trusts only the public roots of its image. That works only with a public certificate and `serverName` set to its DNS name.
 
 With `operatorAccess`, the operator never sends the operator token over plain HTTP:
 

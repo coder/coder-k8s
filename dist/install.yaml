@@ -2810,8 +2810,9 @@ spec:
                       caBundleRef:
                         description: |-
                           CABundleRef names a ConfigMap key in the control plane namespace with
-                          the PEM CA certificates that sign the Coder serving certificate.
-                          Without it, the operator uses the public roots of its image.
+                          the PEM CA certificates that sign the Coder serving certificate. The
+                          operator then trusts only these certificates, never the public roots of
+                          its image. Without it, the operator trusts only those public roots.
                         properties:
                           key:
                             description: Key is the key inside the ConfigMap data

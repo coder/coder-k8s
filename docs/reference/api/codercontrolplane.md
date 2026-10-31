@@ -188,7 +188,7 @@ serving certificate.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `caBundleRef` | [ConfigMapKeySelector](#configmapkeyselector) | CABundleRef names a ConfigMap key in the control plane namespace with the PEM CA certificates that sign the Coder serving certificate. Without it, the operator uses the public roots of its image. |
+| `caBundleRef` | [ConfigMapKeySelector](#configmapkeyselector) | CABundleRef names a ConfigMap key in the control plane namespace with the PEM CA certificates that sign the Coder serving certificate. The operator then trusts only these certificates, never the public roots of its image. Without it, the operator trusts only those public roots. |
 | `serverName` | string | ServerName is the DNS name that the Coder serving certificate must hold. The default is the host of status.url, `<name>.<namespace>.svc.cluster.local`. |
 
 ### ProbeSpec

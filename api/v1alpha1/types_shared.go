@@ -89,8 +89,9 @@ type TLSSpec struct {
 // +kubebuilder:validation:XValidation:rule="has(self.caBundleRef) || has(self.serverName)",message="tls.operatorAccess needs caBundleRef or serverName"
 type OperatorTLSSpec struct {
 	// CABundleRef names a ConfigMap key in the control plane namespace with
-	// the PEM CA certificates that sign the Coder serving certificate.
-	// Without it, the operator uses the public roots of its image.
+	// the PEM CA certificates that sign the Coder serving certificate. The
+	// operator then trusts only these certificates, never the public roots of
+	// its image. Without it, the operator trusts only those public roots.
 	// +optional
 	CABundleRef *ConfigMapKeySelector `json:"caBundleRef,omitempty"`
 	// ServerName is the DNS name that the Coder serving certificate must
