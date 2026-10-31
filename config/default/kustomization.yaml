@@ -9,9 +9,13 @@ resources:
   - ../crd/bases/coder.com_codermcpservers.yaml
   - ../crd/bases/coder.com_coderprovisioners.yaml
   - ../crd/bases/coder.com_codertemplatetests.yaml
+  - ../crd/bases/coder.com_coderworkspaceclaims.yaml
+  - ../crd/bases/coder.com_coderworkspacepoolmembers.yaml
+  - ../crd/bases/coder.com_coderworkspacepools.yaml
   - ../crd/bases/coder.com_coderworkspaceproxies.yaml
   - ../rbac/cleanup-records-rolebinding.yaml
   - ../rbac/clusterrolebinding.yaml
+  - ../rbac/coderworkspacepoolmember-viewer-role.yaml
   - ../rbac/role.yaml
   - ../rbac/serviceaccount.yaml
   - ../../deploy/deployment.yaml

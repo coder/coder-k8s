@@ -42,7 +42,7 @@
 | `topologySpreadConstraints` | [TopologySpreadConstraint](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#topologyspreadconstraint-v1-core) array | TopologySpreadConstraints control pod topology spread. |
 | `mcpServers` | [MCPServersSpec](#mcpserversspec) | MCPServers configures CoderMCPServer objects that use this control plane. Removing it disables in Coder each server config that a CoderMCPServer created through this control plane. |
 | `aiGateway` | [AIGatewaySpec](#aigatewayspec) | AIGateway configures CoderAIGatewayKey objects that use this control plane. |
-| `workspacePools` | [WorkspacePoolsSpec](#workspacepoolsspec) | WorkspacePools configures CoderWorkspacePool objects that use this control plane. It has no effect yet: the CoderWorkspacePool controller is not shipped. |
+| `workspacePools` | [WorkspacePoolsSpec](#workspacepoolsspec) | WorkspacePools configures CoderWorkspacePool objects that use this control plane. |
 | `templateTests` | [TemplateTestsSpec](#templatetestsspec) | TemplateTests configures CoderTemplateTest runs against this control plane. |
 
 ## Status
@@ -281,7 +281,7 @@ CoderControlPlane (CoderControlPlane.spec.workspacePools).
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `owners` | [WorkspacePoolOwner](#workspacepoolowner) array | Owners are the Coder users that pools on this control plane can use as owners, each with the templates it can build and a workspace cap. They are the admin's consent that pools make Coder build these templates as this owner. Every start build gives the owner's API token to the template's Terraform. A pool whose owner or template is not listed creates no workspace. This field has no effect yet: the CoderWorkspacePool controller is not shipped. |
+| `owners` | [WorkspacePoolOwner](#workspacepoolowner) array | Owners are the Coder users that pools on this control plane can use as owners, each with the templates it can build and a workspace cap. They are the admin's consent that pools make Coder build these templates as this owner. Every start build gives the owner's API token to the template's Terraform. A pool whose owner or template is not listed creates no workspace. |
 
 ## Source
 

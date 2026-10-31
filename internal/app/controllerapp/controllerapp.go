@@ -170,6 +170,26 @@ func SetupControllers(mgr manager.Manager) error {
 		return fmt.Errorf("unable to create MCP server controller: %w", err)
 	}
 
+	workspacePoolReconciler := &controller.CoderWorkspacePoolReconciler{
+		Client:    client,
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    managerScheme,
+		Clock:     clock.RealClock{},
+	}
+	if err := workspacePoolReconciler.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create workspace pool controller: %w", err)
+	}
+
+	workspacePoolMemberReconciler := &controller.CoderWorkspacePoolMemberReconciler{
+		Client:    client,
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    managerScheme,
+		Clock:     clock.RealClock{},
+	}
+	if err := workspacePoolMemberReconciler.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create workspace pool member controller: %w", err)
+	}
+
 	return nil
 }
 

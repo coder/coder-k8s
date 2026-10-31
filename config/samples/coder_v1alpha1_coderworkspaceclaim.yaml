@@ -1,0 +1,10 @@
+# Takes one ready workspace of a CoderWorkspacePool. status.ownerName and
+# status.workspaceName name it for `coder ssh <ownerName>/<workspaceName>`.
+# Deleting the claim deletes its workspace. See docs/how-to/workspace-pools.md.
+apiVersion: coder.com/v1alpha1
+kind: CoderWorkspaceClaim
+metadata:
+  name: coderworkspaceclaim-sample
+  namespace: coder
+spec:
+  poolName: coderworkspacepool-sample

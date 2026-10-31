@@ -4367,8 +4367,7 @@ spec:
               workspacePools:
                 description: |-
                   WorkspacePools configures CoderWorkspacePool objects that use this
-                  control plane. It has no effect yet: the CoderWorkspacePool controller
-                  is not shipped.
+                  control plane.
                 properties:
                   owners:
                     description: |-
@@ -4378,9 +4377,6 @@ spec:
                       this owner. Every start build gives the owner's API token to the
                       template's Terraform. A pool whose owner or template is not listed
                       creates no workspace.
-
-                      This field has no effect yet: the CoderWorkspacePool controller is not
-                      shipped.
                     items:
                       description: WorkspacePoolOwner allows one Coder user as the
                         owner of pool workspaces.

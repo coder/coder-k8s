@@ -59,6 +59,9 @@ nav:
           - CoderMCPServer: reference/api/codermcpserver.md
           - CoderProvisioner: reference/api/coderprovisioner.md
           - CoderTemplateTest: reference/api/codertemplatetest.md
+          - CoderWorkspaceClaim: reference/api/coderworkspaceclaim.md
+          - CoderWorkspacePool: reference/api/coderworkspacepool.md
+          - CoderWorkspacePoolMember: reference/api/coderworkspacepoolmember.md
           - CoderWorkspaceProxy: reference/api/coderworkspaceproxy.md
           - CoderTemplate: reference/api/codertemplate.md
           - CoderTemplateVersion: reference/api/codertemplateversion.md

@@ -41,9 +41,6 @@ type WorkspacePoolsSpec struct {
 	// this owner. Every start build gives the owner's API token to the
 	// template's Terraform. A pool whose owner or template is not listed
 	// creates no workspace.
-	//
-	// This field has no effect yet: the CoderWorkspacePool controller is not
-	// shipped.
 	// +kubebuilder:validation:MaxItems=16
 	// +listType=map
 	// +listMapKey=userID

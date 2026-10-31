@@ -101,6 +101,9 @@ rules:
   - codermcpservers/finalizers
   - coderprovisioners/finalizers
   - codertemplatetests/finalizers
+  - coderworkspaceclaims/finalizers
+  - coderworkspacepoolmembers/finalizers
+  - coderworkspacepools/finalizers
   - coderworkspaceproxies/finalizers
   verbs:
   - update
@@ -118,6 +121,7 @@ rules:
   resources:
   - codercontrolplanes
   - coderprovisioners
+  - coderworkspacepoolmembers
   - coderworkspaceproxies
   verbs:
   - create
@@ -133,6 +137,9 @@ rules:
   - codercontrolplanes/status
   - coderprovisioners/status
   - codertemplatetests/status
+  - coderworkspaceclaims/status
+  - coderworkspacepoolmembers/status
+  - coderworkspacepools/status
   - coderworkspaceproxies/status
   verbs:
   - get
@@ -148,6 +155,15 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - coder.com
+  resources:
+  - coderworkspaceclaims
+  - coderworkspacepools
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - coordination.k8s.io
