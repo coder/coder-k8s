@@ -174,9 +174,28 @@ func TestPoolShareNotAllowed(t *testing.T) {
 			require.False(t, meta.IsStatusConditionTrue(pool.Status.Conditions, coderv1alpha1.CoderWorkspacePoolConditionReady))
 			require.Equal(t, time.Minute, e.lastStep.RequeueAfter, "a fix in Coder sends no event")
 			require.Nil(t, e.reconcileMember(t, member, 0).Spec.ClaimRef)
-			requireShareClaim(t, e.claim(t, claimKey), coderv1alpha1.CoderWorkspaceClaimPhasePending, "WaitingForReadyWorkspace", false, false)
+			claim := e.claim(t, claimKey)
+			requireShareClaim(t, claim, coderv1alpha1.CoderWorkspaceClaimPhasePending, "ShareNotAllowed", false, false)
+			require.Contains(t, claim.Status.Message, tc.wantMessage)
 		})
 	}
+}
+
+// TestPoolDropsShareDemandWhileShareNotAllowed: while the owner may not
+// share, no Share claim of the pool can bind, so none counts as demand. A
+// pool at replicas 0 deletes the member it built for a waiting claim.
+func TestPoolDropsShareDemandWhileShareNotAllowed(t *testing.T) {
+	t.Parallel()
+	e := newShareEnv(t)
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(0)) })
+	claimKey := e.createShareClaim(t, "build", "bob")
+	member, _ := e.readyMember(t)
+	e.setShareGroups(t)
+
+	require.Equal(t, "ShareNotAllowed", e.reconcilePool(t, 1).Status.Reason)
+	requireShareClaim(t, e.claim(t, claimKey), coderv1alpha1.CoderWorkspaceClaimPhasePending, "ShareNotAllowed", false, false)
+	m := e.reconcileMember(t, member, 0)
+	require.True(t, m == nil || !m.DeletionTimestamp.IsZero(), "the member built for the claim is deleted")
 }
 
 // TestPoolChecksShareUserBeforeBind (T12): a claim author can name any Coder
@@ -556,6 +575,32 @@ func TestPoolMemberRevokesWithdrawnShare(t *testing.T) {
 		requireMember(t, e.reconcileMember(t, member, 1), coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "ShareRevoked", "")
 		require.Empty(t, e.acl(t, workspaceID))
 	})
+}
+
+// TestPoolMemberEnforcesPolicyAfterRoleChange: a person can change the
+// shared user's role from use to admin in Coder. The user still has the
+// workspace, so the member keeps reporting the share and never writes the
+// role back, but it still removes the share once the policy no longer allows
+// it.
+func TestPoolMemberEnforcesPolicyAfterRoleChange(t *testing.T) {
+	t.Parallel()
+	e := newShareEnv(t)
+	member, claimKey, workspaceID := e.bindShareClaim(t, "bob")
+	requireMember(t, e.reconcileMember(t, member, 1), coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "Shared", "(role use)")
+	require.NoError(t, e.fake.client(t, 5*time.Second).UpdateWorkspaceACL(e.ctx, workspaceID, codersdk.UpdateWorkspaceACL{
+		UserRoles: map[string]codersdk.WorkspaceRole{e.bob.String(): codersdk.WorkspaceRoleAdmin},
+	}))
+
+	requireMember(t, e.reconcileMember(t, member, 1), coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "Shared", "(role admin)")
+	e.reconcilePool(t, 1)
+	requireShareClaim(t, e.claim(t, claimKey), coderv1alpha1.CoderWorkspaceClaimPhaseBound, "WorkspaceReady", true, false)
+	require.Equal(t, 2, e.fake.requestCount(routeUpdateWorkspaceACL), "the share and the person's change, nothing more")
+
+	e.fake.updateUser(e.bob, func(u *codersdk.User) { u.Status = codersdk.UserStatusSuspended })
+	requireMember(t, e.reconcileMember(t, member, 1), coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "ShareRevoked", `status "suspended"`)
+	require.Empty(t, e.acl(t, workspaceID))
+	e.reconcilePool(t, 1)
+	requireShareClaim(t, e.claim(t, claimKey), coderv1alpha1.CoderWorkspaceClaimPhaseBound, "ShareRevoked", false, true)
 }
 
 // loseSharedStatus runs one member reconcile that sends the ACL write and

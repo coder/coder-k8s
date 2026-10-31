@@ -26,7 +26,7 @@
 | `workspaceName` | string | WorkspaceName is the Coder workspace name. |
 | `ownerName` | string | OwnerName is the Coder username of the workspace owner, so that `coder ssh <ownerName>/<workspaceName>` reaches the workspace. |
 | `boundTime` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#time-v1-meta) | BoundTime is when a member took the claim. |
-| `sharedUserID` | string | SharedUserID is the Coder user that has the `use` role on the workspace through this claim, as the member last read it from Coder. |
+| `sharedUserID` | string | SharedUserID is the Coder user that has a role on the workspace through this claim, as the member last read it from Coder. The controller grants `use`. |
 | `reason` | string | Reason is the current wait reason or the reason for Lost. |
 | `message` | string | Message explains Reason. It never holds Coder error details, build logs, parameter values, or tokens. |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#condition-v1-meta) array | Conditions are Ready, Reconciling, and Stalled. |

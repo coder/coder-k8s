@@ -208,8 +208,12 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// A claim with a step neither binds nor counts as demand.
 	claimSteps := map[types.UID]*coderStep{}
 	for i := range claims {
-		if step := poolClaimModeStep(pool, &claims[i]); step != nil && poolClaimWaits(&claims[i], all.Items) {
-			claimSteps[claims[i].UID] = step
+		claimStep := poolClaimModeStep(pool, &claims[i])
+		if claimStep == nil && step != nil && step.reason == "ShareNotAllowed" {
+			claimStep = step // No claim of the pool can get its share.
+		}
+		if claimStep != nil && poolClaimWaits(&claims[i], all.Items) {
+			claimSteps[claims[i].UID] = claimStep
 		}
 	}
 	if err := r.releaseUsedMembers(ctx, pool, members); err != nil {

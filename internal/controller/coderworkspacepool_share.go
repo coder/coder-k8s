@@ -126,7 +126,7 @@ func checkWorkspaceShareUser(
 // shareWorkspace gives the Coder user of the member's Share claim the use
 // role on workspace (plan 6.2 step 11 rule 2), which the caller read with the
 // identity guard in this reconcile, and reports in the Shared condition
-// whether Coder's ACL gives it now. It checks the share policy at every poll
+// whether Coder's ACL lists it now. It checks the share policy at every poll
 // and removes a share that the policy no longer allows. step is the member's
 // step when no share is due. A refusal is a wait: the member stays ready and
 // checks again at its next poll. A share that is gone, or that the controller
@@ -158,9 +158,10 @@ func (r *CoderWorkspacePoolMemberReconciler) shareWorkspace(
 	if err != nil {
 		return coderStepUnavailable("get workspace ACL", err), nil
 	}
-	has := target != "" && slices.ContainsFunc(acl.Users, func(u codersdk.WorkspaceUser) bool {
-		return u.ID.String() == target && u.Role == codersdk.WorkspaceRoleUse
-	})
+	// With any role: a person can change use to admin in Coder, and the
+	// policy still applies to that share.
+	i := slices.IndexFunc(acl.Users, func(u codersdk.WorkspaceUser) bool { return target != "" && u.ID.String() == target })
+	has := i >= 0
 	switch {
 	case !has && granted && shared.Reason == "ShareRevoked":
 		return coderWait(shared.Reason, "%s", shared.Message), nil
@@ -170,7 +171,7 @@ func (r *CoderWorkspacePoolMemberReconciler) shareWorkspace(
 		// For example, Coder drops shares when an admin tightens the
 		// organization's sharing setting.
 		return report(metav1.ConditionFalse, "ShareRemoved",
-			"Coder user %s no longer has the use role on workspace %s. The controller does not share it again. Delete the claim to free the workspace.", target, name), nil
+			"Coder user %s no longer has a role on workspace %s. The controller does not share it again. Delete the claim to free the workspace.", target, name), nil
 	}
 
 	// After the first check, the stored user ID, never the claim's username
@@ -183,7 +184,7 @@ func (r *CoderWorkspacePoolMemberReconciler) shareWorkspace(
 		return s, nil // Nothing proves a refusal: the share stays as it is.
 	case has && s == nil:
 		// Also after a crash that lost the status write of the share.
-		return report(metav1.ConditionTrue, "Shared", "Workspace %s is bound to claim %s and shared with Coder user %s.", name, claim.Name, target), nil
+		return report(metav1.ConditionTrue, "Shared", "Workspace %s is bound to claim %s and shared with Coder user %s (role %s).", name, claim.Name, target, acl.Users[i].Role), nil
 	case has:
 		// The admin withdrew what allowed the share, for example removed the
 		// user from every listed group.
@@ -215,7 +216,8 @@ func (r *CoderWorkspacePoolMemberReconciler) shareWorkspace(
 	})
 	switch {
 	case err == nil:
-		return report(metav1.ConditionTrue, "Shared", "Workspace %s is bound to claim %s and shared with Coder user %s.", name, claim.Name, member.Status.SharedUserID), nil
+		return report(metav1.ConditionTrue, "Shared", "Workspace %s is bound to claim %s and shared with Coder user %s (role %s).",
+			name, claim.Name, member.Status.SharedUserID, codersdk.WorkspaceRoleUse), nil
 	case coderStatus(err) == http.StatusForbidden:
 		return report(metav1.ConditionFalse, "ShareRefused", "Workspace %s is not shared: %s", name, coderErrorSummary(err)), nil
 	default:

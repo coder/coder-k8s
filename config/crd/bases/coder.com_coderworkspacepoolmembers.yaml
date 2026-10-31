@@ -355,7 +355,7 @@ spec:
                   workspace with for a Share claim. The controller stores it before its
                   first ACL write and never changes it, so a renamed or reused username
                   never moves the share to another user. The Shared condition reports
-                  whether Coder's ACL gives this user the `use` role.
+                  whether Coder's ACL gives this user a role.
                 maxLength: 36
                 pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
                 type: string

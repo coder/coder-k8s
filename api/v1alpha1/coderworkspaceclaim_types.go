@@ -76,8 +76,9 @@ type CoderWorkspaceClaimStatus struct {
 	// BoundTime is when a member took the claim.
 	// +optional
 	BoundTime *metav1.Time `json:"boundTime,omitempty"`
-	// SharedUserID is the Coder user that has the `use` role on the
-	// workspace through this claim, as the member last read it from Coder.
+	// SharedUserID is the Coder user that has a role on the workspace
+	// through this claim, as the member last read it from Coder. The
+	// controller grants `use`.
 	// +kubebuilder:validation:MaxLength=36
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
 	// +kubebuilder:validation:XValidation:rule="self != 'c42fdf75-3097-471c-8c33-fb52454d81c0'",message="sharedUserID must not be the Coder prebuilds system user"
