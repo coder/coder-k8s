@@ -2,7 +2,8 @@
 # CoderWorkspacePool E2E driver (#153 plan 10.4, phases P1 to P8). The Kind job runs it before the lifecycle driver,
 # which deletes namespace coder at its end. It imports its own template from the agent fixture. P8 deletes its claim,
 # pool, and members and checks that their workspaces are deleted in Coder. Once every phase passed, it restores the
-# control plane's spec.workspacePools. Every wait is bounded. Offline tests with stubbed tools: hack/e2e-workspace-pool_test.sh.
+# control plane's spec.workspacePools. Every wait is bounded. Offline tests with stubbed tools:
+# hack/e2e-workspace-pool_test.sh.
 set -euo pipefail
 umask 077 # $WORK holds the Coder token header and request bodies
 shopt -s inherit_errexit
@@ -280,10 +281,10 @@ USED=$(jq -er '[.items[] | select(.spec.claimRef == null and .status.phase == "R
   fail "no unclaimed ready member to use"
 USED_WS=$(jq -er --arg m "$USED" '.items[] | select(.metadata.name == $m) | .status.workspaceID' "$WORK/members.json")
 coder_api POST "/api/v2/workspaces/$USED_WS/usage" >/dev/null || fail "cannot post usage for workspace $USED_WS"
-is_used() { jq -e '.status.conditions // [] | any(.type == "Used" and .status == "True")' "$1" >/dev/null; }
 released() {
   k -n "$NS" get coderworkspacepoolmember "$USED" -o json >"$WORK/used.json" || return 1
-  is_used "$WORK/used.json" && jq -e '[.metadata.ownerReferences[]? | select(.controller == true)] | length == 0' "$WORK/used.json" >/dev/null
+  jq -e '(.status.conditions // [] | any(.type == "Used" and .status == "True")) and
+    ([.metadata.ownerReferences[]? | select(.controller == true)] | length == 0)' "$WORK/used.json" >/dev/null
 }
 USED_T0=$SECONDS
 TIMEOUT=$USED_SECONDS wait_until "member $USED Used=True and released by the pool" released
