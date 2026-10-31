@@ -375,7 +375,7 @@ func TestPoolMemberWaitsForConsentAndOwner(t *testing.T) {
 	requireWait("TemplateNotAllowed", `"default.docker"`)
 	e.allowOwner(t, e.tester.String(), "Default.Docker")
 	e.fake.updateUser(e.tester, func(u *codersdk.User) { u.Status = codersdk.UserStatusSuspended })
-	requireWait("OwnerNotEligible", "Only active users can own workspaces that the operator creates")
+	requireWait("OwnerNotEligible", "Only active users can own workspaces that the operator creates. Activate the user in Coder and log in as it once")
 	e.fake.updateUser(e.tester, func(u *codersdk.User) {
 		u.Status, u.Roles = codersdk.UserStatusActive, []codersdk.SlimRole{{Name: codersdk.RoleTemplateAdmin}}
 	})

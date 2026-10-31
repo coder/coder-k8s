@@ -129,9 +129,12 @@ func checkCoderWorkspaceOwner(ctx context.Context, sdk *codersdk.Client, ownerID
 		return user, nil, err
 	}
 	// Coder refuses a dormant owner's agents (401), so their workspaces could
-	// only time out. Coder creates users through the API as dormant.
+	// only time out. Coder creates users through the API as dormant, and its
+	// dormancy check, every 15 minutes, makes an active user dormant again
+	// while its last login or API use is 90 days old. Activation does not
+	// count as a use.
 	if user.Status != codersdk.UserStatusActive {
-		return user, refuse("status %q is not allowed. Only active users can own workspaces that the operator creates: activate the user in Coder.", user.Status), nil
+		return user, refuse("status %q is not allowed. Only active users can own workspaces that the operator creates. Activate the user in Coder and log in as it once: Coder marks users unseen for 90 days dormant.", user.Status), nil
 	}
 	// Headless users created before service accounts still have login type none.
 	if !user.IsServiceAccount && user.LoginType != codersdk.LoginTypePassword && user.LoginType != codersdk.LoginTypeNone { //nolint:staticcheck // See above.
