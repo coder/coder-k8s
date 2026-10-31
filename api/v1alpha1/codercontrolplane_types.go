@@ -21,6 +21,10 @@ const (
 	// yet. The operator does not read or write an operator token Secret that
 	// another owner, or no owner, controls.
 	CoderControlPlaneConditionOperatorTokenSecretOwned = "OperatorTokenSecretOwned"
+	// CoderControlPlaneConditionOperatorTLSReady indicates whether the operator
+	// verifies the Coder serving certificate with spec.tls.operatorAccess. It is
+	// set only while spec.tls.operatorAccess is set.
+	CoderControlPlaneConditionOperatorTLSReady = "OperatorTLSReady"
 
 	// CoderControlPlaneLicenseTierNone indicates no license is currently installed.
 	CoderControlPlaneLicenseTierNone = "none"

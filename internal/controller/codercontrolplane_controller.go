@@ -2172,6 +2172,10 @@ func (r *CoderControlPlaneReconciler) reconcileEntitlements(
 		nextStatus.ExternalProvisionerDaemonsEntitlement = coderv1alpha1.CoderControlPlaneEntitlementUnknown
 	}
 
+	if err := r.reconcileOperatorTLSTrust(ctx, coderControlPlane, nextStatus); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if nextStatus.Phase != coderv1alpha1.CoderControlPlanePhaseReady ||
 		!nextStatus.OperatorAccessReady ||
 		nextStatus.OperatorTokenSecretRef == nil {
@@ -2204,6 +2208,11 @@ func (r *CoderControlPlaneReconciler) reconcileEntitlements(
 	}
 
 	entitlements, err := r.EntitlementsInspector.Entitlements(ctx, controlPlaneURL, coderTLS, operatorToken)
+	if coderTLS != nil {
+		if conditionErr := recordOperatorTLSCall(coderControlPlane, nextStatus, controlPlaneURL, err); conditionErr != nil {
+			return ctrl.Result{}, conditionErr
+		}
+	}
 	if err != nil {
 		var sdkErr *codersdk.Error
 		if errors.As(err, &sdkErr) {
@@ -3378,6 +3387,14 @@ func (r *CoderControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),
 		&coderv1alpha1.CoderControlPlane{},
+		caBundleConfigMapNameFieldIndex,
+		indexByCABundleConfigMapName,
+	); err != nil {
+		return fmt.Errorf("index coder control planes by CA bundle ConfigMap name: %w", err)
+	}
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&coderv1alpha1.CoderControlPlane{},
 		envFromSecretNameFieldIndex,
 		indexByEnvFromSecretName,
 	); err != nil {
@@ -3408,6 +3425,10 @@ func (r *CoderControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(r.reconcileRequestsForEnvFromConfigMap),
+		).
+		Watches(
+			&corev1.ConfigMap{},
+			handler.EnqueueRequestsFromMapFunc(r.reconcileRequestsForCABundleConfigMap),
 		).
 		// A control plane that is being deleted waits for these (#353).
 		Watches(&coderv1alpha1.CoderAIGatewayKey{}, handler.EnqueueRequestsFromMapFunc(requestForDependentControlPlane),
