@@ -41,7 +41,8 @@ cleanup() {
   rm -f "$WORK/coder.hdr" "$WORK/coder-body.json" "$WORK/owner.json" "$WORK/owner-login.json" "$WORK/owner.hdr"
   printf '%s\n' "=== RECEIPT ($RESULT) ===" "owner=$OWNER/${OWNER_ID:-unset}" "pool_uid=${POOL_UID:-unset}" \
     "claim_ready_ms=${CLAIM_MS:-unset}" "bind_deadline=${BIND_DEADLINE:-unset}" "restart_member=${RESTART_MEMBER:-unset}" \
-    "live_workspaces_after_restart=${LIVE:-unset}" "phase_seconds=${PHASES[*]:-unset}" | tee "$WORK/receipt.txt"
+    "live_workspaces_after_restart=${LIVE:-unset}" "member_workspace_rows=${ROWS:-unset}" "phase_seconds=${PHASES[*]:-unset}" |
+    tee "$WORK/receipt.txt"
 }
 trap cleanup EXIT
 
@@ -255,11 +256,17 @@ members_json
 jq -e --slurpfile c "$WORK/owner-workspaces.json" '[.items[] | select(.metadata.deletionTimestamp == null) | .status.workspaceID] | sort
   == ([$c[0].workspaces[] | select(.name | startswith("kwp-")) | .id] | sort) and length == 5' "$WORK/members.json" >/dev/null ||
   fail "the owner's live kwp- workspaces are not exactly the 5 members' workspaces"
-# A second create of a member that Coder then deleted would leave a deleted workspace with that member's name.
-coder_api GET "/api/v2/workspaces?q=owner:$OWNER%20deleted:true" >"$WORK/owner-deleted.json"
-jq -e --slurpfile m "$WORK/members.json" '[$m[0].items[].status.workspaceName] as $names |
-  [.workspaces[] | select(.name as $n | $names | index($n))] | length == 0' "$WORK/owner-deleted.json" >/dev/null ||
-  fail "a member's workspace name also has a deleted workspace: $(jq -c '[.workspaces[].name]' "$WORK/owner-deleted.json")"
+# A second create of a member that Coder then deleted leaves a deleted row with that member's name. Coder's API does
+# not list deleted workspaces, so count the rows in its database.
+NAMES=$(jq -er '[.items[].status.workspaceName | select(test("^kwp-[0-9a-f]{28}$"))] |
+  if length == 5 then map(@sh) | join(",") else error("want 5 member workspace names") end' "$WORK/members.json") ||
+  fail "the members do not name 5 kwp- workspaces"
+[[ $OWNER_ID =~ ^[0-9a-f-]{36}$ ]] || fail "assertion failed: owner ID '$OWNER_ID' is not a UUID"
+DB_POD=$(k -n "$NS" get cluster coder-db -o json | jq -er '.status.currentPrimary') || fail "no CloudNativePG primary for coder-db"
+ROWS=$(k -n "$NS" exec "$DB_POD" -c postgres -- psql -d coder -XtAc \
+  "SELECT count(*) FROM workspaces WHERE owner_id = '$OWNER_ID' AND name IN ($NAMES)" | grep -Ex '[0-9]+') ||
+  fail "cannot count the members' workspace rows"
+((ROWS == 5)) || fail "the 5 members' workspace names have $ROWS workspace rows (deleted included), want 5"
 w=$(coder_api GET "/api/v2/workspaces/$BOUND_WS") || fail "cannot read the bound workspace"
 [[ $(deadline_of "$w") == "$BIND_DEADLINE" ]] || fail "the bound deadline changed after the bind extension"
 phase P5
