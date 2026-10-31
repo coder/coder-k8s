@@ -42,7 +42,7 @@ func (r *CoderTemplateTestReconciler) deleteStep(
 	// one whose ID a failed status write lost, or someone else's. The test has
 	// counted none yet, and the same status write makes it final, so it
 	// counts once.
-	result, err := deleteCoderWorkspace(ctx, sdk, &state, now, afterPass)
+	result, err := deleteCoderWorkspace(ctx, sdk, &state, now, afterPass, nil)
 	tt.Status.DeleteBuildID, tt.Status.DeleteAttempts = state.deleteBuildID, state.deleteAttempts
 	return deleteResult{deleted: result.deleted, failedBuild: result.failedBuild, wait: templateTestStepFrom(result.wait), requeue: result.requeue}, err
 }
