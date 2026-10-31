@@ -87,7 +87,7 @@ A claim with a ready workspace in its pool is `Bound` and `Ready` at once. In th
 To delete claimed workspaces that nobody uses, set `claims.idleTimeoutSeconds` on the pool (at least 600). Without it, the operator never deletes a claimed workspace on its own.
 
 !!! warning "Idle reaping deletes the workspace and its data"
-    The pool deletes a claimed workspace once both the bind and the workspace's `last_used_at` in Coder are older than `claims.idleTimeoutSeconds`. A stopped workspace counts as idle. The claim then becomes `Lost` with reason `IdleTimeout`, and it never binds again. Coder writes `last_used_at` about once a minute, so a session that starts less than a minute before the pool's check can still be lost.
+    The pool deletes a claimed workspace once both the bind and the workspace's `last_used_at` in Coder are older than `claims.idleTimeoutSeconds`. A stopped workspace counts as idle. The claim then becomes `Lost` with reason `IdleTimeout`, and it never binds again. If Coder shows a newer `last_used_at` right before the delete build, the operator keeps the workspace in Coder and only releases its member. Find it as in [Cleanup](#cleanup). Coder writes `last_used_at` about once a minute, so a session that starts less than a minute before the delete build can still be lost.
 
 ## 5. Grant access
 
