@@ -2,8 +2,12 @@ package controller_test
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -17,6 +21,7 @@ import (
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/controller"
+	"github.com/coder/coder-k8s/internal/controlplaneurl"
 	"github.com/coder/coder-k8s/internal/tlstest"
 )
 
@@ -149,4 +154,43 @@ func TestReconcile_LicenseAndEntitlementsUseOperatorTLS(t *testing.T) {
 		require.Equal(t, statusURL, req.coderURL)
 		require.NotNil(t, req.coderTLS)
 	}
+}
+
+func TestSDKLicenseClientsVerifyCoderTLS(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	ca := tlstest.NewCA(t)
+	var requests atomic.Int32
+	server := ca.NewServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v2/licenses" {
+			_, _ = w.Write([]byte(`[]`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"features":{}}`))
+	}), "127.0.0.1")
+	newTrust := func(caBundle []byte) *controlplaneurl.TLS {
+		trust, err := controlplaneurl.NewTLS(caBundle, "")
+		require.NoError(t, err)
+		return trust
+	}
+	uploader, inspector := controller.NewSDKLicenseUploader(), controller.NewSDKEntitlementsInspector()
+
+	_, err := uploader.HasAnyLicense(ctx, server.URL, newTrust(ca.PEM), "operator-token")
+	require.NoError(t, err)
+	_, err = inspector.Entitlements(ctx, server.URL, newTrust(ca.PEM), "operator-token")
+	require.NoError(t, err)
+	require.EqualValues(t, 2, requests.Load())
+
+	otherCA := newTrust(tlstest.NewCA(t).PEM)
+	var verifyErr *tls.CertificateVerificationError
+	_, err = uploader.HasAnyLicense(ctx, server.URL, otherCA, "operator-token")
+	require.True(t, errors.As(err, &verifyErr), "want a certificate verification error, got %v", err)
+	err = uploader.AddLicense(ctx, server.URL, otherCA, "operator-token", "license-jwt")
+	require.True(t, errors.As(err, &verifyErr), "want a certificate verification error, got %v", err)
+	_, err = inspector.Entitlements(ctx, server.URL, otherCA, "operator-token")
+	require.True(t, errors.As(err, &verifyErr), "want a certificate verification error, got %v", err)
+	require.EqualValues(t, 2, requests.Load(), "a server that failed verification must get no request")
 }
