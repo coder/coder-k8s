@@ -112,8 +112,8 @@ func (r *CoderWorkspacePoolMemberReconciler) cleanupStep(
 		return step, templateTestUnavailablePoll, false, err
 	}
 	// The pool releases a used member (decision D6). With no controller left,
-	// garbage collection never deletes it: only a person or a namespace
-	// deletion does, and that delete deletes its workspace, as a claim's does.
+	// garbage collection never deletes it, so its delete is deliberate and
+	// deletes its workspace, as a claim's delete does.
 	released := metav1.GetControllerOf(member) == nil &&
 		meta.IsStatusConditionTrue(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed)
 	var keep func(codersdk.Workspace) (bool, error)

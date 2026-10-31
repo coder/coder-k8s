@@ -163,8 +163,8 @@ func TestPoolMemberCleanupLastUseCheck(t *testing.T) {
 }
 
 // TestPoolMemberCleanupDeletesReleasedUsedMember (decision D6, Kind phase
-// P8): once the pool released a used member, only a person or a namespace
-// deletion can delete it, and that delete deletes its workspace. A used
+// P8): once the pool released a used member, garbage collection never
+// deletes it, so its delete is deliberate and deletes its workspace. A used
 // member that its pool still controls keeps its workspace, because garbage
 // collection of the pool can be the deleter. So does a member without a
 // controller, for example after a pool delete with --cascade=orphan, whose
