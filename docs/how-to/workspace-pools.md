@@ -60,7 +60,7 @@ spec:
 kubectl -n coder get coderworkspacepools,coderworkspacepoolmembers
 ```
 
-Each member owns one workspace named `kwp-` plus 28 hex characters of the member's UID. Do not rename these workspaces, and do not use an unclaimed one directly. The pool releases a workspace that someone used without a claim, and never deletes it on its own. Opening an unclaimed workspace's page in the Coder dashboard counts as use too: the page asks the workspace agent for its containers, and in Coder v2.37.2 that request moves `last_used_at`. The workspaces list does not.
+Each member owns one workspace named `kwp-` plus 28 hex characters of the member's UID. Do not rename these workspaces, and do not use an unclaimed one directly. The pool releases a workspace that someone used without a claim, and never deletes it on its own. Opening an unclaimed workspace's page in the Coder dashboard counts as use too: the page asks the workspace agent for its containers, and in Coder v2.37.2 that request moves `last_used_at` ([#444](https://github.com/coder/coder-k8s/issues/444)). The workspaces list does not.
 
 `replicas` has a scale subresource, so `kubectl scale`, HPA, and KEDA can change it:
 
