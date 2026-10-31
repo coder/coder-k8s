@@ -38,17 +38,22 @@ func NewTLS(caBundle []byte, serverName string) (*TLS, error) {
 }
 
 // parseCABundle accepts only a bundle of PEM certificates, so that a bundle
-// with a broken or cut-off certificate fails instead of trusting only the
-// certificates before it.
+// with other data, or a broken or cut-off certificate, fails instead of
+// trusting only some of its certificates.
 func parseCABundle(caBundle []byte) (*x509.CertPool, error) {
 	pool := x509.NewCertPool()
 	count := 0
-	rest := caBundle
-	for {
+	for rest := bytes.TrimSpace(caBundle); len(rest) > 0; {
+		// pem.Decode skips data before a block, so check that a block starts here.
 		var block *pem.Block
-		block, rest = pem.Decode(rest)
+		if bytes.HasPrefix(rest, []byte("-----BEGIN ")) {
+			block, rest = pem.Decode(rest)
+		}
 		if block == nil {
-			break
+			if count == 0 {
+				return nil, errors.New("the bundle does not start with a PEM block")
+			}
+			return nil, fmt.Errorf("the data after certificate %d is not a PEM block", count)
 		}
 		count++
 		if block.Type != "CERTIFICATE" {
@@ -59,12 +64,10 @@ func parseCABundle(caBundle []byte) (*x509.CertPool, error) {
 			return nil, fmt.Errorf("parse certificate %d: %w", count, err)
 		}
 		pool.AddCert(cert)
+		rest = bytes.TrimSpace(rest)
 	}
 	if count == 0 {
 		return nil, errors.New("no PEM certificate")
-	}
-	if len(bytes.TrimSpace(rest)) > 0 {
-		return nil, fmt.Errorf("the data after certificate %d is not a PEM block", count)
 	}
 	return pool, nil
 }
