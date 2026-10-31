@@ -10,7 +10,6 @@ import (
 	"strings"
 	"unicode"
 
-	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -57,10 +56,14 @@ func (r *CoderControlPlaneReconciler) recordOperatorToken(
 		if latest.UID != coderControlPlane.UID {
 			return fmt.Errorf("control plane %s has UID %q, not %q", key, latest.UID, coderControlPlane.UID)
 		}
-		if equality.Semantic.DeepEqual(latest.Status.OperatorTokenSecretRef, ref) && latest.Status.OperatorTokenDatabaseHash == databaseHash {
+		if latest.Status.OperatorTokenSecretRef != nil && latest.Status.OperatorTokenDatabaseHash == databaseHash {
 			return nil
 		}
-		latest.Status.OperatorTokenSecretRef = cloneSecretKeySelector(ref)
+		// A published reference keeps its name until the final status write,
+		// so that consumers never read a Secret that holds no token yet.
+		if latest.Status.OperatorTokenSecretRef == nil {
+			latest.Status.OperatorTokenSecretRef = cloneSecretKeySelector(ref)
+		}
 		latest.Status.OperatorTokenDatabaseHash = databaseHash
 		return r.Status().Update(ctx, latest)
 	}); err != nil {

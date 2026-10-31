@@ -2308,6 +2308,10 @@ func (r *CoderControlPlaneReconciler) deleteManagedOperatorTokenSecret(
 			TokenName:        operatorAccessDatabaseTokenName(coderControlPlane),
 			Token:            token,
 		}); err != nil {
+			if errors.Is(err, coderbootstrap.ErrOperatorTokenNotFound) {
+				log.FromContext(ctx).Info("Keeping the operator token Secret: the current database has no token with its value, so the operator cannot confirm that its token is gone",
+					"secret", operatorTokenSecretName)
+			}
 			return fmt.Errorf("delete the token of operator token secret %q in Coder: %w", operatorTokenSecretName, err)
 		}
 	}
