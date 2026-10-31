@@ -1,16 +1,21 @@
 package controller_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/controller"
 )
 
 func (e *poolMemberEnv) deleteMember(t *testing.T, key types.NamespacedName) {
@@ -102,6 +107,37 @@ func TestPoolMemberCleanupGuardsDelete(t *testing.T) {
 	require.Equal(t, requests, e.fake.totalRequests(), "no Coder call after the finalizer is gone")
 	member.Finalizers = nil
 	require.NoError(t, k8sClient.Update(e.ctx, member))
+}
+
+// staleControlPlaneCache answers NotFound for every CoderControlPlane, as a
+// cache that has not seen the control plane yet.
+type staleControlPlaneCache struct{ client.Client }
+
+func (c staleControlPlaneCache) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*coderv1alpha1.CoderControlPlane); ok {
+		return apierrors.NewNotFound(coderv1alpha1.GroupVersion.WithResource("codercontrolplanes").GroupResource(), key.Name)
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+// TestPoolMemberCleanupConfirmsControlPlaneGone: the release of a member whose
+// control plane is gone leaves its workspace in Coder for good. So a cached
+// NotFound does not count: while the control plane still exists, a member
+// that stopped with OwnershipUnknown keeps its finalizer.
+func TestPoolMemberCleanupConfirmsControlPlaneGone(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	key, workspaceID := e.readyMember(t)
+	e.fake.renameWorkspace(workspaceID, "renamed")
+	e.deleteMember(t, key)
+	requireDeletedCondition(t, e.reconcileMember(t, key, 1), metav1.ConditionUnknown, "OwnershipUnknown")
+
+	stale := &controller.CoderWorkspacePoolMemberReconciler{Client: staleControlPlaneCache{k8sClient}, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	requests := e.fake.totalRequests()
+	_, err := stale.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+	require.NotNil(t, e.reconcileMember(t, key, 0), "the control plane exists, so the finalizer stays")
+	require.Equal(t, requests, e.fake.totalRequests(), "no Coder call")
 }
 
 // TestPoolMemberCleanupLastUseCheck is mutation check 11: before each
