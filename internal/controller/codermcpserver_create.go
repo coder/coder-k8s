@@ -172,7 +172,7 @@ func (r *CoderMCPServerReconciler) createMCPServer(
 		r.rememberSentCredentials(server, sent, values)
 		return nil, nil
 	case status == 0 && createHadNoEffect(err):
-		// A failed dial or TLS handshake never sent the request.
+		// coder.NotSent proves that the request never reached Coder.
 		server.Status.CreateAttemptTime, server.Status.Credentials = nil, nil
 		return mcpServerWait(mcpServerRetry, "CreateRetrying", "The create request had no effect: %s", coderErrorSummary(err)), nil
 	case status >= 400 && status < 500:

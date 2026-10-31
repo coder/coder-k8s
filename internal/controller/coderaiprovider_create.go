@@ -186,7 +186,7 @@ func (r *CoderAIProviderReconciler) createAIProvider(
 		r.rememberSentKey(provider, key)
 		return nil, nil
 	case status == 0 && createHadNoEffect(err):
-		// A failed dial or TLS handshake never sent the request.
+		// coder.NotSent proves that the request never reached Coder.
 		provider.Status.CreateAttemptTime, provider.Status.Credential = nil, nil
 		return aiProviderWait(aiProviderRetry, "CreateRetrying", "The create request had no effect: %s", coderErrorSummary(err)), nil
 	case status >= 400 && status < 500:

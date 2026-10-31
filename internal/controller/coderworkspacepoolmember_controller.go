@@ -23,8 +23,11 @@ import (
 	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 )
@@ -47,6 +50,50 @@ type CoderWorkspacePoolMemberReconciler struct {
 	Clock     clock.PassiveClock
 
 	rateLimited coderBackoff // Keyed by types.NamespacedName.
+}
+
+// SetupWithManager wires the reconciler into controller-runtime. Nothing
+// calls it until activation (#153 plan PR 12). One worker: the owner cap
+// check before the create marker counts the owner's members, which is exact
+// only while no other member reconciles at the same time. A control plane
+// change wakes its members, so a member that waits for its control plane, or
+// whose cleanup ends once the control plane is gone, does not wait for its
+// next poll.
+func (r *CoderWorkspacePoolMemberReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if mgr == nil || r.Client == nil || r.APIReader == nil || r.Scheme == nil || r.Clock == nil {
+		return errors.New("assertion failed: pool member reconciler needs a manager, a client, an API reader, a scheme, and a clock")
+	}
+	if err := startSecretInformer(mgr); err != nil {
+		return err
+	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &coderv1alpha1.CoderWorkspacePoolMember{}, poolControlPlaneRefIndex,
+		func(obj client.Object) []string {
+			if member, ok := obj.(*coderv1alpha1.CoderWorkspacePoolMember); ok && member.Spec.ControlPlaneRef.Name != "" {
+				return []string{member.Spec.ControlPlaneRef.Name}
+			}
+			return nil
+		}); err != nil {
+		return fmt.Errorf("index pool members by control plane: %w", err)
+	}
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&coderv1alpha1.CoderWorkspacePoolMember{}).
+		Watches(&coderv1alpha1.CoderControlPlane{}, handler.EnqueueRequestsFromMapFunc(r.membersForControlPlane)).
+		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
+		Named("coderworkspacepoolmember").
+		Complete(r)
+}
+
+func (r *CoderWorkspacePoolMemberReconciler) membersForControlPlane(ctx context.Context, obj client.Object) []reconcile.Request {
+	var members coderv1alpha1.CoderWorkspacePoolMemberList
+	if err := r.List(ctx, &members, client.InNamespace(obj.GetNamespace()), client.MatchingFields{poolControlPlaneRefIndex: obj.GetName()}); err != nil {
+		log.FromContext(ctx).Error(err, "list pool members of a control plane", "controlPlane", obj.GetName())
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(members.Items))
+	for _, member := range members.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: member.Namespace, Name: member.Name}})
+	}
+	return requests
 }
 
 // Reconcile runs the first step of the member that applies, then returns.

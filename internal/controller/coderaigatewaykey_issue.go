@@ -243,8 +243,8 @@ func aiGatewayKeyCreateFailure(key *coderv1alpha1.CoderAIGatewayKey, name string
 
 // aiGatewayKeyCreateHadNoEffect reports answers that prove Coder created
 // nothing: the rate limiter and authentication answer before the handler,
-// and a failed dial or TLS handshake sent no request. Coder's 406 means
-// something else for workspaces, so it is not counted here.
+// and coder.NotSent proves that a request never reached Coder. Coder's 406
+// means something else for workspaces, so it is not counted here.
 func aiGatewayKeyCreateHadNoEffect(err error) bool {
 	return coderStatus(err) != http.StatusNotAcceptable && createHadNoEffect(err)
 }
