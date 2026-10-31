@@ -692,7 +692,7 @@ WHERE id = $3
 
 	if req.Token != "" {
 		tokenID, tokenSecret, validFormat := splitOperatorToken(req.Token)
-		if !validFormat {
+		if !validFormat || validateOperatorTokenID(tokenID) != nil {
 			return ErrOperatorTokenNotFound
 		}
 		hashedSecret := sha256.Sum256([]byte(tokenSecret))

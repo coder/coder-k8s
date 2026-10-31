@@ -2290,6 +2290,12 @@ func (r *CoderControlPlaneReconciler) deleteManagedOperatorTokenSecret(
 		return fmt.Errorf("assertion failed: operator token secret name must not be empty")
 	}
 
+	if revokeToken {
+		if err := r.revokeEarlierSecretTokens(ctx, coderControlPlane, operatorTokenSecretName); err != nil {
+			return err
+		}
+	}
+
 	secret := &corev1.Secret{}
 	err := r.Get(ctx, types.NamespacedName{Name: operatorTokenSecretName, Namespace: coderControlPlane.Namespace}, secret)
 	switch {
@@ -2327,6 +2333,50 @@ func (r *CoderControlPlaneReconciler) deleteManagedOperatorTokenSecret(
 		return fmt.Errorf("delete operator token secret %q while disabling operator access: %w", operatorTokenSecretName, err)
 	}
 
+	return nil
+}
+
+// revokeEarlierSecretTokens deletes in Coder the exact token of every other
+// Secret in the namespace that this control plane controls, for example the
+// Secret of an earlier spec.operatorAccess.generatedTokenSecretName. Without a
+// record, the value is the only proof of such a token. A value that names no
+// token proves nothing, so those Secrets stay as they are.
+func (r *CoderControlPlaneReconciler) revokeEarlierSecretTokens(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+	currentSecretName string,
+) error {
+	secrets := &corev1.SecretList{}
+	if err := r.List(ctx, secrets, client.InNamespace(coderControlPlane.Namespace)); err != nil {
+		return fmt.Errorf("list secrets while disabling operator access: %w", err)
+	}
+	postgresURL := ""
+	for i := range secrets.Items {
+		secret := &secrets.Items[i]
+		token := string(secret.Data[coderv1alpha1.DefaultTokenSecretKey])
+		if secret.Name == currentSecretName || token == "" || !isManagedOperatorTokenSecret(secret, coderControlPlane) {
+			continue
+		}
+		if r.OperatorAccessProvisioner == nil {
+			return fmt.Errorf("assertion failed: operator access provisioner must not be nil to delete the token of secret %q", secret.Name)
+		}
+		if postgresURL == "" {
+			resolved, err := r.resolveBootstrapPostgresURL(ctx, coderControlPlane)
+			if err != nil {
+				return fmt.Errorf("resolve postgres URL while disabling operator access: %w", err)
+			}
+			postgresURL = resolved
+		}
+		err := r.OperatorAccessProvisioner.RevokeOperatorToken(ctx, coderbootstrap.RevokeOperatorTokenRequest{
+			PostgresURL:      postgresURL,
+			OperatorUsername: defaultOperatorAccessUsername,
+			TokenName:        operatorAccessDatabaseTokenName(coderControlPlane),
+			Token:            token,
+		})
+		if err != nil && !errors.Is(err, coderbootstrap.ErrOperatorTokenNotFound) {
+			return fmt.Errorf("delete the token of secret %q in Coder: %w", secret.Name, err)
+		}
+	}
 	return nil
 }
 
