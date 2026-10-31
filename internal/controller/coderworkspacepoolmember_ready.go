@@ -161,7 +161,11 @@ func readOwnPoolMemberWorkspace(
 // identity (plan 6.2, identity guard) against values that no status writer
 // can change: the owner from the immutable spec, the kwp- name derived from
 // the UID, and the template. It also returns the operator user's ID. A nil
-// step means the workspace is this member's own.
+// step means the workspace is this member's own. The guard does not follow a
+// rename: the workspace ID is in status, and only the name tells this
+// member's workspace apart from one that the operator built for another
+// member with the same inputs. A renamed workspace makes the member
+// OwnershipUnknown.
 func readPoolMemberWorkspace(
 	ctx context.Context, sdk *codersdk.Client, member *coderv1alpha1.CoderWorkspacePoolMember,
 ) (codersdk.Workspace, uuid.UUID, *coderStep, error) {
