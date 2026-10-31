@@ -171,7 +171,7 @@ To fix `TokenSecretNotOwned`, do one of these steps. The controller checks again
 
 ### Where the operator token goes
 
-The controller, provisioners, template tests, the AI resources and the aggregated API server send the operator token to Coder. The URL and the transport depend on `spec.tls`:
+The controller, provisioners, template tests, workspace pools, the AI resources and the aggregated API server send the operator token to Coder. The URL and the transport depend on `spec.tls`:
 
 | `spec.tls` | URL of the operator's Coder API calls | Transport |
 | --- | --- | --- |

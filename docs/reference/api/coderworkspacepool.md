@@ -36,7 +36,7 @@
 | `boundReplicas` | integer | BoundReplicas is the number of members that claims hold. |
 | `usedReplicas` | integer | UsedReplicas is the number of members that someone may have used without a claim. They no longer count toward the pool, and the controller never deletes their workspaces. |
 | `pendingClaims` | integer | PendingClaims is the number of claims that wait for a workspace. |
-| `selector` | string | Selector is the label selector of the scale subresource, in string form: coder.com/workspace-pool-uid=<pool UID>. It matches no pods unless a template sets that label, so autoscalers must use External or Object metrics with target type AverageValue. |
+| `selector` | string | Selector is the label selector of the scale subresource, in string form: the label coder.com/workspace-pool-uid equal to the pool's UID. It matches no pods unless a template sets that label, so autoscalers must use External or Object metrics with target type AverageValue. |
 | `resolved` | [CoderWorkspacePoolResolved](#coderworkspacepoolresolved) | Resolved holds the inputs that the controller resolved in Coder. |
 | `consecutiveFailures` | integer | ConsecutiveFailures is the number of member failures in a row: the length of RunFailures. A ready member and a change of status.resolved (template, version, preset, parameters, owner, or readyTimeoutSeconds) reset it. A change of replicas or maxInFlight does not. |
 | `lastFailure` | [CoderWorkspacePoolFailure](#coderworkspacepoolfailure) | LastFailure is the newest member failure. |

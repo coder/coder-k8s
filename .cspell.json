@@ -103,7 +103,15 @@
     "cabundle",
     "cephfs",
     "iscsi",
-    "storageos"
+    "storageos",
+    "autoscalers",
+    "autostop",
+    "coderworkspaceclaim",
+    "coderworkspaceclaims",
+    "coderworkspacepool",
+    "coderworkspacepools",
+    "coderworkspacepoolmember",
+    "coderworkspacepoolmembers"
   ],
   "ignorePaths": [
     ".git/**",
