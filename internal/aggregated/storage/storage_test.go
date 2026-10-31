@@ -2935,6 +2935,9 @@ func (s *mockCoderServerState) handleRequest(t *testing.T, w http.ResponseWriter
 	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "workspaces") && len(segments) == 3:
 		s.handleListWorkspaces(w)
 		return
+	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "workspaces") && len(segments) == 4:
+		s.handleGetWorkspaceByID(w, segments[3])
+		return
 	case r.Method == http.MethodGet && hasSegments(segments, "api", "v2", "users") && len(segments) == 6 && segments[4] == "workspace":
 		s.handleGetWorkspace(w, segments[3], segments[5])
 		return
@@ -3538,6 +3541,24 @@ func (s *mockCoderServerState) handleGetWorkspace(w http.ResponseWriter, owner, 
 		return
 	}
 	workspace := s.workspacesByID[workspaceID]
+
+	writeJSON(w, http.StatusOK, workspace)
+}
+
+func (s *mockCoderServerState) handleGetWorkspaceByID(w http.ResponseWriter, workspaceIDSegment string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	workspaceID, err := uuid.Parse(workspaceIDSegment)
+	if err != nil {
+		writeCoderError(w, http.StatusBadRequest, fmt.Sprintf("invalid workspace id %q", workspaceIDSegment))
+		return
+	}
+	workspace, ok := s.workspacesByID[workspaceID]
+	if !ok {
+		writeCoderError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
 
 	writeJSON(w, http.StatusOK, workspace)
 }

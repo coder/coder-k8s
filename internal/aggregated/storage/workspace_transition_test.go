@@ -199,8 +199,18 @@ func runTransition(t *testing.T, s *WorkspaceTransitionStorage, dryRun bool) (*a
 	return result, nil
 }
 
+// build returns a build with the job status and a workspace status that matches it.
 func build(transition codersdk.WorkspaceTransition, status codersdk.ProvisionerJobStatus) codersdk.WorkspaceBuild {
-	return codersdk.WorkspaceBuild{Transition: transition, Job: codersdk.ProvisionerJob{Status: status}}
+	workspaceStatus := codersdk.WorkspaceStatusPending
+	switch {
+	case status == codersdk.ProvisionerJobSucceeded && transition == codersdk.WorkspaceTransitionStart:
+		workspaceStatus = codersdk.WorkspaceStatusRunning
+	case status == codersdk.ProvisionerJobSucceeded && transition == codersdk.WorkspaceTransitionStop:
+		workspaceStatus = codersdk.WorkspaceStatusStopped
+	case status == codersdk.ProvisionerJobFailed:
+		workspaceStatus = codersdk.WorkspaceStatusFailed
+	}
+	return codersdk.WorkspaceBuild{Transition: transition, Status: workspaceStatus, Job: codersdk.ProvisionerJob{Status: status}}
 }
 
 const (
@@ -498,6 +508,8 @@ func TestWorkspaceTransitionUncertainPost(t *testing.T) {
 		{"a proxy answered 200 with an HTML page", stop, false, nil, http.StatusOK, false, ""},
 		{"a proxy answered 201 with {} after the build was queued", stop, false, &found{transition: stop}, http.StatusCreated, true, "{}"},
 		{"a proxy answered 201 with null", stop, false, nil, http.StatusCreated, false, "null"},
+		{"a proxy answered 201 with only a build ID", stop, false, nil, http.StatusCreated, false, `{"id":"` + uuid.NewString() + `"}`},
+		{"a proxy answered 307 without Location after the build was queued", stop, false, &found{transition: stop}, http.StatusTemporaryRedirect, true, ""},
 		{"another user queued the same transition", stop, false, &found{transition: stop, byOther: true}, 0, false, ""},
 		{"the new build has the other transition", stop, false, &found{transition: start}, 0, false, ""},
 		{"a start with the requested version", start, true, &found{transition: start}, 0, true, ""},
@@ -636,6 +648,67 @@ func TestWorkspaceTransitionUncertainPost(t *testing.T) {
 	}
 }
 
+// TestWorkspaceTransitionMalformedConfirmingReRead: Coder queued the build, the POST answer leaves
+// it open, and the confirming re-read fails or does not show a usable new build: a workspace
+// without its name, a latest build without its ID or its status. The re-read does not confirm the
+// build, so the result is the uncertain 504, not a 500 and not Queued. A 409 that is not Coder's own
+// answer leaves the result open in the same way.
+func TestWorkspaceTransitionMalformedConfirmingReRead(t *testing.T) {
+	writeWorkspace := func(change func(*codersdk.Workspace)) func(http.ResponseWriter, codersdk.Workspace) {
+		return func(w http.ResponseWriter, current codersdk.Workspace) {
+			change(&current)
+			writeLogFakeJSON(w, current)
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		post   func(http.ResponseWriter)
+		reRead func(http.ResponseWriter, codersdk.Workspace)
+	}{
+		{"307, workspace without its name", gatewayPageWriter(http.StatusTemporaryRedirect), writeWorkspace(func(ws *codersdk.Workspace) { ws.Name = "" })},
+		{"502, workspace without its name", gatewayPageWriter(http.StatusBadGateway), writeWorkspace(func(ws *codersdk.Workspace) { ws.Name = "" })},
+		{"307, latest build without its ID", gatewayPageWriter(http.StatusTemporaryRedirect), writeWorkspace(func(ws *codersdk.Workspace) { ws.LatestBuild.ID = uuid.Nil })},
+		{"502, latest build without its ID", gatewayPageWriter(http.StatusBadGateway), writeWorkspace(func(ws *codersdk.Workspace) { ws.LatestBuild.ID = uuid.Nil })},
+		{"307, latest build without its status", gatewayPageWriter(http.StatusTemporaryRedirect), writeWorkspace(func(ws *codersdk.Workspace) { ws.LatestBuild.Status = "" })},
+		{"502, latest build without its status", gatewayPageWriter(http.StatusBadGateway), writeWorkspace(func(ws *codersdk.Workspace) { ws.LatestBuild.Status = "" })},
+		{"proxy 409 page, re-read 502", gatewayPageWriter(http.StatusConflict), func(w http.ResponseWriter, _ codersdk.Workspace) { writeLogFakeError(w, http.StatusBadGateway) }},
+		{"409 that looks like Coder's, re-read 502", func(w http.ResponseWriter) { writeLogFakeError(w, http.StatusConflict) }, func(w http.ResponseWriter, _ codersdk.Workspace) {
+			writeLogFakeError(w, http.StatusBadGateway)
+		}},
+	} {
+		f := newTransitionFakeCoder(t, build(codersdk.WorkspaceTransitionStart, codersdk.ProvisionerJobSucceeded))
+		queued := build(codersdk.WorkspaceTransitionStop, codersdk.ProvisionerJobPending)
+		queued.ID, queued.BuildNumber, queued.InitiatorID = uuid.New(), 8, f.operatorID
+		f.set(func(f *transitionFakeCoder) {
+			f.onPost = func(w http.ResponseWriter, _ *http.Request) {
+				f.update(func(ws *codersdk.Workspace) { ws.LatestBuild = queued })
+				tc.post(w)
+			}
+			f.onReread = func(w http.ResponseWriter, _ *http.Request) {
+				f.mu.Lock()
+				current := f.ws
+				f.mu.Unlock()
+				tc.reRead(w, current)
+			}
+		})
+		result, err := runTransition(t, newTestTransitionStorage(t, f, codersdk.WorkspaceTransitionStop), false)
+		if posts, _ := f.recordedPosts(); len(posts) != 1 || f.rereads.Load() != 1 {
+			t.Fatalf("%s: POSTs=%d rereads=%d, want 1 and 1", tc.name, len(posts), f.rereads.Load())
+		}
+		if !apierrors.IsTimeout(err) || !strings.Contains(err.Error(), "uncertain") || !strings.Contains(err.Error(), "re-read") {
+			t.Fatalf("%s: result=%v err=%v, want an uncertain 504", tc.name, result, err)
+		}
+	}
+}
+
+func gatewayPageWriter(status int) func(http.ResponseWriter) {
+	return func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte("<html>proxy page</html>"))
+	}
+}
+
 // TestWorkspaceTransitionRequestChecks covers the body, identity checks, and Coder errors.
 func TestWorkspaceTransitionRequestChecks(t *testing.T) {
 	f := newTransitionFakeCoder(t, build(codersdk.WorkspaceTransitionStop, codersdk.ProvisionerJobSucceeded))
@@ -729,4 +802,32 @@ func TestWorkspaceTransitionQueuedSendsWatchEvent(t *testing.T) {
 		t.Fatalf("stop of a stopped workspace: err=%v result=%+v, want Unchanged", err, result)
 	}
 	assertNoWatchEvent(t, watcher, 200*time.Millisecond)
+}
+
+// TestWorkspaceTransitionConflictReReadFailureIsLogged: after a 409 in Coder's format, the re-read
+// fails. The client gets the uncertain 504, and the coder-errors log keeps the re-read error.
+func TestWorkspaceTransitionConflictReReadFailureIsLogged(t *testing.T) {
+	t.Parallel()
+
+	marker := uuid.NewString()
+	f := newTransitionFakeCoder(t, build(codersdk.WorkspaceTransitionStart, codersdk.ProvisionerJobSucceeded))
+	f.set(func(f *transitionFakeCoder) {
+		f.onPost = func(w http.ResponseWriter, _ *http.Request) { writeLogFakeError(w, http.StatusConflict) }
+		f.onReread = func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(codersdk.Response{Message: marker})
+		}
+	})
+	readLog := captureCoderErrorLog()
+	_, err := runTransition(t, newTestTransitionStorage(t, f, codersdk.WorkspaceTransitionStop), false)
+	if !apierrors.IsTimeout(err) || !strings.Contains(err.Error(), "uncertain") || f.rereads.Load() != 1 {
+		t.Fatalf("err=%v rereads=%d, want the uncertain 504 after one re-read", err, f.rereads.Load())
+	}
+	for _, line := range readLog() {
+		if strings.Contains(line, marker) && strings.Contains(line, `"status"=503 `) {
+			return
+		}
+	}
+	t.Fatalf("the coder-errors log has no line with the re-read error %q and status 503", marker)
 }

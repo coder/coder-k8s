@@ -115,16 +115,31 @@ const (
 // a write. A 2xx status means that the request got through, but the answer is not the one that
 // Coder sends: the SDK returns a *codersdk.Error for a 2xx other than the expected one, and since
 // codersdk v2.37 also for the expected 2xx with a body that is not JSON (for example a proxy page
-// or an empty body). A proxy in front of Coder can answer 502, 503 or 504 after Coder applied the
-// write.
+// or an empty body). The SDK sees a 3xx only when net/http did not follow it, for example a proxy
+// redirect without Location, and the server that answered it got the write. A proxy in front of
+// Coder can answer 502, 503 or 504 after Coder applied the write.
 func IsUncertainStatus(status int) bool {
-	return (status >= http.StatusOK && status < http.StatusMultipleChoices) ||
+	return (status >= http.StatusOK && status < http.StatusBadRequest) ||
 		status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
+}
+
+// IsCoderErrorAnswer reports whether coderErr comes from an error answer in Coder's own format: a
+// JSON body with a message. For a body that is not JSON, is empty, or has no message, for example
+// the error page of a proxy, the SDK sets one of its own messages instead.
+func IsCoderErrorAnswer(coderErr *codersdk.Error) bool {
+	if coderErr == nil {
+		panic("assertion failed: coder error must not be nil")
+	}
+	message := coderErr.Message
+	return message != "" && message != "empty response body" &&
+		!strings.HasPrefix(message, "unexpected non-JSON response ") &&
+		message != fmt.Sprintf("unexpected status code %d, response has no message", coderErr.StatusCode())
 }
 
 // MapCoderWriteError maps the error of the Coder call that creates, updates or deletes name. An
 // error that leaves it open whether Coder applied the write returns UncertainWriteError: a status
-// of IsUncertainStatus other than 504, or an error without a status after the request was sent,
+// of IsUncertainStatus other than 504, an error answer that is not Coder's own (see
+// IsCoderErrorAnswer), or an error without a status after the request was sent,
 // such as a connection that broke or a body that is not the expected JSON. A timeout, a Coder 504,
 // a request that did not reach Coder (see notSent) and every other status map as in MapCoderError.
 func MapCoderWriteError(err error, write Write, resource schema.GroupResource, name string) error {
@@ -144,7 +159,7 @@ func MapCoderWriteError(err error, write Write, resource schema.GroupResource, n
 	var coderErr *codersdk.Error
 	if errors.As(err, &coderErr) {
 		status := coderErr.StatusCode()
-		if status != http.StatusGatewayTimeout && IsUncertainStatus(status) {
+		if status != http.StatusGatewayTimeout && (IsUncertainStatus(status) || !IsCoderErrorAnswer(coderErr)) {
 			logHiddenError(err, resource, name, status)
 			return UncertainWriteError(write, resource, name, fmt.Sprintf("status %d from the Coder API", status))
 		}
@@ -157,6 +172,27 @@ func MapCoderWriteError(err error, write Write, resource schema.GroupResource, n
 	}
 	logHiddenError(err, resource, name, 0)
 	return UncertainWriteError(write, resource, name, "an answer from the Coder API that broke off or could not be read")
+}
+
+// UncertainWriteErrorFrom is UncertainWriteError for a write whose result the Coder call that
+// failed with err could not confirm. It logs err, which names the Coder URL, for operators.
+func UncertainWriteErrorFrom(err error, write Write, resource schema.GroupResource, name, reason string) error {
+	if err == nil {
+		return fmt.Errorf("assertion failed: error must not be nil")
+	}
+	LogHiddenError(err, resource, name)
+	return UncertainWriteError(write, resource, name, reason)
+}
+
+// LogHiddenError logs err, which can name the Coder URL, for operators, with the status of its
+// *codersdk.Error or 0 for an error without a status.
+func LogHiddenError(err error, resource schema.GroupResource, name string) {
+	status := 0
+	var coderErr *codersdk.Error
+	if errors.As(err, &coderErr) {
+		status = coderErr.StatusCode()
+	}
+	logHiddenError(err, resource, name, status)
 }
 
 // UncertainWriteError is the 504 for a write that Coder can have applied. reason names the answer

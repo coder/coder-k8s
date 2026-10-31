@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -481,11 +482,33 @@ func (s *WorkspaceStorage) Create(
 		stopBuild, stopErr := sdk.CreateWorkspaceBuild(ctx, createdWorkspace.ID, codersdk.CreateWorkspaceBuildRequest{
 			Transition: codersdk.WorkspaceTransitionStop,
 		})
-		if stopErr == nil {
+		if stopErr == nil && isRequestedBuild(stopBuild, codersdk.WorkspaceTransitionStop) {
 			createdWorkspace.LatestBuild = stopBuild
+		} else {
+			// Without the stop build in the answer, Coder can still have queued the stop, or still be
+			// queueing it while the re-read shows the start build. Only the stop build confirms such
+			// a stop. The start build is the result only after a stop that Coder refused or that was
+			// not sent.
+			stopUncertain := stopErr == nil ||
+				apierrors.IsTimeout(coder.MapCoderWriteError(stopErr, coder.WriteCreate, aggregationv1alpha1.Resource("coderworkspaces"), workspaceObj.Name))
+			current, readErr := sdk.Workspace(ctx, createdWorkspace.ID)
+			latest := current.LatestBuild
+			confirms := latest.Transition == codersdk.WorkspaceTransitionStop ||
+				(!stopUncertain && latest.Transition == codersdk.WorkspaceTransitionStart)
+			if readErr == nil && (latest.ID == uuid.Nil || latest.Status == "" || !confirms) {
+				readErr = errors.New("the re-read of the workspace shows no confirming build with an ID and a status")
+			}
+			switch {
+			case readErr == nil:
+				createdWorkspace.LatestBuild = latest
+			case stopUncertain:
+				// The start build of the create answer can be stale, so it is not a result.
+				return nil, coder.UncertainWriteErrorFrom(readErr, coder.WriteCreate, aggregationv1alpha1.Resource("coderworkspaces"), workspaceObj.Name,
+					"no confirmation of its stop build from the Coder API after the workspace was created")
+			}
 		}
-		// The workspace creation already succeeded. Returning a stop transition error here
-		// would cause client retries to fail with AlreadyExists, while the desired stop
+		// The workspace creation already succeeded. Returning an error for a stop that Coder
+		// refused would cause client retries to fail with AlreadyExists, while the desired stop
 		// transition can be retried safely via a subsequent Update.
 	}
 
@@ -692,7 +715,7 @@ func (s *WorkspaceStorage) Update(
 	if err != nil {
 		return nil, false, coder.MapCoderWriteError(err, coder.WriteUpdate, aggregationv1alpha1.Resource("coderworkspaces"), name)
 	}
-	if build.ID == uuid.Nil {
+	if !isRequestedBuild(build, req.Transition) {
 		return nil, false, uncertainBuildAnswer(coder.WriteUpdate, name)
 	}
 
@@ -777,7 +800,7 @@ func (s *WorkspaceStorage) Delete(
 	if err != nil {
 		return nil, false, coder.MapCoderWriteError(err, coder.WriteDelete, aggregationv1alpha1.Resource("coderworkspaces"), name)
 	}
-	if deleteBuild.ID == uuid.Nil {
+	if !isRequestedBuild(deleteBuild, codersdk.WorkspaceTransitionDelete) {
 		return nil, false, uncertainBuildAnswer(coder.WriteDelete, name)
 	}
 
