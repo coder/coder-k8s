@@ -20,7 +20,11 @@ import (
 	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 )
@@ -39,6 +43,65 @@ type CoderWorkspacePoolReconciler struct {
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
 	Clock     clock.PassiveClock
+}
+
+const poolControlPlaneRefIndex = ".spec.controlPlaneRef.name"
+
+// SetupWithManager wires the reconciler into controller-runtime. Nothing
+// calls it until activation (#153 plan PR 12), which also adds the RBAC
+// markers. Besides the verbs that the pool uses, they need update on
+// coderworkspacepools/finalizers and coderworkspaceclaims/finalizers: a
+// member's controller reference to its pool or claim sets blockOwnerDeletion.
+// One worker serializes counting and binding (plan 6.1). Members map to
+// their pool by spec.poolName, because a bound member's controller is its
+// claim. A claim wakes its pool, so a pool that is Ready, and so does not
+// poll, binds a new claim at once.
+func (r *CoderWorkspacePoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if mgr == nil || r.Client == nil || r.APIReader == nil || r.Scheme == nil || r.Clock == nil {
+		return errors.New("assertion failed: pool reconciler needs a manager, a client, an API reader, a scheme, and a clock")
+	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &coderv1alpha1.CoderWorkspacePool{}, poolControlPlaneRefIndex,
+		func(obj client.Object) []string {
+			if pool, ok := obj.(*coderv1alpha1.CoderWorkspacePool); ok && pool.Spec.ControlPlaneRef.Name != "" {
+				return []string{pool.Spec.ControlPlaneRef.Name}
+			}
+			return nil
+		}); err != nil {
+		return fmt.Errorf("index workspace pools by control plane: %w", err)
+	}
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&coderv1alpha1.CoderWorkspacePool{}).
+		Watches(&coderv1alpha1.CoderWorkspacePoolMember{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
+			member, ok := obj.(*coderv1alpha1.CoderWorkspacePoolMember)
+			if !ok || member.Spec.PoolName == "" {
+				return nil
+			}
+			return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: member.Namespace, Name: member.Spec.PoolName}}}
+		})).
+		Watches(&coderv1alpha1.CoderWorkspaceClaim{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
+			claim, ok := obj.(*coderv1alpha1.CoderWorkspaceClaim)
+			if !ok || claim.Spec.PoolName == "" {
+				return nil
+			}
+			return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: claim.Namespace, Name: claim.Spec.PoolName}}}
+		})).
+		Watches(&coderv1alpha1.CoderControlPlane{}, handler.EnqueueRequestsFromMapFunc(r.poolsForControlPlane)).
+		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
+		Named("coderworkspacepool").
+		Complete(r)
+}
+
+func (r *CoderWorkspacePoolReconciler) poolsForControlPlane(ctx context.Context, obj client.Object) []reconcile.Request {
+	var pools coderv1alpha1.CoderWorkspacePoolList
+	if err := r.List(ctx, &pools, client.InNamespace(obj.GetNamespace()), client.MatchingFields{poolControlPlaneRefIndex: obj.GetName()}); err != nil {
+		log.FromContext(ctx).Error(err, "list workspace pools of a control plane", "controlPlane", obj.GetName())
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(pools.Items))
+	for _, pool := range pools.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}})
+	}
+	return requests
 }
 
 const (

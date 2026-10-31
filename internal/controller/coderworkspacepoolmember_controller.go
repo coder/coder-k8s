@@ -23,6 +23,7 @@ import (
 	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -47,6 +48,21 @@ type CoderWorkspacePoolMemberReconciler struct {
 	Clock     clock.PassiveClock
 
 	rateLimited coderBackoff // Keyed by types.NamespacedName.
+}
+
+// SetupWithManager wires the reconciler into controller-runtime. Nothing
+// calls it until activation (#153 plan PR 12). One worker: the owner cap
+// check before the create marker counts the owner's members, which is exact
+// only while no other member reconciles at the same time.
+func (r *CoderWorkspacePoolMemberReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if mgr == nil || r.Client == nil || r.APIReader == nil || r.Scheme == nil || r.Clock == nil {
+		return errors.New("assertion failed: pool member reconciler needs a manager, a client, an API reader, a scheme, and a clock")
+	}
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&coderv1alpha1.CoderWorkspacePoolMember{}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
+		Named("coderworkspacepoolmember").
+		Complete(r)
 }
 
 // Reconcile runs the first step of the member that applies, then returns.
