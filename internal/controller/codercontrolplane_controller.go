@@ -2315,7 +2315,9 @@ func (r *CoderControlPlaneReconciler) deleteManagedOperatorTokenSecret(
 			return fmt.Errorf("delete the token of operator token secret %q in Coder: %w", operatorTokenSecretName, err)
 		}
 	}
-	if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+	// The preconditions keep a Secret that replaced or changed the read one
+	// during the token delete.
+	if err := r.Delete(ctx, secret, client.Preconditions{UID: &secret.UID, ResourceVersion: &secret.ResourceVersion}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete operator token secret %q while disabling operator access: %w", operatorTokenSecretName, err)
 	}
 
