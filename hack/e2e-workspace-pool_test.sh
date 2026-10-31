@@ -63,6 +63,11 @@ reconcile() { # one pass of the fake pool controller
   [[ -f $pool ]] || return 0
   local groups sharing
   groups=$(cat "$S/groups" 2>/dev/null || echo '[]') sharing=$(cat "$S/sharing" 2>/dev/null || echo everyone)
+  if [[ $groups == "[]" && $SCENARIO != share-not-revoked && -f $S/claim.json ]] &&
+    jq -e '.spec.share != null and .status.phase == "Bound"' "$S/claim.json" >/dev/null; then # the member revokes its share
+    rm -f "$S/acl/$(jq -r .status.workspaceID "$S/claim.json").json"
+    edit "$S/claim.json" '.status += {reason: "ShareRevoked", conditions: [{type: "Ready", status: "False"}]} | del(.status.sharedUserID)'
+  fi
   if jq -e '.spec.claims.mode == "Share"' "$pool" >/dev/null; then # the share policy at resolve
     if [[ $groups == "[]" && $SCENARIO != share-policy-ignored ]]; then
       edit "$pool" '.status = {reason: "ShareNotAllowed", message: "The control plane lists no shareGroupIDs."}' && return 0
@@ -332,6 +337,7 @@ run_scenario share-none-ignored "ShareNotAllowed while the organization's sharin
 run_scenario share-acl-admin "want only e2e-share-user with use"
 run_scenario share-user-cannot-read "e2e-share-user cannot read the shared workspace"
 run_scenario share-user-can-delete "answered 201, want 403"
+run_scenario share-not-revoked "ShareRevoked after shareGroupIDs were withdrawn"
 
 ((FAILURES == 0)) || { echo "$FAILURES scenario(s) failed"; exit 1; }
 echo "all workspace pool driver scenarios passed"

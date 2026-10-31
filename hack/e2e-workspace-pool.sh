@@ -396,9 +396,9 @@ wait_until "Share pool with 1 ready member" pool_ready 1 0
 render "$CLAIM_SAMPLE" '.metadata.name = $n | .metadata.namespace = $ns | .spec.poolName = $p | .spec.share.user = $u' \
   --arg n "$CLAIM" --arg ns "$NS" --arg p "$POOL" --arg u "$SHARE_USER" >"$WORK/share-claim.json" || fail "cannot render the Share claim"
 k create -f "$WORK/share-claim.json" >/dev/null || fail "cannot create the Share claim $CLAIM"
-claim_waits() { # <reason>: the claim is Pending with this reason
+claim_waits() { # <reason> [phase]: the claim is in the phase, Pending by default, with this reason
   k -n "$NS" get coderworkspaceclaim "$CLAIM" -o json >"$WORK/claim.json" || return 1
-  jq -e --arg r "$1" '.status.phase == "Pending" and .status.reason == $r' "$WORK/claim.json" >/dev/null
+  jq -e --arg r "$1" --arg p "${2:-Pending}" '.status.phase == $p and .status.reason == $r' "$WORK/claim.json" >/dev/null
 }
 wait_until "Share claim Pending with ShareUserNotEligible for a group that is not Everyone" claim_waits ShareUserNotEligible
 GROUP_REFUSAL=$(jq -er '.status.message' "$WORK/claim.json")
@@ -432,6 +432,11 @@ log "$SHARE_USER has use on $SHARE_WS, reads it, and cannot delete it (403)"
 wait_until "1 unclaimed ready member and 1 bound in the Share pool" pool_ready 1 1
 members_json
 SPARE_WS=$(jq -c --arg m "$SHARE_MEMBER" '[.items[] | select(.metadata.name != $m) | .status.workspaceID]' "$WORK/members.json")
+allow_owner '[]' # the admin withdraws Share mode for the owner: the member removes its share
+wait_until "Share claim reason ShareRevoked after shareGroupIDs were withdrawn" claim_waits ShareRevoked Bound
+coder_api GET "/api/v2/workspaces/$SHARE_WS/acl" | jq -e '.users | length == 0' >/dev/null ||
+  fail "the ACL of $SHARE_WS still lists a user after the share was revoked"
+log "shareGroupIDs withdrawn: the share of $SHARE_WS is removed"
 k -n "$NS" delete coderworkspaceclaim "$CLAIM" --wait=false >/dev/null
 wait_until "member $SHARE_MEMBER of the deleted Share claim gone" member_gone "$SHARE_MEMBER"
 deleted_in_coder "$SHARE_WS" || fail "the Share claim's workspace $SHARE_WS is not deleted in Coder"
