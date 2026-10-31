@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Offline tests for hack/e2e-workspace-pool.sh (#153). kubectl and curl are stubs on PATH over one fake cluster and
 # Coder in JSON files, with a fake pool controller that runs one pass per stub call. Nothing touches a cluster. The
-# pass scenario runs phases P1 to P9. Each other scenario breaks one behavior, and the driver must fail with the
+# pass scenario runs phases P1 to P12. Each other scenario breaks one behavior, and the driver must fail with the
 # check that covers it. No scenario may print a secret outside its mask command or pass one in argv.
 # shellcheck disable=SC2016 # jq programs are single-quoted on purpose.
 set -euo pipefail
@@ -13,6 +13,7 @@ trap 'rm -rf "$BASE"' EXIT
 STUBS=$BASE/bin
 mkdir -p "$STUBS"
 FAILURES=0
+KEDA_SUM=$(printf 'stub keda manifest\n' | sha256sum | cut -d' ' -f1)
 
 cat >"$STUBS/fake.sh" <<'STUB'
 # shellcheck shell=bash
@@ -46,13 +47,14 @@ member_create() {
   d=$(iso $((t + 3500)))
   [[ $SCENARIO != zero-deadline ]] || d=0001-01-01T00:00:00Z
   jq -n --arg n "$name" --arg id "$id" --arg ws "$(printf 'kwp-%028x' "$n")" --arg u "$POOL_UID" --arg t "$(iso "$t")" \
-    '{metadata: {name: $n, labels: {"coder.com/workspace-pool-uid": $u}, ownerReferences: [{kind: "CoderWorkspacePool",
-    controller: true}]}, spec: {poolName: "e2e-pool", claimRef: null}, status: {phase: "Creating", createAttemptTime: $t,
+    --arg v "$(version)" '{metadata: {name: $n, labels: {"coder.com/workspace-pool-uid": $u}, ownerReferences: [{kind: "CoderWorkspacePool",
+    controller: true}]}, spec: {poolName: "e2e-pool", claimRef: null, templateVersionID: $v}, status: {phase: "Creating", createAttemptTime: $t,
     workspaceID: $id, workspaceName: $ws, startBuildID: ("build-" + $id)}}' >"$S/m/$name.json"
   jq -n --arg id "$id" --arg ws "$(printf 'kwp-%028x' "$n")" --arg o "$OWNER_UUID" --arg t "$TPL_UUID" --arg d "$d" \
     '{id: $id, name: $ws, owner_id: $o, template_id: $t, deleted: false,
     latest_build: {id: ("build-" + $id), transition: "start", deadline: $d, job: {status: "succeeded"}}}' >"$S/ws/$id.json"
 }
+version() { cat "$S/version" 2>/dev/null || echo version-1; } # the template's active version
 reconcile() { # one pass of the fake pool controller
   local m pool=$S/pool.json want unclaimed=() reason=Ready
   for m in "$S"/m/*.json; do # garbage collection after a claim or pool delete
@@ -61,6 +63,10 @@ reconcile() { # one pass of the fake pool controller
       [[ $SCENARIO == pool-delete-takes-used ]]; }; then member_delete "$m"; fi
   done
   [[ -f $pool ]] || return 0
+  if [[ -f $S/so.json ]]; then # KEDA's cron window: open until the driver has read KEDA's HPA, then closed
+    local r=2 && [[ ! -f $S/hpa-read || $SCENARIO == keda-stays-up ]] || r=0
+    edit "$pool" --argjson r "$r" 'if .spec.replicas != $r then .spec.replicas = $r | .metadata.generation += 1 end'
+  fi
   local groups sharing
   groups=$(cat "$S/groups" 2>/dev/null || echo '[]') sharing=$(cat "$S/sharing" 2>/dev/null || echo everyone)
   if [[ $groups == "[]" && $SCENARIO != share-not-revoked && -f $S/claim.json ]] &&
@@ -108,11 +114,21 @@ reconcile() { # one pass of the fake pool controller
       break
     done
   fi
-  for m in "$S"/m/*.json; do ! unused "$m" || unclaimed+=("$m"); done
+  local outdated=() ready=0 keep
+  for m in "$S"/m/*.json; do
+    unused "$m" || continue
+    if jq -e --arg v "$(version)" '.spec.templateVersionID == $v' "$m" >/dev/null; then unclaimed+=("$m"); else outdated+=("$m"); fi
+  done
   want=$(jq .spec.replicas "$pool")
+  [[ ! -f $S/claim.json || $SCENARIO == no-on-demand ]] || ! jq -e '.spec.share == null and .status.phase != "Bound"' \
+    "$S/claim.json" >/dev/null || want=$((want + 1)) # a member built on demand for a waiting claim
   while ((${#unclaimed[@]} > want)); do member_delete "${unclaimed[0]}" && unclaimed=("${unclaimed[@]:1}"); done
   for ((m = ${#unclaimed[@]}; m < want; m++)); do member_create; done
-  edit "$pool" --argjson ms "$(members)" --arg r "$reason" '.status = {observedGeneration: .metadata.generation, reason: $r,
+  for m in "${unclaimed[@]}"; do ! jq -e '.status.phase == "Ready"' "$m" >/dev/null || ready=$((ready + 1)); done
+  keep=$((want - ready)) && [[ $SCENARIO != rollout-dips ]] || keep=0 # new before old: outdated members stay until replaced
+  while ((${#outdated[@]} > (keep > 0 ? keep : 0))); do member_delete "${outdated[0]}" && outdated=("${outdated[@]:1}"); done
+  edit "$pool" --argjson ms "$(members)" --arg r "$reason" --arg v "$(version)" '.status = {observedGeneration: .metadata.generation,
+    reason: $r, resolved: {templateVersionID: $v},
     conditions: [{type: "Ready", status: "True"}], boundReplicas: ([$ms[] | select(.spec.claimRef != null)] | length),
     usedReplicas: ([$ms[] | select(.status.conditions // [] | length > 0)] | length)} | .status += ([$ms[] |
     select(.spec.claimRef == null and (.status.conditions // [] | length == 0))] | {replicas: length,
@@ -150,6 +166,18 @@ show() { # <file> <kind> <name>: the object in the -o format
 [[ -z $raw ]] || pos=(get raw)
 case "${pos[0]:-} ${pos[1]:-}" in
   "port-forward "*) echo "$$" >"$S/pf.pid" && exec sleep 60 ;;
+  "get hpa") # KEDA's HPA exists while its ScaledObject does
+    [[ -f $S/so.json ]] || notfound hpa "${pos[2]}"
+    [[ $out == name ]] || touch "$S/hpa-read"
+    jq -n --arg a "$([[ $SCENARIO == hpa-not-active ]] && echo False || echo True)" '{spec: {scaleTargetRef: {kind: "CoderWorkspacePool"},
+      minReplicas: 1, maxReplicas: 2, metrics: [{external: {target: {type: "AverageValue"}}}]}, status: {currentReplicas: 2,
+      conditions: [{type: "ScalingActive", status: $a, reason: "ValidMetricFound"}]}}' >"$S/hpa.json"
+    show "$S/hpa.json" hpa "${pos[2]}" ;;
+  "get scaledobject") show "$S/so.json" scaledobject "${pos[2]}" ;;
+  "get namespace") [[ -f $S/keda ]] || notfound namespace "${pos[2]}"; echo "namespace/${pos[2]}" ;;
+  "delete scaledobject") rm -f "$S/so.json" "$S/hpa.json" ;;
+  "delete apiservice") ;;
+  "delete ") rm -f "$S/keda" ;; # kubectl delete -f of the KEDA manifest
   "get codercontrolplane") jq -n '{spec: {}, status: {operatorTokenSecretRef: {name: "tok", key: "token"}}} |
     if env.SCENARIO == "no-token-ref" then .status = {} end' ;;
   "get secret") printf '{"data": {"token": "%s"}}\n' "$(printf stub-token | base64)" ;;
@@ -173,13 +201,21 @@ case "${pos[0]:-} ${pos[1]:-}" in
         *coderworkspaceclaim.yaml) echo '{"kind": "CoderWorkspaceClaim", "metadata": {"name": "x"}, "spec": {}}' ;;
         *) echo '{"kind": "CoderTemplate", "metadata": {"name": "x"}, "spec": {}}' ;;
       esac
+    elif jq -e '.kind == "ScaledObject"' "$file" >/dev/null; then
+      [[ -f $S/keda ]] || { echo 'no matches for kind "ScaledObject"' >&2 && exit 1; }
+      cp "$file" "$S/so.json"
     elif jq -e '.kind == "CoderWorkspacePool"' "$file" >/dev/null; then
       jq --arg u "$POOL_UID" '.metadata += {uid: $u, generation: 1} | .status = {}' "$file" >"$S/pool.json"
     else jq '.metadata.uid = "claim-uid" | .status = {}' "$file" >"$S/claim.json"; fi ;;
   "apply ")
     [[ $dry != server ]] || { echo "coderworkspacepool.coder.com/e2e-pool created (server dry run)"; [[ $SCENARIO == dry-run-creates ]] ||
       exit 0; jq --arg u "$POOL_UID" '.metadata += {uid: $u, generation: 1} | .status = {}' "$file" >"$S/pool.json"; exit 0; }
-    echo "codertemplate.aggregation.coder.com/coder.e2e-pool-agent created" ;;
+    case $file in
+      *keda.yaml) touch "$S/keda" && echo "namespace/keda serverside-applied" ;;
+      *template-v2.json) [[ $SCENARIO == rollout-stays-old ]] || echo version-2 >"$S/version"
+        echo "codertemplate.aggregation.coder.com/coder.e2e-pool-agent configured" ;;
+      *) echo "codertemplate.aggregation.coder.com/coder.e2e-pool-agent created" ;;
+    esac ;;
   "patch codercontrolplane")
     if jq -e '.spec.workspacePools.owners // [] | length > 0' <<<"$patch" >/dev/null; then touch "$S/allowed"; else rm -f "$S/allowed"; fi
     jq -c '.spec.workspacePools.owners // [] | map(.shareGroupIDs // []) | add // []' <<<"$patch" >"$S/groups" ;;
@@ -219,10 +255,13 @@ while (($#)); do
     -H) [[ $2 != @* ]] || auth=$(<"${2#@}"); shift 2 ;;
     -o) body=$2 && shift 2 ;;
     -w | --max-time) shift 2 ;;
-    http://*) url=$1 && shift ;;
+    http://* | https://*) url=$1 && shift ;;
     *) shift ;;
   esac
 done
+if [[ $url == https://* ]]; then # the KEDA manifest download
+  printf 'stub keda manifest%s\n' "$([[ $SCENARIO == keda-tampered ]] && echo ', changed')" >"$body" && exit 0
+fi
 status() { echo "curl: (22) The requested URL returned error: $1" >&2 && exit 22; }
 user() { jq -n --arg id "$OWNER_UUID" --arg o "$ORG_UUID" --arg t "${1:-password}" '{id: $id, username: "e2e-pool-owner",
   login_type: $t, organization_ids: [$o]}'; }
@@ -280,19 +319,21 @@ leaked() {
   return 1
 }
 
-# run_scenario <name> [part of the FAIL message] [nowrite]: without a message the driver must pass P1 to P9 and leave
+# run_scenario <name> [part of the FAIL message] [nowrite]: without a message the driver must pass P1 to P12 and leave
 # nothing behind; with one it must fail with that message, and with nowrite before any write.
 run_scenario() {
   local name=$1 want=${2:-} nowrite=${3:-} dir=$BASE/$1 rc=0 problem=""
   mkdir -p "$dir"
   : >"$dir/calls.log"
   (cd "$ROOT" && PATH="$STUBS:$PATH" STUB_STATE=$dir SCENARIO=$name E2E_WORKDIR=$dir/work E2E_POLL_SECONDS=0.1 \
-    E2E_TIMEOUT_SECONDS=5 E2E_USED_SECONDS=3 E2E_DRY_RUN_SETTLE_SECONDS=1 GITHUB_ACTIONS=true timeout 120 bash "$DRIVER") \
+    E2E_TIMEOUT_SECONDS=5 E2E_KEDA_TIMEOUT_SECONDS=5 E2E_ROLLOUT_TIMEOUT_SECONDS=5 E2E_ROLLOUT_POLL_SECONDS=0.1 \
+    E2E_KEDA_MANIFEST_SHA256=$KEDA_SUM E2E_USED_SECONDS=3 E2E_DRY_RUN_SETTLE_SECONDS=1 GITHUB_ACTIONS=true timeout 120 bash "$DRIVER") \
     </dev/null >"$dir/out.log" 2>&1 || rc=$?
   if [[ -z $want ]]; then
     if ((rc != 0)); then problem="driver failed"
-    elif ! grep -qE '^phase_seconds=P1=.* P6=.* P7=.* P8=.* P9=.* cleanup=' "$dir/work/receipt.txt"; then problem="phases P1 to P9 did not all run"
-    elif [[ -e $dir/pool.json || -e $dir/claim.json || -e $dir/allowed || $(cat "$dir/sharing" 2>/dev/null || echo everyone) != everyone ]] ||
+    elif ! grep -qE '^phase_seconds=P1=.* P8=.* P9=.* P10=.* P11=.* P12=.* cleanup=' "$dir/work/receipt.txt"; then
+      problem="phases P1 to P12 did not all run"
+    elif [[ -e $dir/pool.json || -e $dir/claim.json || -e $dir/allowed || -e $dir/so.json || -e $dir/keda || $(cat "$dir/sharing" 2>/dev/null || echo everyone) != everyone ]] ||
       compgen -G "$dir/m/*.json" >/dev/null ||
       cat "$dir"/ws/*.json 2>/dev/null | jq -se 'any(.[]; .deleted | not)' >/dev/null; then problem="left objects or live workspaces behind"
     elif grep -E '^curl .*-X (DELETE|POST) .*/api/v2/workspaces' "$dir/calls.log" | grep -v 'share-user.hdr' | grep -qv '/usage$'; then
@@ -338,6 +379,12 @@ run_scenario share-acl-admin "want only e2e-share-user with use"
 run_scenario share-user-cannot-read "e2e-share-user cannot read the shared workspace"
 run_scenario share-user-can-delete "answered 201, want 403"
 run_scenario share-not-revoked "ShareRevoked after shareGroupIDs were withdrawn"
+run_scenario no-on-demand "claim Bound and Ready on a member built on demand"
+run_scenario keda-tampered "the KEDA manifest has SHA-256"
+run_scenario hpa-not-active "KEDA's HPA with ScalingActive=True"
+run_scenario keda-stays-up "KEDA scales the pool back to 0"
+run_scenario rollout-dips "readyReplicas dropped to 0 during the rollout"
+run_scenario rollout-stays-old "2 members on the new version"
 
 ((FAILURES == 0)) || { echo "$FAILURES scenario(s) failed"; exit 1; }
 echo "all workspace pool driver scenarios passed"

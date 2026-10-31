@@ -683,9 +683,10 @@ jobs:
           kubectl -n coder delete secret coder-tls
           kubectl -n coder delete configmap coder-ca
 
-      # CoderWorkspacePool phases P1-P9 (#153). It runs before the lifecycle driver, which deletes namespace coder at
-      # its end, imports its own template e2e-pool-agent from the agent fixture, and removes its objects when it passes.
-      - name: Workspace pool (create, scale, claim, operator restart, use, deletes, share)
+      # CoderWorkspacePool phases P1-P12 (#153). It runs before the lifecycle driver, which deletes namespace coder at
+      # its end, imports its own template e2e-pool-agent from the agent fixture, installs KEDA from a pinned manifest for
+      # P11, and removes its objects and KEDA when it passes.
+      - name: Workspace pool (create, scale, claim, operator restart, use, deletes, share, scale to 0, KEDA, rollout)
         if: env.E2E_FULL == 'true'
         env:
           E2E_WORKDIR: ${{ runner.temp }}/workspace-pool
@@ -780,6 +781,10 @@ jobs:
           echo ""
           echo "=== CoderWorkspacePools, members, and claims ==="
           kubectl -n coder get coderworkspacepools,coderworkspacepoolmembers,coderworkspaceclaims -o yaml || true
+          echo ""
+          echo "=== KEDA (workspace pool P11) ==="
+          kubectl -n coder get scaledobjects.keda.sh,hpa -o yaml || true
+          kubectl -n keda get pods || true
           echo ""
           echo "=== Workspace pool driver files ==="
           tail -n 50 "$RUNNER_TEMP"/workspace-pool/*.err "$RUNNER_TEMP"/workspace-pool/*.log || true
