@@ -9,8 +9,10 @@ import (
 
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -24,9 +26,9 @@ const poolMemberUnknownOutcomePoll = 10 * time.Minute
 // cleanup runs the delete steps of a member being deleted (plan 6.5). It
 // releases the finalizer once no workspace of the member can exist, the
 // workspace is deleted, the workspace was used but the pool never released
-// the member, or the control plane is gone. A workspace that nothing proves
-// to be the member's keeps the finalizer, and the controller never touches
-// it.
+// the member, the namespace of a released used member is being deleted, or
+// the control plane is gone. A workspace that nothing proves to be the
+// member's keeps the finalizer, and the controller never touches it.
 func (r *CoderWorkspacePoolMemberReconciler) cleanup(ctx context.Context, member *coderv1alpha1.CoderWorkspacePoolMember) (ctrl.Result, error) {
 	deleted := meta.FindStatusCondition(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionWorkspaceDeleted)
 	if !poolMemberMayHaveWorkspace(member) || (deleted != nil && deleted.Status == metav1.ConditionTrue) {
@@ -75,11 +77,28 @@ func (r *CoderWorkspacePoolMemberReconciler) cleanup(ctx context.Context, member
 }
 
 // cleanupStep runs one delete step. release means that the finalizer can go
-// without a status write: no workspace of the member exists, or someone
-// used it.
+// without a status write: no workspace of the member exists, someone used
+// it, or its namespace is being deleted.
 func (r *CoderWorkspacePoolMemberReconciler) cleanupStep(
 	ctx context.Context, member *coderv1alpha1.CoderWorkspacePoolMember,
 ) (step *coderStep, requeue time.Duration, release bool, err error) {
+	// The pool releases a used member (decision D6). With no controller left,
+	// garbage collection never deletes it, so a person's delete deletes its
+	// workspace, as a claim's delete does. A namespace deletion is no such
+	// delete, and it can reach the member before the control plane (#445).
+	released := metav1.GetControllerOf(member) == nil &&
+		meta.IsStatusConditionTrue(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed)
+	if released {
+		namespace := &corev1.Namespace{}
+		if err := r.APIReader.Get(ctx, types.NamespacedName{Name: member.Namespace}, namespace); err != nil {
+			return nil, 0, false, fmt.Errorf("get namespace %s: %w", member.Namespace, err)
+		}
+		if !namespace.DeletionTimestamp.IsZero() {
+			log.FromContext(ctx).Info("The namespace is being deleted, so the controller releases the used pool member without deleting its workspace",
+				"workspaceID", member.Status.WorkspaceID, "workspaceName", member.Status.WorkspaceName)
+			return nil, 0, true, nil
+		}
+	}
 	sdk, _, wait, err := controlPlaneCoderClient(ctx, r.Client, member.Namespace, member.Spec.ControlPlaneRef.Name)
 	switch {
 	case wait != nil:
@@ -111,11 +130,6 @@ func (r *CoderWorkspacePoolMemberReconciler) cleanupStep(
 	if step != nil || err != nil {
 		return step, templateTestUnavailablePoll, false, err
 	}
-	// The pool releases a used member (decision D6). With no controller left,
-	// garbage collection never deletes it, so its delete is deliberate and
-	// deletes its workspace, as a claim's delete does.
-	released := metav1.GetControllerOf(member) == nil &&
-		meta.IsStatusConditionTrue(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed)
 	var keep func(codersdk.Workspace) (bool, error)
 	if member.Spec.ClaimRef == nil && !released {
 		// The last use check runs on the delete step's own read, before any
