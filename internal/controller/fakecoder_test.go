@@ -96,6 +96,7 @@ type fakeCoder struct {
 	pool         fakePoolState // Workspace pool routes, see fakecoder_pool_test.go.
 	faults       map[string][]fakeFault
 	requests     map[string]int // Route -> requests received.
+	share        fakeShareState // Share mode routes, see fakecoder_share_test.go.
 
 	aiProviders map[uuid.UUID]*fakeAIProvider // See fakecoder_ai_test.go.
 	aiGateway   fakeAIGatewayState            // AI Gateway key routes, see fakecoder_aigateway_test.go.
@@ -149,6 +150,7 @@ func newFakeCoder(t *testing.T) *fakeCoder {
 	f.route(mux, "GET /api/v2/users/{user}/workspace/{name}", routeWorkspaceByName, f.getWorkspaceByOwnerAndName)
 	f.route(mux, "GET /api/v2/workspaces/{id}", routeWorkspace, f.getWorkspace)
 	f.registerPoolRoutes(mux)
+	f.registerShareRoutes(mux)
 	f.route(mux, "GET /api/v2/workspaces/{id}/builds", routeWorkspaceBuilds, f.listBuilds)
 	f.route(mux, "POST /api/v2/workspaces/{id}/builds", routeCreateBuild, f.createBuild)
 	f.route(mux, "PATCH /api/v2/workspacebuilds/{id}/cancel", routeCancelBuild, f.cancelBuild)
