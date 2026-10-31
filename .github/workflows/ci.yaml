@@ -667,6 +667,15 @@ jobs:
           tls_reason() {
             kubectl -n coder get codercontrolplane coder -o jsonpath='{.status.conditions[?(@.type=="OperatorTLSReady")].reason}'
           }
+          # Right after a Coder rollout, a call can fail to reach Coder for a moment, so retry.
+          aggregated_get() {
+            for _ in $(seq 1 30); do
+              kubectl -n coder get codertemplates.aggregation.coder.com && return 0
+              sleep 2
+            done
+            echo "assertion failed: the aggregated API did not reach Coder" >&2
+            return 1
+          }
           wait_tls_reason() {
             for _ in $(seq 1 150); do
               [[ $(tls_reason) == "$1" ]] && return 0
@@ -692,7 +701,7 @@ jobs:
           rollout_tls true
           wait_tls_reason Verified
           test "$(kubectl -n coder get codercontrolplane coder -o jsonpath='{.status.url}')" = "https://$host:443"
-          kubectl -n coder get codertemplates.aggregation.coder.com
+          aggregated_get
 
           set_ca "$work/wrong.crt"
           wait_tls_reason CertificateNotVerified
@@ -703,14 +712,14 @@ jobs:
 
           set_ca "$work/ca.crt"
           wait_tls_reason Verified
-          kubectl -n coder get codertemplates.aggregation.coder.com
+          aggregated_get
 
           # Restore plain HTTP for the lifecycle driver; the condition goes away.
           kubectl -n coder patch codercontrolplane coder --type=merge -p '{"spec":{"tls":{"secretNames":null,"operatorAccess":null}}}'
           rollout_tls false
           kubectl -n coder wait --for=jsonpath='{.status.url}'="http://$host:80" codercontrolplane/coder --timeout=300s
           test -z "$(tls_reason)"
-          kubectl -n coder get codertemplates.aggregation.coder.com
+          aggregated_get
           kubectl -n coder delete secret coder-tls
           kubectl -n coder delete configmap coder-ca
 
