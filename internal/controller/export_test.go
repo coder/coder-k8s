@@ -44,3 +44,9 @@ func HasSentCredentials(r *CoderMCPServerReconciler, uid types.UID) bool {
 	})
 	return found
 }
+
+// ElapseEarlierKeyRetryInterval lets the next reconcile of the provisioner uid
+// retry the keys of earlier targets, as after provisionerPendingKeyRetryInterval.
+func ElapseEarlierKeyRetryInterval(r *CoderProvisionerReconciler, uid types.UID) {
+	r.earlierKeyRetryAt.Delete(uid)
+}

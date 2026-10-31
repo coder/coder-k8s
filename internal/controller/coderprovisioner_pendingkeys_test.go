@@ -22,6 +22,7 @@ import (
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/coderbootstrap"
+	"github.com/coder/coder-k8s/internal/controller"
 )
 
 // keyRecordingClient checks that status records every key create before the
@@ -623,6 +624,7 @@ func TestCoderProvisionerKey_IDLessRecordKeepsOtherProvisionersKey(t *testing.T)
 			require.Contains(t, report.Message, urlC)
 
 			store.failLookupAt = ""
+			controller.ElapseEarlierKeyRetryInterval(f.reconciler, f.get(ctx, t, p).UID)
 			f.reconcile(ctx, t, p)
 			require.Empty(t, f.get(ctx, t, p).Status.PendingKeys)
 			require.Nil(t, unverifiedReport())
