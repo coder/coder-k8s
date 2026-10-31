@@ -313,9 +313,11 @@ func TestPoolBoundsShareChecksOfRefusedClaims(t *testing.T) {
 	require.Equal(t, 3, e.fake.requestCount(routeGroup), "a refusal holds until the next poll")
 
 	e.clock.SetTime(e.clock.Now().Add(time.Minute))
-	e.fake.failNext(routeGroup, fakeFault{Status: http.StatusTooManyRequests})
+	userReads := e.fake.requestCount(routeUser)
+	e.fake.failNext(routeUser, fakeFault{Inspect: func([]byte) {}}) // The owner read at resolve.
+	e.fake.failNext(routeUser, fakeFault{Status: http.StatusTooManyRequests})
 	reconcile()
-	require.Equal(t, 4, e.fake.requestCount(routeGroup), "Coder's 429 ends the checks")
+	require.Equal(t, userReads+2, e.fake.requestCount(routeUser), "Coder's 429 for the first claim ends the checks")
 	for _, key := range claims {
 		requireShareClaim(t, e.claim(t, key), coderv1alpha1.CoderWorkspaceClaimPhasePending, "CoderUnavailable", false, false)
 	}
