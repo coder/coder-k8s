@@ -109,6 +109,45 @@ The install adds `get`, `list`, and `watch` on `coderworkspacepoolmembers` to th
 !!! warning "Who can resize a pool"
     The HPA controller and KEDA can write `/scale` of every pool. So anyone who can create an HPA in the namespace, which includes the built-in `edit` role, can resize a pool up to 100. `maxWorkspaces` on the control plane still caps the owner's workspaces.
 
+To allow an autoscaler only for users who can resize the pool themselves, add this `ValidatingAdmissionPolicy` (Kubernetes 1.30 or later). It refuses an HPA or a KEDA `ScaledObject` that targets a pool unless its author has `update` on that pool's `coderworkspacepools/scale`. Other autoscalers are not affected. In Kind, an `edit` user without that right got the denial, and with it the HPA was created.
+
+```yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: coderworkspacepool-autoscalers
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [autoscaling]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [horizontalpodautoscalers]
+      - apiGroups: [keda.sh]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [scaledobjects]
+  matchConditions:
+    - name: targets-a-pool
+      expression: has(object.spec.scaleTargetRef.kind) && object.spec.scaleTargetRef.kind == 'CoderWorkspacePool'
+  validations:
+    - expression: >-
+        authorizer.group('coder.com').resource('coderworkspacepools').subresource('scale')
+        .namespace(object.metadata.namespace).name(object.spec.scaleTargetRef.name).check('update').allowed()
+      message: Only a user who can update coderworkspacepools/scale of the target pool can autoscale it.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: coderworkspacepool-autoscalers
+spec:
+  policyName: coderworkspacepool-autoscalers
+  validationActions: [Deny]
+```
+
+KEDA's operator creates the HPA for a `ScaledObject`, and its own role can update every `/scale`, so the policy checks the `ScaledObject`'s author instead.
+
 ## Cost
 
 Each unclaimed workspace runs all the time, so a pool of `replicas: N` costs N running workspaces plus the claimed ones. A claimed workspace keeps a normal autostop deadline after the bind, so Coder stops it when nobody uses it. A template with a default TTL of 0 has no deadline: its claimed workspaces run until someone stops or deletes them.
