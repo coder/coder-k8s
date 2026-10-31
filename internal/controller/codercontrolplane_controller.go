@@ -2209,7 +2209,7 @@ func (r *CoderControlPlaneReconciler) reconcileEntitlements(
 
 	entitlements, err := r.EntitlementsInspector.Entitlements(ctx, controlPlaneURL, coderTLS, operatorToken)
 	if coderTLS != nil {
-		if conditionErr := recordOperatorTLSCall(coderControlPlane, nextStatus, controlPlaneURL, err); conditionErr != nil {
+		if conditionErr := recordOperatorTLSCall(coderControlPlane, nextStatus, controlPlaneURL, coderTLS, err); conditionErr != nil {
 			return ctrl.Result{}, conditionErr
 		}
 	}
