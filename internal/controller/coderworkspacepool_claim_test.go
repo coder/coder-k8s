@@ -332,6 +332,33 @@ func TestPoolBindRaceTwoMembers(t *testing.T) {
 	require.Equal(t, holders[0], claim.Status.MemberName)
 }
 
+// TestPoolBindHonorsReservation: a crash between the reservation and the
+// bind leaves a claim with memberName and no member. The next reconcile
+// binds the reserved member, not the older one. A claim that reserved a
+// member that is gone binds another one.
+func TestPoolBindHonorsReservation(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(2)) })
+	older := e.createMember(t, nil)
+	e.setMemberStatus(t, older, readyWithWorkspace("kwp-older"))
+	time.Sleep(1100 * time.Millisecond) // creationTimestamp has second precision.
+	newer := e.createMember(t, nil)
+	e.setMemberStatus(t, newer, readyWithWorkspace("kwp-newer"))
+	reserved := e.createClaim(t, "reserved")
+	time.Sleep(1100 * time.Millisecond)
+	gone := e.createClaim(t, "gone")
+	for key, member := range map[types.NamespacedName]string{reserved: newer.Name, gone: e.pool.Name + "-gone"} {
+		claim := e.claim(t, key)
+		claim.Status.MemberName = member
+		require.NoError(t, k8sClient.Status().Update(e.ctx, claim))
+	}
+
+	e.reconcilePool(t, 1)
+	e.requireBound(t, newer, reserved)
+	e.requireBound(t, older, gone)
+}
+
 // TestPoolFinishesClaimAfterCrash: the pool crashed after the member bind,
 // before the claim status. The next reconcile finds the member that holds
 // the claim, finishes the claim status, and binds no second member.

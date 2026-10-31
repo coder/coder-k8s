@@ -144,8 +144,9 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               memberName:
-                description: MemberName is the CoderWorkspacePoolMember that holds
-                  the claim.
+                description: |-
+                  MemberName is the CoderWorkspacePoolMember that holds the claim. While
+                  the claim is Pending, it is the member that the pool reserved for it.
                 type: string
               message:
                 description: |-
