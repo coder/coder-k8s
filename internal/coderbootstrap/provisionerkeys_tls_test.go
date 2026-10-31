@@ -21,7 +21,7 @@ func TestSDKClientVerifiesCoderTLS(t *testing.T) {
 
 	ca := tlstest.NewCA(t)
 	var requests atomic.Int32
-	server := ca.NewServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := ca.NewServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"features":{}}`))
