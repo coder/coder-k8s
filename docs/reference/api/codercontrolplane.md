@@ -273,6 +273,7 @@ WorkspacePoolOwner allows one Coder user as the owner of pool workspaces.
 | `userID` | string | UserID is the UUID of the Coder user, in lower case with hyphens, as Coder writes it. One user has one spelling, so the list holds each owner once. Coder's prebuilds system user is refused: Coder's prebuild reconciler can delete or hand out the workspaces it owns. |
 | `templates` | string array | Templates are the only Coder templates, as `<organization>.<template>`, that pools of this owner can build. |
 | `maxWorkspaces` | integer | MaxWorkspaces caps the workspaces of this owner across all pools of this control plane: unclaimed, bound, and used. |
+| `shareGroupIDs` | string array | ShareGroupIDs turn on Share mode for this owner: they are the Coder groups whose members a Share claim can name. Empty means Share mode is off for this owner. The template organization's ID names its Everyone group: every active member of that organization, without a license. Other groups need a Premium license (Coder answers 403 without one, and the share is refused). Every claimant can act as the pool owner if the template exposes the owner's session token (see the how-to). |
 
 ### WorkspacePoolsSpec
 

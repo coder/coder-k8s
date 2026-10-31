@@ -139,6 +139,15 @@ func TestCoderWorkspacePoolMemberAPIValidation(t *testing.T) {
 		member.Status.Phase = "Bound"
 		requireInvalid(t, k8sClient.Status().Update(ctx, member), "status.phase")
 	})
+	t.Run("shared user ID", func(t *testing.T) {
+		member := newPoolMember(namespace, "shared", nil)
+		require.NoError(t, k8sClient.Create(ctx, member))
+		for _, id := range []string{prebuildsUserID, upper} {
+			changed := member.DeepCopy()
+			changed.Status.SharedUserID = id
+			requireInvalid(t, k8sClient.Status().Update(ctx, changed), "status.sharedUserID")
+		}
+	})
 }
 
 // TestCoderWorkspacePoolMemberAPIImmutability proves the contract that the

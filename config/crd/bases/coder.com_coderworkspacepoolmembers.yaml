@@ -238,7 +238,9 @@ spec:
                   at bind.
                 type: boolean
               conditions:
-                description: Conditions are Ready, Used, and WorkspaceDeleted.
+                description: |-
+                  Conditions are Ready, Used, WorkspaceDeleted, and, for a Share claim,
+                  Shared.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -347,6 +349,19 @@ spec:
               reason:
                 description: Reason is the current wait reason or the failure reason.
                 type: string
+              sharedUserID:
+                description: |-
+                  SharedUserID is the Coder user that the controller shares the
+                  workspace with for a Share claim. The controller stores it before its
+                  first ACL write and never changes it, so a renamed or reused username
+                  never moves the share to another user. The Shared condition reports
+                  whether Coder's ACL gives this user the `use` role.
+                maxLength: 36
+                pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                type: string
+                x-kubernetes-validations:
+                - message: sharedUserID must not be the Coder prebuilds system user
+                  rule: self != 'c42fdf75-3097-471c-8c33-fb52454d81c0'
               startBuildID:
                 description: StartBuildID is the ID of the start build that the controller
                   requested.

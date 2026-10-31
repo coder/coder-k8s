@@ -39,11 +39,12 @@
 | `lastExtendTime` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#time-v1-meta) | LastExtendTime is when the controller last extended the autostop deadline of the unclaimed workspace. |
 | `bindExtended` | boolean | BindExtended is true after the one deadline extension at bind. |
 | `bindExtendDeadline` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#time-v1-meta) | BindExtendDeadline is the deadline that the extension at bind asks Coder for. The controller stores it before the first extend request. While BindExtended is false, a Coder deadline at or after it proves that the extension happened. |
+| `sharedUserID` | string | SharedUserID is the Coder user that the controller shares the workspace with for a Share claim. The controller stores it before its first ACL write and never changes it, so a renamed or reused username never moves the share to another user. The Shared condition reports whether Coder's ACL gives this user the `use` role. |
 | `deleteBuildID` | string | DeleteBuildID is the ID of the current delete build. |
 | `deleteAttempts` | integer | DeleteAttempts counts failed delete builds. It drives the retry backoff. |
 | `reason` | string | Reason is the current wait reason or the failure reason. |
 | `message` | string | Message explains Reason. It never holds Coder error details, build logs, parameter values, or tokens. |
-| `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#condition-v1-meta) array | Conditions are Ready, Used, and WorkspaceDeleted. |
+| `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#condition-v1-meta) array | Conditions are Ready, Used, WorkspaceDeleted, and, for a Share claim, Shared. |
 
 ## Referenced types
 

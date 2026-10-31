@@ -26,6 +26,9 @@ const (
 	// The consumer connects with credentials it already holds for the pool
 	// owner.
 	CoderWorkspacePoolClaimModeReserve = "Reserve"
+	// CoderWorkspacePoolClaimModeShare binds a ready workspace to a claim and
+	// gives the claim's spec.share.user the Coder `use` role on it.
+	CoderWorkspacePoolClaimModeShare = "Share"
 
 	// CoderWorkspacePoolSelectorLabel is the label key of the pool's
 	// status.selector: <key>=<pool UID>.
@@ -76,6 +79,19 @@ type WorkspacePoolOwner struct {
 	// +kubebuilder:validation:Maximum=100
 	// +optional
 	MaxWorkspaces *int32 `json:"maxWorkspaces,omitempty"`
+	// ShareGroupIDs turn on Share mode for this owner: they are the Coder
+	// groups whose members a Share claim can name. Empty means Share mode is
+	// off for this owner. The template organization's ID names its Everyone
+	// group: every active member of that organization, without a license.
+	// Other groups need a Premium license (Coder answers 403 without one, and
+	// the share is refused). Every claimant can act as the pool owner if the
+	// template exposes the owner's session token (see the how-to).
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MaxLength=36
+	// +kubebuilder:validation:items:Pattern=`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
+	// +listType=set
+	// +optional
+	ShareGroupIDs []string `json:"shareGroupIDs,omitempty"`
 }
 
 // CoderWorkspacePoolVersion selects the template version of new members. Set
@@ -117,8 +133,11 @@ type CoderWorkspacePoolParameter struct {
 // CoderWorkspacePoolClaims configures how the pool hands out workspaces.
 type CoderWorkspacePoolClaims struct {
 	// Mode is how a claim gets its workspace. Reserve binds a ready workspace
-	// to the claim, and the workspace stays with the pool owner.
-	// +kubebuilder:validation:Enum=Reserve
+	// to the claim, and the workspace stays with the pool owner. Share also
+	// gives the claim's spec.share.user the Coder `use` role on the workspace
+	// (open apps, SSH, start, stop; never delete), where the organization's
+	// sharing setting and the owner's shareGroupIDs allow it.
+	// +kubebuilder:validation:Enum=Reserve;Share
 	// +kubebuilder:default=Reserve
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="claims.mode is immutable"
 	// +optional

@@ -5058,6 +5058,22 @@ spec:
                           maximum: 100
                           minimum: 1
                           type: integer
+                        shareGroupIDs:
+                          description: |-
+                            ShareGroupIDs turn on Share mode for this owner: they are the Coder
+                            groups whose members a Share claim can name. Empty means Share mode is
+                            off for this owner. The template organization's ID names its Everyone
+                            group: every active member of that organization, without a license.
+                            Other groups need a Premium license (Coder answers 403 without one, and
+                            the share is refused). Every claimant can act as the pool owner if the
+                            template exposes the owner's session token (see the how-to).
+                          items:
+                            maxLength: 36
+                            pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                            type: string
+                          maxItems: 16
+                          type: array
+                          x-kubernetes-list-type: set
                         templates:
                           description: |-
                             Templates are the only Coder templates, as `<organization>.<template>`,
@@ -6759,6 +6775,28 @@ spec:
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                 type: string
+              share:
+                description: |-
+                  Share names the Coder user that gets the workspace. Required when the
+                  pool's claims.mode is Share, refused otherwise: such a claim never binds
+                  and is Stalled with ClaimModeMismatch.
+                properties:
+                  user:
+                    description: User is a Coder username or user UUID (lower case
+                      with hyphens).
+                    maxLength: 36
+                    minLength: 1
+                    pattern: ^([a-zA-Z0-9]+(-[a-zA-Z0-9]+)*|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: user must be a Coder username of at most 32 characters
+                        or a lower-case UUID
+                      rule: self.size() <= 32 || self.matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+                    - message: user must not be the Coder prebuilds system user
+                      rule: self != 'c42fdf75-3097-471c-8c33-fb52454d81c0'
+                required:
+                - user
+                type: object
             required:
             - poolName
             type: object
@@ -6860,6 +6898,16 @@ spec:
               reason:
                 description: Reason is the current wait reason or the reason for Lost.
                 type: string
+              sharedUserID:
+                description: |-
+                  SharedUserID is the Coder user that has the `use` role on the
+                  workspace through this claim, as the member last read it from Coder.
+                maxLength: 36
+                pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                type: string
+                x-kubernetes-validations:
+                - message: sharedUserID must not be the Coder prebuilds system user
+                  rule: self != 'c42fdf75-3097-471c-8c33-fb52454d81c0'
               workspaceID:
                 description: WorkspaceID is the Coder workspace ID.
                 type: string
@@ -7114,7 +7162,9 @@ spec:
                   at bind.
                 type: boolean
               conditions:
-                description: Conditions are Ready, Used, and WorkspaceDeleted.
+                description: |-
+                  Conditions are Ready, Used, WorkspaceDeleted, and, for a Share claim,
+                  Shared.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -7223,6 +7273,19 @@ spec:
               reason:
                 description: Reason is the current wait reason or the failure reason.
                 type: string
+              sharedUserID:
+                description: |-
+                  SharedUserID is the Coder user that the controller shares the
+                  workspace with for a Share claim. The controller stores it before its
+                  first ACL write and never changes it, so a renamed or reused username
+                  never moves the share to another user. The Shared condition reports
+                  whether Coder's ACL gives this user the `use` role.
+                maxLength: 36
+                pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                type: string
+                x-kubernetes-validations:
+                - message: sharedUserID must not be the Coder prebuilds system user
+                  rule: self != 'c42fdf75-3097-471c-8c33-fb52454d81c0'
               startBuildID:
                 description: StartBuildID is the ID of the start build that the controller
                   requested.
@@ -7327,9 +7390,13 @@ spec:
                     default: Reserve
                     description: |-
                       Mode is how a claim gets its workspace. Reserve binds a ready workspace
-                      to the claim, and the workspace stays with the pool owner.
+                      to the claim, and the workspace stays with the pool owner. Share also
+                      gives the claim's spec.share.user the Coder `use` role on the workspace
+                      (open apps, SSH, start, stop; never delete), where the organization's
+                      sharing setting and the owner's shareGroupIDs allow it.
                     enum:
                     - Reserve
+                    - Share
                     type: string
                     x-kubernetes-validations:
                     - message: claims.mode is immutable

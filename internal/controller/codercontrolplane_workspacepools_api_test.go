@@ -74,9 +74,9 @@ func TestControlPlaneWorkspacePoolsValidation(t *testing.T) {
 	for i := range owners {
 		owners[i] = coderv1alpha1.WorkspacePoolOwner{UserID: fmt.Sprintf("5f0c3c4e-0000-4000-8000-%012d", i), Templates: []string{"default.ci-runner"}}
 	}
-	templates := make([]string, 17)
+	templates, groups := make([]string, 17), make([]string, 17)
 	for i := range templates {
-		templates[i] = fmt.Sprintf("default.t%d", i)
+		templates[i], groups[i] = fmt.Sprintf("default.t%d", i), fmt.Sprintf("5f0c3c4e-0000-4000-9000-%012d", i)
 	}
 	one := func(mutate func(*coderv1alpha1.WorkspacePoolOwner)) *coderv1alpha1.WorkspacePoolsSpec {
 		o := coderv1alpha1.WorkspacePoolOwner{UserID: poolOwnerID, Templates: []string{"default.ci-runner"}}
@@ -123,6 +123,11 @@ func TestControlPlaneWorkspacePoolsValidation(t *testing.T) {
 		}), wantErr: "must each have at most 32 characters"},
 		{name: "cap 0", spec: one(func(o *coderv1alpha1.WorkspacePoolOwner) { o.MaxWorkspaces = ptrTo(int32(0)) }), wantErr: "spec.workspacePools.owners[0].maxWorkspaces"},
 		{name: "cap 101", spec: one(func(o *coderv1alpha1.WorkspacePoolOwner) { o.MaxWorkspaces = ptrTo(int32(101)) }), wantErr: "spec.workspacePools.owners[0].maxWorkspaces"},
+		{name: "16 share groups", spec: one(func(o *coderv1alpha1.WorkspacePoolOwner) { o.ShareGroupIDs = groups[:16] })},
+		{name: "17 share groups", spec: one(func(o *coderv1alpha1.WorkspacePoolOwner) { o.ShareGroupIDs = groups }), wantErr: "spec.workspacePools.owners[0].shareGroupIDs"},
+		{name: "share group in upper case", spec: one(func(o *coderv1alpha1.WorkspacePoolOwner) {
+			o.ShareGroupIDs = []string{strings.ToUpper(groups[0])}
+		}), wantErr: "spec.workspacePools.owners[0].shareGroupIDs[0]"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

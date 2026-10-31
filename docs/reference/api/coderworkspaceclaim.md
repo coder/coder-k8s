@@ -14,6 +14,7 @@
 | Field | Type | Description |
 | --- | --- | --- |
 | `poolName` | string | PoolName is the CoderWorkspacePool in the claim's namespace. |
+| `share` | [CoderWorkspaceClaimShare](#coderworkspaceclaimshare) | Share names the Coder user that gets the workspace. Required when the pool's claims.mode is Share, refused otherwise: such a claim never binds and is Stalled with ClaimModeMismatch. |
 
 ## Status
 
@@ -25,9 +26,20 @@
 | `workspaceName` | string | WorkspaceName is the Coder workspace name. |
 | `ownerName` | string | OwnerName is the Coder username of the workspace owner, so that `coder ssh <ownerName>/<workspaceName>` reaches the workspace. |
 | `boundTime` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#time-v1-meta) | BoundTime is when a member took the claim. |
+| `sharedUserID` | string | SharedUserID is the Coder user that has the `use` role on the workspace through this claim, as the member last read it from Coder. |
 | `reason` | string | Reason is the current wait reason or the reason for Lost. |
 | `message` | string | Message explains Reason. It never holds Coder error details, build logs, parameter values, or tokens. |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.35/#condition-v1-meta) array | Conditions are Ready, Reconciling, and Stalled. |
+
+## Referenced types
+
+### CoderWorkspaceClaimShare
+
+CoderWorkspaceClaimShare names the Coder user of a Share claim.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `user` | string | User is a Coder username or user UUID (lower case with hyphens). |
 
 ## Source
 
