@@ -38,7 +38,7 @@ phase() { PHASES+=("$1=$((SECONDS - T0))s") && log "=== $1 passed in $((SECONDS 
 cleanup() {
   local p
   for p in "${BG_PIDS[@]}"; do kill "$p" 2>/dev/null || true; done
-  rm -f "$WORK/coder.hdr" "$WORK/coder-body.json" "$WORK/owner.json"
+  rm -f "$WORK/coder.hdr" "$WORK/coder-body.json" "$WORK/owner.json" "$WORK/owner-login.json" "$WORK/owner.hdr"
   printf '%s\n' "=== RECEIPT ($RESULT) ===" "owner=$OWNER/${OWNER_ID:-unset}" "pool_uid=${POOL_UID:-unset}" \
     "claim_ready_ms=${CLAIM_MS:-unset}" "bind_deadline=${BIND_DEADLINE:-unset}" "restart_member=${RESTART_MEMBER:-unset}" \
     "live_workspaces_after_restart=${LIVE:-unset}" "phase_seconds=${PHASES[*]:-unset}" | tee "$WORK/receipt.txt"
@@ -111,7 +111,7 @@ wait_until "Coder API via port-forward" coder_ready
 log "=== P1: pool owner, template with a 1 h TTL, pool refused until the owner is allowed"
 ORG_ID=$(coder_api GET /api/v2/organizations | jq -er 'map(select(.is_default)) | if length == 1 then .[0].id else error end') ||
   fail "cannot read the single default organization"
-PASSWORD=$(head -c 24 /dev/urandom | base64) # never logged or kept: nobody logs in as the owner
+PASSWORD=$(head -c 24 /dev/urandom | base64) # never logged; used once for the login below
 [[ ${GITHUB_ACTIONS:-} == true ]] && echo "::add-mask::$PASSWORD"
 jq -nc --arg u "$OWNER" --arg p "$PASSWORD" --arg o "$ORG_ID" '{username: $u, name: "E2E pool owner",
   email: ($u + "@e2e.example.com"), password: $p, login_type: "password", organization_ids: [$o]}' >"$WORK/owner.json"
@@ -119,13 +119,25 @@ unset PASSWORD
 if USER_JSON=$(coder_api POST /api/v2/users "$(<"$WORK/owner.json")" 2>"$WORK/owner.err"); then :
 elif grep -q 'error: 409' "$WORK/owner.err"; then
   log "owner $OWNER exists (409): reusing it after the same checks"
+  OWNER_REUSED=1
   USER_JSON=$(coder_api GET "/api/v2/users/$OWNER") || fail "cannot read the existing owner $OWNER"
 else fail "cannot create the owner $OWNER: $(head -c 300 "$WORK/owner.err")"; fi
-rm -f "$WORK/owner.json" "$WORK/coder-body.json"
 OWNER_ID=$(jq -er --arg u "$OWNER" --arg o "$ORG_ID" 'select(.username == $u and .login_type == "password" and
   (.organization_ids | index($o))) | .id' <<<"$USER_JSON") || fail "owner $OWNER has an unexpected shape or organization"
+[[ -z ${OWNER_REUSED:-} ]] || coder_api PUT "/api/v2/users/$OWNER_ID/password" "$(jq -c '{password}' "$WORK/owner.json")" \
+  >/dev/null || fail "cannot reset the password of the reused owner $OWNER"
 # New API users start dormant, and the pool refuses an owner that is not active.
 coder_api PUT "/api/v2/users/$OWNER_ID/status/activate" | jq -e '.status == "active"' >/dev/null || fail "cannot activate $OWNER"
+# Coder marks an active user dormant at its next check (every 15 min) once its last use is 90 days old, and a new user
+# was never used. One login sets the last use, as the claim consumer that holds the owner's credentials would.
+jq -c '{email, password}' "$WORK/owner.json" >"$WORK/owner-login.json"
+SESSION=$(curl -fsS --max-time 30 -X POST -H 'Content-Type: application/json' --data @"$WORK/owner-login.json" \
+  "$CODER_URL/api/v2/users/login" | jq -er '.session_token') || fail "cannot log in as $OWNER"
+[[ ${GITHUB_ACTIONS:-} == true ]] && echo "::add-mask::$SESSION"
+printf 'Coder-Session-Token: %s\n' "$SESSION" >"$WORK/owner.hdr"
+unset SESSION
+curl -fsS --max-time 30 -X POST -H @"$WORK/owner.hdr" "$CODER_URL/api/v2/users/logout" >/dev/null || fail "cannot log out $OWNER"
+rm -f "$WORK/owner.json" "$WORK/owner-login.json" "$WORK/owner.hdr" "$WORK/coder-body.json"
 render "$AGENT_MANIFEST" '.metadata.name = $n | .spec.displayName = "E2E Pool Agent Template"' --arg n "$ORG.$TEMPLATE" \
   >"$WORK/template.json" || fail "cannot render the pool template from $AGENT_MANIFEST"
 kubectl --request-timeout="$TEMPLATE_APPLY_TIMEOUT" apply -f "$WORK/template.json" >"$WORK/template-apply.out" 2>&1 ||
