@@ -1693,14 +1693,15 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 	if coderControlPlane.Spec.OperatorAccess.Disabled {
 		meta.RemoveStatusCondition(&nextStatus.Conditions, coderv1alpha1.CoderControlPlaneConditionOperatorTokenSecretOwned)
 		nextStatus.OperatorAccessReady = false
-		if err := r.deleteManagedOperatorTokenSecret(ctx, coderControlPlane); err != nil {
-			//nolint:nilerr // disabling operator access should retry cleanup without surfacing a terminal reconcile error.
-			return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
-		}
 		// The record stays while its token can still work in Coder.
 		revoke, err := r.revokeRecordedOperatorToken(ctx, coderControlPlane)
 		if err != nil {
 			return ctrl.Result{}, err
+		}
+		revokeSecretToken := revoke == operatorTokenNotRecorded || revoke == operatorTokenRevokeRefused
+		if err := r.deleteManagedOperatorTokenSecret(ctx, coderControlPlane, revokeSecretToken); err != nil {
+			//nolint:nilerr // disabling operator access should retry cleanup without surfacing a terminal reconcile error.
+			return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
 		}
 		if revoke == operatorTokenRevokePending || revoke == operatorTokenRevokeRefused {
 			return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
@@ -2265,10 +2266,14 @@ func licenseTierFromEntitlements(entitlements codersdk.Entitlements) string {
 }
 
 // deleteManagedOperatorTokenSecret deletes the operator token Secret when this
-// control plane controls it.
+// control plane controls it. With revokeToken, it first deletes in Coder the
+// token that the Secret holds, by its value. No other token has that value, so
+// this delete needs no record of the database. The Secret stays until that
+// delete worked.
 func (r *CoderControlPlaneReconciler) deleteManagedOperatorTokenSecret(
 	ctx context.Context,
 	coderControlPlane *coderv1alpha1.CoderControlPlane,
+	revokeToken bool,
 ) error {
 	if coderControlPlane == nil {
 		return fmt.Errorf("assertion failed: coder control plane must not be nil")
@@ -2288,6 +2293,23 @@ func (r *CoderControlPlaneReconciler) deleteManagedOperatorTokenSecret(
 		return fmt.Errorf("get operator token secret %q while disabling operator access: %w", operatorTokenSecretName, err)
 	case !isManagedOperatorTokenSecret(secret, coderControlPlane):
 		return nil
+	}
+	if token := string(secret.Data[coderv1alpha1.DefaultTokenSecretKey]); revokeToken && token != "" {
+		if r.OperatorAccessProvisioner == nil {
+			return fmt.Errorf("assertion failed: operator access provisioner must not be nil to delete the token of operator token secret %q", operatorTokenSecretName)
+		}
+		postgresURL, err := r.resolveBootstrapPostgresURL(ctx, coderControlPlane)
+		if err != nil {
+			return fmt.Errorf("resolve postgres URL while disabling operator access: %w", err)
+		}
+		if err := r.OperatorAccessProvisioner.RevokeOperatorToken(ctx, coderbootstrap.RevokeOperatorTokenRequest{
+			PostgresURL:      postgresURL,
+			OperatorUsername: defaultOperatorAccessUsername,
+			TokenName:        operatorAccessDatabaseTokenName(coderControlPlane),
+			Token:            token,
+		}); err != nil {
+			return fmt.Errorf("delete the token of operator token secret %q in Coder: %w", operatorTokenSecretName, err)
+		}
 	}
 	if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete operator token secret %q while disabling operator access: %w", operatorTokenSecretName, err)

@@ -628,6 +628,33 @@ func revokeOperatorToken(ctx context.Context, tx *sql.Tx, req RevokeOperatorToke
 		return err
 	}
 
+	if strings.TrimSpace(req.Token) != "" {
+		tokenID, tokenSecret, validFormat := splitOperatorToken(req.Token)
+		if !validFormat {
+			// No token in Coder has this value.
+			return nil
+		}
+		hashedSecret := sha256.Sum256([]byte(tokenSecret))
+		// #nosec G101 -- token_name here is a column identifier, not a credential.
+		const deleteOperatorTokenByValueQuery = `
+DELETE FROM api_keys
+WHERE id = $3
+  AND hashed_secret = $4
+  AND login_type = 'token'::login_type
+  AND token_name = $2
+  AND user_id IN (
+	SELECT id
+	FROM users
+	WHERE deleted = false
+	  AND lower(username) = lower($1)
+)
+`
+		if _, err := tx.ExecContext(ctx, deleteOperatorTokenByValueQuery, req.OperatorUsername, req.TokenName, tokenID, hashedSecret[:]); err != nil {
+			return fmt.Errorf("delete operator token %q by value: %w", req.TokenName, err)
+		}
+		return nil
+	}
+
 	// #nosec G101 -- token_name here is a column identifier, not a credential.
 	const deleteOperatorTokenByNameQuery = `
 DELETE FROM api_keys
