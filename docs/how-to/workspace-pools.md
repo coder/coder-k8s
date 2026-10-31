@@ -181,7 +181,7 @@ Checks that fall due together wait in line, so with a 1 s delay some checks wait
 
 - Delete a claim to delete its workspace.
 - Delete a pool to delete its unclaimed workspaces. Claimed workspaces stay with their claims, and the claims stay `Bound`.
-- A member whose workspace someone used without a claim (`Used=True`) leaves the pool: the pool removes itself as the member's owner, so neither a scale-down nor deleting the pool deletes it. A cluster admin who deletes such a member, or its namespace, deletes its workspace in Coder, as deleting a claim does. To keep the work, copy it out of the workspace first.
+- A member whose workspace someone used without a claim (`Used=True`) leaves the pool: the pool removes itself as the member's owner, so neither a scale-down nor deleting the pool deletes it. A cluster admin who deletes such a member, or its namespace, deletes its workspace in Coder, as deleting a claim does. To keep the work, copy it out of the workspace first. A used member that still lists the pool as its controller is not released yet, and deleting it keeps the workspace in Coder.
 - When the `CoderControlPlane` is deleted, members release their finalizers without a Coder call. Find leftover workspaces in Coder with the filter `owner:<pool owner>` and delete those whose names start with `kwp-`.
 
 With TLS on the control plane and without `spec.tls.operatorAccess`, pools send the operator token to Coder over plain HTTP inside the cluster. See [Where the operator token goes](deploy-controller.md#where-the-operator-token-goes).

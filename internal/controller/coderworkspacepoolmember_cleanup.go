@@ -23,9 +23,10 @@ const poolMemberUnknownOutcomePoll = 10 * time.Minute
 
 // cleanup runs the delete steps of a member being deleted (plan 6.5). It
 // releases the finalizer once no workspace of the member can exist, the
-// workspace is deleted, the workspace was used while the pool still held the
-// member, or the control plane is gone. A workspace that nothing proves to be the member's keeps the
-// finalizer, and the controller never touches it.
+// workspace is deleted, the workspace was used but the pool never released
+// the member, or the control plane is gone. A workspace that nothing proves
+// to be the member's keeps the finalizer, and the controller never touches
+// it.
 func (r *CoderWorkspacePoolMemberReconciler) cleanup(ctx context.Context, member *coderv1alpha1.CoderWorkspacePoolMember) (ctrl.Result, error) {
 	deleted := meta.FindStatusCondition(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionWorkspaceDeleted)
 	if !poolMemberMayHaveWorkspace(member) || (deleted != nil && deleted.Status == metav1.ConditionTrue) {

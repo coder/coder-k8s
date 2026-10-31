@@ -29,8 +29,13 @@ unused() { jq -e '.spec.claimRef == null and (.status.conditions // [] | length 
 ws_delete() { [[ $SCENARIO == scale-down-keeps-workspace ]] ||
   edit "$S/ws/$1.json" '.deleted = true | .latest_build = {id: "build-delete", transition: "delete", job: {status: "succeeded"}}'; }
 member_delete() { # the member finalizer: a person's delete of a released used member deletes its workspace (D6)
-  [[ $SCENARIO == used-member-kept ]] && ! unused "$1" && jq -e '.spec.claimRef == null' "$1" >/dev/null ||
-    ws_delete "$(jq -r .status.workspaceID "$1")"
+  local keep=""
+  case $SCENARIO in
+    used-member-kept) ! unused "$1" && jq -e '.spec.claimRef == null' "$1" >/dev/null && keep=1 ;;
+    claim-delete-keeps-workspace) jq -e '.spec.claimRef != null' "$1" >/dev/null && keep=1 ;;
+    pool-delete-keeps-workspace) [[ ! -f $S/pool.json ]] && unused "$1" && keep=1 ;;
+  esac
+  [[ -n $keep ]] || ws_delete "$(jq -r .status.workspaceID "$1")"
   rm -f "$1"
 }
 member_create() {
@@ -271,6 +276,8 @@ run_scenario restart-duplicates "the 5 members' workspace names have 6 workspace
 run_scenario use-not-detected "Used=True and released by the pool"
 run_scenario false-use "pool usedReplicas is not 1"
 run_scenario scale-down-keeps-workspace "deleted in Coder"
+run_scenario claim-delete-keeps-workspace "the claim's workspace"
+run_scenario pool-delete-keeps-workspace "the unclaimed workspace"
 run_scenario pool-delete-takes-used "the used member"
 run_scenario used-member-kept "did not delete workspace"
 run_scenario dry-run-creates "the server dry run created pool e2e-pool"

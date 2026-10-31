@@ -166,28 +166,44 @@ func TestPoolMemberCleanupLastUseCheck(t *testing.T) {
 // P8): once the pool released a used member, only a person or a namespace
 // deletion can delete it, and that delete deletes its workspace. A used
 // member that its pool still controls keeps its workspace, because garbage
-// collection of the pool can be the deleter.
+// collection of the pool can be the deleter. So does a member without a
+// controller, for example after a pool delete with --cascade=orphan, whose
+// use the delete finds first.
 func TestPoolMemberCleanupDeletesReleasedUsedMember(t *testing.T) {
 	t.Parallel()
 	e := newPoolMemberEnv(t)
-	for _, released := range []bool{false, true} {
+	for _, tc := range []struct {
+		name                            string
+		recorded, noController, deletes bool
+	}{
+		{"used member of the pool", true, false, false},
+		{"released used member", true, true, true},
+		{"orphaned member, use found at delete", false, true, false},
+	} {
 		key, workspaceID := e.readyMember(t)
 		e.fake.markUsed(workspaceID, e.clock.Now().Add(time.Minute))
 		e.clock.SetTime(e.clock.Now().Add(2 * time.Minute))
-		requireUsed(t, e.reconcileMember(t, key, 1), true)
-		if released {
-			e.reconcilePool(t, 1)
-			require.Nil(t, metav1.GetControllerOf(e.reconcileMember(t, key, 0)), "the pool released the used member")
+		switch {
+		case tc.recorded:
+			requireUsed(t, e.reconcileMember(t, key, 1), true)
+			if tc.noController {
+				e.reconcilePool(t, 1)
+			}
+		case tc.noController:
+			member := e.reconcileMember(t, key, 0)
+			member.OwnerReferences = nil
+			require.NoError(t, k8sClient.Update(e.ctx, member))
 		}
+		require.Equal(t, tc.noController, metav1.GetControllerOf(e.reconcileMember(t, key, 0)) == nil, tc.name)
 		builds := e.fake.requestCount(routeCreateBuild)
 		e.deleteMember(t, key)
 		member := e.reconcileMember(t, key, 1)
-		if !released {
-			require.Nil(t, member, "a used member of the pool goes without deleting its workspace")
-			require.Equal(t, builds, e.fake.requestCount(routeCreateBuild))
+		if !tc.deletes {
+			require.Nil(t, member, "%s: the member goes without deleting its workspace", tc.name)
+			require.Equal(t, builds, e.fake.requestCount(routeCreateBuild), tc.name)
 			continue
 		}
-		require.NotNil(t, member, "deleting a released used member deletes its workspace before the finalizer goes")
+		require.NotNil(t, member, "%s: the delete deletes its workspace before the finalizer goes", tc.name)
 		requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhaseDeleting, "Deleting", "started a delete build")
 		require.Equal(t, builds+1, e.fake.requestCount(routeCreateBuild))
 		e.fake.setBuildJob(uuid.MustParse(member.Status.DeleteBuildID), codersdk.ProvisionerJobSucceeded)
