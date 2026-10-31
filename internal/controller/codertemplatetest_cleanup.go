@@ -124,7 +124,7 @@ func (r *CoderTemplateTestReconciler) cleanupStep(ctx context.Context, tt *coder
 		markTemplateTestNotCreated(tt, r.Clock.Now())
 		return 0, nil
 	}
-	if gone, err := controlPlaneGone(ctx, r.Client, tt.Namespace, tt.Spec.ControlPlaneRef.Name); err != nil || gone {
+	if gone, err := controlPlaneGone(ctx, r.Client, r.APIReader, tt.Namespace, tt.Spec.ControlPlaneRef.Name); err != nil || gone {
 		if gone {
 			step := templateTestControlPlaneGone(tt)
 			set(step.deleted.Status, step.deleted.Reason, step.deleted.Message)

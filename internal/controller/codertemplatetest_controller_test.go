@@ -88,7 +88,7 @@ func (e *templateTestEnv) createTest(t *testing.T, template string, version code
 func (e *templateTestEnv) reconcile(t *testing.T, key types.NamespacedName, n int) *coderv1alpha1.CoderTemplateTest {
 	t.Helper()
 	for range n {
-		r := &controller.CoderTemplateTestReconciler{Client: k8sClient, Scheme: scheme, Clock: e.clock}
+		r := &controller.CoderTemplateTestReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
 		var err error
 		e.lastStep, err = r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
 		require.NoError(t, err)
@@ -535,7 +535,7 @@ func TestTemplateTestDeadlineAfterSlowLookup(t *testing.T) {
 	require.NotNil(t, tt.Status.StartTime)
 
 	deadline := tt.Status.StartTime.Add(900 * time.Second)
-	r := &controller.CoderTemplateTestReconciler{Client: k8sClient, Scheme: scheme, Clock: &lateClock{times: []time.Time{deadline.Add(-time.Second), deadline}}}
+	r := &controller.CoderTemplateTestReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Clock: &lateClock{times: []time.Time{deadline.Add(-time.Second), deadline}}}
 	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
 	require.NoError(t, err)
 	tt = e.settle(t, key)
