@@ -270,6 +270,9 @@ func TestPoolIdleCheckNeedsEvidence(t *testing.T) {
 	requireClaim(t, e.claim(t, claimKey), coderv1alpha1.CoderWorkspaceClaimPhaseBound, "WorkspaceReady", true)
 
 	e.fake.markUsed(workspaceID, e.clock.Now())
+	e.reconcilePool(t, 1)
+	requireClaim(t, e.claim(t, claimKey), coderv1alpha1.CoderWorkspaceClaimPhaseBound, "WorkspaceReady", true)
+	require.True(t, e.reconcileMember(t, member, 0).DeletionTimestamp.IsZero(), "a recorded check without a Lost claim deletes nothing")
 	e.deleteMember(t, member) // A person's delete, while the claim is Bound.
 	m := e.reconcileMember(t, member, 1)
 	requireMember(t, m, coderv1alpha1.CoderWorkspacePoolMemberPhaseDeleting, "Deleting", "started a delete build")
