@@ -1,15 +1,23 @@
 package controller
 
 import (
+	"context"
 	"crypto/tls"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/coder/coder/v2/codersdk"
+	"github.com/google/uuid"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/coder/coder-k8s/internal/aggregated/coder"
 )
 
 func TestCreateHadNoEffect(t *testing.T) {
@@ -50,4 +58,33 @@ func TestCreateHadNoEffectTLSRecordHeader(t *testing.T) {
 	} {
 		require.Equal(t, tc.want, createHadNoEffect(tc.err), tc.name)
 	}
+}
+
+// A create that Coder got is never without effect, even when the error is a
+// refused dial: here the server takes the create, answers with a same-origin
+// redirect, and stops listening, so the request after the redirect cannot
+// connect.
+func TestCreateHadNoEffectRedirectThenRefusedDial(t *testing.T) {
+	t.Parallel()
+	var received atomic.Int32
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received.Add(1)
+		_ = server.Listener.Close()
+		w.Header().Set("Connection", "close")
+		http.Redirect(w, r, "/api/v2/moved", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(server.Close)
+	serverURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	sdk, err := coder.NewSDKClient(coder.Config{CoderURL: serverURL, SessionToken: "token", RequestTimeout: 5 * time.Second})
+	require.NoError(t, err)
+
+	_, err = sdk.CreateUserWorkspace(context.Background(), codersdk.Me, codersdk.CreateWorkspaceRequest{TemplateVersionID: uuid.New(), Name: "kwp-test"})
+	require.Error(t, err)
+	var opErr *net.OpError
+	require.ErrorAs(t, err, &opErr, "the request after the redirect fails to dial")
+	require.Equal(t, "dial", opErr.Op)
+	require.EqualValues(t, 1, received.Load(), "the server got the create")
+	require.False(t, createHadNoEffect(err), "%v", err)
 }
