@@ -155,6 +155,66 @@ spec:
 
 KEDA's operator creates the HPA for a `ScaledObject`, and its own role can update every `/scale`, so the policy checks the `ScaledObject`'s author instead.
 
+## 6. Share a workspace with a person
+
+A pool in Share mode binds a claim as usual, then gives one named Coder user the `use` role on the workspace. That user can open its apps, connect with SSH, and start and stop it. The user cannot delete the workspace or share it further. The workspace still belongs to the pool owner.
+
+Share mode is off until the control plane admin turns it on for an owner with `shareGroupIDs`, the Coder groups whose members a claim can name:
+
+```yaml
+spec:
+  workspacePools:
+    owners:
+      - userID: 5f0c3c4e-0000-4000-8000-000000000001
+        templates: [coder.ci-runner]
+        shareGroupIDs: [7d1c2b3a-0000-4000-8000-000000000002] # the ID of organization "coder"
+```
+
+The ID of the template's organization names that organization's `Everyone` group: every active member of the organization can then get a share. This works without a license. Any other group needs a Premium license. Without one, Coder answers 403 to the group read, and the claim waits with `ShareUserNotEligible` and names the group that could not be read. The ID of another organization does not stand for membership of that organization: the operator reads it like any other group, which needs Premium.
+
+The organization's **Workspace sharing** setting must also let the owner share: `everyone`, or `service_accounts` when the owner is a service account (service accounts need Premium). The operator is a site owner, and Coder lets a site owner share where the owner could not, so the controller checks the setting itself: at the pool's resolve, and again right before each share. The controller never changes the setting. A pool whose owner may not share waits with `ShareNotAllowed`.
+
+Set the mode when you create the pool. It cannot change later:
+
+```yaml
+apiVersion: coder.com/v1alpha1
+kind: CoderWorkspacePool
+metadata:
+  name: dev-workspaces
+  namespace: coder
+spec:
+  claims:
+    mode: Share # the default is Reserve
+  # controlPlaneRef, ownerUserID, template, version, and replicas as in step 3
+```
+
+Name the user in each claim by Coder username or by user ID in lower case:
+
+```yaml
+apiVersion: coder.com/v1alpha1
+kind: CoderWorkspaceClaim
+metadata:
+  name: alice-dev
+  namespace: coder
+spec:
+  poolName: dev-workspaces
+  share:
+    user: alice
+```
+
+The pool binds the claim only when the user is active, a member of the template's organization, and in one of the owner's groups. Otherwise the claim stays `Pending` with `ShareUserNotFound` or `ShareUserNotEligible`, and the pool builds no workspace for it. A claim without `share` on a Share pool, or with `share` on a Reserve pool, never binds and is `Stalled` with `ClaimModeMismatch`.
+
+The claim is `Ready` only after the share, and `status.sharedUserID` holds the user's ID. While the share is pending, `kubectl -n coder get coderworkspaceclaims` shows the reason `SharingWorkspace`. If the policy or Coder refuses the share after the bind, the claim is `Stalled` with `ShareRefused`, and the operator checks again every minute. Wait for a claim with:
+
+```bash
+kubectl -n coder wait --for=condition=Ready coderworkspaceclaim/alice-dev
+```
+
+The operator shares once and never revokes or rewrites a share. Deleting the claim deletes the workspace, which ends the share. Coder itself drops shares when an admin tightens the organization's sharing setting.
+
+!!! warning "Share mode trusts every claimant with the pool owner"
+    Every claimant can act as the pool owner, and so reach the workspaces of other claimants, if the template exposes `data.coder_workspace_owner.<name>.session_token`, if the owner has external-auth links, or through the owner's Git SSH key. Use a template that never exposes the owner's token and an owner without external-auth links, and treat the owner's Git SSH key as shared by every claimant. Anyone who can create pools on a control plane can act as every owner that the control plane lists. `maxWorkspaces` counts per control plane, so two `CoderControlPlane` objects on one Coder deployment can each allow the full cap for one owner.
+
 ## Cost
 
 Each unclaimed workspace runs all the time, so a pool of `replicas: N` costs N running workspaces plus the claimed ones. A claimed workspace keeps a normal autostop deadline after the bind, so Coder stops it when nobody uses it. A template with a default TTL of 0 has no deadline: its claimed workspaces run until someone stops or deletes them. For such a template, `claims.idleTimeoutSeconds` is the only automatic limit.
