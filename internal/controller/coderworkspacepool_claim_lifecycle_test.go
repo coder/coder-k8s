@@ -3,6 +3,7 @@ package controller_test
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
@@ -165,4 +166,75 @@ func TestPoolOrphanClaimKeepsOwnerName(t *testing.T) {
 	requireClaim(t, claim, coderv1alpha1.CoderWorkspaceClaimPhaseBound, "WorkspaceReady", true)
 	require.Equal(t, "tester", claim.Status.OwnerName)
 	require.Equal(t, "kwp-crash", claim.Status.WorkspaceName)
+}
+
+// TestPoolNewOwnerKeepsClaimOwnerName: the pool of a bound claim is deleted,
+// and a new pool takes its name with another owner. The claim still names
+// the owner of its workspace, so `coder ssh tester/kwp-owned` keeps working.
+func TestPoolNewOwnerKeepsClaimOwnerName(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(0)) })
+	member := e.createMember(t, nil)
+	e.setMemberStatus(t, member, readyWithWorkspace("kwp-owned"))
+	claimKey := e.createClaim(t, "build-1")
+	e.reconcilePool(t, 1)
+	e.requireBound(t, member, claimKey)
+	require.Equal(t, "tester", e.claim(t, claimKey).Status.OwnerName)
+
+	require.NoError(t, k8sClient.Delete(e.ctx, e.reconcilePool(t, 0)))
+	bob := e.fake.addUser("bob", codersdk.LoginTypePassword)
+	e.fake.addMember(e.orgID, bob)
+	e.allowOwner(t, bob.String(), "default.docker")
+	e.pool = &coderv1alpha1.CoderWorkspacePool{
+		ObjectMeta: metav1.ObjectMeta{Name: e.pool.Name, Namespace: e.ns},
+		Spec: coderv1alpha1.CoderWorkspacePoolSpec{
+			ControlPlaneRef: coderv1alpha1.CoderControlPlaneReference{Name: "coder"},
+			OwnerUserID:     bob.String(), Template: "default.docker",
+			Version: coderv1alpha1.CoderWorkspacePoolVersion{Name: "v1"}, Replicas: new(int32(0)),
+		},
+	}
+	require.NoError(t, k8sClient.Create(e.ctx, e.pool))
+	e.reconcilePool(t, 2)
+	claim := e.claim(t, claimKey)
+	requireClaim(t, claim, coderv1alpha1.CoderWorkspaceClaimPhaseBound, "WorkspaceReady", true)
+	require.Equal(t, "tester", claim.Status.OwnerName)
+}
+
+// TestPoolBoundClaimOnCoderErrors: a bound member whose workspace read gets
+// a 404 or a 5xx keeps its claim Bound. Coder also answers 404 when the
+// operator may not read the workspace, so only a 410 makes a claim Lost. A
+// rename of the bound workspace stops the member with OwnershipUnknown, and
+// the claim stays Bound with that reason: the controller does not follow a
+// rename (see readPoolMemberWorkspace).
+func TestPoolBoundClaimOnCoderErrors(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(0)) })
+	member, workspaceID := e.readyMember(t)
+	claimKey := e.createClaim(t, "build-1")
+	e.reconcilePool(t, 1)
+	e.requireBound(t, member, claimKey)
+	require.True(t, e.reconcileMember(t, member, 1).Status.BindExtended)
+
+	for _, status := range []int{http.StatusNotFound, http.StatusInternalServerError, http.StatusServiceUnavailable} {
+		e.fake.failNext(routeWorkspace, fakeFault{Status: status})
+		m := e.reconcileMember(t, member, 1)
+		require.Equal(t, coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, m.Status.Phase, "%d: %s", status, m.Status.Message)
+		e.reconcilePool(t, 1)
+		claim := e.claim(t, claimKey)
+		require.Equal(t, coderv1alpha1.CoderWorkspaceClaimPhaseBound, claim.Status.Phase, "%d: %s", status, claim.Status.Message)
+		require.Equal(t, m.Name, claim.Status.MemberName)
+	}
+	e.reconcileMember(t, member, 1)
+	e.reconcilePool(t, 1)
+	requireClaim(t, e.claim(t, claimKey), coderv1alpha1.CoderWorkspaceClaimPhaseBound, "WorkspaceReady", true)
+
+	e.fake.renameWorkspace(workspaceID, "renamed")
+	requireMemberFailed(t, e.reconcileMember(t, member, 1), "OwnershipUnknown", "is not the workspace of this member", metav1.ConditionUnknown)
+	e.reconcilePool(t, 1)
+	claim := e.claim(t, claimKey)
+	require.Equal(t, coderv1alpha1.CoderWorkspaceClaimPhaseBound, claim.Status.Phase, claim.Status.Message)
+	require.Equal(t, "OwnershipUnknown", claim.Status.Reason)
+	require.NotNil(t, e.reconcileMember(t, member, 0).Spec.ClaimRef, "the pool never deletes a bound member")
 }

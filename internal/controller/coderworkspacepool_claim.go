@@ -70,7 +70,7 @@ func (r *CoderWorkspacePoolReconciler) reconcileOrphanClaims(ctx context.Context
 	if err := r.APIReader.List(ctx, all, client.InNamespace(namespace)); err != nil {
 		return fmt.Errorf("list pool members in namespace %s: %w", namespace, err)
 	}
-	return r.writeClaimStatuses(ctx, poolName, true, claims, all.Items, "")
+	return r.writeClaimStatuses(ctx, poolName, true, claims, all.Items, "", "")
 }
 
 // poolClaimHolder returns the member of the claim's pool that holds the
@@ -134,9 +134,13 @@ func (r *CoderWorkspacePoolReconciler) refreshWaitingClaims(
 // skips a member that this read does not prove unused (#409). skipped
 // reports such a member, so the pool reads again soon. The bound members
 // change in all, so the later steps see them bound. The claims come from
-// refreshWaitingClaims. Before each bind, the pool stores ownerName in the
-// claim status, so the name survives a crash between the bind and the
-// status. It also sets the pool label again, in case it drifted.
+// refreshWaitingClaims. Before each bind, the pool reserves the member in the
+// claim status: memberName and workspaceName, with ownerName, so the name
+// survives a crash between the bind and the status. The write carries the
+// claim's resourceVersion, so of two reconciles that pick different members
+// for one claim (two operator replicas), only one reserves. A reconcile that
+// finds a reservation binds only that member until poolReservationStale says
+// otherwise. It also sets the pool label again, in case it drifted.
 func (r *CoderWorkspacePoolReconciler) bindClaims(
 	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, claims []coderv1alpha1.CoderWorkspaceClaim,
 	all []coderv1alpha1.CoderWorkspacePoolMember, counts *poolMemberCounts, ownerName string,
@@ -183,26 +187,48 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 		if !poolClaimWaits(claim, all) {
 			continue
 		}
-		if claim.Status.OwnerName != ownerName {
-			claim.Status.OwnerName = ownerName
-			if err := r.Status().Update(ctx, claim); err != nil {
-				return false, fmt.Errorf("update status of workspace claim %s/%s: %w", claim.Namespace, claim.Name, err)
-			}
-		}
-		for len(free) > 0 {
-			unused, err := poolMemberUnusedNow(ctx, sdk, free[0], r.Clock.Now())
+		follow := claim.Status.MemberName != ""
+		if follow {
+			stale, err := r.poolReservationStale(ctx, claim)
 			if err != nil {
 				return false, err
 			}
-			if unused {
-				break
+			if stale {
+				follow = false
+			} else if !slices.ContainsFunc(free, func(m *coderv1alpha1.CoderWorkspacePoolMember) bool { return poolReserves(claim, m) }) {
+				skipped = true // It holds the claim already, or this list is older than the reservation.
+				continue
 			}
-			free, skipped = free[1:], true
 		}
-		if len(free) == 0 {
-			return skipped, nil
+		var m *coderv1alpha1.CoderWorkspacePoolMember
+		for j := 0; m == nil && j < len(free); {
+			if follow && !poolReserves(claim, free[j]) {
+				j++
+				continue
+			}
+			unused, err := poolMemberUnusedNow(ctx, sdk, free[j], r.Clock.Now())
+			if err != nil {
+				return false, err
+			}
+			if !unused {
+				free, skipped = slices.Delete(free, j, j+1), true
+				continue
+			}
+			m = free[j]
 		}
-		m := free[0]
+		if m == nil {
+			continue
+		}
+		workspaceName, err := uidWorkspaceName(poolMemberWorkspacePrefix, m.UID)
+		if err != nil {
+			return false, err
+		}
+		if claim.Status.OwnerName != ownerName || claim.Status.MemberName != m.Name || claim.Status.WorkspaceName != workspaceName {
+			claim.Status.OwnerName, claim.Status.MemberName, claim.Status.WorkspaceName = ownerName, m.Name, workspaceName
+			if err := r.Status().Update(ctx, claim); err != nil {
+				return false, fmt.Errorf("reserve pool member %s for workspace claim %s/%s: %w", m.Name, claim.Namespace, claim.Name, err)
+			}
+		}
 		current := poolMemberInputMismatch(m, pool) == ""
 		bound := m.DeepCopy()
 		bound.Spec.ClaimRef = &coderv1alpha1.CoderWorkspaceClaimReference{Name: claim.Name, UID: string(claim.UID)}
@@ -217,7 +243,8 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 		if err := r.Update(ctx, bound); err != nil {
 			return false, fmt.Errorf("bind pool member %s/%s to claim %s: %w", m.Namespace, m.Name, claim.Name, err)
 		}
-		*m, free = *bound, free[1:]
+		*m = *bound
+		free = slices.DeleteFunc(free, func(f *coderv1alpha1.CoderWorkspacePoolMember) bool { return f == m })
 		counts.unclaimed--
 		counts.ready--
 		counts.bound++
@@ -229,6 +256,43 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 		}
 	}
 	return skipped, nil
+}
+
+// poolReserves reports whether claim reserved m: its name and the workspace
+// name derived from its UID. A member that a delete and a create gave the
+// name of the reserved one is another member.
+func poolReserves(claim *coderv1alpha1.CoderWorkspaceClaim, m *coderv1alpha1.CoderWorkspacePoolMember) bool {
+	workspaceName, err := uidWorkspaceName(poolMemberWorkspacePrefix, m.UID)
+	return err == nil && m.Name == claim.Status.MemberName && workspaceName == claim.Status.WorkspaceName
+}
+
+// poolReservationStale reports whether the member that claim reserved can
+// no longer be bound to it, read without the cache. Only states that a member
+// never leaves count: it is gone, being deleted, failed, used, or held by
+// another claim. A reconcile that reserved the member, or that found the
+// reservation, binds it with the resourceVersion of a list in which it was
+// free. A member that went through any of these states since then has a newer
+// resourceVersion, so that update fails, and a later list never shows it
+// free again. A member that holds the claim, or that is only not ready for
+// now, keeps the reservation. So does a ready member whose workspace read
+// keeps failing: the claim waits for it, as for any member that a bind cannot
+// read.
+func (r *CoderWorkspacePoolReconciler) poolReservationStale(ctx context.Context, claim *coderv1alpha1.CoderWorkspaceClaim) (bool, error) {
+	m := &coderv1alpha1.CoderWorkspacePoolMember{}
+	key := client.ObjectKey{Namespace: claim.Namespace, Name: claim.Status.MemberName}
+	if err := r.APIReader.Get(ctx, key, m); apierrors.IsNotFound(err) {
+		return true, nil
+	} else if err != nil {
+		return false, fmt.Errorf("get reserved pool member %s: %w", key, err)
+	}
+	if !poolReserves(claim, m) {
+		return true, nil
+	}
+	if m.Spec.ClaimRef != nil {
+		return m.Spec.ClaimRef.UID != string(claim.UID), nil
+	}
+	return !m.DeletionTimestamp.IsZero() || m.Status.Phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed ||
+		meta.IsStatusConditionTrue(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed), nil
 }
 
 // poolMemberUnusedNow reads the member's workspace with the member's identity
@@ -246,12 +310,15 @@ func poolMemberUnusedNow(ctx context.Context, sdk *codersdk.Client, member *code
 
 // writeClaimStatuses writes the status of every claim of the pool from the
 // member that holds it (plan 6.3 step 10). A claim whose member's workspace
-// is deleted becomes Lost, which is final. ownerName is the owner's Coder
-// username from this reconcile, or "" when the owner read did not run.
-// poolMissing marks a pool that is gone or being deleted.
+// is deleted becomes Lost, which is final. ownerName is the Coder username of
+// ownerID, the pool's owner, from this reconcile, or "" when the owner read
+// did not run. It updates only the claims whose member ownerID owns: a new
+// pool with the name of a deleted one can have another owner. A pending
+// claim keeps memberName, its reservation (see bindClaims). poolMissing
+// marks a pool that is gone or being deleted.
 func (r *CoderWorkspacePoolReconciler) writeClaimStatuses(
 	ctx context.Context, poolName string, poolMissing bool, claims []coderv1alpha1.CoderWorkspaceClaim,
-	all []coderv1alpha1.CoderWorkspacePoolMember, ownerName string,
+	all []coderv1alpha1.CoderWorkspacePoolMember, ownerID, ownerName string,
 ) error {
 	now := metav1.NewTime(r.Clock.Now())
 	for i := range claims {
@@ -284,7 +351,9 @@ func (r *CoderWorkspacePoolReconciler) writeClaimStatuses(
 		case m != nil:
 			st.Phase, st.MemberName = coderv1alpha1.CoderWorkspaceClaimPhaseBound, m.Name
 			st.WorkspaceID, st.WorkspaceName = m.Status.WorkspaceID, m.Status.WorkspaceName
-			st.OwnerName = cmp.Or(ownerName, st.OwnerName)
+			if ownerName != "" && m.Spec.OwnerID == ownerID {
+				st.OwnerName = ownerName
+			}
 			if st.BoundTime == nil {
 				st.BoundTime = &now
 			}

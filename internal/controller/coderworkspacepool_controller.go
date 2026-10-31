@@ -170,7 +170,7 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err := r.deleteUnclaimedMembers(ctx, pool, poolWant(pool, claims, all.Items), all.Items, step); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.writeClaimStatuses(ctx, pool.Name, false, claims, all.Items, ownerName); err != nil {
+	if err := r.writeClaimStatuses(ctx, pool.Name, false, claims, all.Items, pool.Spec.OwnerUserID, ownerName); err != nil {
 		return ctrl.Result{}, err
 	}
 	r.applyPoolStatus(pool, counts, step)

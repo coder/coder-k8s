@@ -41,7 +41,9 @@ type CoderWorkspaceClaimStatus struct {
 	// +kubebuilder:validation:Enum=Pending;Bound;Lost
 	// +optional
 	Phase string `json:"phase,omitempty"`
-	// MemberName is the CoderWorkspacePoolMember that holds the claim.
+	// MemberName is the CoderWorkspacePoolMember that holds the claim. While
+	// the claim is Pending, memberName and workspaceName name the member that
+	// the pool reserved for it.
 	// +optional
 	MemberName string `json:"memberName,omitempty"`
 	// WorkspaceID is the Coder workspace ID.
