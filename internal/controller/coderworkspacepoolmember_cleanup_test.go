@@ -162,6 +162,39 @@ func TestPoolMemberCleanupLastUseCheck(t *testing.T) {
 	require.Zero(t, e.coderWrites(), "a used workspace is never deleted")
 }
 
+// TestPoolMemberCleanupDeletesReleasedUsedMember (decision D6, Kind phase
+// P8): once the pool released a used member, only a person or a namespace
+// deletion can delete it, and that delete deletes its workspace. A used
+// member that its pool still controls keeps its workspace, because garbage
+// collection of the pool can be the deleter.
+func TestPoolMemberCleanupDeletesReleasedUsedMember(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	for _, released := range []bool{false, true} {
+		key, workspaceID := e.readyMember(t)
+		e.fake.markUsed(workspaceID, e.clock.Now().Add(time.Minute))
+		e.clock.SetTime(e.clock.Now().Add(2 * time.Minute))
+		requireUsed(t, e.reconcileMember(t, key, 1), true)
+		if released {
+			e.reconcilePool(t, 1)
+			require.Nil(t, metav1.GetControllerOf(e.reconcileMember(t, key, 0)), "the pool released the used member")
+		}
+		builds := e.fake.requestCount(routeCreateBuild)
+		e.deleteMember(t, key)
+		member := e.reconcileMember(t, key, 1)
+		if !released {
+			require.Nil(t, member, "a used member of the pool goes without deleting its workspace")
+			require.Equal(t, builds, e.fake.requestCount(routeCreateBuild))
+			continue
+		}
+		require.NotNil(t, member, "deleting a released used member deletes its workspace before the finalizer goes")
+		requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhaseDeleting, "Deleting", "started a delete build")
+		require.Equal(t, builds+1, e.fake.requestCount(routeCreateBuild))
+		e.fake.setBuildJob(uuid.MustParse(member.Status.DeleteBuildID), codersdk.ProvisionerJobSucceeded)
+		require.Nil(t, e.reconcileMember(t, key, 1), "the finalizer goes once the delete build succeeded")
+	}
+}
+
 // TestPoolMemberCleanupUseBeforeDeleteRetry (#409): the last use check runs
 // before every delete build. After a failed delete build, an unused workspace
 // gets a new delete build once the backoff ends, and a workspace that someone
