@@ -5,9 +5,12 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -132,4 +135,70 @@ func TestNewSDKClient_RefusesTLSTrustForHTTPURL(t *testing.T) {
 		SessionToken: "operator-token",
 	})
 	require.ErrorContains(t, err, "assertion failed: a TLS trust needs an HTTPS coder URL")
+}
+
+// connectProxy tunnels CONNECT requests and counts them.
+type connectProxy struct{ tunnels atomic.Int32 }
+
+func (p *connectProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodConnect {
+		http.Error(w, "CONNECT only", http.StatusMethodNotAllowed)
+		return
+	}
+	p.tunnels.Add(1)
+	target, err := net.Dial("tcp", r.Host)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer func() { _ = target.Close() }()
+	client, _, err := http.NewResponseController(w).Hijack()
+	if err != nil {
+		return
+	}
+	defer func() { _ = client.Close() }()
+	_, _ = io.WriteString(client, "HTTP/1.1 200 Connection established\r\n\r\n")
+	go func() { _, _ = io.Copy(target, client) }()
+	_, _ = io.Copy(client, target)
+}
+
+func TestTransportRegistryProxiesWithTLSTrust(t *testing.T) {
+	t.Parallel()
+
+	ca := tlstest.NewCA(t)
+	coder := &countingCoder{}
+	server := ca.NewServer(t, coder, "127.0.0.1")
+	call := func(proxyURL string, trust *controlplaneurl.TLS) error {
+		registry := newTransportRegistry(func() (*http.Transport, error) {
+			transport, err := newCoderTransport()
+			if err != nil {
+				return nil, err
+			}
+			transport.Proxy = http.ProxyURL(mustParseURL(t, proxyURL))
+			return transport, nil
+		})
+		transport, err := registry.forURL(mustParseURL(t, server.URL), trust)
+		require.NoError(t, err)
+		req, err := http.NewRequest(http.MethodGet, server.URL+"/api/v2/buildinfo", nil)
+		require.NoError(t, err)
+		req.Header.Set("Coder-Session-Token", "operator-token")
+		res, err := transport.RoundTrip(req)
+		if err != nil {
+			return err
+		}
+		return res.Body.Close()
+	}
+
+	proxy := &connectProxy{}
+	httpProxy := httptest.NewServer(proxy)
+	t.Cleanup(httpProxy.Close)
+	require.NoError(t, call(httpProxy.URL, newTrust(t, ca.PEM, "")), "an http:// proxy tunnels the verified connection")
+	requireCertificateRejected(t, call(httpProxy.URL, newTrust(t, tlstest.NewCA(t).PEM, "")))
+	require.EqualValues(t, 2, proxy.tunnels.Load())
+
+	httpsProxy := ca.NewServer(t, proxy, "127.0.0.1")
+	err := call(httpsProxy.URL, newTrust(t, ca.PEM, ""))
+	require.ErrorIs(t, err, errHTTPSProxyWithTrust)
+	require.EqualValues(t, 2, proxy.tunnels.Load(), "the https:// proxy must get no request")
+	require.Len(t, coder.requests(), 1)
 }

@@ -114,6 +114,7 @@ func (r *transportRegistry) forURL(coderURL *url.URL, trust *controlplaneurl.TLS
 	}
 	if trust != nil {
 		transport.TLSClientConfig = trust.ClientConfig()
+		transport.Proxy = refuseHTTPSProxy(transport.Proxy)
 	}
 	entry := &registeredTransport{registry: r, key: key, transport: transport, lastUsed: now}
 	r.byDeployment[key] = entry
@@ -244,6 +245,26 @@ func newCoderTransport() (*http.Transport, error) {
 	transport.OnProxyConnectResponse = refuseFailedProxyConnect
 
 	return transport, nil
+}
+
+// errHTTPSProxyWithTrust marks a request with a TLS trust that would go through an https://
+// proxy. net/http verifies the proxy with the TLSClientConfig of the transport too, so the
+// trust for Coder would also apply to the proxy, and the Coder server name would go to it.
+var errHTTPSProxyWithTrust = errors.New("an https:// proxy cannot carry a Coder request with a TLS trust; exclude the Coder host with NO_PROXY or use an http:// proxy")
+
+// refuseHTTPSProxy wraps proxy so that it refuses https:// proxies (see errHTTPSProxyWithTrust).
+// An http:// proxy stays: it tunnels the TLS connection to Coder with CONNECT.
+func refuseHTTPSProxy(proxy func(*http.Request) (*url.URL, error)) func(*http.Request) (*url.URL, error) {
+	if proxy == nil {
+		return nil
+	}
+	return func(req *http.Request) (*url.URL, error) {
+		proxyURL, err := proxy(req)
+		if err == nil && proxyURL != nil && proxyURL.Scheme == "https" {
+			return nil, fmt.Errorf("%w: %s", errHTTPSProxyWithTrust, proxyURL.Redacted())
+		}
+		return proxyURL, err
+	}
 }
 
 // errProxyConnectRefused marks a proxy answer other than 200 to the CONNECT for Coder. Go reports

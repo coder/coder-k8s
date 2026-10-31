@@ -39,11 +39,11 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/aggregated/coder"
 	"github.com/coder/coder-k8s/internal/coderbootstrap"
 	"github.com/coder/coder-k8s/internal/controlplaneurl"
 	"github.com/coder/coder-k8s/internal/credentialsecret"
 	"github.com/coder/coder-k8s/internal/operatortoken"
-	"github.com/coder/coder-k8s/internal/sameorigin"
 )
 
 const (
@@ -180,35 +180,18 @@ func newSDKLicenseClient(coderURL, sessionToken string) (*codersdk.Client, error
 	if strings.TrimSpace(coderURL) == "" {
 		return nil, fmt.Errorf("assertion failed: coder URL must not be empty")
 	}
-	if sessionToken == "" {
-		return nil, fmt.Errorf("assertion failed: session token must not be empty")
-	}
 
 	parsedURL, err := url.Parse(coderURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse coder URL: %w", err)
 	}
 
-	sdkClient := codersdk.New(parsedURL)
-	sdkClient.SetSessionToken(sessionToken)
-	if sdkClient.HTTPClient == nil {
-		sdkClient.HTTPClient = &http.Client{}
+	// coder.NewSDKClient uses the shared Coder transport and refuses
+	// redirects and websocket dials that leave the control plane origin.
+	sdkClient, err := coder.NewSDKClient(coder.Config{CoderURL: parsedURL, SessionToken: sessionToken, RequestTimeout: licenseUploadRequestTimeout})
+	if err != nil {
+		return nil, fmt.Errorf("create Coder client: %w", err)
 	}
-	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		return nil, fmt.Errorf("assertion failed: http.DefaultTransport is not *http.Transport")
-	}
-	// Use a dedicated transport to avoid sharing http.DefaultTransport's
-	// connection pool across parallel test servers.
-	sdkClient.HTTPClient.Transport = defaultTransport.Clone()
-	sdkClient.HTTPClient.Timeout = licenseUploadRequestTimeout
-	// net/http copies Coder-Session-Token to every redirect target, so refuse
-	// redirects that leave the control plane origin.
-	sdkClient.HTTPClient.CheckRedirect = sameorigin.RedirectPolicy(parsedURL)
-	// This client dials no websocket. codersdk websocket dials keep only the
-	// Transport and skip CheckRedirect, so before adding one, also wrap the
-	// Transport with sameorigin.RoundTripper (#299).
-
 	return sdkClient, nil
 }
 
