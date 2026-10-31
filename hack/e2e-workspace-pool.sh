@@ -113,8 +113,9 @@ ORG_ID=$(coder_api GET /api/v2/organizations | jq -er 'map(select(.is_default)) 
   fail "cannot read the single default organization"
 PASSWORD=$(head -c 24 /dev/urandom | base64) # never logged; used once for the login below
 [[ ${GITHUB_ACTIONS:-} == true ]] && echo "::add-mask::$PASSWORD"
-jq -nc --arg u "$OWNER" --arg p "$PASSWORD" --arg o "$ORG_ID" '{username: $u, name: "E2E pool owner",
-  email: ($u + "@e2e.example.com"), password: $p, login_type: "password", organization_ids: [$o]}' >"$WORK/owner.json"
+# The password reaches jq through its environment, which other users cannot read, unlike argv.
+PASSWORD=$PASSWORD jq -nc --arg u "$OWNER" --arg o "$ORG_ID" '{username: $u, name: "E2E pool owner",
+  email: ($u + "@e2e.example.com"), password: env.PASSWORD, login_type: "password", organization_ids: [$o]}' >"$WORK/owner.json"
 unset PASSWORD
 if USER_JSON=$(coder_api POST /api/v2/users "$(<"$WORK/owner.json")" 2>"$WORK/owner.err"); then :
 elif grep -q 'error: 409' "$WORK/owner.err"; then
