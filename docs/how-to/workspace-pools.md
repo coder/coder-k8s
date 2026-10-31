@@ -202,7 +202,7 @@ spec:
     user: alice
 ```
 
-The pool binds the claim only when the user is active, a member of the template's organization, and in one of the owner's groups. Otherwise the claim stays `Pending` with `ShareUserNotFound` or `ShareUserNotEligible`, and the pool builds no workspace for it. A claim without `share` on a Share pool, or with `share` on a Reserve pool, never binds and is `Stalled` with `ClaimModeMismatch`.
+The pool binds the claim only when the user is active, a member of the template's organization, and in one of the owner's groups. Otherwise the claim stays `Pending` with `ShareUserNotFound` or `ShareUserNotEligible`, and the pool builds no workspace for it. The pool checks such a claim again once a minute, so a fix in Coder takes up to a minute to bind it. Each refused claim costs Coder about one request per minute. Anyone who can create claims can add them, so cap claims per namespace with a `ResourceQuota` on `count/coderworkspaceclaims.coder.com` (see [Cost](#cost)). A claim without `share` on a Share pool, or with `share` on a Reserve pool, never binds and is `Stalled` with `ClaimModeMismatch`.
 
 The claim is `Ready` only after the share, and `status.sharedUserID` holds the user's ID. While the share is pending, `kubectl -n coder get coderworkspaceclaims` shows the reason `SharingWorkspace`. If the policy or Coder refuses the share after the bind, the claim is `Stalled` with `ShareRefused`, and the operator checks again every minute. Wait for a claim with:
 
