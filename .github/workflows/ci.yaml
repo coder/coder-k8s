@@ -683,9 +683,9 @@ jobs:
           kubectl -n coder delete secret coder-tls
           kubectl -n coder delete configmap coder-ca
 
-      # CoderWorkspacePool phases P1-P5 (#153). It runs before the lifecycle driver, which deletes namespace coder at
+      # CoderWorkspacePool phases P1-P8 (#153). It runs before the lifecycle driver, which deletes namespace coder at
       # its end, imports its own template e2e-pool-agent from the agent fixture, and removes its objects when it passes.
-      - name: Workspace pool (create, scale, claim, operator restart)
+      - name: Workspace pool (create, scale, claim, operator restart, use, deletes)
         if: env.E2E_FULL == 'true'
         env:
           E2E_WORKDIR: ${{ runner.temp }}/workspace-pool

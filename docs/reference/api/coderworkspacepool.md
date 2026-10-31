@@ -34,7 +34,7 @@
 | `readyReplicas` | integer | ReadyReplicas is the number of those members whose workspace is ready. |
 | `updatedReplicas` | integer | UpdatedReplicas is the number of those members that use the resolved inputs. |
 | `boundReplicas` | integer | BoundReplicas is the number of members that claims hold. |
-| `usedReplicas` | integer | UsedReplicas is the number of members that someone may have used without a claim. They no longer count toward the pool, and the controller never deletes their workspaces. |
+| `usedReplicas` | integer | UsedReplicas is the number of members that someone may have used without a claim. They no longer count toward the pool, and the pool never deletes them. |
 | `pendingClaims` | integer | PendingClaims is the number of claims that wait for a workspace. |
 | `selector` | string | Selector is the label selector of the scale subresource, in string form: the label coder.com/workspace-pool-uid equal to the pool's UID. It matches no pods unless a template sets that label, so autoscalers must use External or Object metrics with target type AverageValue. |
 | `resolved` | [CoderWorkspacePoolResolved](#coderworkspacepoolresolved) | Resolved holds the inputs that the controller resolved in Coder. |
