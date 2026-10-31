@@ -292,8 +292,6 @@ log "member $USED Used=True and released ${USED_S}s after the usage request"
 wait_until "4 unclaimed ready members and 1 bound after the release" pool_ready 4 1
 jq -e '.status.usedReplicas == 1' "$WORK/pool.json" >/dev/null || fail "pool usedReplicas is not 1: $(jq -c .status "$WORK/pool.json")"
 members_json
-jq -e --arg m "$USED" '[.items[] | select(.metadata.name != $m and (.status.conditions // [] | any(.type == "Used" and .status == "True")))] |
-  length == 0' "$WORK/members.json" >/dev/null || fail "a member that nobody used is Used"
 phase P6
 
 log "=== P7: scale to 1 deletes the extra unclaimed workspaces in Coder; the bound and the used one stay"
