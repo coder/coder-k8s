@@ -59,13 +59,17 @@ type CoderWorkspacePoolMemberReconciler struct {
 // members, which is exact only while no other member reconciles at the same
 // time. A control plane change wakes its members, so a member that waits
 // for its control plane, or whose cleanup ends once the control plane is
-// gone, does not wait for its next poll.
+// gone, does not wait for its next poll. A bound member reads its claim
+// through the cache, so its informer starts here.
 func (r *CoderWorkspacePoolMemberReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if mgr == nil || r.Client == nil || r.APIReader == nil || r.Scheme == nil || r.Clock == nil {
 		return errors.New("assertion failed: pool member reconciler needs a manager, a client, an API reader, a scheme, and a clock")
 	}
 	if err := startSecretInformer(mgr); err != nil {
 		return err
+	}
+	if _, err := mgr.GetCache().GetInformer(context.Background(), &coderv1alpha1.CoderWorkspaceClaim{}); err != nil {
+		return fmt.Errorf("start the CoderWorkspaceClaim informer: %w", err)
 	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &coderv1alpha1.CoderWorkspacePoolMember{}, poolControlPlaneRefIndex,
 		func(obj client.Object) []string {
