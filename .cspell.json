@@ -3,6 +3,10 @@
   "language": "en",
   "words": [
     "buildinfo",
+    "dbname",
+    "PGDATABASE",
+    "PGHOST",
+    "PGPORT",
     "allapp",
     "automount",
     "prebuild",
