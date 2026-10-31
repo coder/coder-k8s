@@ -33,7 +33,7 @@ func TestOperatorTokenDatabaseHash(t *testing.T) {
 		"host=db.example port=5432 user=coder dbname=other sslmode=disable",
 		"host=db.example port=5432 user=coder dbname=coder sslmode=require",
 		"host=db.example port=5432 user=coder dbname=coder",
-		"host=/var/run/postgresql user=coder dbname=coder",
+		"host=/var/run/postgresql port=5432 user=coder dbname=coder",
 	} {
 		hash := operatorTokenDatabaseHash(dsn)
 		require.NotEmpty(t, hash, dsn)
@@ -41,12 +41,13 @@ func TestOperatorTokenDatabaseHash(t *testing.T) {
 		seen[hash] = dsn
 	}
 
-	// lib/pq takes a missing host from PGHOST but an empty one as is, and a
-	// URL cannot hold an empty value, so an empty value gets no hash. A host
-	// with ":" and no port would read as host and port in the URL.
+	// lib/pq takes a missing host, port or database name from PGHOST, PGPORT
+	// or PGDATABASE, so the string alone does not name the database. It takes
+	// an empty value as is, which a URL cannot hold.
 	for _, unusable := range []string{
 		"", "  ", "host=db.example dbname", "host='db.example", "host=db.example\\", "mysql://db.example/coder",
-		"host='' user=coder dbname=coder", "host=db.example dbname=coder user=", "host=db.example:5433 dbname=coder",
+		"host='' port=5432 user=coder dbname=coder", "host=db.example port=5432 dbname=coder user=",
+		"user=coder dbname=coder", "host=db.example user=coder dbname=coder", "host=db.example port=5432 user=coder",
 	} {
 		require.Empty(t, operatorTokenDatabaseHash(unusable), "%q", unusable)
 	}

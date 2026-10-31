@@ -64,7 +64,7 @@ func TestRevokeOperatorToken_ByValue(t *testing.T) {
 		t.Fatalf("expected one delete with the token ID and secret hash, got %+v", d.execs)
 	}
 
-	for _, token := range []string{"AbCdEfGhIj-other", "not-a-token-of-coder", "nodash"} {
+	for _, token := range []string{"AbCdEfGhIj-other", "not-a-token-of-coder", "nodash", "   "} {
 		if _, err := revokeWith(t, 0, RevokeOperatorTokenRequest{Token: token}); !errors.Is(err, ErrOperatorTokenNotFound) {
 			t.Fatalf("token %q: expected ErrOperatorTokenNotFound, got %v", token, err)
 		}
