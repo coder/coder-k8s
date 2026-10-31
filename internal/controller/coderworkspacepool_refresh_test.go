@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -186,4 +187,152 @@ func TestPoolIdleReapAfterCrash(t *testing.T) {
 	e.reconcilePool(t, 1)
 	require.False(t, e.reconcileMember(t, member, 0).DeletionTimestamp.IsZero(), "the member of a Lost IdleTimeout claim is deleted")
 	requireIdleLost(t, e.claim(t, claimKey))
+}
+
+// TestPoolIdleReapKeepsLaterUse: the pool records the last_used_at of its
+// idle check on the member before the claim becomes Lost. A crash then stops
+// the member delete, and the pool is deleted: the claim path still deletes
+// the member. The member's cleanup then reads a newer last_used_at, so it
+// keeps the workspace and starts no delete build.
+func TestPoolIdleReapKeepsLaterUse(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) {
+		s.Replicas, s.Claims.IdleTimeoutSeconds = new(int32(0)), new(int32(600))
+	})
+	member, workspaceID := e.readyMember(t)
+	claimKey := e.createClaim(t, "idle")
+	e.reconcilePool(t, 1)
+	e.requireBound(t, member, claimKey)
+
+	e.clock.SetTime(e.clock.Now().Add(11 * time.Minute))
+	key := types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}
+	r := &controller.CoderWorkspacePoolReconciler{Client: failMemberDelete{k8sClient}, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+	require.ErrorContains(t, err, "crash before the member delete")
+	requireIdleLost(t, e.claim(t, claimKey))
+	require.NoError(t, k8sClient.Delete(e.ctx, e.reconcilePool(t, 0)))
+	r = &controller.CoderWorkspacePoolReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	_, err = r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+	require.False(t, e.reconcileMember(t, member, 0).DeletionTimestamp.IsZero(), "the claim path deletes the member of a gone pool")
+
+	e.fake.markUsed(workspaceID, e.clock.Now())
+	builds := e.fake.requestCount(routeCreateBuild)
+	require.Nil(t, e.reconcileMember(t, member, 1), "the member goes")
+	require.Equal(t, builds, e.fake.requestCount(routeCreateBuild), "no delete build after a use")
+	_, err = e.fake.client(t, 5*time.Second).Workspace(e.ctx, workspaceID)
+	require.NoError(t, err, "the workspace stays in Coder")
+}
+
+// failClaimStatus refuses claim status writes, as a crash right after the
+// pool recorded its idle check would end the reconcile.
+type failClaimStatus struct{ client.Client }
+
+func (c failClaimStatus) Status() client.SubResourceWriter {
+	return failClaimStatusWriter{c.Client.Status()}
+}
+
+type failClaimStatusWriter struct{ client.SubResourceWriter }
+
+func (w failClaimStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	if _, ok := obj.(*coderv1alpha1.CoderWorkspaceClaim); ok {
+		return errors.New("crash before the claim status")
+	}
+	return w.SubResourceWriter.Update(ctx, obj, opts...)
+}
+
+// TestPoolIdleCheckNeedsEvidence: a workspace read without last_used_at
+// proves no idleness, and a recorded idle check whose claim never became Lost
+// is no reap: deleting the claim then deletes the workspace as usual, even
+// after a newer use.
+func TestPoolIdleCheckNeedsEvidence(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) {
+		s.Replicas, s.Claims.IdleTimeoutSeconds = new(int32(0)), new(int32(600))
+	})
+	member, workspaceID := e.readyMember(t)
+	claimKey := e.createClaim(t, "idle")
+	e.reconcilePool(t, 1)
+	e.requireBound(t, member, claimKey)
+
+	e.clock.SetTime(e.clock.Now().Add(11 * time.Minute))
+	e.fake.markUsed(workspaceID, time.Time{})
+	e.reconcilePool(t, 1)
+	requireClaim(t, e.claim(t, claimKey), coderv1alpha1.CoderWorkspaceClaimPhaseBound, "WorkspaceReady", true)
+
+	e.fake.markUsed(workspaceID, e.clock.Now().Add(-11*time.Minute))
+	r := &controller.CoderWorkspacePoolReconciler{Client: failClaimStatus{k8sClient}, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}})
+	require.ErrorContains(t, err, "crash before the claim status")
+	require.NotEmpty(t, e.reconcileMember(t, member, 0).Annotations, "the idle check is recorded")
+	requireClaim(t, e.claim(t, claimKey), coderv1alpha1.CoderWorkspaceClaimPhaseBound, "WorkspaceReady", true)
+
+	e.fake.markUsed(workspaceID, e.clock.Now())
+	require.NoError(t, k8sClient.Delete(e.ctx, e.claim(t, claimKey)))
+	e.deleteMember(t, member) // Garbage collection, which envtest does not run.
+	m := e.reconcileMember(t, member, 1)
+	requireMember(t, m, coderv1alpha1.CoderWorkspacePoolMemberPhaseDeleting, "Deleting", "started a delete build")
+}
+
+// hourlyClock moves an hour forward at every reading.
+type hourlyClock struct{ now time.Time }
+
+func (c *hourlyClock) Now() time.Time                  { c.now = c.now.Add(time.Hour); return c.now }
+func (c *hourlyClock) Since(t time.Time) time.Duration { return c.Now().Sub(t) }
+
+// TestPoolAgesOnOneClockReading: a member that gets too old between two
+// clock readings of one reconcile counts the same in every step, so binding
+// it leaves room for one new member.
+func TestPoolAgesOnOneClockReading(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.MaxUnclaimedAgeSeconds = new(int32(3600)) })
+	start := e.clock.Now()
+	member := e.createMember(t, nil)
+	// Current at the first reading, start + 1 h, and too old from start + 1.5 h.
+	e.setMemberStatus(t, member, withWorkspace(e.readyAt(start.Add(30*time.Minute))))
+	claimKey := e.createClaim(t, "c")
+	r := &controller.CoderWorkspacePoolReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Clock: &hourlyClock{now: start}}
+	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}})
+	require.NoError(t, err)
+	e.requireBound(t, member, claimKey)
+	require.Len(t, e.poolMembers(t, e.pool.Name), 2, "one new member for replicas 1")
+}
+
+// TestPoolIdleReapSkipsForeignMember: a new pool with the name of a deleted
+// one and another owner never reaps a bound member of the old pool, even when
+// the member's pool label points at the new pool.
+func TestPoolIdleReapSkipsForeignMember(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(0)) })
+	member, _ := e.readyMember(t)
+	claimKey := e.createClaim(t, "build-1")
+	e.reconcilePool(t, 1)
+	e.requireBound(t, member, claimKey)
+
+	require.NoError(t, k8sClient.Delete(e.ctx, e.reconcilePool(t, 0)))
+	bob := e.fake.addUser("bob", codersdk.LoginTypePassword)
+	e.fake.addMember(e.orgID, bob)
+	e.allowOwner(t, bob.String(), "default.docker")
+	e.pool = &coderv1alpha1.CoderWorkspacePool{
+		ObjectMeta: metav1.ObjectMeta{Name: e.pool.Name, Namespace: e.ns},
+		Spec: coderv1alpha1.CoderWorkspacePoolSpec{
+			ControlPlaneRef: coderv1alpha1.CoderControlPlaneReference{Name: "coder"},
+			OwnerUserID:     bob.String(), Template: "default.docker",
+			Version: coderv1alpha1.CoderWorkspacePoolVersion{Name: "v1"}, Replicas: new(int32(0)),
+			Claims: coderv1alpha1.CoderWorkspacePoolClaims{IdleTimeoutSeconds: new(int32(600))},
+		},
+	}
+	require.NoError(t, k8sClient.Create(e.ctx, e.pool))
+	m := e.reconcileMember(t, member, 0)
+	m.Labels[coderv1alpha1.CoderWorkspacePoolSelectorLabel] = string(e.pool.UID)
+	require.NoError(t, k8sClient.Update(e.ctx, m))
+
+	e.clock.SetTime(e.clock.Now().Add(11 * time.Minute))
+	e.reconcilePool(t, 2)
+	requireClaim(t, e.claim(t, claimKey), coderv1alpha1.CoderWorkspaceClaimPhaseBound, "WorkspaceReady", true)
+	require.True(t, e.reconcileMember(t, member, 0).DeletionTimestamp.IsZero())
 }

@@ -60,7 +60,7 @@ func poolWant(pool *coderv1alpha1.CoderWorkspacePool, claims []coderv1alpha1.Cod
 // reconcileOrphanClaims writes the status of the claims of a pool that is
 // gone or being deleted: a claim that a member holds stays as its member
 // says, so a bound claim stays Bound, and the others wait with
-// PoolNotFound.
+// PoolNotFound. It also finishes the idle reaps that the pool committed.
 func (r *CoderWorkspacePoolReconciler) reconcileOrphanClaims(ctx context.Context, namespace, poolName string) error {
 	claims, err := r.poolClaims(ctx, namespace, poolName)
 	if err != nil || len(claims) == 0 {
@@ -69,6 +69,9 @@ func (r *CoderWorkspacePoolReconciler) reconcileOrphanClaims(ctx context.Context
 	all := &coderv1alpha1.CoderWorkspacePoolMemberList{}
 	if err := r.APIReader.List(ctx, all, client.InNamespace(namespace)); err != nil {
 		return fmt.Errorf("list pool members in namespace %s: %w", namespace, err)
+	}
+	if err := r.finishIdleReaps(ctx, claims, all.Items, r.Clock.Now()); err != nil {
+		return err
 	}
 	return r.writeClaimStatuses(ctx, poolName, true, claims, all.Items, "", "")
 }
@@ -143,12 +146,11 @@ func (r *CoderWorkspacePoolReconciler) refreshWaitingClaims(
 // otherwise. It also sets the pool label again, in case it drifted.
 func (r *CoderWorkspacePoolReconciler) bindClaims(
 	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, claims []coderv1alpha1.CoderWorkspaceClaim,
-	all []coderv1alpha1.CoderWorkspacePoolMember, counts *poolMemberCounts, ownerName string,
+	all []coderv1alpha1.CoderWorkspacePoolMember, counts *poolMemberCounts, ownerName string, now time.Time,
 ) (skipped bool, err error) {
 	if ownerName == "" {
 		return false, fmt.Errorf("assertion failed: pool %s/%s binds claims without the owner's Coder username", pool.Namespace, pool.Name)
 	}
-	now := r.Clock.Now()
 	var free []*coderv1alpha1.CoderWorkspacePoolMember
 	for i := range all {
 		m := &all[i]
@@ -207,7 +209,7 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 				j++
 				continue
 			}
-			unused, err := poolMemberUnusedNow(ctx, sdk, free[j], r.Clock.Now())
+			unused, err := poolMemberUnusedNow(ctx, sdk, free[j], now)
 			if err != nil {
 				return false, err
 			}

@@ -208,11 +208,13 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err := r.deleteFailedMembers(ctx, pool, before, members, step == nil); err != nil {
 		return ctrl.Result{}, err
 	}
-	wake, err := r.reapIdleClaims(ctx, pool, claims, all.Items)
+	// One time for every age decision of this reconcile, so a member that
+	// gets too old midway counts the same in every step.
+	now := r.Clock.Now()
+	wake, err := r.reapIdleClaims(ctx, pool, claims, all.Items, now)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	now := r.Clock.Now()
 	wake = earliestWake(wake, poolRefreshWake(pool, members, now))
 	counts := countPoolMembers(pool, members, now)
 
@@ -239,7 +241,7 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if claims, err = r.refreshWaitingClaims(ctx, claims, all.Items); err != nil {
 			return ctrl.Result{}, err
 		}
-		skipped, err := r.bindClaims(ctx, pool, claims, all.Items, &counts, ownerName)
+		skipped, err := r.bindClaims(ctx, pool, claims, all.Items, &counts, ownerName, now)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -254,7 +256,7 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 	// The namespace list, where trimToOwnerCap marked its deletes.
-	if err := r.deleteUnclaimedMembers(ctx, pool, poolWant(pool, claims, all.Items), all.Items, step); err != nil {
+	if err := r.deleteUnclaimedMembers(ctx, pool, poolWant(pool, claims, all.Items), all.Items, step, now); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.writeClaimStatuses(ctx, pool.Name, false, claims, all.Items, pool.Spec.OwnerUserID, ownerName); err != nil {
@@ -409,11 +411,10 @@ var poolConsentLostReasons = []string{"OwnerNotAllowed", "TemplateNotAllowed", "
 // (spec.replicas plus the waiting claims) go in this order: those without a create request, those not
 // ready (newest first), then ready ones (oldest first).
 func (r *CoderWorkspacePoolReconciler) deleteUnclaimedMembers(
-	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, want int32, members []coderv1alpha1.CoderWorkspacePoolMember, step *coderStep,
+	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, want int32, members []coderv1alpha1.CoderWorkspacePoolMember, step *coderStep, now time.Time,
 ) error {
 	var current, outdatedReady, doomed []*coderv1alpha1.CoderWorkspacePoolMember
 	var readyCurrent int32
-	now := r.Clock.Now()
 	for i := range members {
 		m := &members[i]
 		controller := metav1.GetControllerOf(m)
