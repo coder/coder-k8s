@@ -10,7 +10,8 @@ const (
 	// CoderWorkspaceClaimPhaseBound means a member holds the claim.
 	CoderWorkspaceClaimPhaseBound = "Bound"
 	// CoderWorkspaceClaimPhaseLost means someone deleted the claim's
-	// workspace. It is final: a claim never binds again.
+	// workspace, or the pool deleted it after its idle timeout. It is final:
+	// a claim never binds again.
 	CoderWorkspaceClaimPhaseLost = "Lost"
 
 	// CoderWorkspaceClaimConditionReady is True when the claim is bound and

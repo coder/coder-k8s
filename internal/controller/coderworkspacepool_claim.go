@@ -148,6 +148,7 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 	if ownerName == "" {
 		return false, fmt.Errorf("assertion failed: pool %s/%s binds claims without the owner's Coder username", pool.Namespace, pool.Name)
 	}
+	now := r.Clock.Now()
 	var free []*coderv1alpha1.CoderWorkspacePoolMember
 	for i := range all {
 		m := &all[i]
@@ -163,7 +164,7 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 		return cmp.Or(m.Status.ReadyTime, &m.CreationTimestamp).Time
 	}
 	slices.SortStableFunc(free, func(a, b *coderv1alpha1.CoderWorkspacePoolMember) int {
-		aOld, bOld := poolMemberInputMismatch(a, pool) != "", poolMemberInputMismatch(b, pool) != ""
+		aOld, bOld := !poolMemberCurrent(a, pool, now), !poolMemberCurrent(b, pool, now)
 		if aOld != bOld {
 			if aOld {
 				return 1
@@ -229,7 +230,7 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 				return false, fmt.Errorf("reserve pool member %s for workspace claim %s/%s: %w", m.Name, claim.Namespace, claim.Name, err)
 			}
 		}
-		current := poolMemberInputMismatch(m, pool) == ""
+		current := poolMemberCurrent(m, pool, now)
 		bound := m.DeepCopy()
 		bound.Spec.ClaimRef = &coderv1alpha1.CoderWorkspaceClaimReference{Name: claim.Name, UID: string(claim.UID)}
 		bound.OwnerReferences = slices.DeleteFunc(bound.OwnerReferences, func(o metav1.OwnerReference) bool { return o.UID == pool.UID })

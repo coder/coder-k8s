@@ -123,6 +123,15 @@ type CoderWorkspacePoolClaims struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="claims.mode is immutable"
 	// +optional
 	Mode string `json:"mode,omitempty"`
+	// IdleTimeoutSeconds deletes a claimed workspace, with its data, once
+	// both the bind and the workspace's last use in Coder (last_used_at) are
+	// this long ago. The claim then becomes Lost with reason IdleTimeout.
+	// Leave it out to keep claimed workspaces until their claims are deleted.
+	// Unclaimed workspaces are idle by design and never count.
+	// +kubebuilder:validation:Minimum=600
+	// +kubebuilder:validation:Maximum=2592000
+	// +optional
+	IdleTimeoutSeconds *int32 `json:"idleTimeoutSeconds,omitempty"`
 }
 
 // CoderWorkspacePoolSpec defines a pool of ready Coder workspaces from one
@@ -198,6 +207,14 @@ type CoderWorkspacePoolSpec struct {
 	// +kubebuilder:validation:Maximum=7200
 	// +optional
 	ReadyTimeoutSeconds *int32 `json:"readyTimeoutSeconds,omitempty"`
+	// MaxUnclaimedAgeSeconds replaces an unclaimed workspace that has been
+	// ready this long, new before old: the old workspace stays claimable
+	// until its replacement is ready. Leave it out to keep unclaimed
+	// workspaces until a claim, a scale-down, or an input change.
+	// +kubebuilder:validation:Minimum=3600
+	// +kubebuilder:validation:Maximum=2592000
+	// +optional
+	MaxUnclaimedAgeSeconds *int32 `json:"maxUnclaimedAgeSeconds,omitempty"`
 	// Claims configures how the pool hands out workspaces.
 	// +kubebuilder:default={}
 	// +optional

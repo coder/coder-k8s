@@ -81,6 +81,11 @@ func TestCoderWorkspacePoolAPIValidation(t *testing.T) {
 		{name: "too many in flight", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.MaxInFlight = ptrTo(int32(21)) }, wantErr: "spec.maxInFlight"},
 		{name: "short ready timeout", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.ReadyTimeoutSeconds = ptrTo(int32(59)) }, wantErr: "spec.readyTimeoutSeconds"},
 		{name: "long ready timeout", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.ReadyTimeoutSeconds = ptrTo(int32(7201)) }, wantErr: "spec.readyTimeoutSeconds"},
+		{name: "refresh and idle bounds", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) {
+			s.MaxUnclaimedAgeSeconds, s.Claims.IdleTimeoutSeconds = ptrTo(int32(3600)), ptrTo(int32(2592000))
+		}},
+		{name: "young max unclaimed age", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.MaxUnclaimedAgeSeconds = ptrTo(int32(3599)) }, wantErr: "spec.maxUnclaimedAgeSeconds"},
+		{name: "short idle timeout", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Claims.IdleTimeoutSeconds = ptrTo(int32(599)) }, wantErr: "spec.claims.idleTimeoutSeconds"},
 		{name: "long preset name", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.PresetName = strings.Repeat("p", 65) }, wantErr: "spec.presetName"},
 		{name: "too many parameters", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Parameters = tooManyParameters }, wantErr: "spec.parameters"},
 		{name: "duplicate parameter", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) {

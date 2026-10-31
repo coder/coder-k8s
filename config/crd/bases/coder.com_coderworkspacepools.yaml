@@ -67,6 +67,17 @@ spec:
                 default: {}
                 description: Claims configures how the pool hands out workspaces.
                 properties:
+                  idleTimeoutSeconds:
+                    description: |-
+                      IdleTimeoutSeconds deletes a claimed workspace, with its data, once
+                      both the bind and the workspace's last use in Coder (last_used_at) are
+                      this long ago. The claim then becomes Lost with reason IdleTimeout.
+                      Leave it out to keep claimed workspaces until their claims are deleted.
+                      Unclaimed workspaces are idle by design and never count.
+                    format: int32
+                    maximum: 2592000
+                    minimum: 600
+                    type: integer
                   mode:
                     default: Reserve
                     description: |-
@@ -104,6 +115,16 @@ spec:
                 format: int32
                 maximum: 20
                 minimum: 1
+                type: integer
+              maxUnclaimedAgeSeconds:
+                description: |-
+                  MaxUnclaimedAgeSeconds replaces an unclaimed workspace that has been
+                  ready this long, new before old: the old workspace stays claimable
+                  until its replacement is ready. Leave it out to keep unclaimed
+                  workspaces until a claim, a scale-down, or an input change.
+                format: int32
+                maximum: 2592000
+                minimum: 3600
                 type: integer
               ownerUserID:
                 description: |-

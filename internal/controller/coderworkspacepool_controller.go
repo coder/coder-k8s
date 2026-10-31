@@ -208,7 +208,13 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err := r.deleteFailedMembers(ctx, pool, before, members, step == nil); err != nil {
 		return ctrl.Result{}, err
 	}
-	counts := countPoolMembers(pool, members)
+	wake, err := r.reapIdleClaims(ctx, pool, claims, all.Items)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	now := r.Clock.Now()
+	wake = earliestWake(wake, poolRefreshWake(pool, members, now))
+	counts := countPoolMembers(pool, members, now)
 
 	var requeue time.Duration
 	switch {
@@ -260,15 +266,14 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 	switch {
 	case requeue > 0:
-		return ctrl.Result{RequeueAfter: requeue}, nil
 	case step != nil, pool.Spec.Version.Active != nil && *pool.Spec.Version.Active:
 		// A stall polls too: someone can fix the input in Coder, for example
 		// unarchive the version, which no Kubernetes event reports.
-		return ctrl.Result{RequeueAfter: poolResolvePoll}, nil
+		requeue = poolResolvePoll
 	case !meta.IsStatusConditionTrue(pool.Status.Conditions, coderv1alpha1.CoderWorkspacePoolConditionReady):
-		return ctrl.Result{RequeueAfter: poolMemberPendingPoll}, nil
+		requeue = poolMemberPendingPoll
 	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: earliestWake(requeue, wake)}, nil
 }
 
 // deleteFailedMembers records the failures of the pool's failed unclaimed
@@ -408,6 +413,7 @@ func (r *CoderWorkspacePoolReconciler) deleteUnclaimedMembers(
 ) error {
 	var current, outdatedReady, doomed []*coderv1alpha1.CoderWorkspacePoolMember
 	var readyCurrent int32
+	now := r.Clock.Now()
 	for i := range members {
 		m := &members[i]
 		controller := metav1.GetControllerOf(m)
@@ -419,7 +425,7 @@ func (r *CoderWorkspacePoolReconciler) deleteUnclaimedMembers(
 		switch ready := poolMemberReady(m); {
 		case step != nil && slices.Contains(poolConsentLostReasons, step.reason):
 			doomed = append(doomed, m)
-		case poolMemberInputMismatch(m, pool) == "":
+		case poolMemberCurrent(m, pool, now):
 			current = append(current, m)
 			if ready {
 				readyCurrent++
@@ -726,7 +732,7 @@ func poolResolvedEqual(a, b *coderv1alpha1.CoderWorkspacePoolResolved) bool {
 // member that the pool controls counts as unclaimed. Members that someone
 // used, failed members, and deleting members never count, and a ready
 // member counts as ready only while its Ready condition is True.
-func countPoolMembers(pool *coderv1alpha1.CoderWorkspacePool, members []coderv1alpha1.CoderWorkspacePoolMember) poolMemberCounts {
+func countPoolMembers(pool *coderv1alpha1.CoderWorkspacePool, members []coderv1alpha1.CoderWorkspacePoolMember, now time.Time) poolMemberCounts {
 	var c poolMemberCounts
 	for i := range members {
 		m := &members[i]
@@ -750,7 +756,7 @@ func countPoolMembers(pool *coderv1alpha1.CoderWorkspacePool, members []coderv1a
 			c.building++
 		}
 		ready := poolMemberReady(m)
-		current := poolMemberInputMismatch(m, pool) == ""
+		current := poolMemberCurrent(m, pool, now)
 		switch {
 		case current && ready:
 			c.ready++
