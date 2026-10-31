@@ -113,15 +113,15 @@ func (r *CoderMCPServerReconciler) deleteStep(ctx context.Context, server *coder
 	}
 	if record == nil && server.Status.ConfigID != "" {
 		// A config from before records existed gets its record before a
-		// delete that can release without a confirmation.
-		r.backfillMCPServerRecord(ctx, sdk, server)
-		if record, _, err = readCleanupRecord(ctx, r.APIReader, r.OperatorNamespace, server.UID); errors.Is(err, errNotACleanupRecord) {
-			record = nil
-		} else if err != nil {
-			return false, nil, err
-		}
+		// delete that can release without a confirmation. The write takes
+		// the deployment ID that Coder answers now, so no check follows. It
+		// gets half of the bounded attempt, so a hanging Coder call leaves
+		// time for the delete (#422 item 3).
+		backfillCtx, cancel := context.WithTimeout(ctx, mcpServerBoundedDeleteTimeout/2)
+		r.backfillMCPServerRecord(backfillCtx, sdk, server)
+		cancel()
 	}
-	recordedID := ""
+	recordedID, recordedNonce := "", ""
 	if record != nil {
 		// The record names the deployment that holds the config. When the
 		// control plane now reaches another deployment, a delete there
@@ -135,9 +135,9 @@ func (r *CoderMCPServerReconciler) deleteStep(ctx context.Context, server *coder
 		case id != record.DeploymentID:
 			return r.releaseWithoutDelete(ctx, server, fmt.Sprintf("CoderControlPlane now reaches Coder deployment %s, but the config is in deployment %s", id, record.DeploymentID)), nil, nil
 		}
-		recordedID = record.CoderID
+		recordedID, recordedNonce = record.CoderID, record.Nonce
 	}
-	unproven, step, err := deleteMCPServerInCoder(ctx, sdk, server, orgID, recordedID)
+	unproven, step, err := deleteMCPServerInCoder(ctx, sdk, server, orgID, recordedID, recordedNonce)
 	if err == nil && step == nil && unproven {
 		// A config that can be this object's stays in Coder, so the record
 		// stays for a sweep, which reports it for manual cleanup (#353).
@@ -169,9 +169,11 @@ func (r *CoderMCPServerReconciler) deleteStep(ctx context.Context, server *coder
 // nothing: a person can edit the slug and the display name of a config, so
 // the nonce does not prove that this object created it (#422). Only Coder's
 // own 404 proves absence (#337). unproven reports a config that it leaves
-// although it can be this object's: a config with the slug, or one with the
-// nonce under another slug.
-func deleteMCPServerInCoder(ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, orgID uuid.UUID, recordedID string) (unproven bool, step *mcpServerStep, err error) {
+// although it can be this object's: a config with the slug, or one with
+// recordedNonce, the nonce of the cleanup record, under another slug.
+func deleteMCPServerInCoder(
+	ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, orgID uuid.UUID, recordedID, recordedNonce string,
+) (unproven bool, step *mcpServerStep, err error) {
 	var id uuid.UUID
 	if configID := cmp.Or(server.Status.ConfigID, recordedID); configID != "" {
 		parsed, err := uuid.Parse(configID)
@@ -206,7 +208,7 @@ func deleteMCPServerInCoder(ctx context.Context, sdk *codersdk.Client, server *c
 					"MCP server config %s is not in Coder, but its create request was sent at %s and can still commit. The controller reads again before it releases the finalizer.",
 					server.Spec.Slug, server.Status.CreateAttemptTime.UTC().Format(time.RFC3339)), nil
 			}
-			return mcpServerWithDisplayName(configs, mcpServerNonce(server)) != nil, nil, nil
+			return recordedNonce != "" && mcpServerWithDisplayName(configs, recordedNonce) != nil, nil, nil
 		default:
 			return true, nil, nil
 		}

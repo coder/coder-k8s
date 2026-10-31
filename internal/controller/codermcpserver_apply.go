@@ -448,7 +448,7 @@ func mcpServerReady(server *coderv1alpha1.CoderMCPServer) *mcpServerStep {
 // makes Coder clear them (plan F9). The tool lists stay unset until the spec
 // has them. Credentials are revealed only here, into the request body.
 func mcpServerUpdateRequest(server *coderv1alpha1.CoderMCPServer, values map[string]credentialsecret.Value) (codersdk.UpdateMCPServerConfigRequest, error) {
-	create, err := mcpServerCreateRequest(server, values)
+	create, err := mcpServerCreateRequest(server, values, server.Spec.DisplayName)
 	if err != nil {
 		return codersdk.UpdateMCPServerConfigRequest{}, err
 	}

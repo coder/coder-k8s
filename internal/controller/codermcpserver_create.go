@@ -25,13 +25,6 @@ const (
 	mcpServerConfirmingRejectedCreate = "ConfirmingRejectedCreate"
 )
 
-// mcpServerNonce is the display name of a config that this object created,
-// until the spec's display name replaces it. Coder stores no owner, so the
-// nonce is the proof (plan 5.3).
-func mcpServerNonce(server *coderv1alpha1.CoderMCPServer) string {
-	return mcpServerNoncePrefix + string(server.UID)
-}
-
 // createOrRecord handles an object without status.configID, following the
 // CoderAIProvider create (#253). It reads Coder first, so a create that
 // committed earlier is recorded instead of sent again. Coder's unique slug
@@ -68,7 +61,8 @@ func (r *CoderMCPServerReconciler) createOrRecord(
 			}
 			recordedID = record.CoderID
 		}
-		if step := recordMCPServer(server, *found, recordedID); step != nil {
+		nonce := adoptionNonce(mcpServerNoncePrefix, record, found.ID.String(), server.Status.CreateAttemptTime != nil)
+		if step := recordMCPServer(server, *found, nonce, recordedID); step != nil {
 			return step, nil
 		}
 		// Store the ID before the sync replaces the nonce (#353).
@@ -114,12 +108,13 @@ func mcpServerRequireSiteOwner(ctx context.Context, sdk *codersdk.Client) *mcpSe
 }
 
 // recordMCPServer decides whether found, the config with the spec's slug, is
-// the config that this object created. Only the nonce or recordedID, the
-// config ID of the cleanup record, proves it. Anything else is a config that
-// the controller never touches (no adoption). It returns nil when it recorded
-// the ID.
-func recordMCPServer(server *coderv1alpha1.CoderMCPServer, found codersdk.MCPServerConfig, recordedID string) *mcpServerStep {
-	if found.DisplayName != mcpServerNonce(server) && found.ID.String() != recordedID {
+// the config that this object created. Only nonce, the display name of the
+// last create, or recordedID, the config ID of the cleanup record, proves it.
+// Without a nonce, no create of this object can be pending. Anything else is
+// a config that the controller never touches (no adoption). It returns nil
+// when it recorded the ID.
+func recordMCPServer(server *coderv1alpha1.CoderMCPServer, found codersdk.MCPServerConfig, nonce, recordedID string) *mcpServerStep {
+	if (nonce == "" || found.DisplayName != nonce) && found.ID.String() != recordedID {
 		// No create of this object can commit while another config holds the
 		// slug, so nothing of this object can exist in Coder.
 		server.Status.CreateAttemptTime, server.Status.Credentials = nil, nil
@@ -134,9 +129,9 @@ func recordMCPServer(server *coderv1alpha1.CoderMCPServer, found codersdk.MCPSer
 // createMCPServer writes the cleanup record, then the create marker and the
 // change tokens, then sends the only create request of this attempt. A failed
 // record write or a conflict on the marker write ends the reconcile before
-// any request. The config starts disabled with the nonce as its display name,
-// so members never see it and chats never use it (plan F6) before the apply
-// step.
+// any request. The config starts disabled with the recorded nonce as its
+// display name, so members never see it and chats never use it (plan F6)
+// before the apply step.
 func (r *CoderMCPServerReconciler) createMCPServer(
 	ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, orgID uuid.UUID,
 	values map[string]credentialsecret.Value, before *coderv1alpha1.CoderMCPServerStatus,
@@ -144,7 +139,8 @@ func (r *CoderMCPServerReconciler) createMCPServer(
 	now := time.Now()
 	// Without the record, a config that a namespace deletion leaves behind
 	// cannot be found again (#353 invariant 1).
-	if step, err := r.writeMCPServerRecord(ctx, sdk, server, &now); step != nil || err != nil {
+	nonce, step, err := r.writeMCPServerRecord(ctx, sdk, server, &now)
+	if step != nil || err != nil {
 		return step, err
 	}
 	server.Status.CreateAttemptTime = &metav1.Time{Time: now}
@@ -155,7 +151,7 @@ func (r *CoderMCPServerReconciler) createMCPServer(
 	}
 	*before = *server.Status.DeepCopy()
 
-	req, err := mcpServerCreateRequest(server, values)
+	req, err := mcpServerCreateRequest(server, values, nonce)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +176,7 @@ func (r *CoderMCPServerReconciler) createMCPServer(
 		server.Status.CreateAttemptTime, server.Status.Credentials = nil, nil
 		return mcpServerWait(mcpServerRetry, "CreateRetrying", "The create request had no effect: %s", coderErrorSummary(err)), nil
 	case status >= 400 && status < 500:
-		return confirmRejectedMCPServerCreate(ctx, sdk, server, orgID, status, err), nil
+		return confirmRejectedMCPServerCreate(ctx, sdk, server, orgID, nonce, status, err), nil
 	default:
 		return mcpServerWait(mcpServerConfirmPoll, "ConfirmingCreate",
 			"The create result is uncertain (%s). The controller reads Coder instead of sending it again.", coderErrorSummary(err)), nil
@@ -191,8 +187,9 @@ func (r *CoderMCPServerReconciler) createMCPServer(
 // Coder sends its 4xx answers before the insert commits, but a proxy can put a
 // 4xx in place of a committed answer, so only a read proves that nothing of
 // this object exists. Until then the marker stays (#253 review round 3).
+// nonce is the display name that the create sent.
 func confirmRejectedMCPServerCreate(
-	ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, orgID uuid.UUID, status int, createErr error,
+	ctx context.Context, sdk *codersdk.Client, server *coderv1alpha1.CoderMCPServer, orgID uuid.UUID, nonce string, status int, createErr error,
 ) *mcpServerStep {
 	retryable := mcpServerCreateRetryable(status)
 	found, step := findMCPServerSlug(ctx, sdk, server, orgID)
@@ -202,7 +199,7 @@ func confirmRejectedMCPServerCreate(
 	case found != nil:
 		// Ours (the create committed) or someone else's (SlugConflict). The
 		// create dropped the recorded ID, so only the nonce can prove it.
-		return recordMCPServer(server, *found, "")
+		return recordMCPServer(server, *found, nonce, "")
 	}
 	if step := mcpServerRequireSiteOwner(ctx, sdk); step != nil {
 		return keepRejectedMCPServerCreate(step, !retryable)
@@ -239,15 +236,17 @@ func mcpServerCredentialStatus(auth coderv1alpha1.CoderMCPServerAuth, values map
 }
 
 // mcpServerCreateRequest builds the create request: every spec field, the
-// credentials of the auth type, enabled false, and the nonce as the display
-// name. Credentials are revealed only here, into the request body.
-func mcpServerCreateRequest(server *coderv1alpha1.CoderMCPServer, values map[string]credentialsecret.Value) (codersdk.CreateMCPServerConfigRequest, error) {
+// credentials of the auth type, enabled false, and displayName, the nonce of
+// a create. Credentials are revealed only here, into the request body.
+func mcpServerCreateRequest(
+	server *coderv1alpha1.CoderMCPServer, values map[string]credentialsecret.Value, displayName string,
+) (codersdk.CreateMCPServerConfigRequest, error) {
 	spec := server.Spec
 	if spec.Transport == "" || spec.Availability == "" {
 		return codersdk.CreateMCPServerConfigRequest{}, fmt.Errorf("assertion failed: MCP server %s/%s has no transport or availability after admission defaults", server.Namespace, server.Name)
 	}
 	req := codersdk.CreateMCPServerConfigRequest{
-		DisplayName: mcpServerNonce(server), Slug: spec.Slug, Description: spec.Description, IconURL: spec.IconURL,
+		DisplayName: displayName, Slug: spec.Slug, Description: spec.Description, IconURL: spec.IconURL,
 		Transport: spec.Transport, URL: spec.URL, AuthType: spec.Auth.Type, Availability: spec.Availability,
 		Enabled: false, ModelIntent: spec.ModelIntent, AllowInPlanMode: spec.AllowInPlanMode, ForwardCoderHeaders: spec.ForwardCoderHeaders,
 	}

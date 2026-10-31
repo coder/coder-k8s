@@ -55,7 +55,7 @@ func TestCoderMCPServerCleanupRecord(t *testing.T) {
 	delete(record, "createAttemptTime")
 	require.Equal(t, map[string]string{
 		"kind": "CoderMCPServer", "uid": string(got.UID), "namespace": env.namespace, "name": got.Name,
-		"deploymentID": env.fake.deploymentID, "nonce": "coder-k8s:" + string(got.UID), "coderID": env.requireCreated(t, got).view.ID.String(),
+		"deploymentID": env.fake.deploymentID, "nonce": env.requireCreated(t, got).view.DisplayName, "coderID": env.requireCreated(t, got).view.ID.String(),
 		"type": "", "organizationID": env.orgID.String(), "slug": got.Spec.Slug,
 	}, record, "the config ID is recorded before the sync replaces the nonce")
 
@@ -283,6 +283,25 @@ func TestCoderMCPServerRecordBackfillOnDelete(t *testing.T) {
 	record := env.mcpServerRecord(ctx, t, got.UID)
 	require.Equal(t, id.String(), record["coderID"], "the record stays for a sweep")
 	require.Equal(t, env.fake.deploymentID, record["deploymentID"])
+}
+
+// #422 item 3: a deployment ID read that hangs leaves no record, but it does
+// not use up the one bounded attempt: the delete still goes out and succeeds.
+func TestCoderMCPServerRecordBackfillOnDeleteHangs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newMCPServerEnv(ctx, t, true)
+	env.keySecret(ctx, t, testMCPKey)
+	got, _ := env.applied(ctx, t, nil)
+	require.NoError(t, k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: env.namespace, Name: "ck8s-cleanup-" + string(got.UID)}}))
+	holdControlPlane(ctx, t, env.namespace)
+	env.fake.failNext(routeBuildInfo, fakeFault{Hang: true})
+
+	gone, _ := env.deleteMCPServer(ctx, t, got)
+	require.Nil(t, gone, "released after one attempt")
+	require.Equal(t, 1, env.fake.requestCount(routeDeleteMCPServer))
+	require.Empty(t, env.fake.mcpServers(), "the delete had time left")
+	require.Nil(t, env.mcpServerRecord(ctx, t, got.UID))
 }
 
 // #353: a create answer that was lost is confirmed by the next reconcile,

@@ -493,10 +493,13 @@ func TestCoderAIProviderNonceWithoutCredential(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	env, _, provider := newAIProviderCreateEnv(ctx, t)
-	got := &coderv1alpha1.CoderAIProvider{}
-	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(provider), got))
+	// A 429 that a read confirms clears the marker and the credential.
+	env.fake.failNext(routeCreateAIProvider, fakeFault{Status: http.StatusTooManyRequests})
+	got, _ := env.reconcile(ctx, t, provider)
+	requireAIProviderStep(t, got, false, "CreateRetrying")
+	require.Nil(t, got.Status.Credential)
 	_, err := env.fake.client(t, 2*time.Second).CreateAIProvider(ctx, codersdk.CreateAIProviderRequest{
-		Type: codersdk.AIProviderTypeOpenAI, Name: "openai", DisplayName: "coder-k8s:" + string(got.UID),
+		Type: codersdk.AIProviderTypeOpenAI, Name: "openai", DisplayName: cleanupRecord(ctx, t, env.namespace, got.UID)["nonce"],
 		BaseURL: "https://api.openai.com/v1", APIKeys: []string{"sk-late-commit-0123456789ab"},
 	})
 	require.NoError(t, err)
@@ -505,7 +508,7 @@ func TestCoderAIProviderNonceWithoutCredential(t *testing.T) {
 	stored, _ := env.fake.aiProvider("openai")
 	require.Equal(t, stored.id.String(), got.Status.ProviderID)
 	require.Equal(t, testAIProviderKey, stored.keys[0].plaintext, "the current key replaced the unknown one")
-	require.Equal(t, 1, env.fake.requestCount(routeCreateAIProvider), "only the late commit")
+	require.Equal(t, 2, env.fake.requestCount(routeCreateAIProvider), "the rejected create and the late commit")
 }
 
 // Plan 5.3 rule 5: a key PATCH that failed before it committed leaves the

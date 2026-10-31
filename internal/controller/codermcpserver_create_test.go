@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,7 +43,7 @@ func (env mcpServerEnv) requireCreated(t *testing.T, server *coderv1alpha1.Coder
 		require.NoError(t, json.Unmarshal(body, &req))
 		if req.Slug == server.Spec.Slug {
 			require.False(t, req.Enabled, "created disabled")
-			require.Equal(t, "coder-k8s:"+string(server.UID), req.DisplayName)
+			require.True(t, strings.HasPrefix(req.DisplayName, "coder-k8s:"), "created with a nonce, not %q", req.DisplayName)
 		}
 	}
 	return own[0]

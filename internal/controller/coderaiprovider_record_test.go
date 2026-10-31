@@ -56,7 +56,7 @@ func TestCoderAIProviderCleanupRecord(t *testing.T) {
 	delete(record, "createAttemptTime")
 	require.Equal(t, map[string]string{
 		"kind": "CoderAIProvider", "uid": string(got.UID), "namespace": env.namespace, "name": "openai",
-		"deploymentID": env.fake.deploymentID, "nonce": "coder-k8s:" + string(got.UID), "coderID": stored.id.String(), "type": "openai",
+		"deploymentID": env.fake.deploymentID, "nonce": stored.displayName, "coderID": stored.id.String(), "type": "openai",
 	}, record, "the provider ID is recorded before the sync replaces the nonce")
 
 	got, _ = env.reconcile(ctx, t, got)
@@ -169,6 +169,44 @@ func TestCoderAIProviderRecordBackfillOnDisable(t *testing.T) {
 	stored, _ := env.fake.aiProvider("openai")
 	require.False(t, stored.enabled, "the disable still runs")
 	require.Equal(t, got.Status.ProviderID, cleanupRecord(ctx, t, env.namespace, provider.UID)["coderID"])
+}
+
+// #422 item 3: a provider from before records gets one also when its object
+// is already being deleted, so a release without a confirmed delete leaves a
+// record for a sweep.
+func TestCoderAIProviderRecordBackfillOnDelete(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newReadyAIProvider(ctx, t)
+	require.NoError(t, k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: env.namespace, Name: "ck8s-cleanup-" + string(provider.UID)}}))
+	holdControlPlane(ctx, t, env.namespace)
+	env.fake.failNext(routeDeleteAIProvider, fakeFault{Status: http.StatusBadGateway})
+
+	gone, _ := env.deleteAIProvider(ctx, t, provider)
+	require.Nil(t, gone, "released after one attempt")
+	_, ok := env.fake.aiProvider("openai")
+	require.True(t, ok)
+	record := cleanupRecord(ctx, t, env.namespace, provider.UID)
+	require.Equal(t, provider.Status.ProviderID, record["coderID"], "the record stays for a sweep")
+	require.Equal(t, env.fake.deploymentID, record["deploymentID"])
+}
+
+// #422 item 3: a deployment ID read that hangs leaves no record, but it does
+// not use up the one bounded attempt: the delete still goes out and succeeds.
+func TestCoderAIProviderRecordBackfillOnDeleteHangs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _, provider := newReadyAIProvider(ctx, t)
+	require.NoError(t, k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: env.namespace, Name: "ck8s-cleanup-" + string(provider.UID)}}))
+	holdControlPlane(ctx, t, env.namespace)
+	env.fake.failNext(routeBuildInfo, fakeFault{Hang: true})
+
+	gone, _ := env.deleteAIProvider(ctx, t, provider)
+	require.Nil(t, gone, "released after one attempt")
+	require.Equal(t, 1, env.fake.requestCount(routeDeleteAIProvider))
+	_, ok := env.fake.aiProvider("openai")
+	require.False(t, ok, "the delete had time left")
+	require.Nil(t, cleanupRecord(ctx, t, env.namespace, provider.UID))
 }
 
 // #374 review: the controller reads records live. A cache that does not
