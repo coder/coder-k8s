@@ -875,6 +875,59 @@ func TestReconcile_OperatorAccess_Disabled_SecretReplacedDuringRevoke(t *testing
 	require.Equal(t, "foreign-token", string(stored.Data[coderv1alpha1.DefaultTokenSecretKey]))
 }
 
+// TestReconcile_OperatorAccess_Disabled_WithoutRecordRevokesEarlierSecretTokens
+// checks one update that disables operator access and renames
+// spec.operatorAccess.generatedTokenSecretName while the status records no
+// token. The operator still deletes in Coder the exact token of the Secret
+// under the earlier name, because this control plane controls that Secret. It
+// sends no delete for Secrets that it does not control or that hold no token.
+func TestReconcile_OperatorAccess_Disabled_WithoutRecordRevokesEarlierSecretTokens(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: createTestNamespace(ctx, t, "operator-token-disabled-renamed")},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image:    "test-operator-token-disabled-renamed:latest",
+			ExtraEnv: []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: losesOwnerPostgresURL}},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, cp))
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), cp) })
+	controlled := []metav1.OwnerReference{{
+		APIVersion: coderv1alpha1.GroupVersion.String(), Kind: "CoderControlPlane", Name: cp.Name, UID: cp.UID, Controller: ptrTo(true),
+	}}
+	for _, secret := range []*corev1.Secret{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: cp.Name + "-operator-token", Namespace: cp.Namespace, OwnerReferences: controlled},
+			Data:       map[string][]byte{coderv1alpha1.DefaultTokenSecretKey: []byte("earlier-operator-token")},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "controlled-without-token", Namespace: cp.Namespace, OwnerReferences: controlled},
+			Data:       map[string][]byte{"license": []byte("license-jwt")},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "unowned-with-token", Namespace: cp.Namespace},
+			Data:       map[string][]byte{coderv1alpha1.DefaultTokenSecretKey: []byte("foreign-token")},
+		},
+	} {
+		require.NoError(t, k8sClient.Create(ctx, secret))
+	}
+	updateControlPlaneSpec(ctx, t, cp, func(spec *coderv1alpha1.CoderControlPlaneSpec) {
+		spec.OperatorAccess.Disabled = true
+		spec.OperatorAccess.GeneratedTokenSecretName = "renamed-operator-token"
+	})
+
+	provisioner := &fakeOperatorAccessProvisioner{}
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}})
+	require.NoError(t, err)
+	require.Len(t, provisioner.revokeRequests, 1, "only the token of the controlled Secret is deleted")
+	require.Equal(t, losesOwnerPostgresURL, provisioner.revokeRequests[0].PostgresURL)
+	require.Equal(t, "earlier-operator-token", provisioner.revokeRequests[0].Token)
+	require.Empty(t, provisioner.revokeRequests[0].TokenID)
+	require.Nil(t, getControlPlane(t, cp).Status.OperatorTokenSecretRef)
+}
+
 // TestReconcile_OperatorAccess_TokenSecretLosesOwner_KeywordValueDSN checks
 // that a key=value PostgreSQL connection string records the database like a
 // URL does, so that the operator deletes its token after the Secret was
