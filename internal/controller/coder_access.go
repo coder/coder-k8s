@@ -91,11 +91,22 @@ func coderStepUnavailable(action string, err error) *coderStep {
 }
 
 // controlPlaneGone reports whether the CoderControlPlane name in namespace is
-// NotFound or being deleted. Then nothing can clean up in Coder.
-func controlPlaneGone(ctx context.Context, reader client.Reader, namespace, name string) (bool, error) {
-	if reader == nil {
-		return false, errors.New("assertion failed: control plane check needs a Kubernetes reader")
+// NotFound or being deleted. Then nothing can clean up in Coder. The caller
+// then releases its object without a Coder call, which is final, and a cache
+// can lag behind the API: so a "gone" from cache counts only after apiReader,
+// a read without the cache, confirms it.
+func controlPlaneGone(ctx context.Context, cache, apiReader client.Reader, namespace, name string) (bool, error) {
+	if cache == nil || apiReader == nil {
+		return false, errors.New("assertion failed: control plane check needs a cached and an uncached Kubernetes reader")
 	}
+	gone, err := controlPlaneGoneIn(ctx, cache, namespace, name)
+	if err != nil || !gone {
+		return gone, err
+	}
+	return controlPlaneGoneIn(ctx, apiReader, namespace, name)
+}
+
+func controlPlaneGoneIn(ctx context.Context, reader client.Reader, namespace, name string) (bool, error) {
 	controlPlane := &coderv1alpha1.CoderControlPlane{}
 	key := types.NamespacedName{Namespace: namespace, Name: name}
 	if err := reader.Get(ctx, key, controlPlane); apierrors.IsNotFound(err) {

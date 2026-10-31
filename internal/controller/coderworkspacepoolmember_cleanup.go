@@ -31,12 +31,7 @@ func (r *CoderWorkspacePoolMemberReconciler) cleanup(ctx context.Context, member
 	if !poolMemberMayHaveWorkspace(member) || (deleted != nil && deleted.Status == metav1.ConditionTrue) {
 		return ctrl.Result{}, r.releaseFinalizer(ctx, member)
 	}
-	gone, err := controlPlaneGone(ctx, r.Client, member.Namespace, member.Spec.ControlPlaneRef.Name)
-	if err == nil && gone {
-		// The release below is final, and the cache can lag behind: only a
-		// read without the cache proves that the control plane is gone.
-		gone, err = controlPlaneGone(ctx, r.APIReader, member.Namespace, member.Spec.ControlPlaneRef.Name)
-	}
+	gone, err := controlPlaneGone(ctx, r.Client, r.APIReader, member.Namespace, member.Spec.ControlPlaneRef.Name)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

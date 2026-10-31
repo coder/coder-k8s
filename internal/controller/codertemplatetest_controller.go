@@ -60,8 +60,8 @@ const templateTestControlPlaneRefIndex = ".spec.controlPlaneRef.name"
 // calls it until activation (#152). A change of a control plane requeues the
 // tests that use it, so cleanup that waits for Coder resumes at once.
 func (r *CoderTemplateTestReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if mgr == nil || r.Client == nil || r.Scheme == nil || r.Clock == nil {
-		return fmt.Errorf("assertion failed: template test reconciler needs a manager, a client, a scheme, and a clock")
+	if mgr == nil || r.Client == nil || r.APIReader == nil || r.Scheme == nil || r.Clock == nil {
+		return fmt.Errorf("assertion failed: template test reconciler needs a manager, a client, an API reader, a scheme, and a clock")
 	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &coderv1alpha1.CoderTemplateTest{}, templateTestControlPlaneRefIndex,
 		func(obj client.Object) []string {
@@ -117,8 +117,8 @@ func templateTestFail(reason, format string, args ...any) *templateTestStep {
 
 // Reconcile runs the first step of the test that applies, then returns.
 func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	if r.Client == nil || r.Scheme == nil || r.Clock == nil {
-		return ctrl.Result{}, fmt.Errorf("assertion failed: template test reconciler needs a client, a scheme, and a clock")
+	if r.Client == nil || r.APIReader == nil || r.Scheme == nil || r.Clock == nil {
+		return ctrl.Result{}, fmt.Errorf("assertion failed: template test reconciler needs a client, an API reader, a scheme, and a clock")
 	}
 	// Only a wait after HTTP 429 keeps the backoff count. Every other
 	// outcome, including deletion and errors, forgets it.
@@ -175,7 +175,7 @@ func (r *CoderTemplateTestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, fmt.Errorf("assertion failed: template test %s/%s is %s without status.startTime", tt.Namespace, tt.Name, tt.Status.Phase)
 	}
 	if templateTestMayHaveWorkspace(tt) {
-		if gone, err := controlPlaneGone(ctx, r.Client, tt.Namespace, tt.Spec.ControlPlaneRef.Name); err != nil || gone {
+		if gone, err := controlPlaneGone(ctx, r.Client, r.APIReader, tt.Namespace, tt.Spec.ControlPlaneRef.Name); err != nil || gone {
 			if err == nil {
 				applyTemplateTestStep(tt, now, templateTestControlPlaneGone(tt))
 				err = r.writeStatus(ctx, tt, before)
