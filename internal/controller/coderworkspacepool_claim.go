@@ -448,7 +448,7 @@ func (r *CoderWorkspacePoolReconciler) writeClaimStatuses(
 			switch {
 			case !memberReady:
 				reason, message = cmp.Or(m.Status.Reason, "WorkspaceNotReady"), truncateTemplateTestMessage(m.Status.Message)
-			case !ready && shared != nil && (shared.Reason == "ShareRefused" || shared.Reason == "ShareRemoved"):
+			case !ready && shared != nil && slices.Contains([]string{"ShareRefused", "ShareRemoved", "ShareRevoked", "ShareRevoking"}, shared.Reason):
 				reason, message, stalled = shared.Reason, truncateTemplateTestMessage(shared.Message), true
 			case !ready:
 				reason, message = "SharingWorkspace", fmt.Sprintf("Workspace %s is being shared with Coder user %s.", m.Status.WorkspaceName, claim.Spec.Share.User)

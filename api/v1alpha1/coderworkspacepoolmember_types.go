@@ -31,10 +31,12 @@ const (
 	// member's workspace is gone, with the CoderTemplateTest reasons.
 	CoderWorkspacePoolMemberConditionWorkspaceDeleted = "WorkspaceDeleted"
 	// CoderWorkspacePoolMemberConditionShared is True while Coder's ACL gives
-	// status.sharedUserID the use role on the workspace of a Share claim.
-	// Reason ShareRefused: the policy or Coder refused the share. Reason
-	// ShareRemoved: the share is gone from Coder, and the controller does not
-	// share again.
+	// status.sharedUserID the use role on the workspace of a Share claim and
+	// the share policy allows it. Reason ShareRefused: the policy or Coder
+	// refused the share. ShareRevoked: the policy no longer allowed the share,
+	// and the controller removed it (ShareRevoking until that worked).
+	// ShareRemoved: someone else removed the share. The controller does not
+	// share again after ShareRevoked or ShareRemoved.
 	CoderWorkspacePoolMemberConditionShared = "Shared"
 
 	// CoderWorkspacePoolMemberCleanupFinalizer keeps a member until its

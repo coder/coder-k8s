@@ -110,11 +110,12 @@ func checkWorkspaceShareUser(ctx context.Context, sdk *codersdk.Client, orgID uu
 
 // shareWorkspace gives the Coder user of the member's Share claim the use
 // role on workspace (plan 6.2 step 11 rule 2), which the caller read with the
-// identity guard in this reconcile, and then reports in the Shared condition
-// whether Coder's ACL still gives it. step is the member's step when no share
-// is due. A refusal is a wait: the member stays ready and checks again at its
-// next poll. The controller never shares a second time once Coder showed the
-// share: a share that is gone stays gone.
+// identity guard in this reconcile, and reports in the Shared condition
+// whether Coder's ACL gives it now. It checks the share policy at every poll
+// and removes a share that the policy no longer allows. step is the member's
+// step when no share is due. A refusal is a wait: the member stays ready and
+// checks again at its next poll. A share that is gone, or that the controller
+// removed, stays gone.
 func (r *CoderWorkspacePoolMemberReconciler) shareWorkspace(
 	ctx context.Context, sdk *codersdk.Client, member *coderv1alpha1.CoderWorkspacePoolMember, before *coderv1alpha1.CoderWorkspacePoolMemberStatus,
 	workspace codersdk.Workspace, step *coderStep,
@@ -131,67 +132,57 @@ func (r *CoderWorkspacePoolMemberReconciler) shareWorkspace(
 	}
 	name, target := member.Status.WorkspaceName, member.Status.SharedUserID
 	shared := meta.FindStatusCondition(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionShared)
-	granted := shared != nil && (shared.Status == metav1.ConditionTrue || shared.Reason == "ShareRemoved")
+	granted := shared != nil && (shared.Status == metav1.ConditionTrue || slices.Contains([]string{"ShareRemoved", "ShareRevoked", "ShareRevoking"}, shared.Reason))
 	report := func(status metav1.ConditionStatus, reason, format string, args ...any) *coderStep {
 		s := coderWait(reason, format, args...)
 		setPoolMemberCondition(member, r.Clock.Now(), coderv1alpha1.CoderWorkspacePoolMemberConditionShared, status, reason, s.message)
 		return s
-	}
-	refused := func(s *coderStep) *coderStep {
-		if s.reason == "CoderUnavailable" {
-			return s
-		}
-		return report(metav1.ConditionFalse, "ShareRefused", "Workspace %s is not shared: %s", name, s.message)
 	}
 
 	acl, err := sdk.WorkspaceACL(ctx, workspace.ID)
 	if err != nil {
 		return coderStepUnavailable("get workspace ACL", err), nil
 	}
-	switch {
-	case target != "" && slices.ContainsFunc(acl.Users, func(u codersdk.WorkspaceUser) bool {
+	has := target != "" && slices.ContainsFunc(acl.Users, func(u codersdk.WorkspaceUser) bool {
 		return u.ID.String() == target && u.Role == codersdk.WorkspaceRoleUse
-	}):
-		// Also after a crash that lost the status write of the share.
-		return report(metav1.ConditionTrue, "Shared", "Workspace %s is bound to claim %s and shared with Coder user %s.", name, claim.Name, target), nil
-	case granted:
+	})
+	switch {
+	case !has && granted && shared.Reason == "ShareRevoked":
+		return coderWait(shared.Reason, "%s", shared.Message), nil
+	case !has && granted && shared.Reason == "ShareRevoking":
+		return report(metav1.ConditionFalse, "ShareRevoked", "The controller removed the share of workspace %s with Coder user %s. It does not share it again.", name, target), nil
+	case !has && granted:
 		// For example, Coder drops shares when an admin tightens the
 		// organization's sharing setting.
 		return report(metav1.ConditionFalse, "ShareRemoved",
 			"Coder user %s no longer has the use role on workspace %s. The controller does not share it again. Delete the claim to free the workspace.", target, name), nil
 	}
 
-	// Uncached: an admin who just withdrew the consent or the groups wins.
-	controlPlane := &coderv1alpha1.CoderControlPlane{}
-	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: member.Namespace, Name: member.Spec.ControlPlaneRef.Name}, controlPlane); err != nil {
-		return nil, fmt.Errorf("get CoderControlPlane %s/%s: %w", member.Namespace, member.Spec.ControlPlaneRef.Name, err)
-	}
-	if !controlPlane.DeletionTimestamp.IsZero() {
-		return coderWait("ControlPlaneDeleting", "CoderControlPlane %s is being deleted.", controlPlane.Name), nil
-	}
-	entry := workspacePoolOwner(controlPlane, member.Spec.OwnerID)
-	if entry == nil {
-		return refused(coderWait("OwnerNotAllowed", "CoderControlPlane %s does not list Coder user %s in spec.workspacePools.owners.", controlPlane.Name, member.Spec.OwnerID)), nil
-	}
-	owner, err := sdk.User(ctx, member.Spec.OwnerID)
-	if err != nil {
-		return coderStepUnavailable("get owner", err), nil
-	}
-	if err := coderAnswerFor("user", member.Spec.OwnerID, owner.ID.String()); err != nil {
-		return nil, err
-	}
-	orgID := uuid.MustParse(member.Spec.OrganizationID) // assertPoolMember checked it.
-	if s := checkWorkspaceSharePolicy(ctx, sdk, orgID, owner, entry.ShareGroupIDs); s != nil {
-		return refused(s), nil
-	}
 	// After the first check, the stored user ID, never the claim's username
 	// again: a username can move to another user.
-	user, s, err := checkWorkspaceShareUser(ctx, sdk, orgID, entry.ShareGroupIDs, cmp.Or(target, claim.Spec.Share.User))
-	if err != nil {
+	user, s, err := r.checkSharePolicy(ctx, sdk, member, cmp.Or(target, claim.Spec.Share.User))
+	switch {
+	case err != nil:
 		return nil, err
-	}
-	if s != nil {
-		return refused(s), nil
+	case s != nil && (s.reason == "CoderUnavailable" || s.reason == "ControlPlaneDeleting"):
+		return s, nil // Nothing proves a refusal: the share stays as it is.
+	case has && s == nil:
+		// Also after a crash that lost the status write of the share.
+		return report(metav1.ConditionTrue, "Shared", "Workspace %s is bound to claim %s and shared with Coder user %s.", name, claim.Name, target), nil
+	case has:
+		// The admin withdrew what allowed the share, for example removed the
+		// user from every listed group.
+		err := sdk.UpdateWorkspaceACL(ctx, workspace.ID, codersdk.UpdateWorkspaceACL{
+			UserRoles: map[string]codersdk.WorkspaceRole{target: codersdk.WorkspaceRoleDeleted},
+		})
+		if err != nil {
+			return report(metav1.ConditionFalse, "ShareRevoking", "The share of workspace %s with Coder user %s is no longer allowed: %s The controller could not remove it yet: %s",
+				name, target, s.message, coderErrorSummary(err)), nil
+		}
+		return report(metav1.ConditionFalse, "ShareRevoked", "The controller removed the share of workspace %s with Coder user %s: %s It does not share it again.",
+			name, target, s.message), nil
+	case s != nil:
+		return report(metav1.ConditionFalse, "ShareRefused", "Workspace %s is not shared: %s", name, s.message), nil
 	}
 	if target == "" {
 		// Stored before the write, so a retry after a crash shares with the
@@ -211,9 +202,43 @@ func (r *CoderWorkspacePoolMemberReconciler) shareWorkspace(
 	case err == nil:
 		return report(metav1.ConditionTrue, "Shared", "Workspace %s is bound to claim %s and shared with Coder user %s.", name, claim.Name, member.Status.SharedUserID), nil
 	case coderStatus(err) == http.StatusForbidden:
-		return refused(coderWait("ShareRefused", "%s", coderErrorSummary(err))), nil
+		return report(metav1.ConditionFalse, "ShareRefused", "Workspace %s is not shared: %s", name, coderErrorSummary(err)), nil
 	default:
 		// The ACL read at the next poll shows whether the write took effect.
 		return coderStepUnavailable("update workspace ACL", err), nil
 	}
+}
+
+// checkSharePolicy applies the share policy (plan 6.8) to the Coder user
+// ident on fresh inputs: the control plane read without the cache, so an
+// admin who just withdrew the consent or the groups wins, the owner, the
+// organization's setting, and the user. A step is a refusal, or a wait with
+// CoderUnavailable or ControlPlaneDeleting that proves nothing.
+func (r *CoderWorkspacePoolMemberReconciler) checkSharePolicy(
+	ctx context.Context, sdk *codersdk.Client, member *coderv1alpha1.CoderWorkspacePoolMember, ident string,
+) (codersdk.User, *coderStep, error) {
+	var user codersdk.User
+	controlPlane := &coderv1alpha1.CoderControlPlane{}
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: member.Namespace, Name: member.Spec.ControlPlaneRef.Name}, controlPlane); err != nil {
+		return user, nil, fmt.Errorf("get CoderControlPlane %s/%s: %w", member.Namespace, member.Spec.ControlPlaneRef.Name, err)
+	}
+	if !controlPlane.DeletionTimestamp.IsZero() {
+		return user, coderWait("ControlPlaneDeleting", "CoderControlPlane %s is being deleted.", controlPlane.Name), nil
+	}
+	entry := workspacePoolOwner(controlPlane, member.Spec.OwnerID)
+	if entry == nil {
+		return user, coderWait("OwnerNotAllowed", "CoderControlPlane %s does not list Coder user %s in spec.workspacePools.owners.", controlPlane.Name, member.Spec.OwnerID), nil
+	}
+	owner, err := sdk.User(ctx, member.Spec.OwnerID)
+	if err != nil {
+		return user, coderStepUnavailable("get owner", err), nil
+	}
+	if err := coderAnswerFor("user", member.Spec.OwnerID, owner.ID.String()); err != nil {
+		return user, nil, err
+	}
+	orgID := uuid.MustParse(member.Spec.OrganizationID) // assertPoolMember checked it.
+	if s := checkWorkspaceSharePolicy(ctx, sdk, orgID, owner, entry.ShareGroupIDs); s != nil {
+		return user, s, nil
+	}
+	return checkWorkspaceShareUser(ctx, sdk, orgID, entry.ShareGroupIDs, ident)
 }

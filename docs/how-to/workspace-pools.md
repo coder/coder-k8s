@@ -210,7 +210,7 @@ The claim is `Ready` only after the share, and `status.sharedUserID` holds the u
 kubectl -n coder wait --for=condition=Ready coderworkspaceclaim/alice-dev
 ```
 
-The operator stores the user's ID before it shares, so a renamed user keeps the share and a new user with the old name never gets it. It reads the workspace's sharing list every minute, and the claim is `Ready` only while that list gives the user `use`. The operator never revokes a share and never shares twice. Coder itself drops shares when an admin tightens the organization's sharing setting, and a person can remove one in the Coder UI. The claim is then `Stalled` with `ShareRemoved`. Deleting the claim deletes the workspace, which ends the share.
+The operator stores the user's ID before it shares, so a renamed user keeps the share and a new user with the old name never gets it. It checks the share every minute, and at once when the control plane changes. The claim is `Ready` only while the workspace's sharing list gives the user `use` and the policy above still allows it. When the admin withdraws what allowed the share, for example removes the user from every listed group, empties `shareGroupIDs`, removes the owner from `owners`, or suspends the user, the operator removes the share, and the claim is `Stalled` with `ShareRevoked`. Coder itself drops shares when an admin tightens the organization's sharing setting, and a person can remove one in the Coder UI. The claim is then `Stalled` with `ShareRemoved`. The operator never shares a second time, so create a new claim instead. Deleting the claim deletes the workspace, which ends the share.
 
 !!! warning "Share mode trusts every claimant with the pool owner"
     Every claimant can act as the pool owner, and so reach the workspaces of other claimants, if the template exposes `data.coder_workspace_owner.<name>.session_token`, if the owner has external-auth links, or through the owner's Git SSH key. Use a template that never exposes the owner's token and an owner without external-auth links, and treat the owner's Git SSH key as shared by every claimant. Anyone who can create pools on a control plane can act as every owner that the control plane lists. `maxWorkspaces` counts per control plane, so two `CoderControlPlane` objects on one Coder deployment can each allow the full cap for one owner.
@@ -228,6 +228,7 @@ The operator sends every pool request with its operator token. Measured in Kind 
 | What | Requests per minute | Requests |
 | --- | --- | --- |
 | A ready member | 2 | `GET /api/v2/workspaces/<id>` and `GET /api/v2/users/me` once a minute |
+| A shared member of a Share claim | 6 | The two requests above, plus the workspace's sharing list, the owner, the shared user, and the organization's sharing setting once a minute (and each listed group other than `Everyone`) |
 | A member that builds | 24 | The same two requests every 5 s, until the member is ready |
 | A pool that follows the active version | 6 | The owner, its organization membership, the organization (twice), the template, and the version, once a minute |
 | A pool of 10 ready members | 26 | 10 × 2 + 6 |

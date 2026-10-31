@@ -366,20 +366,15 @@ func TestPoolMemberShareAfterCoderErrors(t *testing.T) {
 
 // TestPoolMemberShareSurvivesLostStatus: a member that sent the ACL write
 // and then lost its status write finds the share in the ACL at its next
-// reconcile. It records the share without a second write, although the user
-// left the listed group meanwhile: the controller never rewrites a share.
+// reconcile, and records it without a second write.
 func TestPoolMemberShareSurvivesLostStatus(t *testing.T) {
 	t.Parallel()
 	e := newShareEnv(t)
-	e.fake.setLicensed(true)
-	group := e.fake.addGroup(e.orgID, "sharers", "Sharers", e.bob)
-	e.setShareGroups(t, group.String())
 	member, claimKey, workspaceID := e.bindShareClaim(t, "bob")
 
 	e.loseSharedStatus(t, member)
 	require.Equal(t, 1, e.fake.requestCount(routeUpdateWorkspaceACL))
 
-	e.fake.setGroupMembers(group)
 	m := e.reconcileMember(t, member, 1)
 	requireMember(t, m, coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "Shared", "")
 	require.Equal(t, e.bob.String(), m.Status.SharedUserID)
@@ -387,6 +382,110 @@ func TestPoolMemberShareSurvivesLostStatus(t *testing.T) {
 	require.Len(t, e.acl(t, workspaceID), 1)
 	e.reconcilePool(t, 1)
 	requireShareClaim(t, e.claim(t, claimKey), coderv1alpha1.CoderWorkspaceClaimPhaseBound, "WorkspaceReady", true, false)
+}
+
+// TestPoolMemberRevokesWithdrawnShare: the member checks the share policy at
+// every poll. When the admin withdraws what allowed a share, the member
+// removes it from the ACL with one write, reports ShareRevoked, and never
+// shares again, even once the policy allows it again. This holds after a
+// crash that lost the status write of the share, too. A Coder read that
+// fails proves nothing and keeps the share.
+func TestPoolMemberRevokesWithdrawnShare(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name            string
+		lostStatus      bool
+		withdraw, allow func(t *testing.T, e *shareEnv, group uuid.UUID)
+		wantMessage     string
+	}{
+		{
+			name:        "user left every listed group",
+			withdraw:    func(_ *testing.T, e *shareEnv, group uuid.UUID) { e.fake.setGroupMembers(group) },
+			allow:       func(_ *testing.T, e *shareEnv, group uuid.UUID) { e.fake.setGroupMembers(group, e.bob) },
+			wantMessage: "in none of the groups",
+		},
+		{
+			name: "user left every listed group after a lost status write", lostStatus: true,
+			withdraw:    func(_ *testing.T, e *shareEnv, group uuid.UUID) { e.fake.setGroupMembers(group) },
+			allow:       func(_ *testing.T, e *shareEnv, group uuid.UUID) { e.fake.setGroupMembers(group, e.bob) },
+			wantMessage: "in none of the groups",
+		},
+		{
+			name:        "owner lists no shareGroupIDs",
+			withdraw:    func(t *testing.T, e *shareEnv, _ uuid.UUID) { e.setShareGroups(t) },
+			allow:       func(t *testing.T, e *shareEnv, group uuid.UUID) { e.setShareGroups(t, group.String()) },
+			wantMessage: "lists no shareGroupIDs",
+		},
+		{
+			name:     "owner no longer allowed",
+			withdraw: func(t *testing.T, e *shareEnv, _ uuid.UUID) { e.allowOwner(t, "") },
+			allow: func(t *testing.T, e *shareEnv, group uuid.UUID) {
+				e.allowOwner(t, e.tester.String(), "default.docker")
+				e.setShareGroups(t, group.String())
+			},
+			wantMessage: "does not list Coder user",
+		},
+		{
+			name: "user suspended",
+			withdraw: func(_ *testing.T, e *shareEnv, _ uuid.UUID) {
+				e.fake.updateUser(e.bob, func(u *codersdk.User) { u.Status = codersdk.UserStatusSuspended })
+			},
+			allow: func(_ *testing.T, e *shareEnv, _ uuid.UUID) {
+				e.fake.updateUser(e.bob, func(u *codersdk.User) { u.Status = codersdk.UserStatusActive })
+			},
+			wantMessage: `status "suspended"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newShareEnv(t)
+			e.fake.setLicensed(true)
+			group := e.fake.addGroup(e.orgID, "sharers", "Sharers", e.bob)
+			e.setShareGroups(t, group.String())
+			member, claimKey, workspaceID := e.bindShareClaim(t, "bob")
+			if tc.lostStatus {
+				e.loseSharedStatus(t, member)
+			} else {
+				requireMember(t, e.reconcileMember(t, member, 1), coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "Shared", "")
+			}
+			tc.withdraw(t, e, group)
+
+			var body []byte
+			e.fake.failNext(routeUpdateWorkspaceACL, fakeFault{Inspect: func(b []byte) { body = b }})
+			m := e.reconcileMember(t, member, 1)
+			requireMember(t, m, coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "ShareRevoked", tc.wantMessage)
+			require.JSONEq(t, `{"user_roles":{"`+e.bob.String()+`":""}}`, string(body), "removes only the operator's share")
+			require.Empty(t, e.acl(t, workspaceID))
+			e.reconcilePool(t, 1)
+			claim := e.claim(t, claimKey)
+			requireShareClaim(t, claim, coderv1alpha1.CoderWorkspaceClaimPhaseBound, "ShareRevoked", false, true)
+			require.Empty(t, claim.Status.SharedUserID)
+
+			tc.allow(t, e, group)
+			requireMember(t, e.reconcileMember(t, member, 2), coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "ShareRevoked", "")
+			require.Equal(t, 2, e.fake.requestCount(routeUpdateWorkspaceACL), "the share and its removal, nothing more")
+			require.Empty(t, e.acl(t, workspaceID))
+		})
+	}
+	t.Run("failed reads and a failed removal", func(t *testing.T) {
+		t.Parallel()
+		e := newShareEnv(t)
+		member, claimKey, workspaceID := e.bindShareClaim(t, "bob")
+		requireMember(t, e.reconcileMember(t, member, 1), coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "Shared", "")
+		e.fake.failNext(routeSharingSettings, fakeFault{Status: http.StatusServiceUnavailable})
+		requireMember(t, e.reconcileMember(t, member, 1), coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "CoderUnavailable", "sharing settings")
+		require.Len(t, e.acl(t, workspaceID), 1, "a failed policy read keeps the share")
+		e.reconcilePool(t, 1)
+		requireShareClaim(t, e.claim(t, claimKey), coderv1alpha1.CoderWorkspaceClaimPhaseBound, "WorkspaceReady", true, false)
+
+		e.fake.updateUser(e.bob, func(u *codersdk.User) { u.Status = codersdk.UserStatusSuspended })
+		e.fake.failNext(routeUpdateWorkspaceACL, fakeFault{Status: http.StatusBadGateway})
+		requireMember(t, e.reconcileMember(t, member, 1), coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "ShareRevoking", "could not remove it yet")
+		e.reconcilePool(t, 1)
+		requireShareClaim(t, e.claim(t, claimKey), coderv1alpha1.CoderWorkspaceClaimPhaseBound, "ShareRevoking", false, true)
+		requireMember(t, e.reconcileMember(t, member, 1), coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "ShareRevoked", "")
+		require.Empty(t, e.acl(t, workspaceID))
+	})
 }
 
 // loseSharedStatus runs one member reconcile that sends the ACL write and
