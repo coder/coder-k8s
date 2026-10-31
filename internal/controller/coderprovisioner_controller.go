@@ -983,41 +983,35 @@ const (
 // not get its token sent to the URL of the old one, and its answer does not
 // show whether the key of the old one is gone, also at the same URL. A record
 // without a UID, from an operator that did not record it, is bound only at
-// the current Coder API URL of controlPlane (see recordCallURL).
+// the current Coder API URL of controlPlane.
 func tokenBoundTo(record coderv1alpha1.CoderProvisionerKeyRecord, controlPlane *coderv1alpha1.CoderControlPlane) bool {
 	if record.ControlPlaneUID != "" {
 		return record.ControlPlaneUID == string(controlPlane.UID)
 	}
 	current, err := coderAPIURL(controlPlane)
-	if err != nil {
-		return false
-	}
-	callURL, err := recordCallURL(record, controlPlane)
-	return err == nil && callURL == current
+	return err == nil && current == record.CoderURL
 }
 
 // recordCallURL returns the URL for the Coder calls of record with the
-// operator access of controlPlane: record.CoderURL, or the current Coder API
-// URL of controlPlane when record.CoderURL has the other scheme on the same
-// host. Such a record is from before spec.tls.operatorAccess was set or
-// removed, and its key is behind the same control plane Service. With
-// spec.tls.operatorAccess, any other plain HTTP URL is an error, so the
-// operator token never travels over plain HTTP.
+// operator access of controlPlane. That is record.CoderURL, except for a
+// record of controlPlane, by UID, at one of its own Service URLs: its plain
+// HTTP Service URL or status.url. Such a record is from before
+// spec.tls.operatorAccess was set or removed, so its calls go to the current
+// Coder API URL of the same Service. With spec.tls.operatorAccess, any other
+// plain HTTP URL is an error, so the operator token never travels over plain
+// HTTP.
 func recordCallURL(record coderv1alpha1.CoderProvisionerKeyRecord, controlPlane *coderv1alpha1.CoderControlPlane) (string, error) {
 	current, err := coderAPIURL(controlPlane)
 	if err != nil {
 		return "", err
 	}
-	currentURL, err := url.Parse(current)
-	if err != nil {
-		return "", fmt.Errorf("assertion failed: parse the Coder API URL %q: %w", current, err)
+	ownServiceURL := record.CoderURL == controlplaneurl.InternalHTTPURL(controlPlane) || record.CoderURL == strings.TrimSpace(controlPlane.Status.URL)
+	if record.ControlPlaneUID == string(controlPlane.UID) && ownServiceURL {
+		return current, nil
 	}
 	recorded, err := url.Parse(record.CoderURL)
 	if err != nil {
 		return "", fmt.Errorf("parse the recorded Coder URL %q: %w", record.CoderURL, err)
-	}
-	if recorded.Scheme != currentURL.Scheme && strings.EqualFold(recorded.Hostname(), currentURL.Hostname()) {
-		return current, nil
 	}
 	if controlPlane.Spec.TLS.OperatorAccess != nil && recorded.Scheme != "https" {
 		return "", fmt.Errorf("CoderControlPlane %s has spec.tls.operatorAccess, so the operator sends its token to no plain HTTP URL such as %q",

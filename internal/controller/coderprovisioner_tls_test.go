@@ -13,15 +13,16 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/controller"
 	"github.com/coder/coder-k8s/internal/tlstest"
 )
 
 // TestCoderProvisionerKey_OperatorTLS checks the opt-in to
-// spec.tls.operatorAccess on a control plane with built-in TLS: the applied
-// key stays, every later Coder call goes to status.url with the CA bundle, a
-// pending key recorded at the plain HTTP Service URL is deleted over HTTPS,
-// and a missing CA bundle stops the Coder calls instead of falling back to
-// HTTP.
+// spec.tls.operatorAccess on a control plane with built-in TLS, and the opt
+// out: the applied key stays, every Coder call goes to status.url with the CA
+// bundle, a pending key recorded at the plain HTTP Service URL is deleted over
+// HTTPS, other plain HTTP records get no request, and a missing CA bundle
+// stops the Coder calls instead of falling back to HTTP.
 func TestCoderProvisionerKey_OperatorTLS(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -86,13 +87,51 @@ func TestCoderProvisionerKey_OperatorTLS(t *testing.T) {
 		require.NotNil(t, req.CoderTLS)
 	}
 
+	// Records that do not prove they are at this control plane's own Service
+	// URL stay, and get no request: a record without a UID (it can be from a
+	// deleted control plane with the same name), and a plain HTTP URL on
+	// another port.
+	withoutUID := leftover
+	withoutUID.ControlPlaneUID, withoutUID.KeyName, withoutUID.KeyID = "", "provisioner-no-uid", uuid.NewString()
+	otherPort := leftover
+	otherPort.CoderURL, otherPort.KeyName, otherPort.KeyID = "http://coder."+f.namespace+".svc.cluster.local:8080", "provisioner-other-port", uuid.NewString()
+	latest.Status.PendingKeys = []coderv1alpha1.CoderProvisionerKeyRecord{withoutUID, otherPort}
+	require.NoError(t, k8sClient.Status().Update(ctx, latest))
+	f.bootstrapClient.deleteKeyByIDRequests = nil
+	_, err := f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}})
+	require.NoError(t, err)
+	require.Empty(t, f.bootstrapClient.deleteKeyByIDRequests)
+	require.ElementsMatch(t, []coderv1alpha1.CoderProvisionerKeyRecord{withoutUID, otherPort}, f.get(ctx, t, provisioner).Status.PendingKeys)
+
 	require.NoError(t, k8sClient.Delete(ctx, caConfigMap))
 	f.bootstrapClient.entitlementsRequests = nil
-	_, err := f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}})
+	_, err = f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}})
 	require.NoError(t, err)
 	require.Empty(t, f.bootstrapClient.entitlementsRequests, "a missing CA bundle must stop the Coder calls")
 	condition := meta.FindStatusCondition(f.get(ctx, t, provisioner).Status.Conditions, coderv1alpha1.CoderProvisionerConditionOperatorAccessReady)
 	require.NotNil(t, condition)
 	require.Equal(t, metav1.ConditionFalse, condition.Status)
 	require.Equal(t, "OperatorTLSUnavailable", condition.Reason)
+
+	// Opting out sends a key recorded at status.url to the plain HTTP Service
+	// URL, the operator's Coder API URL again, without the trust.
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: f.controlPlane.Name, Namespace: f.namespace}, controlPlane))
+	controlPlane.Spec.TLS.OperatorAccess = nil
+	require.NoError(t, k8sClient.Update(ctx, controlPlane))
+	atStatusURL := leftover
+	atStatusURL.CoderURL, atStatusURL.KeyName, atStatusURL.KeyID = httpsURL, "provisioner-https", uuid.NewString()
+	latest = f.get(ctx, t, provisioner)
+	latest.Status.PendingKeys = []coderv1alpha1.CoderProvisionerKeyRecord{atStatusURL}
+	require.NoError(t, k8sClient.Status().Update(ctx, latest))
+	f.bootstrapClient.deleteKeyByIDRequests = nil
+	// A new reconciler has no retry delay from the kept records above.
+	f.reconciler = &controller.CoderProvisionerReconciler{Client: k8sClient, Scheme: scheme, BootstrapClient: f.bootstrapClient}
+	_, err = f.reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: provisioner.Name, Namespace: provisioner.Namespace}})
+	require.NoError(t, err)
+	require.Len(t, f.bootstrapClient.deleteKeyByIDRequests, 1)
+	deleted = f.bootstrapClient.deleteKeyByIDRequests[0]
+	require.Equal(t, atStatusURL.KeyID, deleted.KeyID.String())
+	require.Equal(t, httpURL, deleted.CoderURL)
+	require.Nil(t, deleted.CoderTLS)
+	require.Equal(t, appliedKeyID, f.get(ctx, t, provisioner).Status.ProvisionerKeyID, "opting out must not rotate the applied key")
 }
