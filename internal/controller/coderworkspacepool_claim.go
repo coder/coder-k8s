@@ -139,7 +139,7 @@ func (r *CoderWorkspacePoolReconciler) refreshWaitingClaims(
 // between the bind and the status). The write carries the claim's
 // resourceVersion, so of two reconciles that pick different members for one
 // claim (two operator replicas), only one reserves. A reconcile that finds a
-// reservation binds only that member while poolReservationLive holds. It also
+// reservation binds only that member until poolReservationStale says otherwise. It also
 // sets the pool label again, in case it drifted.
 func (r *CoderWorkspacePoolReconciler) bindClaims(
 	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, claims []coderv1alpha1.CoderWorkspaceClaim,
@@ -189,14 +189,14 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 		}
 		reserved := claim.Status.MemberName
 		if reserved != "" {
-			live, err := r.poolReservationLive(ctx, claim.Namespace, reserved)
+			stale, err := r.poolReservationStale(ctx, claim)
 			if err != nil {
 				return false, err
 			}
-			if !live {
+			if stale {
 				reserved = ""
 			} else if !slices.ContainsFunc(free, func(m *coderv1alpha1.CoderWorkspacePoolMember) bool { return m.Name == reserved }) {
-				skipped = true // Only the reconcile that reserved it can bind it now.
+				skipped = true // It holds the claim already, or this list is older than the reservation.
 				continue
 			}
 		}
@@ -254,20 +254,30 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 	return skipped, nil
 }
 
-// poolReservationLive reports whether the reconcile that reserved the member
-// can still bind it. That reconcile's update carries the resourceVersion of a
-// list in which the member was free, so the update fails once the member is
-// gone or no longer free. The read is uncached: the reserving reconcile's
-// list can be newer than this one's.
-func (r *CoderWorkspacePoolReconciler) poolReservationLive(ctx context.Context, namespace, name string) (bool, error) {
+// poolReservationStale reports whether the member that claim reserved can
+// no longer be bound to it, read without the cache. Only states that a member
+// never leaves count: it is gone, being deleted, failed, used, or held by
+// another claim. A reconcile that reserved the member, or that found the
+// reservation, binds it with the resourceVersion of a list in which it was
+// free. A member that went through any of these states since then has a newer
+// resourceVersion, so that update fails, and a later list never shows it
+// free again. A member that holds the claim, or that is only not ready for
+// now, keeps the reservation. So does a ready member whose workspace read
+// keeps failing: the claim waits for it, as for any member that a bind cannot
+// read.
+func (r *CoderWorkspacePoolReconciler) poolReservationStale(ctx context.Context, claim *coderv1alpha1.CoderWorkspaceClaim) (bool, error) {
 	m := &coderv1alpha1.CoderWorkspacePoolMember{}
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, m); apierrors.IsNotFound(err) {
-		return false, nil
+	key := client.ObjectKey{Namespace: claim.Namespace, Name: claim.Status.MemberName}
+	if err := r.APIReader.Get(ctx, key, m); apierrors.IsNotFound(err) {
+		return true, nil
 	} else if err != nil {
-		return false, fmt.Errorf("get reserved pool member %s/%s: %w", namespace, name, err)
+		return false, fmt.Errorf("get reserved pool member %s: %w", key, err)
 	}
-	return m.Spec.ClaimRef == nil && m.DeletionTimestamp.IsZero() && poolMemberReady(m) &&
-		!meta.IsStatusConditionTrue(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed), nil
+	if m.Spec.ClaimRef != nil {
+		return m.Spec.ClaimRef.UID != string(claim.UID), nil
+	}
+	return !m.DeletionTimestamp.IsZero() || m.Status.Phase == coderv1alpha1.CoderWorkspacePoolMemberPhaseFailed ||
+		meta.IsStatusConditionTrue(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed), nil
 }
 
 // poolMemberUnusedNow reads the member's workspace with the member's identity

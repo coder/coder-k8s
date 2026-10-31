@@ -332,31 +332,89 @@ func TestPoolBindRaceTwoMembers(t *testing.T) {
 	require.Equal(t, holders[0], claim.Status.MemberName)
 }
 
-// TestPoolBindHonorsReservation: a crash between the reservation and the
-// bind leaves a claim with memberName and no member. The next reconcile
-// binds the reserved member, not the older one. A claim that reserved a
-// member that is gone binds another one.
-func TestPoolBindHonorsReservation(t *testing.T) {
+// TestPoolBindRaceAfterCrash: one reconcile reserves and binds a member,
+// then crashes before the claim status. Another reconcile listed the members
+// before that bind and reads the claim after it. It finds the reserved member
+// held by the claim and binds no other member, even when it cannot read the
+// first member's workspace in Coder.
+func TestPoolBindRaceAfterCrash(t *testing.T) {
 	t.Parallel()
 	e := newPoolMemberEnv(t)
 	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(2)) })
+	key := types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}
+	for _, name := range []string{"kwp-one", "kwp-two"} {
+		e.setMemberStatus(t, e.createMember(t, nil), readyWithWorkspace(name))
+	}
+	claimKey := e.createClaim(t, "build-1")
+	crashing := &controller.CoderWorkspacePoolReconciler{Client: crashAfterBind{k8sClient}, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	listedFirst := afterMemberList{Reader: k8sClient, done: new(false), hook: func() {
+		_, err := crashing.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+		require.ErrorContains(t, err, "crash after the bind")
+		e.fake.failNext(routeWorkspace, fakeFault{Status: http.StatusServiceUnavailable})
+	}}
+	r := &controller.CoderWorkspacePoolReconciler{Client: k8sClient, APIReader: listedFirst, Scheme: scheme, Clock: e.clock}
+	_, _ = r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+	e.reconcilePool(t, 1)
+
+	claim := e.claim(t, claimKey)
+	var holders []string
+	for _, m := range e.poolMembers(t, e.pool.Name) {
+		if m.Spec.ClaimRef != nil && m.Spec.ClaimRef.UID == string(claim.UID) {
+			holders = append(holders, m.Name)
+		}
+	}
+	require.Len(t, holders, 1, "exactly one member holds the claim")
+	requireClaim(t, claim, coderv1alpha1.CoderWorkspaceClaimPhaseBound, "WorkspaceReady", true)
+}
+
+// TestPoolBindHonorsReservation: a crash between the reservation and the
+// bind leaves a claim with memberName and no member. The next reconcile
+// binds the reserved member, not the older one. A claim that reserved a
+// member that is gone binds another one. A claim whose reserved member is
+// only not ready for now waits for it, even when another member is free.
+func TestPoolBindHonorsReservation(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(4)) })
 	older := e.createMember(t, nil)
 	e.setMemberStatus(t, older, readyWithWorkspace("kwp-older"))
 	time.Sleep(1100 * time.Millisecond) // creationTimestamp has second precision.
 	newer := e.createMember(t, nil)
 	e.setMemberStatus(t, newer, readyWithWorkspace("kwp-newer"))
-	reserved := e.createClaim(t, "reserved")
+	agentNotReady := memberPhase(coderv1alpha1.CoderWorkspacePoolMemberPhaseReady,
+		memberCondition(coderv1alpha1.CoderWorkspacePoolMemberConditionReady, metav1.ConditionFalse, "AgentNotReady"))
+	flapping := e.createMember(t, nil)
+	e.setMemberStatus(t, flapping, withWorkspace(func(s *coderv1alpha1.CoderWorkspacePoolMemberStatus) {
+		agentNotReady(s)
+		s.WorkspaceName = "kwp-flapping"
+	}))
 	time.Sleep(1100 * time.Millisecond)
-	gone := e.createClaim(t, "gone")
-	for key, member := range map[types.NamespacedName]string{reserved: newer.Name, gone: e.pool.Name + "-gone"} {
-		claim := e.claim(t, key)
-		claim.Status.MemberName = member
+	spare := e.createMember(t, nil)
+	e.setMemberStatus(t, spare, readyWithWorkspace("kwp-spare"))
+	reservations := []struct {
+		claim, member string
+	}{{"reserved", newer.Name}, {"gone", e.pool.Name + "-gone"}, {"waiting", flapping.Name}}
+	keys := map[string]types.NamespacedName{}
+	for _, r := range reservations {
+		keys[r.claim] = e.createClaim(t, r.claim)
+		claim := e.claim(t, keys[r.claim])
+		claim.Status.MemberName = r.member
 		require.NoError(t, k8sClient.Status().Update(e.ctx, claim))
+		time.Sleep(1100 * time.Millisecond)
 	}
 
 	e.reconcilePool(t, 1)
-	e.requireBound(t, newer, reserved)
-	e.requireBound(t, older, gone)
+	e.requireBound(t, newer, keys["reserved"])
+	e.requireBound(t, older, keys["gone"])
+	require.Nil(t, e.reconcileMember(t, flapping, 0).Spec.ClaimRef)
+	require.Nil(t, e.reconcileMember(t, spare, 0).Spec.ClaimRef, "a claim never leaves a member that is only not ready")
+	waiting := e.claim(t, keys["waiting"])
+	requireClaim(t, waiting, coderv1alpha1.CoderWorkspaceClaimPhasePending, "WaitingForReadyWorkspace", false)
+	require.Equal(t, flapping.Name, waiting.Status.MemberName, "the reservation stays")
+
+	e.setMemberStatus(t, flapping, readyStatus)
+	e.reconcilePool(t, 1)
+	e.requireBound(t, flapping, keys["waiting"])
 }
 
 // TestPoolFinishesClaimAfterCrash: the pool crashed after the member bind,
