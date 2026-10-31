@@ -32,6 +32,11 @@ func (r *CoderWorkspacePoolMemberReconciler) cleanup(ctx context.Context, member
 		return ctrl.Result{}, r.releaseFinalizer(ctx, member)
 	}
 	gone, err := controlPlaneGone(ctx, r.Client, member.Namespace, member.Spec.ControlPlaneRef.Name)
+	if err == nil && gone {
+		// The release below is final, and the cache can lag behind: only a
+		// read without the cache proves that the control plane is gone.
+		gone, err = controlPlaneGone(ctx, r.APIReader, member.Namespace, member.Spec.ControlPlaneRef.Name)
+	}
 	if err != nil {
 		return ctrl.Result{}, err
 	}
