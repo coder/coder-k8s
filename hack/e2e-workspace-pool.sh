@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# CoderWorkspacePool E2E driver (#153 plan 10.4, phases P1 to P5). The Kind job runs it before the lifecycle driver,
-# which deletes namespace coder at its end. It imports its own template from the agent fixture. Once every phase
-# passed, it deletes its claim and pool, waits until their workspaces are gone, and restores the control plane's
-# spec.workspacePools. Every wait is bounded. Offline tests with stubbed tools: hack/e2e-workspace-pool_test.sh.
+# CoderWorkspacePool E2E driver (#153 plan 10.4, phases P1 to P8). The Kind job runs it before the lifecycle driver,
+# which deletes namespace coder at its end. It imports its own template from the agent fixture. P8 deletes its claim,
+# pool, and members and checks that their workspaces are deleted in Coder. Once every phase passed, it restores the
+# control plane's spec.workspacePools. Every wait is bounded. Offline tests with stubbed tools:
+# hack/e2e-workspace-pool_test.sh.
 set -euo pipefail
 umask 077 # $WORK holds the Coder token header and request bodies
 shopt -s inherit_errexit
@@ -21,6 +22,8 @@ POOL=${E2E_POOL:-e2e-pool}
 CLAIM=${E2E_CLAIM:-e2e-claim}
 TEMPLATE_APPLY_TIMEOUT=${E2E_TEMPLATE_APPLY_TIMEOUT:-600s}
 CLAIM_READY_SECONDS=${E2E_CLAIM_READY_SECONDS:-10}
+USED_SECONDS=${E2E_USED_SECONDS:-180} # Coder flushes usage once a minute, and a member reads Coder once a minute
+DRY_RUN_SETTLE_SECONDS=${E2E_DRY_RUN_SETTLE_SECONDS:-10}
 TIMEOUT=${E2E_TIMEOUT_SECONDS:-300}
 POLL=${E2E_POLL_SECONDS:-2}
 PORT=${E2E_CODER_LOCAL_PORT:-13001}
@@ -41,7 +44,8 @@ cleanup() {
   rm -f "$WORK/coder.hdr" "$WORK/coder-body.json" "$WORK/owner.json" "$WORK/owner-login.json" "$WORK/owner.hdr"
   printf '%s\n' "=== RECEIPT ($RESULT) ===" "owner=$OWNER/${OWNER_ID:-unset}" "pool_uid=${POOL_UID:-unset}" \
     "claim_ready_ms=${CLAIM_MS:-unset}" "bind_deadline=${BIND_DEADLINE:-unset}" "restart_member=${RESTART_MEMBER:-unset}" \
-    "live_workspaces_after_restart=${LIVE:-unset}" "member_workspace_rows=${ROWS:-unset}" "phase_seconds=${PHASES[*]:-unset}" |
+    "live_workspaces_after_restart=${LIVE:-unset}" "member_workspace_rows=${ROWS:-unset}" "used_member=${USED:-unset}" \
+    "used_seconds=${USED_S:-unset}" "scaled_down_workspaces=${SCALED_DOWN:-unset}" "phase_seconds=${PHASES[*]:-unset}" |
     tee "$WORK/receipt.txt"
 }
 trap cleanup EXIT
@@ -271,13 +275,84 @@ w=$(coder_api GET "/api/v2/workspaces/$BOUND_WS") || fail "cannot read the bound
 [[ $(deadline_of "$w") == "$BIND_DEADLINE" ]] || fail "the bound deadline changed after the bind extension"
 phase P5
 
-log "=== cleanup: claim, pool, and their workspaces; restore spec.workspacePools"
+log "=== P6: usage on an unclaimed workspace makes its member Used, and the pool releases it"
+members_json
+USED=$(jq -er '[.items[] | select(.spec.claimRef == null and .status.phase == "Ready")] | .[0].metadata.name' "$WORK/members.json") ||
+  fail "no unclaimed ready member to use"
+USED_WS=$(jq -er --arg m "$USED" '.items[] | select(.metadata.name == $m) | .status.workspaceID' "$WORK/members.json")
+coder_api POST "/api/v2/workspaces/$USED_WS/usage" >/dev/null || fail "cannot post usage for workspace $USED_WS"
+released() {
+  k -n "$NS" get coderworkspacepoolmember "$USED" -o json >"$WORK/used.json" || return 1
+  jq -e '(.status.conditions // [] | any(.type == "Used" and .status == "True")) and
+    ([.metadata.ownerReferences[]? | select(.controller == true)] | length == 0)' "$WORK/used.json" >/dev/null
+}
+USED_T0=$SECONDS
+TIMEOUT=$USED_SECONDS wait_until "member $USED Used=True and released by the pool" released
+USED_S=$((SECONDS - USED_T0))
+log "member $USED Used=True and released ${USED_S}s after the usage request"
+wait_until "4 unclaimed ready members and 1 bound after the release" pool_ready 4 1
+jq -e '.status.usedReplicas == 1' "$WORK/pool.json" >/dev/null || fail "pool usedReplicas is not 1: $(jq -c .status "$WORK/pool.json")"
+members_json
+phase P6
+
+log "=== P7: scale to 1 deletes the extra unclaimed workspaces in Coder; the bound and the used one stay"
+UNCLAIMED=$(jq -c --arg m "$USED" '[.items[] | select(.spec.claimRef == null and .metadata.name != $m) | .status.workspaceID]' \
+  "$WORK/members.json")
+k -n "$NS" scale coderworkspacepool "$POOL" --replicas=1 >/dev/null
+wait_until "1 unclaimed ready member and 1 bound" pool_ready 1 1
+three_members() { members_json && jq -e '.items | length == 3' "$WORK/members.json" >/dev/null; }
+wait_until "3 members: 1 unclaimed, 1 bound, 1 used" three_members
+KEPT_WS=$(jq -er --arg m "$USED" '[.items[] | select(.spec.claimRef == null and .metadata.name != $m)] |
+  if length == 1 then .[0].status.workspaceID else error end' "$WORK/members.json") || fail "want 1 unclaimed member after the scale to 1"
+deleted_in_coder() { # <workspace ID>: an include_deleted read shows a succeeded delete build
+  coder_api GET "/api/v2/workspaces/$1?include_deleted=true" |
+    jq -e '.latest_build.transition == "delete" and .latest_build.job.status == "succeeded"' >/dev/null
+}
+live_in_coder() { coder_api GET "/api/v2/workspaces/$1" | jq -e '.latest_build.transition == "start"' >/dev/null; }
+SCALED_DOWN=0
+for ws in $(jq -r --arg kept "$KEPT_WS" '.[] | select(. != $kept)' <<<"$UNCLAIMED"); do
+  wait_until "workspace $ws deleted in Coder" deleted_in_coder "$ws"
+  SCALED_DOWN=$((SCALED_DOWN + 1))
+done
+((SCALED_DOWN == 3)) || fail "the scale to 1 deleted $SCALED_DOWN workspaces, want 3"
+for ws in "$KEPT_WS" "$BOUND_WS" "$USED_WS"; do live_in_coder "$ws" || fail "workspace $ws is not live after the scale to 1"; done
+phase P7
+
+log "=== P8: claim, pool, and used member deletes; a server dry run creates nothing"
+absent() { local out; ! out=$(k -n "$NS" get "$@" -o name 2>&1) && grep -q '(NotFound)' <<<"$out"; } # <kind> <name>
+member_gone() { absent coderworkspacepoolmember "$1"; }
 k -n "$NS" delete coderworkspaceclaim "$CLAIM" --wait=false >/dev/null
+wait_until "member $BOUND of the deleted claim gone" member_gone "$BOUND"
+deleted_in_coder "$BOUND_WS" || fail "the claim's workspace $BOUND_WS is not deleted in Coder"
+log "claim delete: member $BOUND gone, workspace deleted in Coder"
+KEPT=$(jq -er --arg w "$KEPT_WS" '.items[] | select(.status.workspaceID == $w) | .metadata.name' "$WORK/members.json")
 k -n "$NS" delete coderworkspacepool "$POOL" --wait=false >/dev/null
-members_gone() { members_json && jq -e '.items | length == 0' "$WORK/members.json" >/dev/null; }
-wait_until "every member of $POOL gone" members_gone
-no_live() { owner_workspaces && jq -e '.workspaces | length == 0' "$WORK/owner-workspaces.json" >/dev/null; }
-wait_until "no live workspace of $OWNER" no_live
+wait_until "unclaimed member $KEPT of the deleted pool gone" member_gone "$KEPT"
+deleted_in_coder "$KEPT_WS" || fail "the unclaimed workspace $KEPT_WS is not deleted in Coder"
+k -n "$NS" get coderworkspacepoolmember "$USED" -o json >"$WORK/used.json" || fail "the used member $USED went with its pool"
+jq -e '.metadata.deletionTimestamp == null' "$WORK/used.json" >/dev/null || fail "the pool delete deletes the used member $USED"
+live_in_coder "$USED_WS" || fail "the used workspace $USED_WS is not live after the pool delete"
+log "pool delete: member $KEPT gone, workspace deleted in Coder; used member $USED and its workspace stay"
+k -n "$NS" delete coderworkspacepoolmember "$USED" --wait=false >/dev/null
+wait_until "the used member $USED gone" member_gone "$USED"
+deleted_in_coder "$USED_WS" || fail "deleting the used member $USED did not delete workspace $USED_WS"
+log "used member delete: member $USED gone, workspace deleted in Coder"
+k apply --dry-run=server -f "$WORK/pool-manifest.json" >"$WORK/dry-run.out" 2>&1 ||
+  fail "server dry run of the pool failed: $(cat "$WORK/dry-run.out")"
+grep -q 'server dry run' "$WORK/dry-run.out" || fail "kubectl did not report a server dry run: $(cat "$WORK/dry-run.out")"
+nothing_made() { # the pool, a member of it, or a live workspace of the owner after the dry run fails at once
+  absent coderworkspacepool "$POOL" || fail "the server dry run created pool $POOL"
+  k -n "$NS" get coderworkspacepoolmembers -o json | jq -e --arg p "$POOL" '[.items[] | select(.spec.poolName == $p)] |
+    length == 0' >/dev/null || fail "a member of $POOL exists after the server dry run"
+  owner_workspaces && jq -e '.workspaces | length == 0' "$WORK/owner-workspaces.json" >/dev/null ||
+    fail "the owner has live workspaces after the server dry run"
+  ((SECONDS - DRY_T0 >= DRY_RUN_SETTLE_SECONDS))
+}
+DRY_T0=$SECONDS
+wait_until "no pool, member, or workspace ${DRY_RUN_SETTLE_SECONDS}s after the server dry run" nothing_made
+phase P8
+
+log "=== cleanup: restore spec.workspacePools"
 k -n "$NS" patch codercontrolplane "$CP" --type=merge -p "$(jq -nc --argjson orig "$ORIGINAL_POOLS" '{spec: {workspacePools: $orig}}')" \
   >/dev/null || fail "cannot restore spec.workspacePools of $CP"
 kubectl -n "$OP_NS" wait --for=condition=Available deploy/coder-k8s --timeout=120s >/dev/null
