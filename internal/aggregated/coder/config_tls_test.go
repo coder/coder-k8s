@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
 	"net/http"
-	"sync/atomic"
+	"slices"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -14,16 +16,27 @@ import (
 	"github.com/coder/coder-k8s/internal/tlstest"
 )
 
-// countingCoder answers every request with 200 and counts the requests that
-// carry the session token.
-type countingCoder struct{ requests atomic.Int32 }
+// countingCoder answers every request with 200 and records the client
+// address of the requests that carry the session token.
+type countingCoder struct {
+	mu      sync.Mutex
+	clients []string
+}
 
 func (c *countingCoder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Coder-Session-Token") == "operator-token" {
-		c.requests.Add(1)
+		c.mu.Lock()
+		c.clients = append(c.clients, r.RemoteAddr)
+		c.mu.Unlock()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{}`))
+}
+
+func (c *countingCoder) requests() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.clients)
 }
 
 func newTrust(t *testing.T, caBundle []byte, serverName string) *controlplaneurl.TLS {
@@ -39,6 +52,10 @@ func callCoder(t *testing.T, rawURL string, trust *controlplaneurl.TLS) error {
 	require.NoError(t, err)
 	res, err := client.Request(context.Background(), http.MethodGet, "/api/v2/buildinfo", nil)
 	if err != nil {
+		return err
+	}
+	// Read to the end, so that the connection goes back to the pool.
+	if _, err := io.Copy(io.Discard, res.Body); err != nil {
 		return err
 	}
 	return res.Body.Close()
@@ -76,17 +93,18 @@ func TestNewSDKClient_VerifiesCoderWithTLSTrust(t *testing.T) {
 			err := callCoder(t, server.URL, tt.trust)
 			if tt.accepted {
 				require.NoError(t, err)
-				require.EqualValues(t, 1, coder.requests.Load())
+				require.Len(t, coder.requests(), 1)
 				return
 			}
 			requireCertificateRejected(t, err)
-			require.Zero(t, coder.requests.Load(), "the operator token must not reach a server that failed verification")
+			require.Empty(t, coder.requests(), "the operator token must not reach a server that failed verification")
 		})
 	}
 }
 
-// A rotated CA bundle must apply to the next client even while a connection
-// verified with the old bundle stays open in the pool.
+// Clients with the same trust share pooled connections. A changed trust, such
+// as a rotated CA bundle, must never get a connection verified with the old
+// one.
 func TestNewSDKClient_NewTrustGetsNewConnections(t *testing.T) {
 	t.Parallel()
 
@@ -95,9 +113,14 @@ func TestNewSDKClient_NewTrustGetsNewConnections(t *testing.T) {
 	server := ca.NewServer(t, coder, "127.0.0.1")
 
 	require.NoError(t, callCoder(t, server.URL, newTrust(t, ca.PEM, "")))
-	requireCertificateRejected(t, callCoder(t, server.URL, newTrust(t, tlstest.NewCA(t).PEM, "")))
 	require.NoError(t, callCoder(t, server.URL, newTrust(t, ca.PEM, "")))
-	require.EqualValues(t, 2, coder.requests.Load())
+	require.NoError(t, callCoder(t, server.URL, newTrust(t, ca.PEM, "127.0.0.1")))
+	requireCertificateRejected(t, callCoder(t, server.URL, newTrust(t, tlstest.NewCA(t).PEM, "")))
+
+	clients := coder.requests()
+	require.Len(t, clients, 3, "the client with the other CA must not reach Coder")
+	require.Equal(t, clients[0], clients[1], "the same trust reuses the pooled connection")
+	require.NotEqual(t, clients[0], clients[2], "another server name gets its own connection")
 }
 
 func TestNewSDKClient_RefusesTLSTrustForHTTPURL(t *testing.T) {

@@ -75,7 +75,10 @@ func (ca *CA) NewServer(t testing.TB, handler http.Handler, names ...string) *ht
 	}
 
 	server := httptest.NewUnstartedServer(handler)
-	server.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}
+	server.TLS = &tls.Config{
+		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
+		MinVersion:   tls.VersionTLS12,
+	}
 	server.StartTLS()
 	t.Cleanup(server.Close)
 	return server

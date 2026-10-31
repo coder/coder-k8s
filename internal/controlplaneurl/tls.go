@@ -78,7 +78,12 @@ func parseCABundle(caBundle []byte) (*x509.CertPool, error) {
 
 // ClientConfig returns a new TLS client configuration that verifies with t.
 func (t *TLS) ClientConfig() *tls.Config {
-	return &tls.Config{RootCAs: t.rootCAs, ServerName: t.serverName, MinVersion: tls.VersionTLS12}
+	config := &tls.Config{ServerName: t.serverName, MinVersion: tls.VersionTLS12}
+	if t.rootCAs != nil {
+		// A copy, so that no change to the returned pool changes t under its key.
+		config.RootCAs = t.rootCAs.Clone()
+	}
+	return config
 }
 
 // Key identifies the trust: two values with the same key verify the same
