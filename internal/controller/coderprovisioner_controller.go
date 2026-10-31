@@ -81,8 +81,8 @@ type CoderProvisionerReconciler struct {
 	Scheme          *runtime.Scheme
 	BootstrapClient coderbootstrap.Client
 
-	// earlierKeyRetryAt maps a provisioner UID to the time.Time before which
-	// revokeEarlierTargetKeys does not try again.
+	// earlierKeyRetryAt maps a provisioner UID to the earlierKeyRetry of its
+	// last try in revokeEarlierTargetKeys.
 	earlierKeyRetryAt sync.Map
 }
 
@@ -238,7 +238,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	inUse := func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
 		return record.Unpublished || isKeyID(record.KeyID, appliedKeyID)
 	}
-	earlier, err := r.revokeEarlierTargetKeys(ctx, provisioner, target, inUse)
+	earlierReports, err := r.revokeEarlierTargetKeys(ctx, provisioner, target, inUse)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -438,13 +438,10 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return ctrl.Result{}, err
 		}
 		// The publish step below drops the records of the key found by name.
-		conditionChanged := false
-		if earlier.tried {
-			reports = slices.DeleteFunc(mergeKeptKeyReports(kept, inUse, earlier.reports, reports), func(report keptKeyReport) bool {
-				return replacedByName(report.record)
-			})
-			conditionChanged = setKeptKeyConditions(provisioner, reports)
-		}
+		reports = slices.DeleteFunc(mergeKeptKeyReports(kept, inUse, earlierReports, reports), func(report keptKeyReport) bool {
+			return replacedByName(report.record)
+		})
+		conditionChanged := setKeptKeyConditions(provisioner, reports)
 		if conditionChanged || !slices.Equal(kept, statusSnapshot.PendingKeys) {
 			provisioner.Status.PendingKeys = kept
 			if err := r.Status().Update(ctx, provisioner); err != nil {
@@ -1154,50 +1151,53 @@ func setKeptKeyConditions(provisioner *coderv1alpha1.CoderProvisioner, reports [
 	return setControlPlaneChangedKeyCondition(provisioner, controlPlaneChanged) || conditionChanged
 }
 
-// earlierKeyCleanup is the result of revokeEarlierTargetKeys.
-type earlierKeyCleanup struct {
-	// tried is false while the retry interval of an earlier try runs.
-	tried bool
-	// reports are the reports of the kept records outside the target slot.
+// earlierKeyRetry is the last try of revokeEarlierTargetKeys that left a key
+// that Coder did not confirm gone.
+type earlierKeyRetry struct {
+	// at is the time before which revokeEarlierTargetKeys does not try again.
+	at time.Time
+	// reports are the reports of that try.
 	reports []keptKeyReport
 }
 
 // revokeEarlierTargetKeys deletes the keys of the status.pendingKeys records
 // outside target that are not in use, each with the operator token of its own
 // control plane (see revokeKey). It updates status.pendingKeys and the
-// conditions of the kept records in provisioner only. After
-// a try that leaves a key that Coder did not confirm gone, it does not try
-// again for provisionerPendingKeyRetryInterval, so an unreachable earlier
-// endpoint does not get a request on every reconcile.
+// conditions of the kept records in provisioner only, and returns the reports
+// of the kept records outside target. After a try that leaves a key that Coder
+// did not confirm gone, it does not try again for
+// provisionerPendingKeyRetryInterval, so an unreachable earlier endpoint does
+// not get a request on every reconcile. Until then it changes nothing and
+// returns the reports of that try.
 func (r *CoderProvisionerReconciler) revokeEarlierTargetKeys(
 	ctx context.Context,
 	provisioner *coderv1alpha1.CoderProvisioner,
 	target coderv1alpha1.CoderProvisionerKeyRecord,
 	inUse func(coderv1alpha1.CoderProvisionerKeyRecord) bool,
-) (earlierKeyCleanup, error) {
+) ([]keptKeyReport, error) {
 	if value, ok := r.earlierKeyRetryAt.Load(provisioner.UID); ok {
-		retryAt, ok := value.(time.Time)
+		retry, ok := value.(earlierKeyRetry)
 		if !ok {
-			return earlierKeyCleanup{}, fmt.Errorf("assertion failed: earlier key retry time of provisioner %s is %T, not time.Time", provisioner.UID, value)
+			return nil, fmt.Errorf("assertion failed: earlier key retry of provisioner %s is %T, not earlierKeyRetry", provisioner.UID, value)
 		}
-		if time.Now().Before(retryAt) {
-			return earlierKeyCleanup{}, nil
+		if time.Now().Before(retry.at) {
+			return retry.reports, nil
 		}
 	}
 	kept, reports, err := r.revokePendingKeys(ctx, provisioner, provisioner.Status.PendingKeys, target, inUse)
 	if err != nil {
-		return earlierKeyCleanup{}, err
+		return nil, err
 	}
 	if slices.ContainsFunc(kept, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
 		return !sameKeySlot(record, target) && !inUse(record)
 	}) {
-		r.earlierKeyRetryAt.Store(provisioner.UID, time.Now().Add(provisionerPendingKeyRetryInterval))
+		r.earlierKeyRetryAt.Store(provisioner.UID, earlierKeyRetry{at: time.Now().Add(provisionerPendingKeyRetryInterval), reports: reports})
 	} else {
 		r.earlierKeyRetryAt.Delete(provisioner.UID)
 	}
 	provisioner.Status.PendingKeys = kept
 	setKeptKeyConditions(provisioner, reports)
-	return earlierKeyCleanup{tried: true, reports: reports}, nil
+	return reports, nil
 }
 
 // setUnverifiedKeyCondition sets the UnverifiedKeyKept condition for the

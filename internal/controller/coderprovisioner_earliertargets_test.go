@@ -3,6 +3,7 @@ package controller_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -211,7 +212,9 @@ func TestCoderProvisionerKey_EarlierTargetRevokedWhileTargetNotReady(t *testing.
 // reports of earlier target records while an unpublished record waits for a
 // control plane C that is not ready. A record whose control plane was created
 // again must be reported, also an unpublished one, and the report of a record
-// without key IDs must go once Coder has no key with its name.
+// without key IDs must go once Coder has no key with its name. When C gets
+// ready while the retry interval runs, and its key replacement deletes the key
+// of a reported record, the report of that record must go too.
 func TestCoderProvisionerKey_EarlierTargetReportsBesideUnpublishedKey(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -282,6 +285,28 @@ func TestCoderProvisionerKey_EarlierTargetReportsBesideUnpublishedKey(t *testing
 	require.Nil(t, meta.FindStatusCondition(got.Status.Conditions, coderv1alpha1.CoderProvisionerConditionUnverifiedKeyKept))
 	require.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, coderv1alpha1.CoderProvisionerConditionControlPlaneChangedKeyKept))
 	require.Empty(t, keyDeletes(f.bootstrapClient), "no recorded key may be deleted: one has another control plane, one is unpublished")
+
+	urlC := "http://coder-c." + f.namespace + ".svc.cluster.local:80"
+	f.bootstrapClient.provisionerKeyByName = func(req coderbootstrap.ProvisionerKeyByNameRequest) *codersdk.ProvisionerKey {
+		if req.CoderURL != urlC {
+			return nil
+		}
+		return &codersdk.ProvisionerKey{ID: uuid.MustParse(recreated.KeyID), OrganizationID: uuid.MustParse(recreated.OrganizationID), Name: req.KeyName}
+	}
+	controlPlaneC := &coderv1alpha1.CoderControlPlane{}
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: "coder-c", Namespace: f.namespace}, controlPlaneC))
+	controlPlaneC.Status.ExternalProvisionerDaemonsEntitlement = string(codersdk.EntitlementEntitled)
+	require.NoError(t, k8sClient.Status().Update(ctx, controlPlaneC))
+	got = reconcile()
+	require.Contains(t, keyDeletes(f.bootstrapClient), keyDelete{coderURL: urlC, token: "operator-token-c", keyID: recreated.KeyID},
+		"the key replacement at C must delete the key that holds the target name")
+	require.False(t, slices.ContainsFunc(got.Status.PendingKeys, func(record coderv1alpha1.CoderProvisionerKeyRecord) bool {
+		return record.KeyName == "recreated"
+	}), "the replacement must drop the record of the deleted key")
+	changed = meta.FindStatusCondition(got.Status.Conditions, coderv1alpha1.CoderProvisionerConditionControlPlaneChangedKeyKept)
+	require.NotNil(t, changed)
+	require.NotContains(t, changed.Message, `"recreated"`, "the report of the deleted key must go")
+	require.Contains(t, changed.Message, `"unpublished-recreated"`)
 }
 
 func markNotEntitled(ctx context.Context, t *testing.T, f provisionerCredentialFixture, _ *coderv1alpha1.CoderProvisioner) {
