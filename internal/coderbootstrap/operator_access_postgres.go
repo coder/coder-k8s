@@ -29,6 +29,9 @@ type EnsureOperatorTokenRequest struct {
 	TokenName        string
 	TokenLifetime    time.Duration
 	ExistingToken    string
+	// TokenID is generated and recorded before provisioning. Rotation inserts
+	// exactly this ID. A token with another ID is not reused.
+	TokenID string
 }
 
 // RevokeOperatorTokenRequest defines the input required to revoke the managed
@@ -37,7 +40,18 @@ type RevokeOperatorTokenRequest struct {
 	PostgresURL      string
 	OperatorUsername string
 	TokenName        string
+	// Token, when set, limits the delete to the token with this value, so
+	// the delete removes no other token with the same name.
+	Token string
+	// TokenID limits the delete to this key ID. Unlike deletion by value,
+	// deletion by ID is idempotent when the key is already absent.
+	TokenID string
 }
+
+// ErrOperatorTokenNotFound means that no operator token has the value in
+// RevokeOperatorTokenRequest.Token. The delete then proves nothing about the
+// token that the value was meant to name.
+var ErrOperatorTokenNotFound = errors.New("no operator token has this value")
 
 // OperatorAccessProvisioner provisions and revokes operator access credentials
 // for coderd.
@@ -51,6 +65,13 @@ type OperatorAccessProvisioner interface {
 type PostgresOperatorAccessProvisioner struct {
 	openDB func(string) (*sql.DB, error)
 	now    func() time.Time
+}
+
+// NewOperatorTokenID generates a key ID that callers can record before the
+// PostgreSQL transaction. A failed or uncertain create then authorizes only a
+// delete of that exact key, never a delete by name.
+func NewOperatorTokenID() (string, error) {
+	return randomTokenPart(operatorTokenIDLength)
 }
 
 // NewPostgresOperatorAccessProvisioner returns a PostgreSQL-backed operator
@@ -212,6 +233,9 @@ func (p *PostgresOperatorAccessProvisioner) RevokeOperatorToken(ctx context.Cont
 }
 
 func (r EnsureOperatorTokenRequest) validate() error {
+	if err := validateOperatorTokenID(r.TokenID); err != nil {
+		return err
+	}
 	if strings.TrimSpace(r.PostgresURL) == "" {
 		return fmt.Errorf("operator access postgres URL is required")
 	}
@@ -232,6 +256,12 @@ func (r EnsureOperatorTokenRequest) validate() error {
 }
 
 func (r RevokeOperatorTokenRequest) validate() error {
+	if r.TokenID != "" && r.Token != "" {
+		return fmt.Errorf("operator token delete must use either an ID or a token value")
+	}
+	if err := validateOperatorTokenID(r.TokenID); err != nil {
+		return err
+	}
 	if strings.TrimSpace(r.PostgresURL) == "" {
 		return fmt.Errorf("operator access postgres URL is required")
 	}
@@ -242,6 +272,18 @@ func (r RevokeOperatorTokenRequest) validate() error {
 		return fmt.Errorf("operator access token name is required")
 	}
 
+	return nil
+}
+
+func validateOperatorTokenID(id string) error {
+	if id == "" {
+		return nil
+	}
+	if len(id) != operatorTokenIDLength || strings.ContainsFunc(id, func(r rune) bool {
+		return !strings.ContainsRune(operatorTokenCharset, r)
+	}) {
+		return fmt.Errorf("operator token ID must be %d alphanumeric characters", operatorTokenIDLength)
+	}
 	return nil
 }
 
@@ -439,7 +481,8 @@ func ensureOperatorToken(
 	}
 
 	existingToken := strings.TrimSpace(req.ExistingToken)
-	if existingToken != "" {
+	existingID, _, _ := splitOperatorToken(existingToken)
+	if existingToken != "" && (req.TokenID == "" || existingID == req.TokenID) {
 		tokenStillValid, err := existingOperatorTokenStillValid(ctx, tx, now, userID, req.TokenName, existingToken)
 		if err != nil {
 			return "", err
@@ -548,9 +591,13 @@ WHERE user_id = $1
 		return "", fmt.Errorf("delete existing operator token %q: %w", req.TokenName, err)
 	}
 
-	tokenID, err := randomTokenPart(operatorTokenIDLength)
-	if err != nil {
-		return "", fmt.Errorf("generate operator token ID: %w", err)
+	tokenID := req.TokenID
+	if tokenID == "" {
+		generated, err := NewOperatorTokenID()
+		if err != nil {
+			return "", fmt.Errorf("generate operator token ID: %w", err)
+		}
+		tokenID = generated
 	}
 	tokenSecret, err := randomTokenPart(operatorTokenSecretLength)
 	if err != nil {
@@ -623,6 +670,58 @@ func revokeOperatorToken(ctx context.Context, tx *sql.Tx, req RevokeOperatorToke
 	}
 	if err := req.validate(); err != nil {
 		return err
+	}
+
+	if req.TokenID != "" {
+		// #nosec G101 -- token_name is a column identifier, not a credential.
+		const deleteOperatorTokenByIDQuery = `
+DELETE FROM api_keys
+WHERE id = $3
+  AND login_type = 'token'::login_type
+  AND token_name = $2
+  AND user_id IN (
+	SELECT id FROM users
+	WHERE deleted = false AND lower(username) = lower($1)
+)
+`
+		if _, err := tx.ExecContext(ctx, deleteOperatorTokenByIDQuery, req.OperatorUsername, req.TokenName, req.TokenID); err != nil {
+			return fmt.Errorf("delete operator token %q by ID: %w", req.TokenName, err)
+		}
+		return nil
+	}
+
+	if req.Token != "" {
+		tokenID, tokenSecret, validFormat := splitOperatorToken(req.Token)
+		if !validFormat || validateOperatorTokenID(tokenID) != nil {
+			return ErrOperatorTokenNotFound
+		}
+		hashedSecret := sha256.Sum256([]byte(tokenSecret))
+		// #nosec G101 -- token_name here is a column identifier, not a credential.
+		const deleteOperatorTokenByValueQuery = `
+DELETE FROM api_keys
+WHERE id = $3
+  AND hashed_secret = $4
+  AND login_type = 'token'::login_type
+  AND token_name = $2
+  AND user_id IN (
+	SELECT id
+	FROM users
+	WHERE deleted = false
+	  AND lower(username) = lower($1)
+)
+`
+		result, err := tx.ExecContext(ctx, deleteOperatorTokenByValueQuery, req.OperatorUsername, req.TokenName, tokenID, hashedSecret[:])
+		if err != nil {
+			return fmt.Errorf("delete operator token %q by value: %w", req.TokenName, err)
+		}
+		deleted, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("count deleted operator tokens %q: %w", req.TokenName, err)
+		}
+		if deleted == 0 {
+			return ErrOperatorTokenNotFound
+		}
+		return nil
 	}
 
 	// #nosec G101 -- token_name here is a column identifier, not a credential.

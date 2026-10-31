@@ -203,12 +203,24 @@ type CoderControlPlaneStatus struct {
 	// OperatorTokenSecretRef points to the Secret key containing the `coder-k8s-operator` API token.
 	OperatorTokenSecretRef *SecretKeySelector `json:"operatorTokenSecretRef,omitempty"`
 	// OperatorTokenDatabaseHash is the SHA-256 hex hash of the PostgreSQL
-	// connection URL, without its password, with which the operator created the
-	// token in OperatorTokenSecretRef. The operator deletes that token only
-	// while the control plane uses a URL with the same hash. It is empty when
-	// that URL is not a postgres:// or postgresql:// URL.
+	// connection URL, without its password, with which the operator creates the
+	// token in OperatorTokenSecretRef. A key=value connection string has the
+	// hash of the postgres:// URL with the same parts. The operator deletes
+	// that token only while the control plane uses a URL with the same hash.
+	// It is empty when the operator cannot hash that URL, for example when it
+	// is neither a postgres:// or postgresql:// URL nor a key=value
+	// connection string.
 	// +optional
 	OperatorTokenDatabaseHash string `json:"operatorTokenDatabaseHash,omitempty"`
+	// OperatorTokenID is the API key ID of the operator token. The operator
+	// generates it, records it before it creates the token with this ID, and
+	// then deletes only the key with this ID. A record without it comes from
+	// an earlier version, which wrote the record only after a successful
+	// create, so the operator deletes that token by name.
+	// +kubebuilder:validation:MaxLength=10
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9]{10}$`
+	// +optional
+	OperatorTokenID string `json:"operatorTokenID,omitempty"`
 	// OperatorAccessReady reports whether operator API access bootstrap succeeded.
 	OperatorAccessReady bool `json:"operatorAccessReady,omitempty"`
 	// LicenseLastApplied is the timestamp of the most recent successful

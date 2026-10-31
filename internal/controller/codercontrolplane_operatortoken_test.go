@@ -257,6 +257,12 @@ func TestReconcile_OperatorAccess_TokenSecretCreateRace(t *testing.T) {
 	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: cp.Namespace}, stored))
 	require.Empty(t, stored.OwnerReferences)
 	require.Equal(t, "foreign-value", string(stored.Data[coderv1alpha1.DefaultTokenSecretKey]))
+
+	next := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	_, err = next.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}})
+	require.NoError(t, err)
+	require.Zero(t, provisioner.revokeCalls, "the operator never held this Secret, so it deletes no token")
+	require.Nil(t, getControlPlane(t, cp).Status.OperatorTokenSecretRef)
 }
 
 // losesOwnerPostgresURL is the database URL with which
@@ -273,13 +279,28 @@ func publishThenReplaceOperatorTokenSecret(
 	prefix string,
 ) (*coderv1alpha1.CoderControlPlane, *fakeOperatorAccessProvisioner, *coder.ControlPlaneClientProvider) {
 	t.Helper()
+	published, provisioner, consumer := publishOperatorToken(ctx, t, prefix, losesOwnerPostgresURL)
+	replaceOperatorTokenSecret(ctx, t, published)
+	return published, provisioner, consumer
+}
+
+// publishOperatorToken creates a control plane with postgresURL in its own
+// namespace and reconciles it once, so that it owns its operator token Secret
+// and publishes it in status.
+func publishOperatorToken(
+	ctx context.Context,
+	t *testing.T,
+	prefix string,
+	postgresURL string,
+) (*coderv1alpha1.CoderControlPlane, *fakeOperatorAccessProvisioner, *coder.ControlPlaneClientProvider) {
+	t.Helper()
 	ensureGatewaySchemeRegistered(t)
 
 	cp := &coderv1alpha1.CoderControlPlane{
 		ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: createTestNamespace(ctx, t, prefix)},
 		Spec: coderv1alpha1.CoderControlPlaneSpec{
 			Image:    "test-operator-token-loses-owner:latest",
-			ExtraEnv: []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: losesOwnerPostgresURL}},
+			ExtraEnv: []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: postgresURL}},
 		},
 	}
 	require.NoError(t, k8sClient.Create(ctx, cp))
@@ -299,7 +320,14 @@ func publishThenReplaceOperatorTokenSecret(
 	require.NoError(t, err)
 	require.Equal(t, "operator-token-published", sdk.SessionToken())
 
-	secretName := published.Status.OperatorTokenSecretRef.Name
+	return published, provisioner, consumer
+}
+
+// replaceOperatorTokenSecret replaces the operator token Secret of cp with one
+// that has no owner, as a user with delete and create rights on Secrets can.
+func replaceOperatorTokenSecret(ctx context.Context, t *testing.T, cp *coderv1alpha1.CoderControlPlane) {
+	t.Helper()
+	secretName := cp.Name + "-operator-token"
 	require.NoError(t, k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: cp.Namespace}}))
 	replaced := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: cp.Namespace},
@@ -308,8 +336,27 @@ func publishThenReplaceOperatorTokenSecret(
 	}
 	require.NoError(t, k8sClient.Create(ctx, replaced))
 	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), replaced) })
+}
 
-	return published, provisioner, consumer
+// updateControlPlaneSpec applies mutate to the stored spec of cp.
+func updateControlPlaneSpec(ctx context.Context, t *testing.T, cp *coderv1alpha1.CoderControlPlane, mutate func(*coderv1alpha1.CoderControlPlaneSpec)) {
+	t.Helper()
+	latest := getControlPlane(t, cp)
+	mutate(&latest.Spec)
+	require.NoError(t, k8sClient.Update(ctx, latest))
+}
+
+// requireOneRevoke checks that the operator deleted, once and with postgresURL,
+// the token that it provisioned for its first request.
+func requireOneRevoke(t *testing.T, provisioner *fakeOperatorAccessProvisioner, postgresURL string) {
+	t.Helper()
+	require.NotEmpty(t, provisioner.requests)
+	require.Equal(t, []coderbootstrap.RevokeOperatorTokenRequest{{
+		PostgresURL:      postgresURL,
+		OperatorUsername: provisioner.requests[0].OperatorUsername,
+		TokenName:        provisioner.requests[0].TokenName,
+		TokenID:          provisioner.requests[0].TokenID,
+	}}, provisioner.revokeRequests)
 }
 
 // requireNoOperatorClient checks that consumers of the control plane status
@@ -343,6 +390,7 @@ func TestReconcile_OperatorAccess_TokenSecretLosesOwner(t *testing.T) {
 		PostgresURL:      losesOwnerPostgresURL,
 		OperatorUsername: provisioner.requests[0].OperatorUsername,
 		TokenName:        provisioner.requests[0].TokenName,
+		TokenID:          provisioner.requests[0].TokenID,
 	}}, provisioner.revokeRequests, "the operator deletes the token that it provisioned")
 	reconciled := getControlPlane(t, cp)
 	require.False(t, reconciled.Status.OperatorAccessReady)
@@ -472,6 +520,46 @@ func TestReconcile_OperatorAccess_TokenSecretLosesOwner_DatabaseNotRecorded(t *t
 	require.Contains(t, condition.Message, "does not delete its earlier operator token")
 }
 
+// TestReconcile_OperatorAccess_TokenSecretLosesOwner_ConfirmedRecordWithoutID
+// checks a record that an earlier version wrote after a successful create: it
+// names the Secret and the database, but no token ID. It keeps the delete by
+// name of #401, also when the first token check after the upgrade fails, and
+// the operator deletes once.
+func TestReconcile_OperatorAccess_TokenSecretLosesOwner_ConfirmedRecordWithoutID(t *testing.T) {
+	ctx := context.Background()
+	cp, provisioner, _ := publishOperatorToken(ctx, t, "operator-token-confirmed-record", losesOwnerPostgresURL)
+	earlierVersionStatus := ctrlclient.RawPatch(types.MergePatchType, []byte(`{"status":{"operatorTokenID":null}}`))
+	require.NoError(t, k8sClient.Status().Patch(ctx, cp.DeepCopy(), earlierVersionStatus))
+	require.Empty(t, getControlPlane(t, cp).Status.OperatorTokenID)
+
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	provisioner.err = errors.New("dial tcp: connection refused")
+	_, err := r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.Len(t, provisioner.requests, 2)
+	require.NotEmpty(t, provisioner.requests[1].TokenID)
+	failed := getControlPlane(t, cp)
+	require.Equal(t, cp.Status.OperatorTokenSecretRef, failed.Status.OperatorTokenSecretRef)
+	require.Empty(t, failed.Status.OperatorTokenID, "a failed check must not replace the confirmed record with an unconfirmed one")
+
+	replaceOperatorTokenSecret(ctx, t, cp)
+	provisioner.err = nil
+	_, err = r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.Equal(t, []coderbootstrap.RevokeOperatorTokenRequest{{
+		PostgresURL:      losesOwnerPostgresURL,
+		OperatorUsername: provisioner.requests[0].OperatorUsername,
+		TokenName:        provisioner.requests[0].TokenName,
+	}}, provisioner.revokeRequests, "a confirmed record deletes by name, as on main")
+	require.Nil(t, getControlPlane(t, cp).Status.OperatorTokenSecretRef)
+
+	restarted := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	_, err = restarted.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.Equal(t, 1, provisioner.revokeCalls, "the operator deletes the token once")
+}
+
 // TestReconcile_OperatorAccess_TokenSecretLosesOwner_StatusWriteFails checks
 // that a failed status write after the delete keeps the record. The next
 // reconcile deletes again in the same database, which removes nothing more,
@@ -499,6 +587,366 @@ func TestReconcile_OperatorAccess_TokenSecretLosesOwner_StatusWriteFails(t *test
 	require.NoError(t, err)
 	require.Equal(t, 2, provisioner.revokeCalls, "the record survived the failed status write, so the operator deletes again")
 	require.Equal(t, provisioner.revokeRequests[0], provisioner.revokeRequests[1])
+	require.Nil(t, getControlPlane(t, cp).Status.OperatorTokenSecretRef)
+}
+
+// TestReconcile_OperatorAccess_RecordsTokenBeforeCreate checks that status
+// names the operator token Secret and the database before the operator can
+// create a token in Coder. So when the operator stops after the create, before
+// its last status write, and someone then replaces the Secret, the next
+// reconcile still deletes that token.
+func TestReconcile_OperatorAccess_RecordsTokenBeforeCreate(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: createTestNamespace(ctx, t, "operator-token-record-first")},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image:    "test-operator-token-record-first:latest",
+			ExtraEnv: []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: losesOwnerPostgresURL}},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, cp))
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), cp) })
+
+	provisioner := &fakeOperatorAccessProvisioner{token: "operator-token-published"}
+	failStatusWrite := func() bool { return true }
+	base, err := ctrlclient.NewWithWatch(cfg, ctrlclient.Options{Scheme: scheme})
+	require.NoError(t, err)
+	statusOutage := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c ctrlclient.Client, sub string, obj ctrlclient.Object, opts ...ctrlclient.SubResourceUpdateOption) error {
+			if failStatusWrite() {
+				return errors.New("status update unavailable")
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	})
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}
+	r := &controller.CoderControlPlaneReconciler{Client: statusOutage, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+
+	_, err = r.Reconcile(ctx, request)
+	require.ErrorContains(t, err, "status update unavailable")
+	require.Zero(t, provisioner.calls, "the operator must not create a token that status does not record")
+
+	failStatusWrite = func() bool { return provisioner.calls > 0 }
+	_, err = r.Reconcile(ctx, request)
+	require.ErrorContains(t, err, "status update unavailable")
+	require.Equal(t, 1, provisioner.calls)
+	recorded := getControlPlane(t, cp)
+	require.False(t, recorded.Status.OperatorAccessReady)
+	require.NotNil(t, recorded.Status.OperatorTokenSecretRef)
+	require.Equal(t, cp.Name+"-operator-token", recorded.Status.OperatorTokenSecretRef.Name)
+	require.NotEmpty(t, recorded.Status.OperatorTokenDatabaseHash)
+	require.Equal(t, provisioner.requests[0].TokenID, recorded.Status.OperatorTokenID)
+	require.Len(t, recorded.Status.OperatorTokenID, 10)
+
+	replaceOperatorTokenSecret(ctx, t, cp)
+	restarted := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	_, err = restarted.Reconcile(ctx, request)
+	require.NoError(t, err)
+	requireOneRevoke(t, provisioner, losesOwnerPostgresURL)
+	require.Nil(t, getControlPlane(t, cp).Status.OperatorTokenSecretRef)
+}
+
+// TestReconcile_OperatorAccess_RecordsTokenBeforeCreate_StaleCache checks that
+// the operator stores the record before a create also when its cache still
+// shows a record that a delete already removed from the API server.
+func TestReconcile_OperatorAccess_RecordsTokenBeforeCreate_StaleCache(t *testing.T) {
+	ctx := context.Background()
+	cp, provisioner, _ := publishThenReplaceOperatorTokenSecret(ctx, t, "operator-token-record-stale-cache")
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	_, err := r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	requireOneRevoke(t, provisioner, losesOwnerPostgresURL)
+	require.Nil(t, getControlPlane(t, cp).Status.OperatorTokenSecretRef)
+	require.NoError(t, k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: cp.Name + "-operator-token", Namespace: cp.Namespace}}))
+
+	stale := cp.Status.DeepCopy()
+	base, err := ctrlclient.NewWithWatch(cfg, ctrlclient.Options{Scheme: scheme})
+	require.NoError(t, err)
+	staleCache := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, c ctrlclient.WithWatch, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if read, ok := obj.(*coderv1alpha1.CoderControlPlane); ok {
+				stale.DeepCopyInto(&read.Status)
+			}
+			return nil
+		},
+		SubResourceUpdate: func(ctx context.Context, c ctrlclient.Client, sub string, obj ctrlclient.Object, opts ...ctrlclient.SubResourceUpdateOption) error {
+			if provisioner.calls > 1 {
+				return errors.New("status update unavailable")
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	})
+	cached := &controller.CoderControlPlaneReconciler{Client: staleCache, APIReader: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	if _, err = cached.Reconcile(ctx, request); err != nil {
+		require.ErrorContains(t, err, "status update unavailable", "only a status write after the create may fail")
+	}
+	require.Equal(t, 2, provisioner.calls)
+	recorded := getControlPlane(t, cp)
+	require.Equal(t, cp.Status.OperatorTokenSecretRef, recorded.Status.OperatorTokenSecretRef, "the API server must hold the record of the new token")
+	require.Equal(t, cp.Status.OperatorTokenDatabaseHash, recorded.Status.OperatorTokenDatabaseHash)
+}
+
+// TestReconcile_OperatorAccess_SecretRenameKeepsPublishedRef checks that a new
+// spec.operatorAccess.generatedTokenSecretName reaches status only together
+// with its token. Until then consumers keep the published Secret, also when the
+// operator stops after the create.
+func TestReconcile_OperatorAccess_SecretRenameKeepsPublishedRef(t *testing.T) {
+	ctx := context.Background()
+	cp, provisioner, consumer := publishOperatorToken(ctx, t, "operator-token-secret-rename", losesOwnerPostgresURL)
+	updateControlPlaneSpec(ctx, t, cp, func(spec *coderv1alpha1.CoderControlPlaneSpec) {
+		spec.OperatorAccess.GeneratedTokenSecretName = "renamed-operator-token"
+	})
+	base, err := ctrlclient.NewWithWatch(cfg, ctrlclient.Options{Scheme: scheme})
+	require.NoError(t, err)
+	stopAfterCreate := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c ctrlclient.Client, sub string, obj ctrlclient.Object, opts ...ctrlclient.SubResourceUpdateOption) error {
+			if provisioner.calls > 1 {
+				return errors.New("status update unavailable")
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	})
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}
+	r := &controller.CoderControlPlaneReconciler{Client: stopAfterCreate, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	_, err = r.Reconcile(ctx, request)
+	require.ErrorContains(t, err, "status update unavailable")
+	require.Equal(t, 2, provisioner.calls)
+	require.Equal(t, cp.Status.OperatorTokenSecretRef, getControlPlane(t, cp).Status.OperatorTokenSecretRef,
+		"the published reference stays until the new Secret holds a token")
+	sdk, err := consumer.ClientForNamespace(ctx, cp.Namespace)
+	require.NoError(t, err)
+	require.Equal(t, "operator-token-published", sdk.SessionToken())
+
+	restarted := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	_, err = restarted.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.Equal(t, "renamed-operator-token", getControlPlane(t, cp).Status.OperatorTokenSecretRef.Name)
+}
+
+// TestReconcile_OperatorAccess_ErrorKeepsTokenRecord checks that a failed
+// token check turns operator access off but keeps the record of the published
+// token. So when someone replaces the Secret afterwards, the operator still
+// deletes that token in Coder.
+func TestReconcile_OperatorAccess_ErrorKeepsTokenRecord(t *testing.T) {
+	tests := []struct {
+		name    string
+		fail    func(*testing.T, *coderv1alpha1.CoderControlPlane, *fakeOperatorAccessProvisioner)
+		recover func(*testing.T, *coderv1alpha1.CoderControlPlane, *fakeOperatorAccessProvisioner)
+	}{
+		{
+			name: "postgres error",
+			fail: func(_ *testing.T, _ *coderv1alpha1.CoderControlPlane, provisioner *fakeOperatorAccessProvisioner) {
+				provisioner.err = errors.New("dial tcp: connection refused")
+			},
+			recover: func(_ *testing.T, _ *coderv1alpha1.CoderControlPlane, provisioner *fakeOperatorAccessProvisioner) {
+				provisioner.err = nil
+			},
+		},
+		{
+			name: "database URL not resolvable",
+			fail: func(t *testing.T, cp *coderv1alpha1.CoderControlPlane, _ *fakeOperatorAccessProvisioner) {
+				updateControlPlaneSpec(context.Background(), t, cp, func(spec *coderv1alpha1.CoderControlPlaneSpec) {
+					spec.ExtraEnv = []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "missing-database-url"}, Key: "url"},
+					}}}
+				})
+			},
+			recover: func(t *testing.T, cp *coderv1alpha1.CoderControlPlane, _ *fakeOperatorAccessProvisioner) {
+				updateControlPlaneSpec(context.Background(), t, cp, func(spec *coderv1alpha1.CoderControlPlaneSpec) {
+					spec.ExtraEnv = []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: losesOwnerPostgresURL}}
+				})
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			cp, provisioner, consumer := publishOperatorToken(ctx, t, "operator-token-error-keeps-record", losesOwnerPostgresURL)
+			request := ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}
+			r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+
+			tt.fail(t, cp, provisioner)
+			result, err := r.Reconcile(ctx, request)
+			require.NoError(t, err)
+			require.Positive(t, result.RequeueAfter)
+			failed := getControlPlane(t, cp)
+			require.False(t, failed.Status.OperatorAccessReady)
+			require.Equal(t, cp.Status.OperatorTokenSecretRef, failed.Status.OperatorTokenSecretRef, "the record of the published token stays")
+			require.Equal(t, cp.Status.OperatorTokenDatabaseHash, failed.Status.OperatorTokenDatabaseHash)
+			require.Equal(t, cp.Status.OperatorTokenID, failed.Status.OperatorTokenID)
+			requireNoOperatorClient(ctx, t, consumer, cp.Namespace, "no eligible CoderControlPlane")
+
+			replaceOperatorTokenSecret(ctx, t, cp)
+			tt.recover(t, cp, provisioner)
+			_, err = r.Reconcile(ctx, request)
+			require.NoError(t, err)
+			requireOneRevoke(t, provisioner, losesOwnerPostgresURL)
+			require.Nil(t, getControlPlane(t, cp).Status.OperatorTokenSecretRef)
+		})
+	}
+}
+
+// TestReconcile_OperatorAccess_Disabled_DatabaseChanged checks that disabling
+// operator access deletes the operator token by name only in the database
+// where the operator created it, as the delete after a replaced Secret does.
+// In another database it deletes only the exact token in the owned Secret.
+func TestReconcile_OperatorAccess_Disabled_DatabaseChanged(t *testing.T) {
+	ctx := context.Background()
+	cp, provisioner, _ := publishOperatorToken(ctx, t, "operator-token-disabled-database-changed", losesOwnerPostgresURL)
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+
+	otherDatabase := "postgres://coder:first-password@example.other-database/coder"
+	updateControlPlaneSpec(ctx, t, cp, func(spec *coderv1alpha1.CoderControlPlaneSpec) {
+		spec.OperatorAccess.Disabled = true
+		spec.ExtraEnv = []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: otherDatabase}}
+	})
+	result, err := r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.Positive(t, result.RequeueAfter)
+	require.Equal(t, []coderbootstrap.RevokeOperatorTokenRequest{{
+		PostgresURL:      otherDatabase,
+		OperatorUsername: provisioner.requests[0].OperatorUsername,
+		TokenName:        provisioner.requests[0].TokenName,
+		Token:            "operator-token-published",
+	}}, provisioner.revokeRequests, "the operator must not delete a token by name in a database where it did not create it")
+	provisioner.revokeRequests, provisioner.revokeCalls = nil, 0
+	refused := getControlPlane(t, cp)
+	require.False(t, refused.Status.OperatorAccessReady)
+	require.Equal(t, cp.Status.OperatorTokenSecretRef, refused.Status.OperatorTokenSecretRef)
+	require.Equal(t, cp.Status.OperatorTokenDatabaseHash, refused.Status.OperatorTokenDatabaseHash)
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name + "-operator-token", Namespace: cp.Namespace}, &corev1.Secret{})
+	require.True(t, apierrors.IsNotFound(err), "disabling deletes the owned Secret, got %v", err)
+
+	rotated := "postgres://coder:second-password@example.loses-owner/coder"
+	updateControlPlaneSpec(ctx, t, cp, func(spec *coderv1alpha1.CoderControlPlaneSpec) {
+		spec.ExtraEnv = []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: rotated}}
+	})
+	result, err = r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.Zero(t, result.RequeueAfter)
+	requireOneRevoke(t, provisioner, rotated)
+	cleared := getControlPlane(t, cp)
+	require.Nil(t, cleared.Status.OperatorTokenSecretRef)
+	require.Empty(t, cleared.Status.OperatorTokenDatabaseHash)
+}
+
+// TestReconcile_OperatorAccess_Disabled_SecretReplacedDuringRevoke checks that
+// disabling operator access deletes only the owned Secret whose token it
+// deleted in Coder, not a Secret that replaced it during that delete.
+func TestReconcile_OperatorAccess_Disabled_SecretReplacedDuringRevoke(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: createTestNamespace(ctx, t, "operator-token-disabled-replaced")},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image:          "test-operator-token-disabled-replaced:latest",
+			ExtraEnv:       []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: losesOwnerPostgresURL}},
+			OperatorAccess: coderv1alpha1.OperatorAccessSpec{Disabled: true},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, cp))
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), cp) })
+	secretName := cp.Name + "-operator-token"
+	owned := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: cp.Namespace, OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: coderv1alpha1.GroupVersion.String(), Kind: "CoderControlPlane", Name: cp.Name, UID: cp.UID, Controller: ptrTo(true),
+		}}},
+		Data: map[string][]byte{coderv1alpha1.DefaultTokenSecretKey: []byte("unrecorded-operator-token")},
+	}
+	require.NoError(t, k8sClient.Create(ctx, owned))
+
+	provisioner := &fakeOperatorAccessProvisioner{onRevoke: func() {
+		replaceOperatorTokenSecret(ctx, t, cp)
+	}}
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}})
+	require.NoError(t, err)
+	require.Positive(t, result.RequeueAfter)
+	require.Equal(t, 1, provisioner.revokeCalls)
+
+	stored := &corev1.Secret{}
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: cp.Namespace}, stored), "the replacement Secret must stay")
+	require.Equal(t, "foreign-token", string(stored.Data[coderv1alpha1.DefaultTokenSecretKey]))
+}
+
+// TestReconcile_OperatorAccess_Disabled_WithoutRecordRevokesEarlierSecretTokens
+// checks one update that disables operator access and renames
+// spec.operatorAccess.generatedTokenSecretName while the status records no
+// token. The operator still deletes in Coder the exact token of the Secret
+// under the earlier name, because this control plane controls that Secret. It
+// sends no delete for Secrets that it does not control or that hold no token.
+func TestReconcile_OperatorAccess_Disabled_WithoutRecordRevokesEarlierSecretTokens(t *testing.T) {
+	ensureGatewaySchemeRegistered(t)
+	ctx := context.Background()
+	cp := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: createTestNamespace(ctx, t, "operator-token-disabled-renamed")},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			Image:    "test-operator-token-disabled-renamed:latest",
+			ExtraEnv: []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: losesOwnerPostgresURL}},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, cp))
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), cp) })
+	controlled := []metav1.OwnerReference{{
+		APIVersion: coderv1alpha1.GroupVersion.String(), Kind: "CoderControlPlane", Name: cp.Name, UID: cp.UID, Controller: ptrTo(true),
+	}}
+	for _, secret := range []*corev1.Secret{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: cp.Name + "-operator-token", Namespace: cp.Namespace, OwnerReferences: controlled},
+			Data:       map[string][]byte{coderv1alpha1.DefaultTokenSecretKey: []byte("earlier-operator-token")},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "controlled-without-token", Namespace: cp.Namespace, OwnerReferences: controlled},
+			Data:       map[string][]byte{"license": []byte("license-jwt")},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "unowned-with-token", Namespace: cp.Namespace},
+			Data:       map[string][]byte{coderv1alpha1.DefaultTokenSecretKey: []byte("foreign-token")},
+		},
+	} {
+		require.NoError(t, k8sClient.Create(ctx, secret))
+	}
+	updateControlPlaneSpec(ctx, t, cp, func(spec *coderv1alpha1.CoderControlPlaneSpec) {
+		spec.OperatorAccess.Disabled = true
+		spec.OperatorAccess.GeneratedTokenSecretName = "renamed-operator-token"
+	})
+
+	provisioner := &fakeOperatorAccessProvisioner{}
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}})
+	require.NoError(t, err)
+	require.Len(t, provisioner.revokeRequests, 1, "only the token of the controlled Secret is deleted")
+	require.Equal(t, losesOwnerPostgresURL, provisioner.revokeRequests[0].PostgresURL)
+	require.Equal(t, "earlier-operator-token", provisioner.revokeRequests[0].Token)
+	require.Empty(t, provisioner.revokeRequests[0].TokenID)
+	require.Nil(t, getControlPlane(t, cp).Status.OperatorTokenSecretRef)
+}
+
+// TestReconcile_OperatorAccess_TokenSecretLosesOwner_KeywordValueDSN checks
+// that a key=value PostgreSQL connection string records the database like a
+// URL does, so that the operator deletes its token after the Secret was
+// replaced, also with a new password.
+func TestReconcile_OperatorAccess_TokenSecretLosesOwner_KeywordValueDSN(t *testing.T) {
+	ctx := context.Background()
+	cp, provisioner, _ := publishOperatorToken(ctx, t, "operator-token-keyword-value-dsn",
+		"host=example.keyword-value port=5432 user=coder password='first password' dbname=coder sslmode=disable")
+	require.NotEmpty(t, cp.Status.OperatorTokenDatabaseHash)
+	replaceOperatorTokenSecret(ctx, t, cp)
+
+	rotated := "host=example.keyword-value port=5432 user=coder password=second-password dbname=coder sslmode=disable"
+	updateControlPlaneSpec(ctx, t, cp, func(spec *coderv1alpha1.CoderControlPlaneSpec) {
+		spec.ExtraEnv = []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: rotated}}
+	})
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}})
+	require.NoError(t, err)
+	requireOneRevoke(t, provisioner, rotated)
 	require.Nil(t, getControlPlane(t, cp).Status.OperatorTokenSecretRef)
 }
 
