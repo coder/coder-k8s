@@ -3,6 +3,7 @@ package controller_test
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -367,15 +368,22 @@ func TestPoolBindRaceAfterCrash(t *testing.T) {
 	requireClaim(t, claim, coderv1alpha1.CoderWorkspaceClaimPhaseBound, "WorkspaceReady", true)
 }
 
+// reservedWorkspaceName is the workspace name that a claim reservation pins:
+// the kwp- name derived from the member UID.
+func reservedWorkspaceName(uid types.UID) string {
+	return "kwp-" + strings.ReplaceAll(string(uid), "-", "")[:28]
+}
+
 // TestPoolBindHonorsReservation: a crash between the reservation and the
 // bind leaves a claim with memberName and no member. The next reconcile
-// binds the reserved member, not the older one. A claim that reserved a
-// member that is gone binds another one. A claim whose reserved member is
-// only not ready for now waits for it, even when another member is free.
+// binds the reserved member, not the older one. A claim whose reserved
+// member is gone, or was replaced by a new member with the same name, binds
+// another one. A claim whose reserved member is only not ready for now waits
+// for it, even when another member is free.
 func TestPoolBindHonorsReservation(t *testing.T) {
 	t.Parallel()
 	e := newPoolMemberEnv(t)
-	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(4)) })
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(5)) })
 	older := e.createMember(t, nil)
 	e.setMemberStatus(t, older, readyWithWorkspace("kwp-older"))
 	time.Sleep(1100 * time.Millisecond) // creationTimestamp has second precision.
@@ -388,33 +396,42 @@ func TestPoolBindHonorsReservation(t *testing.T) {
 		agentNotReady(s)
 		s.WorkspaceName = "kwp-flapping"
 	}))
+	renamed := e.createMember(t, nil)
+	e.setMemberStatus(t, renamed, readyWithWorkspace("kwp-renamed"))
 	time.Sleep(1100 * time.Millisecond)
-	spare := e.createMember(t, nil)
-	e.setMemberStatus(t, spare, readyWithWorkspace("kwp-spare"))
+	last := e.createMember(t, nil)
+	e.setMemberStatus(t, last, readyWithWorkspace("kwp-last"))
+	uid := func(key types.NamespacedName) types.UID { return e.reconcileMember(t, key, 0).UID }
+	// Claims of one second sort by name, so the names give the bind order.
 	reservations := []struct {
-		claim, member string
-	}{{"reserved", newer.Name}, {"gone", e.pool.Name + "-gone"}, {"waiting", flapping.Name}}
+		claim, member, workspace string
+	}{
+		{"a-reserved", newer.Name, reservedWorkspaceName(uid(newer))},
+		{"b-replaced", renamed.Name, reservedWorkspaceName(types.UID(uuid.NewString()))},
+		{"c-gone", e.pool.Name + "-gone", reservedWorkspaceName(types.UID(uuid.NewString()))},
+		{"d-waiting", flapping.Name, reservedWorkspaceName(uid(flapping))},
+	}
 	keys := map[string]types.NamespacedName{}
 	for _, r := range reservations {
 		keys[r.claim] = e.createClaim(t, r.claim)
 		claim := e.claim(t, keys[r.claim])
-		claim.Status.MemberName = r.member
+		claim.Status.MemberName, claim.Status.WorkspaceName = r.member, r.workspace
 		require.NoError(t, k8sClient.Status().Update(e.ctx, claim))
-		time.Sleep(1100 * time.Millisecond)
 	}
 
 	e.reconcilePool(t, 1)
-	e.requireBound(t, newer, keys["reserved"])
-	e.requireBound(t, older, keys["gone"])
+	e.requireBound(t, newer, keys["a-reserved"])
+	e.requireBound(t, older, keys["b-replaced"])
+	e.requireBound(t, renamed, keys["c-gone"])
 	require.Nil(t, e.reconcileMember(t, flapping, 0).Spec.ClaimRef)
-	require.Nil(t, e.reconcileMember(t, spare, 0).Spec.ClaimRef, "a claim never leaves a member that is only not ready")
-	waiting := e.claim(t, keys["waiting"])
+	require.Nil(t, e.reconcileMember(t, last, 0).Spec.ClaimRef, "a claim never leaves a member that is only not ready")
+	waiting := e.claim(t, keys["d-waiting"])
 	requireClaim(t, waiting, coderv1alpha1.CoderWorkspaceClaimPhasePending, "WaitingForReadyWorkspace", false)
 	require.Equal(t, flapping.Name, waiting.Status.MemberName, "the reservation stays")
 
 	e.setMemberStatus(t, flapping, readyStatus)
 	e.reconcilePool(t, 1)
-	e.requireBound(t, flapping, keys["waiting"])
+	e.requireBound(t, flapping, keys["d-waiting"])
 }
 
 // TestPoolFinishesClaimAfterCrash: the pool crashed after the member bind,

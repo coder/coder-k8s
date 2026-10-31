@@ -135,12 +135,12 @@ func (r *CoderWorkspacePoolReconciler) refreshWaitingClaims(
 // reports such a member, so the pool reads again soon. The bound members
 // change in all, so the later steps see them bound. The claims come from
 // refreshWaitingClaims. Before each bind, the pool reserves the member in the
-// claim status (memberName, with ownerName, so the name survives a crash
-// between the bind and the status). The write carries the claim's
-// resourceVersion, so of two reconciles that pick different members for one
-// claim (two operator replicas), only one reserves. A reconcile that finds a
-// reservation binds only that member until poolReservationStale says otherwise. It also
-// sets the pool label again, in case it drifted.
+// claim status: memberName and workspaceName, with ownerName, so the name
+// survives a crash between the bind and the status. The write carries the
+// claim's resourceVersion, so of two reconciles that pick different members
+// for one claim (two operator replicas), only one reserves. A reconcile that
+// finds a reservation binds only that member until poolReservationStale says
+// otherwise. It also sets the pool label again, in case it drifted.
 func (r *CoderWorkspacePoolReconciler) bindClaims(
 	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, claims []coderv1alpha1.CoderWorkspaceClaim,
 	all []coderv1alpha1.CoderWorkspacePoolMember, counts *poolMemberCounts, ownerName string,
@@ -187,22 +187,22 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 		if !poolClaimWaits(claim, all) {
 			continue
 		}
-		reserved := claim.Status.MemberName
-		if reserved != "" {
+		follow := claim.Status.MemberName != ""
+		if follow {
 			stale, err := r.poolReservationStale(ctx, claim)
 			if err != nil {
 				return false, err
 			}
 			if stale {
-				reserved = ""
-			} else if !slices.ContainsFunc(free, func(m *coderv1alpha1.CoderWorkspacePoolMember) bool { return m.Name == reserved }) {
+				follow = false
+			} else if !slices.ContainsFunc(free, func(m *coderv1alpha1.CoderWorkspacePoolMember) bool { return poolReserves(claim, m) }) {
 				skipped = true // It holds the claim already, or this list is older than the reservation.
 				continue
 			}
 		}
 		var m *coderv1alpha1.CoderWorkspacePoolMember
 		for j := 0; m == nil && j < len(free); {
-			if reserved != "" && free[j].Name != reserved {
+			if follow && !poolReserves(claim, free[j]) {
 				j++
 				continue
 			}
@@ -219,8 +219,12 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 		if m == nil {
 			continue
 		}
-		if claim.Status.OwnerName != ownerName || claim.Status.MemberName != m.Name {
-			claim.Status.OwnerName, claim.Status.MemberName = ownerName, m.Name
+		workspaceName, err := uidWorkspaceName(poolMemberWorkspacePrefix, m.UID)
+		if err != nil {
+			return false, err
+		}
+		if claim.Status.OwnerName != ownerName || claim.Status.MemberName != m.Name || claim.Status.WorkspaceName != workspaceName {
+			claim.Status.OwnerName, claim.Status.MemberName, claim.Status.WorkspaceName = ownerName, m.Name, workspaceName
 			if err := r.Status().Update(ctx, claim); err != nil {
 				return false, fmt.Errorf("reserve pool member %s for workspace claim %s/%s: %w", m.Name, claim.Namespace, claim.Name, err)
 			}
@@ -254,6 +258,14 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 	return skipped, nil
 }
 
+// poolReserves reports whether claim reserved m: its name and the workspace
+// name derived from its UID. A member that a delete and a create gave the
+// name of the reserved one is another member.
+func poolReserves(claim *coderv1alpha1.CoderWorkspaceClaim, m *coderv1alpha1.CoderWorkspacePoolMember) bool {
+	workspaceName, err := uidWorkspaceName(poolMemberWorkspacePrefix, m.UID)
+	return err == nil && m.Name == claim.Status.MemberName && workspaceName == claim.Status.WorkspaceName
+}
+
 // poolReservationStale reports whether the member that claim reserved can
 // no longer be bound to it, read without the cache. Only states that a member
 // never leaves count: it is gone, being deleted, failed, used, or held by
@@ -272,6 +284,9 @@ func (r *CoderWorkspacePoolReconciler) poolReservationStale(ctx context.Context,
 		return true, nil
 	} else if err != nil {
 		return false, fmt.Errorf("get reserved pool member %s: %w", key, err)
+	}
+	if !poolReserves(claim, m) {
+		return true, nil
 	}
 	if m.Spec.ClaimRef != nil {
 		return m.Spec.ClaimRef.UID != string(claim.UID), nil

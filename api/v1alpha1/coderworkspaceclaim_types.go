@@ -42,7 +42,8 @@ type CoderWorkspaceClaimStatus struct {
 	// +optional
 	Phase string `json:"phase,omitempty"`
 	// MemberName is the CoderWorkspacePoolMember that holds the claim. While
-	// the claim is Pending, it is the member that the pool reserved for it.
+	// the claim is Pending, memberName and workspaceName name the member that
+	// the pool reserved for it.
 	// +optional
 	MemberName string `json:"memberName,omitempty"`
 	// WorkspaceID is the Coder workspace ID.

@@ -146,7 +146,8 @@ spec:
               memberName:
                 description: |-
                   MemberName is the CoderWorkspacePoolMember that holds the claim. While
-                  the claim is Pending, it is the member that the pool reserved for it.
+                  the claim is Pending, memberName and workspaceName name the member that
+                  the pool reserved for it.
                 type: string
               message:
                 description: |-
