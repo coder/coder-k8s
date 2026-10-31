@@ -355,6 +355,7 @@ func requireOneRevoke(t *testing.T, provisioner *fakeOperatorAccessProvisioner, 
 		PostgresURL:      postgresURL,
 		OperatorUsername: provisioner.requests[0].OperatorUsername,
 		TokenName:        provisioner.requests[0].TokenName,
+		TokenID:          provisioner.requests[0].TokenID,
 	}}, provisioner.revokeRequests)
 }
 
@@ -389,6 +390,7 @@ func TestReconcile_OperatorAccess_TokenSecretLosesOwner(t *testing.T) {
 		PostgresURL:      losesOwnerPostgresURL,
 		OperatorUsername: provisioner.requests[0].OperatorUsername,
 		TokenName:        provisioner.requests[0].TokenName,
+		TokenID:          provisioner.requests[0].TokenID,
 	}}, provisioner.revokeRequests, "the operator deletes the token that it provisioned")
 	reconciled := getControlPlane(t, cp)
 	require.False(t, reconciled.Status.OperatorAccessReady)
@@ -518,6 +520,46 @@ func TestReconcile_OperatorAccess_TokenSecretLosesOwner_DatabaseNotRecorded(t *t
 	require.Contains(t, condition.Message, "does not delete its earlier operator token")
 }
 
+// TestReconcile_OperatorAccess_TokenSecretLosesOwner_ConfirmedRecordWithoutID
+// checks a record that an earlier version wrote after a successful create: it
+// names the Secret and the database, but no token ID. It keeps the delete by
+// name of #401, also when the first token check after the upgrade fails, and
+// the operator deletes once.
+func TestReconcile_OperatorAccess_TokenSecretLosesOwner_ConfirmedRecordWithoutID(t *testing.T) {
+	ctx := context.Background()
+	cp, provisioner, _ := publishOperatorToken(ctx, t, "operator-token-confirmed-record", losesOwnerPostgresURL)
+	earlierVersionStatus := ctrlclient.RawPatch(types.MergePatchType, []byte(`{"status":{"operatorTokenID":null}}`))
+	require.NoError(t, k8sClient.Status().Patch(ctx, cp.DeepCopy(), earlierVersionStatus))
+	require.Empty(t, getControlPlane(t, cp).Status.OperatorTokenID)
+
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}
+	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	provisioner.err = errors.New("dial tcp: connection refused")
+	_, err := r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.Len(t, provisioner.requests, 2)
+	require.NotEmpty(t, provisioner.requests[1].TokenID)
+	failed := getControlPlane(t, cp)
+	require.Equal(t, cp.Status.OperatorTokenSecretRef, failed.Status.OperatorTokenSecretRef)
+	require.Empty(t, failed.Status.OperatorTokenID, "a failed check must not replace the confirmed record with an unconfirmed one")
+
+	replaceOperatorTokenSecret(ctx, t, cp)
+	provisioner.err = nil
+	_, err = r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.Equal(t, []coderbootstrap.RevokeOperatorTokenRequest{{
+		PostgresURL:      losesOwnerPostgresURL,
+		OperatorUsername: provisioner.requests[0].OperatorUsername,
+		TokenName:        provisioner.requests[0].TokenName,
+	}}, provisioner.revokeRequests, "a confirmed record deletes by name, as on main")
+	require.Nil(t, getControlPlane(t, cp).Status.OperatorTokenSecretRef)
+
+	restarted := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	_, err = restarted.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.Equal(t, 1, provisioner.revokeCalls, "the operator deletes the token once")
+}
+
 // TestReconcile_OperatorAccess_TokenSecretLosesOwner_StatusWriteFails checks
 // that a failed status write after the delete keeps the record. The next
 // reconcile deletes again in the same database, which removes nothing more,
@@ -594,6 +636,8 @@ func TestReconcile_OperatorAccess_RecordsTokenBeforeCreate(t *testing.T) {
 	require.NotNil(t, recorded.Status.OperatorTokenSecretRef)
 	require.Equal(t, cp.Name+"-operator-token", recorded.Status.OperatorTokenSecretRef.Name)
 	require.NotEmpty(t, recorded.Status.OperatorTokenDatabaseHash)
+	require.Equal(t, provisioner.requests[0].TokenID, recorded.Status.OperatorTokenID)
+	require.Len(t, recorded.Status.OperatorTokenID, 10)
 
 	replaceOperatorTokenSecret(ctx, t, cp)
 	restarted := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
@@ -734,6 +778,7 @@ func TestReconcile_OperatorAccess_ErrorKeepsTokenRecord(t *testing.T) {
 			require.False(t, failed.Status.OperatorAccessReady)
 			require.Equal(t, cp.Status.OperatorTokenSecretRef, failed.Status.OperatorTokenSecretRef, "the record of the published token stays")
 			require.Equal(t, cp.Status.OperatorTokenDatabaseHash, failed.Status.OperatorTokenDatabaseHash)
+			require.Equal(t, cp.Status.OperatorTokenID, failed.Status.OperatorTokenID)
 			requireNoOperatorClient(ctx, t, consumer, cp.Namespace, "no eligible CoderControlPlane")
 
 			replaceOperatorTokenSecret(ctx, t, cp)

@@ -49,6 +49,32 @@ func revokeWith(t *testing.T, rowsAffected int64, req RevokeOperatorTokenRequest
 	return d, p.RevokeOperatorToken(context.Background(), req)
 }
 
+// TestRevokeOperatorToken_ByID protects the idempotent delete of a key whose
+// ID the caller recorded before creation. It must never delete by name when
+// that ID is absent, including when the create never happened.
+func TestRevokeOperatorToken_ByID(t *testing.T) {
+	t.Parallel()
+	for _, affected := range []int64{0, 1} {
+		d, err := revokeWith(t, affected, RevokeOperatorTokenRequest{TokenID: "AbCdEfGhIj"})
+		if err != nil {
+			t.Fatalf("delete ID with %d affected rows: %v", affected, err)
+		}
+		if len(d.execs) != 1 || len(d.execs[0]) != 3 || d.execs[0][2].Value != "AbCdEfGhIj" {
+			t.Fatalf("expected an exact ID delete, got %+v", d.execs)
+		}
+	}
+	for _, req := range []RevokeOperatorTokenRequest{
+		{TokenID: "invalid"},
+		{TokenID: "not-valid!"},
+		{TokenID: "AbCdEfGhIj", Token: "AbCdEfGhIj-secret"},
+	} {
+		d, err := revokeWith(t, 0, req)
+		if err == nil || len(d.execs) != 0 {
+			t.Fatalf("invalid ID or ambiguous delete must execute no statement, got %v, %+v", err, d.execs)
+		}
+	}
+}
+
 // TestRevokeOperatorToken_ByValue checks that a delete by token value removes
 // only the row with that ID and secret hash, and that it reports a value that
 // names no token, because then a copy of the real token can still work.

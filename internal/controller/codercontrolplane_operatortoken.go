@@ -19,23 +19,29 @@ import (
 )
 
 // The record of an operator token is status.operatorTokenSecretRef together
-// with status.operatorTokenDatabaseHash. The operator writes it before it can
-// create a token, keeps it while the token can still work in Coder, and
-// deletes a token only with a record whose database matches the current one.
+// with status.operatorTokenDatabaseHash, and it has one of two kinds:
+//   - an ID record also holds status.operatorTokenID. The operator writes it
+//     before the create, so the create may not have happened, and it deletes
+//     only the key with that ID.
+//   - a confirmed record has no ID. Earlier versions wrote it only after a
+//     successful create, so it authorizes the delete by name, as in #401.
+//
+// The operator keeps a record while its token can still work in Coder, and
+// deletes only with a record whose database matches the current one.
 
-// recordOperatorToken sets the record in nextStatus and, when the stored
-// status does not hold it yet, stores it before EnsureOperatorToken can create
-// a token. A stop between the create and the final status write then still
-// leaves the record that a later delete needs.
+// recordOperatorToken sets the record in nextStatus and returns the key ID for
+// EnsureOperatorToken. When the stored status has no record for this database
+// yet, it first stores an ID record, so that a stop between the create and the
+// final status write still leaves the record that a later delete needs.
 func (r *CoderControlPlaneReconciler) recordOperatorToken(
 	ctx context.Context,
 	coderControlPlane *coderv1alpha1.CoderControlPlane,
 	nextStatus *coderv1alpha1.CoderControlPlaneStatus,
 	secretName string,
 	databaseHash string,
-) error {
+) (string, error) {
 	if strings.TrimSpace(secretName) == "" {
-		return fmt.Errorf("assertion failed: operator token secret name must not be empty")
+		return "", fmt.Errorf("assertion failed: operator token secret name must not be empty")
 	}
 	ref := &coderv1alpha1.SecretKeySelector{Name: secretName, Key: coderv1alpha1.DefaultTokenSecretKey}
 	nextStatus.OperatorTokenSecretRef = ref
@@ -48,6 +54,7 @@ func (r *CoderControlPlaneReconciler) recordOperatorToken(
 		statusReader = r.Client
 	}
 	key := client.ObjectKeyFromObject(coderControlPlane)
+	tokenID := ""
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &coderv1alpha1.CoderControlPlane{}
 		if err := statusReader.Get(ctx, key, latest); err != nil {
@@ -56,20 +63,46 @@ func (r *CoderControlPlaneReconciler) recordOperatorToken(
 		if latest.UID != coderControlPlane.UID {
 			return fmt.Errorf("control plane %s has UID %q, not %q", key, latest.UID, coderControlPlane.UID)
 		}
-		if latest.Status.OperatorTokenSecretRef != nil && latest.Status.OperatorTokenDatabaseHash == databaseHash {
-			return nil
+		stored := latest.Status
+		tokenID = stored.OperatorTokenID
+		if stored.OperatorTokenSecretRef != nil && stored.OperatorTokenDatabaseHash == databaseHash {
+			nextStatus.OperatorTokenID = tokenID
+			if tokenID != "" {
+				return nil
+			}
+			// A confirmed record already authorizes the delete by name in this
+			// database, which covers the create. Its new ID reaches the status
+			// only after the create succeeded.
+			generated, err := coderbootstrap.NewOperatorTokenID()
+			tokenID = generated
+			return err
+		}
+		if tokenID == "" {
+			generated, err := coderbootstrap.NewOperatorTokenID()
+			if err != nil {
+				return err
+			}
+			tokenID = generated
 		}
 		// A published reference keeps its name until the final status write,
 		// so that consumers never read a Secret that holds no token yet.
-		if latest.Status.OperatorTokenSecretRef == nil {
+		if stored.OperatorTokenSecretRef == nil {
 			latest.Status.OperatorTokenSecretRef = cloneSecretKeySelector(ref)
 		}
 		latest.Status.OperatorTokenDatabaseHash = databaseHash
-		return r.Status().Update(ctx, latest)
+		latest.Status.OperatorTokenID = tokenID
+		if err := r.Status().Update(ctx, latest); err != nil {
+			return err
+		}
+		nextStatus.OperatorTokenID = tokenID
+		return nil
 	}); err != nil {
-		return fmt.Errorf("record operator token before provisioning: %w", err)
+		return "", fmt.Errorf("record operator token before provisioning: %w", err)
 	}
-	return nil
+	if tokenID == "" {
+		return "", fmt.Errorf("assertion failed: operator token ID must not be empty")
+	}
+	return tokenID, nil
 }
 
 // operatorTokenRevoke is the outcome of revokeRecordedOperatorToken.
@@ -123,6 +156,7 @@ func (r *CoderControlPlaneReconciler) revokeRecordedOperatorToken(
 		PostgresURL:      postgresURL,
 		OperatorUsername: defaultOperatorAccessUsername,
 		TokenName:        tokenName,
+		TokenID:          coderControlPlane.Status.OperatorTokenID,
 	}); err != nil {
 		//nolint:nilerr // a failed delete keeps the record, and the caller retries.
 		return operatorTokenRevokePending, nil

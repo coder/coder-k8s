@@ -1708,6 +1708,7 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 		}
 		nextStatus.OperatorTokenSecretRef = nil
 		nextStatus.OperatorTokenDatabaseHash = ""
+		nextStatus.OperatorTokenID = ""
 		return ctrl.Result{}, nil
 	}
 
@@ -1715,6 +1716,7 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 		meta.RemoveStatusCondition(&nextStatus.Conditions, coderv1alpha1.CoderControlPlaneConditionOperatorTokenSecretOwned)
 		nextStatus.OperatorTokenSecretRef = nil
 		nextStatus.OperatorTokenDatabaseHash = ""
+		nextStatus.OperatorTokenID = ""
 		nextStatus.OperatorAccessReady = false
 		return ctrl.Result{}, nil
 	}
@@ -1753,6 +1755,7 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 		case operatorTokenRevoked:
 			nextStatus.OperatorTokenSecretRef = nil
 			nextStatus.OperatorTokenDatabaseHash = ""
+			nextStatus.OperatorTokenID = ""
 		case operatorTokenNotRecorded:
 		}
 		if err := setControlPlaneCondition(
@@ -1806,7 +1809,8 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 
 	// Record the token only once this control plane holds the Secret, so that
 	// a Secret that someone else created never leads to a delete.
-	if err := r.recordOperatorToken(ctx, coderControlPlane, nextStatus, operatorTokenSecretName, operatorTokenDatabaseHash(postgresURL)); err != nil {
+	tokenID, err := r.recordOperatorToken(ctx, coderControlPlane, nextStatus, operatorTokenSecretName, operatorTokenDatabaseHash(postgresURL))
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 	token, provisionErr := r.OperatorAccessProvisioner.EnsureOperatorToken(ctx, coderbootstrap.EnsureOperatorTokenRequest{
@@ -1816,6 +1820,7 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 		TokenName:        operatorTokenName,
 		TokenLifetime:    defaultOperatorAccessTokenLifetime,
 		ExistingToken:    existingToken,
+		TokenID:          tokenID,
 	})
 	if provisionErr != nil {
 		nextStatus.OperatorAccessReady = false
@@ -1837,6 +1842,7 @@ func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
 		return ctrl.Result{}, err
 	}
 
+	nextStatus.OperatorTokenID = tokenID
 	nextStatus.OperatorAccessReady = true
 
 	return ctrl.Result{}, nil
@@ -3147,6 +3153,9 @@ func mergeControlPlaneStatusDelta(
 	}
 	if baseStatus.OperatorTokenDatabaseHash != nextStatus.OperatorTokenDatabaseHash {
 		mergedStatus.OperatorTokenDatabaseHash = nextStatus.OperatorTokenDatabaseHash
+	}
+	if baseStatus.OperatorTokenID != nextStatus.OperatorTokenID {
+		mergedStatus.OperatorTokenID = nextStatus.OperatorTokenID
 	}
 	if baseStatus.OperatorAccessReady != nextStatus.OperatorAccessReady {
 		mergedStatus.OperatorAccessReady = nextStatus.OperatorAccessReady

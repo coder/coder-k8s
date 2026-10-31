@@ -212,6 +212,15 @@ type CoderControlPlaneStatus struct {
 	// connection string.
 	// +optional
 	OperatorTokenDatabaseHash string `json:"operatorTokenDatabaseHash,omitempty"`
+	// OperatorTokenID is the API key ID of the operator token. The operator
+	// generates it, records it before it creates the token with this ID, and
+	// then deletes only the key with this ID. A record without it comes from
+	// an earlier version, which wrote the record only after a successful
+	// create, so the operator deletes that token by name.
+	// +kubebuilder:validation:MaxLength=10
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9]{10}$`
+	// +optional
+	OperatorTokenID string `json:"operatorTokenID,omitempty"`
 	// OperatorAccessReady reports whether operator API access bootstrap succeeded.
 	OperatorAccessReady bool `json:"operatorAccessReady,omitempty"`
 	// LicenseLastApplied is the timestamp of the most recent successful
