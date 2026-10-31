@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 
@@ -293,6 +294,42 @@ func TestPoolBindRace(t *testing.T) {
 	_, err = r.Reconcile(e2.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e2.ns, Name: e2.pool.Name}})
 	require.True(t, apierrors.IsConflict(err), "the resourceVersion refuses the bind: %v", err)
 	require.Nil(t, e2.reconcileMember(t, used, 0).Spec.ClaimRef, "a used member is never bound")
+}
+
+// TestPoolBindRaceTwoMembers: two pool reconciles race for one claim with
+// two ready members, and the second one cannot read the first one's member
+// in Coder. The claim still gets exactly one member: each bind reserves its
+// member in the claim status first, and a reconcile that finds a reservation
+// binds only that member.
+func TestPoolBindRaceTwoMembers(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Replicas = new(int32(2)) })
+	key := types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}
+	for _, name := range []string{"kwp-one", "kwp-two"} {
+		e.setMemberStatus(t, e.createMember(t, nil), readyWithWorkspace(name))
+	}
+	claimKey := e.createClaim(t, "build-1")
+	other := &controller.CoderWorkspacePoolReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	racing := bindHookClient{Client: k8sClient, done: new(false), hook: func(*coderv1alpha1.CoderWorkspacePoolMember) {
+		e.fake.failNext(routeWorkspace, fakeFault{Status: http.StatusServiceUnavailable})
+		_, err := other.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+		require.NoError(t, err)
+	}}
+	r := &controller.CoderWorkspacePoolReconciler{Client: racing, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	_, _ = r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+	e.reconcilePool(t, 1)
+
+	claim := e.claim(t, claimKey)
+	var holders []string
+	for _, m := range e.poolMembers(t, e.pool.Name) {
+		if m.Spec.ClaimRef != nil && m.Spec.ClaimRef.UID == string(claim.UID) {
+			holders = append(holders, m.Name)
+		}
+	}
+	require.Len(t, holders, 1, "exactly one member holds the claim")
+	requireClaim(t, claim, coderv1alpha1.CoderWorkspaceClaimPhaseBound, "WorkspaceReady", true)
+	require.Equal(t, holders[0], claim.Status.MemberName)
 }
 
 // TestPoolFinishesClaimAfterCrash: the pool crashed after the member bind,

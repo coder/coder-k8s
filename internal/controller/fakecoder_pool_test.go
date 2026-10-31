@@ -130,6 +130,13 @@ func (f *fakeCoder) setDormant(workspaceID uuid.UUID, dormantAt, deletingAt *tim
 	}
 }
 
+// renameWorkspace renames a workspace, as a person with update rights on it can.
+func (f *fakeCoder) renameWorkspace(workspaceID uuid.UUID, name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mustWorkspace(workspaceID).workspace.Name = name
+}
+
 // addExternalBuild appends a pending build that someone other than the
 // operator started, for example an admin's stop or an autostop.
 func (f *fakeCoder) addExternalBuild(workspaceID, initiatorID uuid.UUID, transition codersdk.WorkspaceTransition) codersdk.WorkspaceBuild {
