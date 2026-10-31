@@ -1,5 +1,5 @@
 // Package controlplaneurl derives the URL that operator components use for
-// Coder API calls to a CoderControlPlane.
+// Coder API calls to a CoderControlPlane, and the TLS trust that verifies it.
 package controlplaneurl
 
 import (

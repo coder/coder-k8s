@@ -262,7 +262,7 @@ func TestTransportRegistrySeparatesDeploymentsBehindProxy(t *testing.T) {
 	})
 	get := func(ctx context.Context, rawURL string) error {
 		target := mustParseURL(t, rawURL)
-		transport, err := registry.forURL(target)
+		transport, err := registry.forURL(target, nil)
 		if err != nil {
 			return err
 		}
@@ -313,7 +313,7 @@ func TestTransportRegistryKeysByDeployment(t *testing.T) {
 
 	registry := newTransportRegistry(newCoderTransport)
 	forURL := func(rawURL string) *registeredTransport {
-		transport, err := registry.forURL(mustParseURL(t, rawURL))
+		transport, err := registry.forURL(mustParseURL(t, rawURL), nil)
 		if err != nil {
 			t.Fatalf("forURL(%q): %v", rawURL, err)
 		}
@@ -376,7 +376,7 @@ func TestTransportRegistryEvictsUnusedDeployments(t *testing.T) {
 	registry := newTransportRegistry(newCoderTransport)
 	registry.now = func() time.Time { return now }
 	forURL := func(rawURL string) *registeredTransport {
-		transport, err := registry.forURL(mustParseURL(t, rawURL))
+		transport, err := registry.forURL(mustParseURL(t, rawURL), nil)
 		if err != nil {
 			t.Fatalf("forURL(%q): %v", rawURL, err)
 		}
@@ -429,7 +429,7 @@ func TestTransportRegistryKeepsDeploymentsWithOpenResponses(t *testing.T) {
 	registry := newTransportRegistry(newCoderTransport)
 	registry.now = func() time.Time { return now }
 	forURL := func(rawURL string) *registeredTransport {
-		transport, err := registry.forURL(mustParseURL(t, rawURL))
+		transport, err := registry.forURL(mustParseURL(t, rawURL), nil)
 		if err != nil {
 			t.Fatalf("forURL(%q): %v", rawURL, err)
 		}
@@ -518,7 +518,7 @@ func TestTransportRegistryRoutesEvictedTransportToCurrentEntry(t *testing.T) {
 	registry := newTransportRegistry(newCoderTransport)
 	registry.now = func() time.Time { return now }
 	forURL := func(rawURL string) *registeredTransport {
-		transport, err := registry.forURL(mustParseURL(t, rawURL))
+		transport, err := registry.forURL(mustParseURL(t, rawURL), nil)
 		if err != nil {
 			t.Fatalf("forURL(%q): %v", rawURL, err)
 		}
@@ -575,7 +575,7 @@ func TestTransportRegistryClosesIdleConnectionsOfCurrentEntry(t *testing.T) {
 	registry := newTransportRegistry(newCoderTransport)
 	registry.now = func() time.Time { return now }
 	forURL := func(rawURL string) *registeredTransport {
-		transport, err := registry.forURL(mustParseURL(t, rawURL))
+		transport, err := registry.forURL(mustParseURL(t, rawURL), nil)
 		if err != nil {
 			t.Fatalf("forURL(%q): %v", rawURL, err)
 		}
@@ -650,7 +650,7 @@ func TestTransportRegistryBoundsConnectionsAcrossHostnameCase(t *testing.T) {
 	defer releaseOnce()
 	start := func(rawURL string) {
 		target := mustParseURL(t, rawURL)
-		transport, err := registry.forURL(target)
+		transport, err := registry.forURL(target, nil)
 		if err != nil {
 			t.Fatalf("forURL(%q): %v", rawURL, err)
 		}
@@ -726,7 +726,7 @@ func TestTransportRegistryDialsLowercaseHostname(t *testing.T) {
 		"http://[FE80::1%25ETH0]/api/v2": "[fe80::1%ETH0]:80",
 	} {
 		target := mustParseURL(t, rawURL)
-		transport, err := registry.forURL(target)
+		transport, err := registry.forURL(target, nil)
 		if err != nil {
 			t.Fatalf("forURL(%q): %v", rawURL, err)
 		}

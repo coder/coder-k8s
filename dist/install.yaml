@@ -2800,6 +2800,44 @@ spec:
                 default: {}
                 description: TLS configures Coder built-in TLS.
                 properties:
+                  operatorAccess:
+                    description: |-
+                      OperatorAccess makes operator components send their Coder API calls,
+                      and the operator token, to status.url over verified HTTPS. Without it,
+                      they use plain HTTP on the control plane Service. With it, they never
+                      fall back to HTTP: a CA bundle or certificate error stops the call.
+                    properties:
+                      caBundleRef:
+                        description: |-
+                          CABundleRef names a ConfigMap key in the control plane namespace with
+                          the PEM CA certificates that sign the Coder serving certificate.
+                          Without it, the operator uses the public roots of its image.
+                        properties:
+                          key:
+                            description: Key is the key inside the ConfigMap data
+                              map.
+                            minLength: 1
+                            type: string
+                          name:
+                            description: Name is the ConfigMap name.
+                            minLength: 1
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      serverName:
+                        description: |-
+                          ServerName is the DNS name that the Coder serving certificate must
+                          hold. The default is the host of status.url,
+                          `<name>.<namespace>.svc.cluster.local`.
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: tls.operatorAccess needs caBundleRef or serverName
+                      rule: has(self.caBundleRef) || has(self.serverName)
                   secretNames:
                     description: |-
                       SecretNames lists TLS secrets to mount for built-in TLS.
@@ -2808,6 +2846,10 @@ spec:
                       type: string
                     type: array
                 type: object
+                x-kubernetes-validations:
+                - message: tls.operatorAccess needs tls.secretNames
+                  rule: '!has(self.operatorAccess) || (has(self.secretNames) && size(self.secretNames)
+                    > 0)'
               tolerations:
                 description: Tolerations are applied to the control plane pod.
                 items:

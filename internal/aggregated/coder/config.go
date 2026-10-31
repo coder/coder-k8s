@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/coder/v2/codersdk"
 
+	"github.com/coder/coder-k8s/internal/controlplaneurl"
 	"github.com/coder/coder-k8s/internal/sameorigin"
 )
 
@@ -38,9 +39,10 @@ var coderTransports = newTransportRegistry(newCoderTransport)
 const transportIdleEviction = 10 * time.Minute
 
 // transportRegistry holds one long-lived transport per Coder deployment (URL scheme,
-// host, and port). Separate transports keep the per-deployment limits separate even
-// when an HTTP proxy would make deployments share one connection-pool key. Clients stay
-// per request: the session token is set on each client, never on a transport.
+// host, and port) and TLS trust. Separate transports keep the per-deployment limits
+// separate even when an HTTP proxy would make deployments share one connection-pool key.
+// Clients stay per request: the session token is set on each client, never on a
+// transport.
 type transportRegistry struct {
 	newTransport func() (*http.Transport, error)
 	now          func() time.Time
@@ -70,10 +72,12 @@ func newTransportRegistry(newTransport func() (*http.Transport, error)) *transpo
 	}
 }
 
-// forURL returns the transport for the deployment that serves coderURL. It also drops
+// forURL returns the transport for the deployment that serves coderURL, verified with
+// trust (nil: the system roots). A changed trust, such as a rotated CA bundle, gets a new
+// transport, so no connection verified with the old trust serves it. forURL also drops
 // the transports without a request for transportIdleEviction, so deployments whose
-// control plane changed its URL or went away do not stay in the registry.
-func (r *transportRegistry) forURL(coderURL *url.URL) (*registeredTransport, error) {
+// control plane changed its URL or trust or went away do not stay in the registry.
+func (r *transportRegistry) forURL(coderURL *url.URL, trust *controlplaneurl.TLS) (*registeredTransport, error) {
 	if r == nil {
 		return nil, fmt.Errorf("assertion failed: transport registry must not be nil")
 	}
@@ -82,6 +86,9 @@ func (r *transportRegistry) forURL(coderURL *url.URL) (*registeredTransport, err
 	}
 
 	key := sameorigin.Key(coderURL)
+	if trust != nil {
+		key += " " + trust.Key()
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -104,6 +111,9 @@ func (r *transportRegistry) forURL(coderURL *url.URL) (*registeredTransport, err
 	}
 	if transport == nil {
 		return nil, fmt.Errorf("assertion failed: new Coder transport is nil after successful construction")
+	}
+	if trust != nil {
+		transport.TLSClientConfig = trust.ClientConfig()
 	}
 	entry := &registeredTransport{registry: r, key: key, transport: transport, lastUsed: now}
 	r.byDeployment[key] = entry
@@ -305,6 +315,8 @@ type Config struct {
 	CoderURL       *url.URL
 	SessionToken   string
 	RequestTimeout time.Duration
+	// TLS verifies an HTTPS CoderURL. Nil uses the system roots.
+	TLS *controlplaneurl.TLS
 }
 
 // NewSDKClient creates a configured Coder SDK client from cfg.
@@ -314,6 +326,9 @@ func NewSDKClient(cfg Config) (*codersdk.Client, error) {
 	}
 	if cfg.SessionToken == "" {
 		return nil, fmt.Errorf("assertion failed: session token must not be empty")
+	}
+	if cfg.TLS != nil && cfg.CoderURL.Scheme != "https" {
+		return nil, fmt.Errorf("assertion failed: a TLS trust needs an HTTPS coder URL, not %q", cfg.CoderURL.Scheme)
 	}
 
 	requestTimeout := cfg.RequestTimeout
@@ -325,7 +340,7 @@ func NewSDKClient(cfg Config) (*codersdk.Client, error) {
 	}
 
 	coderURL := *cfg.CoderURL
-	transport, err := coderTransports.forURL(&coderURL)
+	transport, err := coderTransports.forURL(&coderURL, cfg.TLS)
 	if err != nil {
 		return nil, fmt.Errorf("get Coder transport: %w", err)
 	}
