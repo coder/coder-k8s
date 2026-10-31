@@ -222,9 +222,11 @@ With `operatorAccess`, the operator never sends the operator token over plain HT
 | Status | Reason | Meaning |
 | --- | --- | --- |
 | `True` | `Verified` | The last entitlements call verified the Coder certificate. |
-| `Unknown` | `Pending` | The CA bundle is valid, and the operator has not called Coder with it yet. |
+| `Unknown` | `Pending` | The CA bundle is valid, and the operator has not verified Coder with it yet, for example right after a CA rotation. |
 | `False` | `CABundleUnavailable` | The ConfigMap or key is missing, or the bundle is invalid. The message says which. |
 | `False` | `CertificateNotVerified` | Coder served a certificate that the bundle does not verify. The message has the `x509` error. |
+
+Each message ends with `(trust <id>)`, a short hash of the CA bundle, the server name and `status.url` that the result is about.
 
 ```bash
 kubectl -n coder get codercontrolplane coder \
