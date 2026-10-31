@@ -244,7 +244,7 @@ func (w failClaimStatusWriter) Update(ctx context.Context, obj client.Object, op
 
 // TestPoolIdleCheckNeedsEvidence: a workspace read without last_used_at
 // proves no idleness, and a recorded idle check whose claim never became Lost
-// is no reap: deleting the claim then deletes the workspace as usual, even
+// is no reap: deleting the member then deletes the workspace as usual, even
 // after a newer use.
 func TestPoolIdleCheckNeedsEvidence(t *testing.T) {
 	t.Parallel()
@@ -270,8 +270,7 @@ func TestPoolIdleCheckNeedsEvidence(t *testing.T) {
 	requireClaim(t, e.claim(t, claimKey), coderv1alpha1.CoderWorkspaceClaimPhaseBound, "WorkspaceReady", true)
 
 	e.fake.markUsed(workspaceID, e.clock.Now())
-	require.NoError(t, k8sClient.Delete(e.ctx, e.claim(t, claimKey)))
-	e.deleteMember(t, member) // Garbage collection, which envtest does not run.
+	e.deleteMember(t, member) // A person's delete, while the claim is Bound.
 	m := e.reconcileMember(t, member, 1)
 	requireMember(t, m, coderv1alpha1.CoderWorkspacePoolMemberPhaseDeleting, "Deleting", "started a delete build")
 }
