@@ -113,7 +113,8 @@
     "coderworkspacepoolmember",
     "coderworkspacepoolmembers",
     "scaledobjects",
-    "admissionregistration"
+    "admissionregistration",
+    "horizontalpodautoscalers"
   ],
   "ignorePaths": [
     ".git/**",
