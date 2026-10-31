@@ -198,6 +198,7 @@ func (s *WorkspaceTransitionStorage) afterConflict(
 ) (runtime.Object, error) {
 	current, err := sdk.Workspace(ctx, workspaceID)
 	if err != nil {
+		coder.LogHiddenError(err, aggregationv1alpha1.Resource("coderworkspaces"), name)
 		return nil, s.uncertain()
 	}
 	outcome, err := decideTransition(s.transition, name, current.LatestBuild)

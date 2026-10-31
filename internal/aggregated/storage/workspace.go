@@ -485,17 +485,23 @@ func (s *WorkspaceStorage) Create(
 		if stopErr == nil && isRequestedBuild(stopBuild, codersdk.WorkspaceTransitionStop) {
 			createdWorkspace.LatestBuild = stopBuild
 		} else {
-			// Without the stop build in the answer, Coder can still have queued the stop.
+			// Without the stop build in the answer, Coder can still have queued the stop, or still be
+			// queueing it while the re-read shows the start build. Only the stop build confirms such
+			// a stop. The start build is the result only after a stop that Coder refused or that was
+			// not sent.
+			stopUncertain := stopErr == nil ||
+				apierrors.IsTimeout(coder.MapCoderWriteError(stopErr, coder.WriteCreate, aggregationv1alpha1.Resource("coderworkspaces"), workspaceObj.Name))
 			current, readErr := sdk.Workspace(ctx, createdWorkspace.ID)
 			latest := current.LatestBuild
-			if readErr == nil && (latest.ID == uuid.Nil || latest.Status == "" ||
-				(latest.Transition != codersdk.WorkspaceTransitionStart && latest.Transition != codersdk.WorkspaceTransitionStop)) {
-				readErr = errors.New("the re-read of the workspace has no start or stop build with a status")
+			confirms := latest.Transition == codersdk.WorkspaceTransitionStop ||
+				(!stopUncertain && latest.Transition == codersdk.WorkspaceTransitionStart)
+			if readErr == nil && (latest.ID == uuid.Nil || latest.Status == "" || !confirms) {
+				readErr = errors.New("the re-read of the workspace shows no confirming build with an ID and a status")
 			}
 			switch {
 			case readErr == nil:
 				createdWorkspace.LatestBuild = latest
-			case stopErr == nil || apierrors.IsTimeout(coder.MapCoderWriteError(stopErr, coder.WriteCreate, aggregationv1alpha1.Resource("coderworkspaces"), workspaceObj.Name)):
+			case stopUncertain:
 				// The start build of the create answer can be stale, so it is not a result.
 				return nil, coder.UncertainWriteErrorFrom(readErr, coder.WriteCreate, aggregationv1alpha1.Resource("coderworkspaces"), workspaceObj.Name,
 					"no confirmation of its stop build from the Coder API after the workspace was created")

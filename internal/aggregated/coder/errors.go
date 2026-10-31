@@ -180,13 +180,19 @@ func UncertainWriteErrorFrom(err error, write Write, resource schema.GroupResour
 	if err == nil {
 		return fmt.Errorf("assertion failed: error must not be nil")
 	}
+	LogHiddenError(err, resource, name)
+	return UncertainWriteError(write, resource, name, reason)
+}
+
+// LogHiddenError logs err, which can name the Coder URL, for operators, with the status of its
+// *codersdk.Error or 0 for an error without a status.
+func LogHiddenError(err error, resource schema.GroupResource, name string) {
 	status := 0
 	var coderErr *codersdk.Error
 	if errors.As(err, &coderErr) {
 		status = coderErr.StatusCode()
 	}
 	logHiddenError(err, resource, name, status)
-	return UncertainWriteError(write, resource, name, reason)
 }
 
 // UncertainWriteError is the 504 for a write that Coder can have applied. reason names the answer
