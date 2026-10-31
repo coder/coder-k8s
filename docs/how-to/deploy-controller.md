@@ -226,7 +226,7 @@ With `operatorAccess`, the operator never sends the operator token over plain HT
 | `False` | `CABundleUnavailable` | The ConfigMap or key is missing, or the bundle is invalid. The message says which. |
 | `False` | `CertificateNotVerified` | Coder served a certificate that the bundle does not verify. The message has the `x509` error. |
 
-Each message ends with `(trust <id>)`, a short hash of the CA bundle, the server name and `status.url` that the result is about.
+Except for `CABundleUnavailable`, which has no valid bundle to name, each message ends with `(trust <id>)`: a short hash of the CA bundle, the server name and `status.url` that the result is about. The operator never writes a result for a trust other than the one it reads at the time of the write.
 
 ```bash
 kubectl -n coder get codercontrolplane coder \
