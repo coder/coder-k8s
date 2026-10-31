@@ -166,26 +166,23 @@ func keywordValueAsURL(dsn string) *url.URL {
 	if !ok || len(options) == 0 {
 		return nil
 	}
-	// A URL cannot hold an empty value: lib/pq drops it and takes the
-	// default, for example PGHOST, which an empty key=value option overrides.
-	// A host with ":" and no port reads as host and port in the URL.
+	// lib/pq takes a missing host, port or database name from PGHOST, PGPORT
+	// or PGDATABASE of the operator, so only a string that sets them names
+	// the database. A URL cannot hold an empty value: lib/pq drops it, but
+	// takes an empty key=value option as is.
+	for _, key := range []string{"host", "port", "dbname"} {
+		if _, ok := options[key]; !ok {
+			return nil
+		}
+	}
 	for key, value := range options {
 		if value == "" && key != "password" {
 			return nil
 		}
 	}
-	if _, hasPort := options["port"]; !hasPort && strings.Contains(options["host"], ":") {
-		return nil
-	}
-	parsed := &url.URL{Scheme: "postgres", Host: options["host"]}
-	if port, ok := options["port"]; ok {
-		parsed.Host = net.JoinHostPort(options["host"], port)
-	}
+	parsed := &url.URL{Scheme: "postgres", Host: net.JoinHostPort(options["host"], options["port"]), Path: "/" + options["dbname"]}
 	if user, ok := options["user"]; ok {
 		parsed.User = url.User(user)
-	}
-	if dbname, ok := options["dbname"]; ok {
-		parsed.Path = "/" + dbname
 	}
 	query := url.Values{}
 	for key, value := range options {

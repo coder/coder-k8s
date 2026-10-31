@@ -633,7 +633,7 @@ func revokeOperatorToken(ctx context.Context, tx *sql.Tx, req RevokeOperatorToke
 		return err
 	}
 
-	if strings.TrimSpace(req.Token) != "" {
+	if req.Token != "" {
 		tokenID, tokenSecret, validFormat := splitOperatorToken(req.Token)
 		if !validFormat {
 			return ErrOperatorTokenNotFound
