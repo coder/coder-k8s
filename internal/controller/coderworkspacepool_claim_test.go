@@ -139,6 +139,61 @@ func TestPoolBindsCurrentBeforeOutdated(t *testing.T) {
 	require.Nil(t, e.reconcileMember(t, misnamed, 0).Spec.ClaimRef)
 }
 
+// TestPoolBindSkipsUseAfterLastRead (#409): a member reads last_used_at once
+// a minute, so its status does not show use since that read. The bind reads
+// Coder again: without an answer nothing binds, then the claim takes the next
+// member, and the used member's next read marks it Used, so the pool
+// releases it.
+func TestPoolBindSkipsUseAfterLastRead(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	used, usedID := e.readyMember(t)
+	e.tick() // The used member is the older one, so the bind tries it first.
+	unused, _ := e.readyMember(t)
+	e.fake.markUsed(usedID, e.clock.Now().Add(30*time.Second))
+	claim := e.createClaim(t, "build")
+
+	e.fake.failNext(routeWorkspace, fakeFault{Status: 502})
+	e.fake.failNext(routeWorkspace, fakeFault{Status: 502})
+	e.reconcilePool(t, 1)
+	requireClaim(t, e.claim(t, claim), coderv1alpha1.CoderWorkspaceClaimPhasePending, "WaitingForReadyWorkspace", false)
+	require.Positive(t, e.lastStep.RequeueAfter, "no event follows the failed reads, so the pool reads again")
+
+	e.reconcilePool(t, 1)
+	e.requireBound(t, unused, claim)
+	require.Nil(t, e.reconcileMember(t, used, 0).Spec.ClaimRef, "a workspace used after the member's last read is never bound")
+
+	requireMember(t, e.reconcileMember(t, used, 1), coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "Used", "")
+	e.reconcilePool(t, 1)
+	m := e.reconcileMember(t, used, 0)
+	require.Nil(t, metav1.GetControllerOf(m), "the pool released the used member")
+	require.Nil(t, m.Spec.ClaimRef)
+}
+
+// TestPoolBindReadsCoderForEachClaim (#409): each bind reads its member's
+// workspace right before the bind, not once per reconcile. A use that lands
+// while the pool binds the first claim keeps that member from the second.
+func TestPoolBindReadsCoderForEachClaim(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	first, _ := e.readyMember(t)
+	e.tick()
+	second, secondID := e.readyMember(t)
+	e.tick()
+	third, _ := e.readyMember(t)
+	claimA, claimB := e.createClaim(t, "a"), e.createClaim(t, "b")
+	hook := bindHookClient{Client: k8sClient, done: new(false), hook: func(m *coderv1alpha1.CoderWorkspacePoolMember) {
+		require.Equal(t, first.Name, m.Name)
+		e.fake.markUsed(secondID, e.clock.Now().Add(time.Minute))
+	}}
+	r := &controller.CoderWorkspacePoolReconciler{Client: hook, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}})
+	require.NoError(t, err)
+	e.requireBound(t, first, claimA)
+	require.Nil(t, e.reconcileMember(t, second, 0).Spec.ClaimRef, "the use during the first bind keeps the second member")
+	e.requireBound(t, third, claimB)
+}
+
 // bindHookClient runs hook once, right before the first member update.
 type bindHookClient struct {
 	client.Client

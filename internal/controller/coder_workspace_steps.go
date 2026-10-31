@@ -185,6 +185,7 @@ type workspaceDeleteState struct {
 // workspaceDeleteResult is the outcome of one delete step.
 type workspaceDeleteResult struct {
 	deleted bool // A delete build succeeded: the workspace is gone.
+	kept    bool // keep chose to keep the workspace: this step sent no write.
 	// failedBuild is true when this step counted a failed delete build.
 	failedBuild bool
 	wait        *coderStep // Why the workspace still exists.
@@ -197,9 +198,12 @@ type workspaceDeleteResult struct {
 // after a backoff. It never cancels a delete build and never sends an orphan
 // delete. countEveryFailure counts a failed delete build that state does not
 // name, for example one whose ID a failed status write lost, or someone
-// else's.
+// else's. A non-nil keep sees the step's own workspace read before any write,
+// so a decision to keep the workspace uses the last read before a cancel or a
+// delete build.
 func deleteCoderWorkspace(
 	ctx context.Context, sdk *codersdk.Client, state *workspaceDeleteState, now time.Time, countEveryFailure bool,
+	keep func(codersdk.Workspace) (bool, error),
 ) (workspaceDeleteResult, error) {
 	if state == nil || state.workspaceID == uuid.Nil {
 		return workspaceDeleteResult{}, errors.New("assertion failed: the delete step needs a workspace ID")
@@ -218,6 +222,11 @@ func deleteCoderWorkspace(
 	if err := errors.Join(coderAnswerFor("workspace", workspaceID.String(), workspace.ID.String()),
 		coderAnswerFor("latest build workspace", workspaceID.String(), build.WorkspaceID.String())); err != nil {
 		return workspaceDeleteResult{}, err
+	}
+	if keep != nil {
+		if kept, err := keep(workspace); err != nil || kept {
+			return workspaceDeleteResult{kept: kept}, err
+		}
 	}
 
 	status := build.Job.Status

@@ -110,21 +110,22 @@ func (r *CoderWorkspacePoolMemberReconciler) cleanupStep(
 	if step != nil || err != nil {
 		return step, templateTestUnavailablePoll, false, err
 	}
-	if member.Spec.ClaimRef == nil && member.Status.DeleteBuildID == "" && member.Status.DeleteAttempts == 0 {
-		// The last use check, before the first delete build: a leaked
-		// workspace is better than lost work.
-		used := meta.IsStatusConditionTrue(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed)
-		if !used && member.Status.ReadyLastUsedAt != nil {
-			step, err := checkPoolMemberUse(member, workspace, now)
-			if err != nil {
-				return nil, 0, false, err
+	var keep func(codersdk.Workspace) (bool, error)
+	if member.Spec.ClaimRef == nil {
+		// The last use check runs on the delete step's own read, before any
+		// write, on every step, so no delete build, a retry included, starts
+		// after a use (#409): a leaked workspace is better than lost work. In
+		// Coder v2.37.3 a failed or canceled delete build does not move
+		// last_used_at, so a failed delete alone never releases the member.
+		keep = func(latest codersdk.Workspace) (bool, error) {
+			if meta.IsStatusConditionTrue(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed) {
+				return true, nil
 			}
-			used = step != nil
-		}
-		if used {
-			log.FromContext(ctx).Info("Someone may have used the workspace without a claim, so the controller releases the pool member without deleting it",
-				"workspaceID", member.Status.WorkspaceID, "workspaceName", member.Status.WorkspaceName)
-			return nil, 0, true, nil
+			if member.Status.ReadyLastUsedAt == nil {
+				return false, nil
+			}
+			step, err := checkPoolMemberUse(member, latest, now)
+			return step != nil, err
 		}
 	}
 
@@ -132,11 +133,15 @@ func (r *CoderWorkspacePoolMemberReconciler) cleanupStep(
 		workspaceID: workspace.ID, workspaceName: member.Status.WorkspaceName,
 		deleteBuildID: member.Status.DeleteBuildID, deleteAttempts: member.Status.DeleteAttempts,
 	}
-	result, err := deleteCoderWorkspace(ctx, sdk, &state, now, false)
+	result, err := deleteCoderWorkspace(ctx, sdk, &state, now, false, keep)
 	member.Status.DeleteBuildID, member.Status.DeleteAttempts = state.deleteBuildID, state.deleteAttempts
 	switch {
 	case err != nil:
 		return nil, 0, false, err
+	case result.kept:
+		log.FromContext(ctx).Info("Someone may have used the workspace without a claim, so the controller releases the pool member and starts no delete build",
+			"workspaceID", member.Status.WorkspaceID, "workspaceName", member.Status.WorkspaceName)
+		return nil, 0, true, nil
 	case result.deleted:
 		step := coderWait("Deleted", "The delete build of workspace %s succeeded.", member.Status.WorkspaceName)
 		step.deleted = &metav1.Condition{Status: metav1.ConditionTrue, Reason: "Deleted", Message: step.message}

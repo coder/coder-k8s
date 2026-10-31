@@ -152,12 +152,18 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if claims, err = r.refreshWaitingClaims(ctx, claims, all.Items); err != nil {
 			return ctrl.Result{}, err
 		}
-		if err := r.bindClaims(ctx, pool, claims, all.Items, &counts, ownerName); err != nil {
+		skipped, err := r.bindClaims(ctx, pool, claims, all.Items, &counts, ownerName)
+		if err != nil {
 			return ctrl.Result{}, err
 		}
 		step, requeue, err = r.createMembers(ctx, pool, poolWant(pool, claims, all.Items), maxWorkspaces, all.Items, &counts)
 		if err != nil {
 			return ctrl.Result{}, err
+		}
+		if skipped && (requeue == 0 || requeue > poolMemberPendingPoll) {
+			// No event follows a failed Coder read or a use that the
+			// member has not marked yet.
+			requeue = poolMemberPendingPoll
 		}
 	}
 	// The namespace list, where trimToOwnerCap marked its deletes.
