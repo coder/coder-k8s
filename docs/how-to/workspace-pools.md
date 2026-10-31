@@ -34,7 +34,7 @@ spec:
         maxWorkspaces: 10                            # the default; at most 100
 ```
 
-`maxWorkspaces` caps all workspaces of the owner on this control plane: unclaimed, claimed, and used ones, across every pool. It is the real cost cap, whoever resizes a pool. When you remove an owner or a template, its pools delete their unclaimed workspaces and keep the claimed ones.
+`maxWorkspaces` caps the owner's pool members on this control plane: unclaimed, claimed, and used ones, across every pool. Workspaces of the owner that no pool made do not count. It is the real cost cap, whoever resizes a pool. When you remove an owner or a template, its pools delete their unclaimed workspaces and keep the claimed ones.
 
 ## 3. Create a pool
 
