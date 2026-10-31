@@ -171,11 +171,56 @@ To fix `TokenSecretNotOwned`, do one of these steps. The controller checks again
 
 ### Where the operator token goes
 
-The controller, provisioners, template tests and the aggregated API server send the operator token to Coder. With built-in TLS (`spec.tls.secretNames`), `status.url` is `https://<control plane>.<namespace>.svc.cluster.local:443`. Certificates for an external hostname rarely cover that name. So these components do not use `status.url` for their Coder API calls. They use the plain HTTP URL of the Service instead: `http://<control plane>.<namespace>.svc.cluster.local:<port>`.
+The controller, provisioners, template tests, the AI resources and the aggregated API server send the operator token to Coder. The URL and the transport depend on `spec.tls`:
 
-The operator token therefore crosses the cluster network without TLS. If you need encryption inside the cluster, use a service mesh. Use a `NetworkPolicy` to limit which pods can reach the control plane Service.
+| `spec.tls` | URL of the operator's Coder API calls | Transport |
+| --- | --- | --- |
+| No `secretNames` | `status.url`, `http://<control plane>.<namespace>.svc.cluster.local:<port>` | Plain HTTP |
+| `secretNames` only | `http://<control plane>.<namespace>.svc.cluster.local:<port>`, not `status.url` | Plain HTTP |
+| `secretNames` and `operatorAccess` | `status.url`, `https://<control plane>.<namespace>.svc.cluster.local:443` | HTTPS, verified |
+
+With built-in TLS but without `operatorAccess`, the operator does not call `status.url`, because certificates for an external hostname rarely cover the Service name. The operator token then crosses the cluster network without TLS. Set `spec.tls.operatorAccess`, or use a service mesh. Use a `NetworkPolicy` to limit which pods can reach the control plane Service.
 
 Provisioner pods are not affected. They still connect to `status.url`.
+
+#### Verify Coder over HTTPS
+
+1. Make sure that the Coder serving certificate in `spec.tls.secretNames` holds the DNS name `<control plane>.<namespace>.svc.cluster.local`. If it holds only another name, for example `coder.example.com`, set `serverName` to that name in step 3.
+2. Put the PEM CA certificates that sign the serving certificate into a ConfigMap in the namespace of the control plane. For a cert-manager CA issuer, the TLS Secret holds the CA as `ca.crt`:
+
+    ```bash
+    kubectl -n coder create configmap coder-ca \
+      --from-literal=ca.crt="$(kubectl -n coder get secret coder-tls -o jsonpath='{.data.ca\.crt}' | base64 -d)"
+    ```
+
+    A trust-manager `Bundle` that writes a ConfigMap works too.
+
+3. Set `spec.tls.operatorAccess`:
+
+    ```yaml
+    spec:
+      tls:
+        secretNames: [coder-tls]
+        operatorAccess:
+          caBundleRef:
+            name: coder-ca
+            key: ca.crt
+          # serverName: coder.example.com
+    ```
+
+The operator trusts exactly one set of roots:
+
+- With `caBundleRef`, it trusts only the CA certificates in the bundle. It never falls back to the public roots of its image, so a certificate from a public CA fails unless its CA is in the bundle.
+- Without `caBundleRef`, it trusts only the public roots of its image. That works only with a public certificate and `serverName` set to its DNS name.
+
+With `operatorAccess`, the operator never sends the operator token over plain HTTP:
+
+- A missing ConfigMap or key, or a bundle with anything other than PEM certificates, stops every Coder call of the operator for this control plane. `CoderTemplateTest` and the AI resources report `ControlPlaneNotReady` with the error, `CoderProvisioner` reports `OperatorAccessReady=False` with reason `OperatorTLSUnavailable`, a control plane with `spec.licenseSecretRef` reports `LicenseApplied=False` with reason `Pending`, and the aggregated API answers `503`.
+- A certificate that the bundle does not verify fails each call with a certificate error (`tls: failed to verify certificate: x509: ...`).
+- The operator reads the ConfigMap from its cache each time it builds a Coder client, for example once per reconcile and once per aggregated API request. After you change the bundle, new clients use it as soon as the cache has the change. During a CA rotation, put the old and the new CA into the bundle until the serving certificate uses the new CA.
+- An `https://` proxy in `HTTPS_PROXY` cannot carry these calls, and they fail with an error that says so. An `http://` proxy works. Better, exclude the Service host with `NO_PROXY`, for example `NO_PROXY=.svc,.cluster.local`.
+- The operator already reads ConfigMaps in every namespace, so this needs no new RBAC.
+- Existing `CoderProvisioner` keys stay. A key that a provisioner recorded at the plain HTTP URL before you set `operatorAccess` is deleted over HTTPS.
 
 #### Redirects to another origin
 

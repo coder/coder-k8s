@@ -114,10 +114,12 @@ func (p *ControlPlaneClientProvider) ClientForNamespace(ctx context.Context, nam
 		)
 	}
 
-	// With TLS, status.url is HTTPS on the Service name, which certificates
-	// rarely cover: use the internal HTTP URL like the controllers do.
 	parsedCoderURL, err := controlplaneurl.CoderAPIURL(&controlPlane)
-	if err != nil {
+	if errors.Is(err, controlplaneurl.ErrUnavailable) {
+		return nil, apierrors.NewServiceUnavailable(
+			fmt.Sprintf("CoderControlPlane %s/%s: %v", controlPlane.Namespace, controlPlane.Name, err),
+		)
+	} else if err != nil {
 		return nil, fmt.Errorf(
 			"derive Coder API URL from CoderControlPlane %s/%s: %w",
 			controlPlane.Namespace,
@@ -128,9 +130,18 @@ func (p *ControlPlaneClientProvider) ClientForNamespace(ctx context.Context, nam
 	if parsedCoderURL == nil {
 		return nil, fmt.Errorf("assertion failed: parsed CoderControlPlane URL must not be nil")
 	}
+	trust, err := controlplaneurl.OperatorTLS(ctx, p.cpReader, &controlPlane)
+	if errors.Is(err, controlplaneurl.ErrUnavailable) {
+		return nil, apierrors.NewServiceUnavailable(
+			fmt.Sprintf("CoderControlPlane %s/%s: %v", controlPlane.Namespace, controlPlane.Name, err),
+		)
+	} else if err != nil {
+		return nil, fmt.Errorf("read the TLS trust of CoderControlPlane %s/%s: %w", controlPlane.Namespace, controlPlane.Name, err)
+	}
 
 	sdkClient, err := NewSDKClient(Config{
 		CoderURL:       parsedCoderURL,
+		TLS:            trust,
 		SessionToken:   sessionToken,
 		RequestTimeout: p.requestTimeout,
 	})

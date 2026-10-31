@@ -92,6 +92,15 @@ CertsSpec configures additional CA certificate mounts.
 | --- | --- | --- |
 | `secrets` | [CertSecretSelector](#certsecretselector) array | Secrets lists Secret key selectors for CA certificates. Each is mounted at `/etc/ssl/certs/\{name\}.crt`. |
 
+### ConfigMapKeySelector
+
+ConfigMapKeySelector identifies a key in a ConfigMap.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | string | Name is the ConfigMap name. |
+| `key` | string | Key is the key inside the ConfigMap data map. |
+
 ### DatabaseSpec
 
 DatabaseSpec configures the external PostgreSQL database used by Coder.
@@ -171,6 +180,17 @@ OperatorAccessSpec configures the controller-managed coderd operator user.
 | `disabled` | boolean | Disabled turns off creation and management of the `coder-k8s-operator` user and API token. |
 | `generatedTokenSecretName` | string | GeneratedTokenSecretName stores the generated operator API token. The default is `<name>-operator-token`. The Secret must not exist yet, or must have this control plane as its controller owner. |
 
+### OperatorTLSSpec
+
+OperatorTLSSpec configures how operator components verify the Coder
+serving certificate.
++kubebuilder:validation:XValidation:rule="has(self.caBundleRef) || has(self.serverName)",message="tls.operatorAccess needs caBundleRef or serverName"
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `caBundleRef` | [ConfigMapKeySelector](#configmapkeyselector) | CABundleRef names a ConfigMap key in the control plane namespace with the PEM CA certificates that sign the Coder serving certificate. The operator then trusts only these certificates, never the public roots of its image. Without it, the operator trusts only those public roots. |
+| `serverName` | string | ServerName is the DNS name that the Coder serving certificate must hold. The default is the host of status.url, `<name>.<namespace>.svc.cluster.local`. |
+
 ### ProbeSpec
 
 ProbeSpec configures a Kubernetes probe with an enable toggle.
@@ -228,10 +248,12 @@ ServiceSpec defines the Service configuration reconciled by the operator.
 ### TLSSpec
 
 TLSSpec configures Coder built-in TLS.
++kubebuilder:validation:XValidation:rule="!has(self.operatorAccess) || (has(self.secretNames) && size(self.secretNames) > 0)",message="tls.operatorAccess needs tls.secretNames"
 
 | Field | Type | Description |
 | --- | --- | --- |
 | `secretNames` | string array | SecretNames lists TLS secrets to mount for built-in TLS. When non-empty, TLS is enabled on the Coder control plane. |
+| `operatorAccess` | [OperatorTLSSpec](#operatortlsspec) | OperatorAccess makes operator components send their Coder API calls, and the operator token, to status.url over verified HTTPS. Without it, they use plain HTTP on the control plane Service. With it, they never fall back to HTTP: a CA bundle or certificate error stops the call. |
 
 ### TemplateTestsSpec
 

@@ -46,10 +46,9 @@ func InternalHTTPURL(controlPlane *coderv1alpha1.CoderControlPlane) string {
 }
 
 // CoderAPIURL returns the URL for Coder API calls with the operator token.
-// It is status.url when that is HTTP. With TLS, status.url is HTTPS on the
-// Service name, which certificates rarely cover, so it is the internal HTTP
-// URL instead. The operator token then travels over plain HTTP inside the
-// cluster.
+// With spec.tls.operatorAccess, it is status.url, which must be HTTPS. Without
+// it, it is status.url when that is HTTP, and the internal HTTP URL when TLS
+// is on: the operator token then travels over plain HTTP inside the cluster.
 func CoderAPIURL(controlPlane *coderv1alpha1.CoderControlPlane) (*url.URL, error) {
 	if controlPlane == nil {
 		return nil, errors.New("assertion failed: coder control plane must not be nil")
@@ -58,6 +57,12 @@ func CoderAPIURL(controlPlane *coderv1alpha1.CoderControlPlane) (*url.URL, error
 	statusURL, err := url.Parse(strings.TrimSpace(controlPlane.Status.URL))
 	if err != nil {
 		return nil, err
+	}
+	if controlPlane.Spec.TLS.OperatorAccess != nil {
+		if statusURL.Scheme != "https" || statusURL.Host == "" {
+			return nil, fmt.Errorf("%w: status.url %q is not an HTTPS URL", ErrUnavailable, controlPlane.Status.URL)
+		}
+		return statusURL, nil
 	}
 	if statusURL.Scheme != "https" {
 		return statusURL, nil

@@ -71,10 +71,46 @@ type RBACSpec struct {
 }
 
 // TLSSpec configures Coder built-in TLS.
+// +kubebuilder:validation:XValidation:rule="!has(self.operatorAccess) || (has(self.secretNames) && size(self.secretNames) > 0)",message="tls.operatorAccess needs tls.secretNames"
 type TLSSpec struct {
 	// SecretNames lists TLS secrets to mount for built-in TLS.
 	// When non-empty, TLS is enabled on the Coder control plane.
 	SecretNames []string `json:"secretNames,omitempty"`
+	// OperatorAccess makes operator components send their Coder API calls,
+	// and the operator token, to status.url over verified HTTPS. Without it,
+	// they use plain HTTP on the control plane Service. With it, they never
+	// fall back to HTTP: a CA bundle or certificate error stops the call.
+	// +optional
+	OperatorAccess *OperatorTLSSpec `json:"operatorAccess,omitempty"`
+}
+
+// OperatorTLSSpec configures how operator components verify the Coder
+// serving certificate.
+// +kubebuilder:validation:XValidation:rule="has(self.caBundleRef) || has(self.serverName)",message="tls.operatorAccess needs caBundleRef or serverName"
+type OperatorTLSSpec struct {
+	// CABundleRef names a ConfigMap key in the control plane namespace with
+	// the PEM CA certificates that sign the Coder serving certificate. The
+	// operator then trusts only these certificates, never the public roots of
+	// its image. Without it, the operator trusts only those public roots.
+	// +optional
+	CABundleRef *ConfigMapKeySelector `json:"caBundleRef,omitempty"`
+	// ServerName is the DNS name that the Coder serving certificate must
+	// hold. The default is the host of status.url,
+	// `<name>.<namespace>.svc.cluster.local`.
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +optional
+	ServerName string `json:"serverName,omitempty"`
+}
+
+// ConfigMapKeySelector identifies a key in a ConfigMap.
+type ConfigMapKeySelector struct {
+	// Name is the ConfigMap name.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+	// Key is the key inside the ConfigMap data map.
+	// +kubebuilder:validation:MinLength=1
+	Key string `json:"key"`
 }
 
 // ProbeSpec configures a Kubernetes probe with an enable toggle.

@@ -299,7 +299,7 @@ func TestEntitlements_Success(t *testing.T) {
 	defer server.Close()
 
 	client := coderbootstrap.NewSDKClient()
-	entitlements, err := client.Entitlements(context.Background(), server.URL, "session-token")
+	entitlements, err := client.Entitlements(context.Background(), server.URL, nil, "session-token")
 	require.NoError(t, err)
 	require.Equal(t, 1, requestCount)
 
@@ -324,7 +324,7 @@ func TestEntitlements_RefusesCrossOriginRedirect(t *testing.T) {
 	defer coderServer.Close()
 
 	client := coderbootstrap.NewSDKClient()
-	_, err := client.Entitlements(context.Background(), coderServer.URL, "session-token")
+	_, err := client.Entitlements(context.Background(), coderServer.URL, nil, "session-token")
 	require.ErrorContains(t, err, "refusing redirect to a different origin")
 	require.Zero(t, otherOriginRequests.Load(), "the session token must not reach a different origin")
 }
@@ -348,7 +348,7 @@ func TestEntitlements_FollowsSameOriginRedirect(t *testing.T) {
 	defer server.Close()
 
 	client := coderbootstrap.NewSDKClient()
-	_, err := client.Entitlements(context.Background(), server.URL, "session-token")
+	_, err := client.Entitlements(context.Background(), server.URL, nil, "session-token")
 	require.NoError(t, err)
 	require.Equal(t, "session-token", redirectedToken.Load())
 }
@@ -358,11 +358,11 @@ func TestEntitlements_ValidationErrors(t *testing.T) {
 
 	client := coderbootstrap.NewSDKClient()
 
-	_, err := client.Entitlements(context.Background(), "", "session-token")
+	_, err := client.Entitlements(context.Background(), "", nil, "session-token")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "coder URL is required")
 
-	_, err = client.Entitlements(context.Background(), "https://coder.example.com", "")
+	_, err = client.Entitlements(context.Background(), "https://coder.example.com", nil, "")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "session token is required")
 }

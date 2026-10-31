@@ -1,6 +1,7 @@
 package controlplaneurl_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -51,4 +52,28 @@ func TestCoderAPIURL_Errors(t *testing.T) {
 
 	_, err = controlplaneurl.CoderAPIURL(&coderv1alpha1.CoderControlPlane{Status: coderv1alpha1.CoderControlPlaneStatus{URL: "://bad"}})
 	require.ErrorContains(t, err, `parse "://bad"`)
+}
+
+func TestCoderAPIURLWithOperatorTLS(t *testing.T) {
+	t.Parallel()
+
+	controlPlane := &coderv1alpha1.CoderControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: "team-a"},
+		Spec: coderv1alpha1.CoderControlPlaneSpec{
+			TLS: coderv1alpha1.TLSSpec{
+				SecretNames:    []string{"coder-tls"},
+				OperatorAccess: &coderv1alpha1.OperatorTLSSpec{ServerName: "coder.example.com"},
+			},
+		},
+		Status: coderv1alpha1.CoderControlPlaneStatus{URL: "https://coder.team-a.svc.cluster.local:443"},
+	}
+	got, err := controlplaneurl.CoderAPIURL(controlPlane)
+	require.NoError(t, err)
+	require.Equal(t, "https://coder.team-a.svc.cluster.local:443", got.String())
+
+	for _, statusURL := range []string{"", "http://coder.team-a.svc.cluster.local:80", "https:///no-host"} {
+		controlPlane.Status.URL = statusURL
+		got, err = controlplaneurl.CoderAPIURL(controlPlane)
+		require.Truef(t, errors.Is(err, controlplaneurl.ErrUnavailable), "status.url %q: got %v, %v; want no URL, never the plain HTTP one", statusURL, got, err)
+	}
 }

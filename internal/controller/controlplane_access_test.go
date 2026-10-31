@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -15,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/tlstest"
 )
 
 func TestControlPlaneCoderClient(t *testing.T) {
@@ -118,6 +120,29 @@ func TestControlPlaneCoderClient(t *testing.T) {
 			wantMessage: `CoderControlPlane coder: operator token unavailable: the control plane is not the controller owner of Secret "coder-operator-token".`,
 		},
 		{
+			name: "operator TLS with an HTTP status URL",
+			objects: func() []client.Object {
+				cp := readyControlPlane()
+				cp.Spec.TLS = coderv1alpha1.TLSSpec{SecretNames: []string{"coder-tls"}, OperatorAccess: &coderv1alpha1.OperatorTLSSpec{ServerName: "coder.example.com"}}
+				return []client.Object{cp, tokenSecret("token", "secret-token")}
+			},
+			wantReason:  "ControlPlaneNotReady",
+			wantMessage: `CoderControlPlane coder has no usable Coder URL: no verified HTTPS endpoint: status.url "http://coder.ns.svc.cluster.local:80" is not an HTTPS URL`,
+		},
+		{
+			name: "operator TLS CA bundle ConfigMap missing",
+			objects: func() []client.Object {
+				cp := readyControlPlane()
+				cp.Status.URL = "https://coder.ns.svc.cluster.local:443"
+				cp.Spec.TLS = coderv1alpha1.TLSSpec{SecretNames: []string{"coder-tls"}, OperatorAccess: &coderv1alpha1.OperatorTLSSpec{
+					CABundleRef: &coderv1alpha1.ConfigMapKeySelector{Name: "coder-ca", Key: "ca.crt"},
+				}}
+				return []client.Object{cp, tokenSecret("token", "secret-token")}
+			},
+			wantReason:  "ControlPlaneNotReady",
+			wantMessage: `CoderControlPlane coder: no verified HTTPS endpoint: CA bundle ConfigMap "coder-ca" does not exist.`,
+		},
+		{
 			name: "unusable status URL",
 			objects: func() []client.Object {
 				cp := readyControlPlane()
@@ -151,6 +176,32 @@ func TestControlPlaneCoderClient(t *testing.T) {
 		require.Equal(t, "coder", gotCP.Name)
 		require.Equal(t, "http://coder.ns.svc.cluster.local:80", sdk.URL.String())
 		require.Equal(t, "secret-token", sdk.SessionToken())
+	})
+
+	t.Run("ready with operator TLS", func(t *testing.T) {
+		t.Parallel()
+		ca := tlstest.NewCA(t)
+		tokens := make(chan string, 10)
+		server := ca.NewServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tokens <- r.Header.Get("Coder-Session-Token")
+			_, _ = w.Write([]byte(`{}`))
+		}), "127.0.0.1")
+		cp := readyControlPlane()
+		cp.Status.URL = server.URL
+		cp.Spec.TLS = coderv1alpha1.TLSSpec{SecretNames: []string{"coder-tls"}, OperatorAccess: &coderv1alpha1.OperatorTLSSpec{
+			CABundleRef: &coderv1alpha1.ConfigMapKeySelector{Name: "coder-ca", Key: "ca.crt"},
+		}}
+		caConfigMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "coder-ca", Namespace: "ns"}, Data: map[string]string{"ca.crt": string(ca.PEM)}}
+		reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cp, tokenSecret("token", "secret-token"), caConfigMap).Build()
+
+		sdk, _, wait, err := controlPlaneCoderClient(context.Background(), reader, "ns", "coder")
+		require.NoError(t, err)
+		require.Nil(t, wait)
+		require.Equal(t, server.URL, sdk.URL.String())
+		res, err := sdk.Request(context.Background(), http.MethodGet, "/api/v2/buildinfo", nil)
+		require.NoError(t, err, "the client must verify Coder with the CA bundle")
+		require.NoError(t, res.Body.Close())
+		require.Equal(t, "secret-token", <-tokens)
 	})
 
 	t.Run("read error", func(t *testing.T) {

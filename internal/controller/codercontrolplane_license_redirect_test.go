@@ -34,11 +34,11 @@ func TestSDKLicenseClient_RefusesCrossOriginRedirect(t *testing.T) {
 	defer controlPlane.Close()
 
 	ctx := context.Background()
-	_, err := controller.NewSDKLicenseUploader().HasAnyLicense(ctx, controlPlane.URL, "operator-token")
+	_, err := controller.NewSDKLicenseUploader().HasAnyLicense(ctx, controlPlane.URL, nil, "operator-token")
 	require.ErrorContains(t, err, "refusing redirect to a different origin")
-	err = controller.NewSDKLicenseUploader().AddLicense(ctx, controlPlane.URL, "operator-token", "license-jwt")
+	err = controller.NewSDKLicenseUploader().AddLicense(ctx, controlPlane.URL, nil, "operator-token", "license-jwt")
 	require.ErrorContains(t, err, "refusing redirect to a different origin")
-	_, err = controller.NewSDKEntitlementsInspector().Entitlements(ctx, controlPlane.URL, "operator-token")
+	_, err = controller.NewSDKEntitlementsInspector().Entitlements(ctx, controlPlane.URL, nil, "operator-token")
 	require.ErrorContains(t, err, "refusing redirect to a different origin")
 
 	mu.Lock()
@@ -65,7 +65,7 @@ func TestSDKLicenseClient_FollowsSameOriginRedirect(t *testing.T) {
 	}))
 	defer server.Close()
 
-	hasLicense, err := controller.NewSDKLicenseUploader().HasAnyLicense(context.Background(), server.URL, "operator-token")
+	hasLicense, err := controller.NewSDKLicenseUploader().HasAnyLicense(context.Background(), server.URL, nil, "operator-token")
 	require.NoError(t, err)
 	require.False(t, hasLicense)
 	require.Equal(t, "operator-token", redirectedToken)

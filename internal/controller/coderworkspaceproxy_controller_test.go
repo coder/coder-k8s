@@ -17,6 +17,7 @@ import (
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/coderbootstrap"
 	"github.com/coder/coder-k8s/internal/controller"
+	"github.com/coder/coder-k8s/internal/controlplaneurl"
 )
 
 type fakeBootstrapClient struct {
@@ -47,6 +48,7 @@ type fakeBootstrapClient struct {
 
 type entitlementsRequest struct {
 	CoderURL     string
+	CoderTLS     *controlplaneurl.TLS
 	SessionToken string
 }
 
@@ -92,10 +94,11 @@ func (f *fakeBootstrapClient) ProvisionerKeyByID(_ context.Context, req coderboo
 	return f.provisionerKeyByID(req), nil
 }
 
-func (f *fakeBootstrapClient) Entitlements(_ context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error) {
+func (f *fakeBootstrapClient) Entitlements(_ context.Context, coderURL string, coderTLS *controlplaneurl.TLS, sessionToken string) (codersdk.Entitlements, error) {
 	f.entitlementsCalls++
 	f.entitlementsRequests = append(f.entitlementsRequests, entitlementsRequest{
 		CoderURL:     coderURL,
+		CoderTLS:     coderTLS,
 		SessionToken: sessionToken,
 	})
 	if f.entitlementsErr != nil {
