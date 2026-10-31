@@ -1664,10 +1664,7 @@ func (r *CoderControlPlaneReconciler) controlPlaneSDKEndpoint(
 	ctx context.Context,
 	coderControlPlane *coderv1alpha1.CoderControlPlane,
 ) (string, *controlplaneurl.TLS, error) {
-	if coderControlPlane.Spec.TLS.OperatorAccess == nil {
-		return controlplaneurl.InternalHTTPURL(coderControlPlane), nil, nil
-	}
-	coderURL, err := controlplaneurl.CoderAPIURL(coderControlPlane)
+	coderURL, err := controlPlaneSDKURL(coderControlPlane)
 	if err != nil {
 		return "", nil, err
 	}
@@ -1675,7 +1672,19 @@ func (r *CoderControlPlaneReconciler) controlPlaneSDKEndpoint(
 	if err != nil {
 		return "", nil, err
 	}
-	return coderURL.String(), coderTLS, nil
+	return coderURL, coderTLS, nil
+}
+
+// controlPlaneSDKURL is the URL of controlPlaneSDKEndpoint.
+func controlPlaneSDKURL(coderControlPlane *coderv1alpha1.CoderControlPlane) (string, error) {
+	if coderControlPlane.Spec.TLS.OperatorAccess == nil {
+		return controlplaneurl.InternalHTTPURL(coderControlPlane), nil
+	}
+	coderURL, err := controlplaneurl.CoderAPIURL(coderControlPlane)
+	if err != nil {
+		return "", err
+	}
+	return coderURL.String(), nil
 }
 
 func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
@@ -2172,7 +2181,10 @@ func (r *CoderControlPlaneReconciler) reconcileEntitlements(
 		nextStatus.ExternalProvisionerDaemonsEntitlement = coderv1alpha1.CoderControlPlaneEntitlementUnknown
 	}
 
-	if err := r.reconcileOperatorTLSTrust(ctx, coderControlPlane, nextStatus); err != nil {
+	// One read of the trust serves both the condition and the call, so that
+	// a CA rotation between two reads cannot keep the result of the old trust.
+	coderTLS, trustUnavailable, err := r.reconcileOperatorTLSTrust(ctx, coderControlPlane, nextStatus)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -2181,7 +2193,10 @@ func (r *CoderControlPlaneReconciler) reconcileEntitlements(
 		nextStatus.OperatorTokenSecretRef == nil {
 		return ctrl.Result{}, nil
 	}
-	controlPlaneURL, coderTLS, err := r.controlPlaneSDKEndpoint(ctx, coderControlPlane)
+	if trustUnavailable {
+		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+	}
+	controlPlaneURL, err := controlPlaneSDKURL(coderControlPlane)
 	if errors.Is(err, controlplaneurl.ErrUnavailable) {
 		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
 	} else if err != nil {
@@ -3337,6 +3352,9 @@ func (r *CoderControlPlaneReconciler) reconcileStatusForGeneration(
 		}
 
 		mergedStatus := mergeControlPlaneStatusDelta(baseStatus, nextStatus, latest.Status)
+		if err := keepCurrentOperatorTLSCondition(ctx, statusReader, latest, &mergedStatus); err != nil {
+			return err
+		}
 		if equality.Semantic.DeepEqual(latest.Status, mergedStatus) {
 			coderControlPlane.Status = latest.Status
 			return nil
