@@ -255,6 +255,11 @@ members_json
 jq -e --slurpfile c "$WORK/owner-workspaces.json" '[.items[] | select(.metadata.deletionTimestamp == null) | .status.workspaceID] | sort
   == ([$c[0].workspaces[] | select(.name | startswith("kwp-")) | .id] | sort) and length == 5' "$WORK/members.json" >/dev/null ||
   fail "the owner's live kwp- workspaces are not exactly the 5 members' workspaces"
+# A second create of a member that Coder then deleted would leave a deleted workspace with that member's name.
+coder_api GET "/api/v2/workspaces?q=owner:$OWNER%20deleted:true" >"$WORK/owner-deleted.json"
+jq -e --slurpfile m "$WORK/members.json" '[$m[0].items[].status.workspaceName] as $names |
+  [.workspaces[] | select(.name as $n | $names | index($n))] | length == 0' "$WORK/owner-deleted.json" >/dev/null ||
+  fail "a member's workspace name also has a deleted workspace: $(jq -c '[.workspaces[].name]' "$WORK/owner-deleted.json")"
 w=$(coder_api GET "/api/v2/workspaces/$BOUND_WS") || fail "cannot read the bound workspace"
 [[ $(deadline_of "$w") == "$BIND_DEADLINE" ]] || fail "the bound deadline changed after the bind extension"
 phase P5

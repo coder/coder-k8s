@@ -80,7 +80,7 @@ spec:
   poolName: ci-runners
 ```
 
-A claim with a ready workspace in its pool is `Bound` and `Ready` at once. In the Kind end-to-end test, that took about 1 s. `status.ownerName` and `status.workspaceName` name the workspace. When the workspace has an autostop deadline, the operator moves it once at the bind, to the template's default TTL from now, at least 30 minutes. After that, Coder's normal autostop applies. One claim is one workspace, and a claim never binds a second time. Delete the claim when you are done: that deletes its workspace.
+A claim with a ready workspace in its pool is `Bound` and `Ready` at once. In the Kind end-to-end test, that took about 1 s. `status.ownerName` and `status.workspaceName` name the workspace. When the workspace has an autostop deadline, the operator moves it once at the bind, to the template's default TTL from now, at least 30 minutes. A workspace's max deadline (from a Premium autostop requirement) can shorten or prevent that extension, and so can a refusal by Coder: the operator then keeps the deadline and does not try again. After that, Coder's normal autostop applies. One claim is one workspace, and a claim never binds a second time. Delete the claim when you are done: that deletes its workspace.
 
 ## 5. Grant access
 
