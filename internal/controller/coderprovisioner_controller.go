@@ -242,8 +242,9 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	// The conditions go with the next status write, so that a replacement
-	// below can update them first.
+	// A dropped record is written at once. A change of the reports alone
+	// waits for the next status write, so that a replacement below can
+	// update them first.
 	if !slices.Equal(provisioner.Status.PendingKeys, statusSnapshot.PendingKeys) {
 		if err := r.Status().Update(ctx, provisioner); err != nil {
 			return ctrl.Result{}, fmt.Errorf("record deleted provisioner keys of earlier targets in status: %w", err)
