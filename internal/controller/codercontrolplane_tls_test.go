@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
@@ -139,6 +140,17 @@ func TestReconcile_LicenseAndEntitlementsUseOperatorTLS(t *testing.T) {
 	require.NotNil(t, condition)
 	require.Equal(t, metav1.ConditionFalse, condition.Status)
 	require.Contains(t, condition.Message, `CA bundle ConfigMap "coder-ca" does not exist`)
+	requireOperatorTLSReady := func(status metav1.ConditionStatus, reason, message string) {
+		t.Helper()
+		reconciled := &coderv1alpha1.CoderControlPlane{}
+		require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, reconciled))
+		condition := meta.FindStatusCondition(reconciled.Status.Conditions, coderv1alpha1.CoderControlPlaneConditionOperatorTLSReady)
+		require.NotNil(t, condition)
+		require.Equal(t, status, condition.Status)
+		require.Equal(t, reason, condition.Reason)
+		require.Contains(t, condition.Message, message)
+	}
+	requireOperatorTLSReady(metav1.ConditionFalse, "CABundleUnavailable", `CA bundle ConfigMap "coder-ca" does not exist`)
 
 	require.NoError(t, k8sClient.Create(ctx, &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "coder-ca", Namespace: namespace},
@@ -154,6 +166,41 @@ func TestReconcile_LicenseAndEntitlementsUseOperatorTLS(t *testing.T) {
 		require.Equal(t, statusURL, req.coderURL)
 		require.NotNil(t, req.coderTLS)
 	}
+	requireOperatorTLSReady(metav1.ConditionTrue, "Verified", statusURL)
+
+	inspector.err = fmt.Errorf("query coder entitlements: %w", &tls.CertificateVerificationError{Err: errors.New("x509: certificate signed by unknown authority")})
+	reconcile()
+	requireOperatorTLSReady(metav1.ConditionFalse, "CertificateNotVerified", "x509: certificate signed by unknown authority")
+
+	inspector.err = errors.New("connection refused")
+	reconcile()
+	requireOperatorTLSReady(metav1.ConditionFalse, "CertificateNotVerified", "x509: certificate signed by unknown authority")
+
+	// A result for the old CA bundle must not stay after a rotation.
+	inspector.err = nil
+	reconcile()
+	requireOperatorTLSReady(metav1.ConditionTrue, "Verified", statusURL)
+	caConfigMap := &corev1.ConfigMap{}
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: "coder-ca", Namespace: namespace}, caConfigMap))
+	caConfigMap.Data["ca.crt"] = string(tlstest.NewCA(t).PEM)
+	require.NoError(t, k8sClient.Update(ctx, caConfigMap))
+	inspector.err = errors.New("connection refused")
+	require.Eventually(t, func() bool {
+		reconcile()
+		reconciled := &coderv1alpha1.CoderControlPlane{}
+		require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, reconciled))
+		condition := meta.FindStatusCondition(reconciled.Status.Conditions, coderv1alpha1.CoderControlPlaneConditionOperatorTLSReady)
+		return condition != nil && condition.Reason == "Pending"
+	}, 10*time.Second, 100*time.Millisecond, "a rotated CA bundle without a verified call must be Pending, not Verified")
+	requireOperatorTLSReady(metav1.ConditionUnknown, "Pending", "has not called Coder with it yet")
+
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, cp))
+	cp.Spec.TLS.OperatorAccess = nil
+	require.NoError(t, k8sClient.Update(ctx, cp))
+	reconcile()
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}, reconciled))
+	require.Nil(t, meta.FindStatusCondition(reconciled.Status.Conditions, coderv1alpha1.CoderControlPlaneConditionOperatorTLSReady),
+		"without operatorAccess, the condition goes away")
 }
 
 func TestSDKLicenseClientsVerifyCoderTLS(t *testing.T) {

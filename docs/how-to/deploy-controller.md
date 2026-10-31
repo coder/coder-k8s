@@ -217,6 +217,22 @@ With `operatorAccess`, the operator never sends the operator token over plain HT
 
 - A missing ConfigMap or key, or a bundle with anything other than PEM certificates, stops every Coder call of the operator for this control plane. `CoderTemplateTest` and the AI resources report `ControlPlaneNotReady` with the error, `CoderProvisioner` reports `OperatorAccessReady=False` with reason `OperatorTLSUnavailable`, a control plane with `spec.licenseSecretRef` reports `LicenseApplied=False` with reason `Pending`, and the aggregated API answers `503`.
 - A certificate that the bundle does not verify fails each call with a certificate error (`tls: failed to verify certificate: x509: ...`).
+- The control plane reports the state in its `OperatorTLSReady` condition, which it sets only while `operatorAccess` is set:
+
+| Status | Reason | Meaning |
+| --- | --- | --- |
+| `True` | `Verified` | The last entitlements call verified the Coder certificate. |
+| `Unknown` | `Pending` | The CA bundle is valid, and the operator has not verified Coder with it yet, for example right after a CA rotation. |
+| `False` | `CABundleUnavailable` | The ConfigMap or key is missing, or the bundle is invalid. The message says which. |
+| `False` | `CertificateNotVerified` | Coder served a certificate that the bundle does not verify. The message has the `x509` error. |
+
+Except for `CABundleUnavailable`, which has no valid bundle to name, each message ends with `(trust <id>)`: a short hash of the CA bundle, the server name and `status.url` that the result is about. The operator never writes a result for a trust other than the one it reads at the time of the write.
+
+```bash
+kubectl -n coder get codercontrolplane coder \
+  -o jsonpath='{range .status.conditions[?(@.type=="OperatorTLSReady")]}{.status} {.reason}: {.message}{"\n"}{end}'
+```
+
 - The operator reads the ConfigMap from its cache each time it builds a Coder client, for example once per reconcile and once per aggregated API request. After you change the bundle, new clients use it as soon as the cache has the change. During a CA rotation, put the old and the new CA into the bundle until the serving certificate uses the new CA.
 - An `https://` proxy in `HTTPS_PROXY` cannot carry these calls, and they fail with an error that says so. An `http://` proxy works. Better, exclude the Service host with `NO_PROXY`, for example `NO_PROXY=.svc,.cluster.local`.
 - The operator already reads ConfigMaps in every namespace, so this needs no new RBAC.

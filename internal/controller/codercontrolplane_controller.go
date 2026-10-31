@@ -1664,10 +1664,7 @@ func (r *CoderControlPlaneReconciler) controlPlaneSDKEndpoint(
 	ctx context.Context,
 	coderControlPlane *coderv1alpha1.CoderControlPlane,
 ) (string, *controlplaneurl.TLS, error) {
-	if coderControlPlane.Spec.TLS.OperatorAccess == nil {
-		return controlplaneurl.InternalHTTPURL(coderControlPlane), nil, nil
-	}
-	coderURL, err := controlplaneurl.CoderAPIURL(coderControlPlane)
+	coderURL, err := controlPlaneSDKURL(coderControlPlane)
 	if err != nil {
 		return "", nil, err
 	}
@@ -1675,7 +1672,19 @@ func (r *CoderControlPlaneReconciler) controlPlaneSDKEndpoint(
 	if err != nil {
 		return "", nil, err
 	}
-	return coderURL.String(), coderTLS, nil
+	return coderURL, coderTLS, nil
+}
+
+// controlPlaneSDKURL is the URL of controlPlaneSDKEndpoint.
+func controlPlaneSDKURL(coderControlPlane *coderv1alpha1.CoderControlPlane) (string, error) {
+	if coderControlPlane.Spec.TLS.OperatorAccess == nil {
+		return controlplaneurl.InternalHTTPURL(coderControlPlane), nil
+	}
+	coderURL, err := controlplaneurl.CoderAPIURL(coderControlPlane)
+	if err != nil {
+		return "", err
+	}
+	return coderURL.String(), nil
 }
 
 func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
@@ -2172,12 +2181,22 @@ func (r *CoderControlPlaneReconciler) reconcileEntitlements(
 		nextStatus.ExternalProvisionerDaemonsEntitlement = coderv1alpha1.CoderControlPlaneEntitlementUnknown
 	}
 
+	// One read of the trust serves both the condition and the call, so that
+	// a CA rotation between two reads cannot keep the result of the old trust.
+	coderTLS, trustUnavailable, err := r.reconcileOperatorTLSTrust(ctx, coderControlPlane, nextStatus)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if nextStatus.Phase != coderv1alpha1.CoderControlPlanePhaseReady ||
 		!nextStatus.OperatorAccessReady ||
 		nextStatus.OperatorTokenSecretRef == nil {
 		return ctrl.Result{}, nil
 	}
-	controlPlaneURL, coderTLS, err := r.controlPlaneSDKEndpoint(ctx, coderControlPlane)
+	if trustUnavailable {
+		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+	}
+	controlPlaneURL, err := controlPlaneSDKURL(coderControlPlane)
 	if errors.Is(err, controlplaneurl.ErrUnavailable) {
 		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
 	} else if err != nil {
@@ -2204,6 +2223,11 @@ func (r *CoderControlPlaneReconciler) reconcileEntitlements(
 	}
 
 	entitlements, err := r.EntitlementsInspector.Entitlements(ctx, controlPlaneURL, coderTLS, operatorToken)
+	if coderTLS != nil {
+		if conditionErr := recordOperatorTLSCall(coderControlPlane, nextStatus, controlPlaneURL, coderTLS, err); conditionErr != nil {
+			return ctrl.Result{}, conditionErr
+		}
+	}
 	if err != nil {
 		var sdkErr *codersdk.Error
 		if errors.As(err, &sdkErr) {
@@ -3328,6 +3352,9 @@ func (r *CoderControlPlaneReconciler) reconcileStatusForGeneration(
 		}
 
 		mergedStatus := mergeControlPlaneStatusDelta(baseStatus, nextStatus, latest.Status)
+		if err := keepCurrentOperatorTLSCondition(ctx, statusReader, latest, &mergedStatus); err != nil {
+			return err
+		}
 		if equality.Semantic.DeepEqual(latest.Status, mergedStatus) {
 			coderControlPlane.Status = latest.Status
 			return nil
@@ -3378,6 +3405,14 @@ func (r *CoderControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),
 		&coderv1alpha1.CoderControlPlane{},
+		caBundleConfigMapNameFieldIndex,
+		indexByCABundleConfigMapName,
+	); err != nil {
+		return fmt.Errorf("index coder control planes by CA bundle ConfigMap name: %w", err)
+	}
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&coderv1alpha1.CoderControlPlane{},
 		envFromSecretNameFieldIndex,
 		indexByEnvFromSecretName,
 	); err != nil {
@@ -3408,6 +3443,10 @@ func (r *CoderControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(r.reconcileRequestsForEnvFromConfigMap),
+		).
+		Watches(
+			&corev1.ConfigMap{},
+			handler.EnqueueRequestsFromMapFunc(r.reconcileRequestsForCABundleConfigMap),
 		).
 		// A control plane that is being deleted waits for these (#353).
 		Watches(&coderv1alpha1.CoderAIGatewayKey{}, handler.EnqueueRequestsFromMapFunc(requestForDependentControlPlane),
