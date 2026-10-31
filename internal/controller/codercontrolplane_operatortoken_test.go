@@ -647,6 +647,43 @@ func TestReconcile_OperatorAccess_RecordsTokenBeforeCreate_StaleCache(t *testing
 	require.Equal(t, cp.Status.OperatorTokenDatabaseHash, recorded.Status.OperatorTokenDatabaseHash)
 }
 
+// TestReconcile_OperatorAccess_SecretRenameKeepsPublishedRef checks that a new
+// spec.operatorAccess.generatedTokenSecretName reaches status only together
+// with its token. Until then consumers keep the published Secret, also when the
+// operator stops after the create.
+func TestReconcile_OperatorAccess_SecretRenameKeepsPublishedRef(t *testing.T) {
+	ctx := context.Background()
+	cp, provisioner, consumer := publishOperatorToken(ctx, t, "operator-token-secret-rename", losesOwnerPostgresURL)
+	updateControlPlaneSpec(ctx, t, cp, func(spec *coderv1alpha1.CoderControlPlaneSpec) {
+		spec.OperatorAccess.GeneratedTokenSecretName = "renamed-operator-token"
+	})
+	base, err := ctrlclient.NewWithWatch(cfg, ctrlclient.Options{Scheme: scheme})
+	require.NoError(t, err)
+	stopAfterCreate := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c ctrlclient.Client, sub string, obj ctrlclient.Object, opts ...ctrlclient.SubResourceUpdateOption) error {
+			if provisioner.calls > 1 {
+				return errors.New("status update unavailable")
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	})
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}
+	r := &controller.CoderControlPlaneReconciler{Client: stopAfterCreate, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	_, err = r.Reconcile(ctx, request)
+	require.ErrorContains(t, err, "status update unavailable")
+	require.Equal(t, 2, provisioner.calls)
+	require.Equal(t, cp.Status.OperatorTokenSecretRef, getControlPlane(t, cp).Status.OperatorTokenSecretRef,
+		"the published reference stays until the new Secret holds a token")
+	sdk, err := consumer.ClientForNamespace(ctx, cp.Namespace)
+	require.NoError(t, err)
+	require.Equal(t, "operator-token-published", sdk.SessionToken())
+
+	restarted := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
+	_, err = restarted.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.Equal(t, "renamed-operator-token", getControlPlane(t, cp).Status.OperatorTokenSecretRef.Name)
+}
+
 // TestReconcile_OperatorAccess_ErrorKeepsTokenRecord checks that a failed
 // token check turns operator access off but keeps the record of the published
 // token. So when someone replaces the Secret afterwards, the operator still

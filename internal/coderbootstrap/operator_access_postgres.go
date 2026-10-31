@@ -42,6 +42,11 @@ type RevokeOperatorTokenRequest struct {
 	Token string
 }
 
+// ErrOperatorTokenNotFound means that no operator token has the value in
+// RevokeOperatorTokenRequest.Token. The delete then proves nothing about the
+// token that the value was meant to name.
+var ErrOperatorTokenNotFound = errors.New("no operator token has this value")
+
 // OperatorAccessProvisioner provisions and revokes operator access credentials
 // for coderd.
 type OperatorAccessProvisioner interface {
