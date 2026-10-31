@@ -249,7 +249,7 @@ A write that the server knows did not reach Coder keeps the `500` that says that
 
 The server cannot tell other transport errors without a status apart from a connection that broke after the send. It treats them as uncertain and returns the `504`.
 
-A workspace create with `spec.running=false` creates the workspace and then requests a stop build. When the stop request fails, or its answer has no build ID or another transition (for example `201` with `{}`), the server re-reads the workspace and returns its latest build. If the re-read fails, the result depends on the stop request:
+A workspace create with `spec.running=false` creates the workspace and then requests a stop build. When the stop request fails, or its answer has no build ID or another transition (for example `201` with `{}`), the server re-reads the workspace and returns its latest build. The server uses the re-read only if its latest build has an ID, a status, and the start or stop transition. If the re-read fails or has no such build, the result depends on the stop request:
 
 - A stop that can have reached Coder (an uncertain answer from the list above, or a timeout) returns `504` with a message that says that the result is uncertain. The workspace exists in Coder, but the server cannot say whether it is stopping. Re-read it with `kubectl get` before you retry. A retry of the create gets `409 AlreadyExists`. To stop the workspace, update `spec.running`.
 - A stop that Coder refused, or that did not reach Coder, leaves the start build. The create succeeds and returns that build. Retry the stop with an update.

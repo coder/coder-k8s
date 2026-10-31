@@ -487,14 +487,16 @@ func (s *WorkspaceStorage) Create(
 		} else {
 			// Without the stop build in the answer, Coder can still have queued the stop.
 			current, readErr := sdk.Workspace(ctx, createdWorkspace.ID)
+			latest := current.LatestBuild
+			if readErr == nil && (latest.ID == uuid.Nil || latest.Status == "" ||
+				(latest.Transition != codersdk.WorkspaceTransitionStart && latest.Transition != codersdk.WorkspaceTransitionStop)) {
+				readErr = errors.New("the re-read of the workspace has no start or stop build with a status")
+			}
 			switch {
-			case readErr == nil && current.LatestBuild.ID != uuid.Nil:
-				createdWorkspace.LatestBuild = current.LatestBuild
+			case readErr == nil:
+				createdWorkspace.LatestBuild = latest
 			case stopErr == nil || apierrors.IsTimeout(coder.MapCoderWriteError(stopErr, coder.WriteCreate, aggregationv1alpha1.Resource("coderworkspaces"), workspaceObj.Name)):
 				// The start build of the create answer can be stale, so it is not a result.
-				if readErr == nil {
-					readErr = errors.New("the re-read of the workspace has no latest build")
-				}
 				return nil, coder.UncertainWriteErrorFrom(readErr, coder.WriteCreate, aggregationv1alpha1.Resource("coderworkspaces"), workspaceObj.Name,
 					"no confirmation of its stop build from the Coder API after the workspace was created")
 			}
