@@ -323,6 +323,7 @@ member_gone() { absent coderworkspacepoolmember "$1"; }
 k -n "$NS" delete coderworkspaceclaim "$CLAIM" --wait=false >/dev/null
 wait_until "member $BOUND of the deleted claim gone" member_gone "$BOUND"
 deleted_in_coder "$BOUND_WS" || fail "the claim's workspace $BOUND_WS is not deleted in Coder"
+log "claim delete: member $BOUND gone, workspace deleted in Coder"
 KEPT=$(jq -er --arg w "$KEPT_WS" '.items[] | select(.status.workspaceID == $w) | .metadata.name' "$WORK/members.json")
 k -n "$NS" delete coderworkspacepool "$POOL" --wait=false >/dev/null
 wait_until "unclaimed member $KEPT of the deleted pool gone" member_gone "$KEPT"
@@ -330,9 +331,11 @@ deleted_in_coder "$KEPT_WS" || fail "the unclaimed workspace $KEPT_WS is not del
 k -n "$NS" get coderworkspacepoolmember "$USED" -o json >"$WORK/used.json" || fail "the used member $USED went with its pool"
 jq -e '.metadata.deletionTimestamp == null' "$WORK/used.json" >/dev/null || fail "the pool delete deletes the used member $USED"
 live_in_coder "$USED_WS" || fail "the used workspace $USED_WS is not live after the pool delete"
+log "pool delete: member $KEPT gone, workspace deleted in Coder; used member $USED and its workspace stay"
 k -n "$NS" delete coderworkspacepoolmember "$USED" --wait=false >/dev/null
 wait_until "the used member $USED gone" member_gone "$USED"
 deleted_in_coder "$USED_WS" || fail "deleting the used member $USED did not delete workspace $USED_WS"
+log "used member delete: member $USED gone, workspace deleted in Coder"
 k apply --dry-run=server -f "$WORK/pool-manifest.json" >"$WORK/dry-run.out" 2>&1 ||
   fail "server dry run of the pool failed: $(cat "$WORK/dry-run.out")"
 grep -q 'server dry run' "$WORK/dry-run.out" || fail "kubectl did not report a server dry run: $(cat "$WORK/dry-run.out")"
