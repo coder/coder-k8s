@@ -523,10 +523,24 @@ func TestWorkspaceCreateStoppedStopBuildAnswer(t *testing.T) {
 	}
 }
 
+// latestBuildOnlyID sends Coder's workspace with a latest build that has only its ID.
+func latestBuildOnlyID(t *testing.T, w http.ResponseWriter, coderAnswer *httptest.ResponseRecorder) {
+	var object map[string]any
+	if err := json.Unmarshal(coderAnswer.Body.Bytes(), &object); err != nil {
+		t.Fatalf("decode Coder answer: %v", err)
+	}
+	object["latest_build"] = map[string]any{"id": uuid.NewString()}
+	body, err := json.Marshal(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonAnswer(coderAnswer.Code, string(body))(t, w, coderAnswer)
+}
+
 // TestWorkspaceCreateStoppedFailedReRead checks a create with spec.running=false whose stop build
-// is not confirmed and whose re-read of the workspace fails. A stop that can have reached Coder
-// returns the uncertain 504 and no object, never the start build as a success. A stop that Coder
-// refused leaves the start build, so the create succeeds with it.
+// is not confirmed and whose re-read of the workspace fails or has no usable latest build. A stop
+// that can have reached Coder returns the uncertain 504 and no object, never the start build as a
+// success. A stop that Coder refused leaves the start build, so the create succeeds with it.
 func TestWorkspaceCreateStoppedFailedReRead(t *testing.T) {
 	t.Parallel()
 
@@ -534,14 +548,15 @@ func TestWorkspaceCreateStoppedFailedReRead(t *testing.T) {
 		name          string
 		stopAnswer    brokenAnswer
 		forwarded     bool
-		readStatus    int
+		reRead        brokenAnswer
 		wantUncertain bool
 	}{
-		{"201 with an empty object, re-read 502", jsonAnswer(http.StatusCreated, `{}`), true, http.StatusBadGateway, true},
-		{"201 with an empty object, re-read 404", jsonAnswer(http.StatusCreated, `{}`), true, http.StatusNotFound, true},
-		{"proxy 502, re-read 502", gatewayPage(http.StatusBadGateway), true, http.StatusBadGateway, true},
-		{"proxy 502, re-read 404", gatewayPage(http.StatusBadGateway), true, http.StatusNotFound, true},
-		{"Coder 400 without the stop, re-read 502", jsonAnswer(http.StatusBadRequest, `{"message":"bad stop"}`), false, http.StatusBadGateway, false},
+		{"201 with an empty object, re-read 502", jsonAnswer(http.StatusCreated, `{}`), true, gatewayPage(http.StatusBadGateway), true},
+		{"201 with an empty object, re-read 404", jsonAnswer(http.StatusCreated, `{}`), true, jsonAnswer(http.StatusNotFound, `{"message":"not found"}`), true},
+		{"201 with an empty object, re-read with only a build ID", jsonAnswer(http.StatusCreated, `{}`), true, latestBuildOnlyID, true},
+		{"proxy 502, re-read 502", gatewayPage(http.StatusBadGateway), true, gatewayPage(http.StatusBadGateway), true},
+		{"proxy 502, re-read 404", gatewayPage(http.StatusBadGateway), true, jsonAnswer(http.StatusNotFound, `{"message":"not found"}`), true},
+		{"Coder 400 without the stop, re-read 502", jsonAnswer(http.StatusBadRequest, `{"message":"bad stop"}`), false, gatewayPage(http.StatusBadGateway), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -563,7 +578,9 @@ func TestWorkspaceCreateStoppedFailedReRead(t *testing.T) {
 				}
 				if stops.Load() > 0 && r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v2/workspaces/") {
 					reReads.Add(1)
-					writeCoderError(w, tc.readStatus, "proxy cannot read the workspace")
+					recorder := httptest.NewRecorder()
+					coderServer.Config.Handler.ServeHTTP(recorder, r)
+					tc.reRead(t, w, recorder)
 					return
 				}
 				coderServer.Config.Handler.ServeHTTP(w, r)
