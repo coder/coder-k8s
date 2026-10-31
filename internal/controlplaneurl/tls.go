@@ -43,11 +43,18 @@ func NewTLS(caBundle []byte, serverName string) (*TLS, error) {
 func parseCABundle(caBundle []byte) (*x509.CertPool, error) {
 	pool := x509.NewCertPool()
 	count := 0
+	beginMarker := []byte("-----BEGIN ")
 	for rest := bytes.TrimSpace(caBundle); len(rest) > 0; {
-		// pem.Decode skips data before a block, so check that a block starts here.
+		// pem.Decode skips data before a block and blocks that do not decode,
+		// so check that it decoded the block that starts here.
 		var block *pem.Block
-		if bytes.HasPrefix(rest, []byte("-----BEGIN ")) {
-			block, rest = pem.Decode(rest)
+		if bytes.HasPrefix(rest, beginMarker) {
+			var next []byte
+			block, next = pem.Decode(rest)
+			if bytes.Count(rest[:len(rest)-len(next)], beginMarker) != 1 {
+				block = nil
+			}
+			rest = next
 		}
 		if block == nil {
 			if count == 0 {

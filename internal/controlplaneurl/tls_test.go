@@ -33,6 +33,8 @@ func TestNewTLS(t *testing.T) {
 		{name: "not PEM", caBundle: "not a certificate", want: "the bundle does not start with a PEM block"},
 		{name: "text before a valid certificate", caBundle: "MIIB-a-cut-off-certificate\n" + string(ca.PEM), want: "the bundle does not start with a PEM block"},
 		{name: "text between valid certificates", caBundle: string(ca.PEM) + "stray text\n" + string(ca.PEM), want: "the data after certificate 1 is not a PEM block"},
+		{name: "undecodable block before a valid certificate", caBundle: "-----BEGIN CERTIFICATE-----\n!!!\n-----END CERTIFICATE-----\n" + string(ca.PEM), want: "the bundle does not start with a PEM block"},
+		{name: "undecodable block between valid certificates", caBundle: string(ca.PEM) + "-----BEGIN CERTIFICATE-----\n!!!\n-----END CERTIFICATE-----\n" + string(ca.PEM), want: "the data after certificate 1 is not a PEM block"},
 		{name: "private key block", caBundle: string(ca.PEM) + "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n", want: `PEM block 2 is "PRIVATE KEY", not a CERTIFICATE`},
 		{name: "broken certificate", caBundle: "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n", want: "parse certificate 1"},
 		{name: "cut-off certificate after a valid one", caBundle: string(ca.PEM) + string(truncated), want: "the data after certificate 1 is not a PEM block"},
