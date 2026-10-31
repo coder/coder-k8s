@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Offline tests for hack/e2e-workspace-pool.sh (#153). kubectl and curl are stubs on PATH over one fake cluster and
 # Coder in JSON files, with a fake pool controller that runs one pass per stub call. Nothing touches a cluster. The
-# pass scenario runs phases P1 to P8. Each other scenario breaks one behavior, and the driver must fail with the
+# pass scenario runs phases P1 to P9. Each other scenario breaks one behavior, and the driver must fail with the
 # check that covers it. No scenario may print a secret outside its mask command or pass one in argv.
 # shellcheck disable=SC2016 # jq programs are single-quoted on purpose.
 set -euo pipefail
@@ -18,9 +18,10 @@ cat >"$STUBS/fake.sh" <<'STUB'
 # shellcheck shell=bash
 S=$STUB_STATE
 shopt -s nullglob
-mkdir -p "$S/m" "$S/ws"
+mkdir -p "$S/m" "$S/ws" "$S/acl"
 OWNER_UUID=00000001-0000-4000-8000-000000000001 ORG_UUID=00000002-0000-4000-8000-000000000002
 TPL_UUID=00000003-0000-4000-8000-000000000003 POOL_UID=00000004-0000-4000-8000-000000000004
+SHARE_UUID=00000005-0000-4000-8000-000000000005
 iso() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
 edit() { local f=$1 && shift && jq "$@" "$f" >"$f.tmp" && mv "$f.tmp" "$f"; } # <file> <jq args...>
 slurp() { local f=("$S/$1"/*.json); if ((${#f[@]})); then jq -s . "${f[@]}"; else echo '[]'; fi; } # <m|ws>: one array
@@ -60,6 +61,15 @@ reconcile() { # one pass of the fake pool controller
       [[ $SCENARIO == pool-delete-takes-used ]]; }; then member_delete "$m"; fi
   done
   [[ -f $pool ]] || return 0
+  local groups sharing
+  groups=$(cat "$S/groups" 2>/dev/null || echo '[]') sharing=$(cat "$S/sharing" 2>/dev/null || echo everyone)
+  if jq -e '.spec.claims.mode == "Share"' "$pool" >/dev/null; then # the share policy at resolve
+    if [[ $groups == "[]" && $SCENARIO != share-policy-ignored ]]; then
+      edit "$pool" '.status = {reason: "ShareNotAllowed", message: "The control plane lists no shareGroupIDs."}' && return 0
+    elif [[ $sharing != everyone && $SCENARIO != share-none-ignored ]]; then
+      edit "$pool" --arg v "$sharing" '.status = {reason: "ShareNotAllowed", message: ("shareable_workspace_owners " + $v)}' && return 0
+    fi
+  fi
   if [[ ! -f $S/allowed ]]; then
     reason=OwnerNotAllowed
     [[ $SCENARIO == members-before-allow ]] || { edit "$pool" '.status = {reason: "OwnerNotAllowed"}' && return 0; }
@@ -72,7 +82,11 @@ reconcile() { # one pass of the fake pool controller
     fi
   done
   rm -f "$S/usage"
-  if [[ -f $S/claim.json ]] && jq -e '.status.phase != "Bound"' "$S/claim.json" >/dev/null; then
+  if [[ -f $S/claim.json ]] && jq -e '.spec.share != null and .status.phase != "Bound"' "$S/claim.json" >/dev/null &&
+    [[ $SCENARIO != share-group-unchecked ]] && ! jq -e --arg o "$ORG_UUID" 'index($o)' <<<"$groups" >/dev/null; then
+    edit "$S/claim.json" --argjson g "$groups" '.status = {phase: "Pending", reason: "ShareUserNotEligible", message: ("Group " +
+      ($g | join(", ")) + " could not be read: Coder answered 403: Template RBAC is a Premium feature. Contact sales!")}'
+  elif [[ -f $S/claim.json ]] && jq -e '.status.phase != "Bound"' "$S/claim.json" >/dev/null; then
     for m in "$S"/m/*.json; do
       unused "$m" && jq -e '.status.phase == "Ready"' "$m" >/dev/null || continue
       edit "$m" '.spec.claimRef = {name: "e2e-claim", uid: "claim-uid"} | .status.bindExtended = true |
@@ -81,6 +95,11 @@ reconcile() { # one pass of the fake pool controller
         '.latest_build.deadline = $d | if $s == "bind-builds" then .latest_build.id = "build-claim" end'
       edit "$S/claim.json" --slurpfile m "$m" '.status = ($m[0].status | {phase: "Bound", conditions: [{type: "Ready",
         status: "True"}], workspaceID, workspaceName, ownerName: "e2e-pool-owner"}) + {memberName: $m[0].metadata.name}'
+      if jq -e '.spec.share != null' "$S/claim.json" >/dev/null; then # the member's share
+        edit "$S/claim.json" --arg u "$SHARE_UUID" '.status.sharedUserID = $u'
+        jq -n --arg u "$SHARE_UUID" --arg r "$([[ $SCENARIO == share-acl-admin ]] && echo admin || echo use)" \
+          '{users: [{id: $u, username: "e2e-share-user", role: $r}], group: []}' >"$S/acl/$(jq -r .status.workspaceID "$m").json"
+      fi
       break
     done
   fi
@@ -157,7 +176,8 @@ case "${pos[0]:-} ${pos[1]:-}" in
       exit 0; jq --arg u "$POOL_UID" '.metadata += {uid: $u, generation: 1} | .status = {}' "$file" >"$S/pool.json"; exit 0; }
     echo "codertemplate.aggregation.coder.com/coder.e2e-pool-agent created" ;;
   "patch codercontrolplane")
-    if jq -e '.spec.workspacePools.owners // [] | length > 0' <<<"$patch" >/dev/null; then touch "$S/allowed"; else rm -f "$S/allowed"; fi ;;
+    if jq -e '.spec.workspacePools.owners // [] | length > 0' <<<"$patch" >/dev/null; then touch "$S/allowed"; else rm -f "$S/allowed"; fi
+    jq -c '.spec.workspacePools.owners // [] | map(.shareGroupIDs // []) | add // []' <<<"$patch" >"$S/groups" ;;
   "scale coderworkspacepool")
     if ((replicas > 100)) && [[ $SCENARIO != scale-101-accepted ]]; then
       echo "The CoderWorkspacePool \"e2e-pool\" is invalid: spec.replicas: Invalid value: $replicas: spec.replicas in body should be less than or equal to 100" >&2
@@ -186,12 +206,14 @@ set -euo pipefail
 echo "curl $*" >>"$STUB_STATE/calls.log"
 # shellcheck source=/dev/null
 source "$(dirname "$0")/fake.sh"
-method=GET url="" data=""
+method=GET url="" data="" auth="" body=""
 while (($#)); do
   case $1 in
     -X) method=$2 && shift 2 ;;
     --data) data=${2#@} && shift 2 ;;
-    -H | --max-time) shift 2 ;;
+    -H) [[ $2 != @* ]] || auth=$(<"${2#@}"); shift 2 ;;
+    -o) body=$2 && shift 2 ;;
+    -w | --max-time) shift 2 ;;
     http://*) url=$1 && shift ;;
     *) shift ;;
   esac
@@ -199,21 +221,41 @@ done
 status() { echo "curl: (22) The requested URL returned error: $1" >&2 && exit 22; }
 user() { jq -n --arg id "$OWNER_UUID" --arg o "$ORG_UUID" --arg t "${1:-password}" '{id: $id, username: "e2e-pool-owner",
   login_type: $t, organization_ids: [$o]}'; }
+share_user() { jq -n --arg id "$SHARE_UUID" --arg o "$ORG_UUID" '{id: $id, username: "e2e-share-user", login_type: "password",
+  organization_ids: [$o]}'; }
+as_share_user() { [[ $auth == *stub-share-session* ]]; }
 path=${url#http://127.0.0.1:*/}
 id=${path#api/v2/workspaces/} && id=${id%%[/?]*}
 case "$method $path" in
   "GET api/v2/buildinfo") echo '{"version": "v2.37.2"}' ;;
   "GET api/v2/organizations") jq -n --arg o "$ORG_UUID" '[{id: $o, is_default: true}]' ;;
-  "POST api/v2/users") [[ $SCENARIO != owner-not-password ]] || status 409; jq -r .password "$data" >"$S/password" && user ;;
+  "POST api/v2/users")
+    jq -r .password "$data" >>"$S/password"
+    if jq -e '.username == "e2e-share-user"' "$data" >/dev/null; then share_user
+    else [[ $SCENARIO != owner-not-password ]] || status 409; user; fi ;;
   "GET api/v2/users/e2e-pool-owner") if [[ $SCENARIO == owner-not-password ]]; then user oidc; else user; fi ;;
   "PUT api/v2/users/"*/status/activate) echo '{"status": "active"}' ;;
-  "POST api/v2/users/login") echo '{"session_token": "stub-session"}' ;;
+  "POST api/v2/users/login")
+    if jq -e '.email | startswith("e2e-share-user@")' "$data" >/dev/null; then echo '{"session_token": "stub-share-session"}'
+    else echo '{"session_token": "stub-session"}'; fi ;;
+  "GET api/v2/organizations/"*/settings/workspace-sharing)
+    jq -n --arg v "$(cat "$S/sharing" 2>/dev/null || echo everyone)" '{shareable_workspace_owners: $v}' ;;
+  "PATCH api/v2/organizations/"*/settings/workspace-sharing)
+    jq -r .shareable_workspace_owners "$data" >"$S/sharing" && jq -n --arg v "$(<"$S/sharing")" '{shareable_workspace_owners: $v}'
+    for f in "$S"/acl/*.json; do [[ $(<"$S/sharing") == everyone ]] || rm -f "$f"; done ;; # Coder drops the ACLs
+  "GET api/v2/workspaces/"*/acl) cat "$S/acl/$id.json" 2>/dev/null || echo '{"users": [], "group": []}' ;;
+  "POST api/v2/workspaces/"*/builds) # only the share user tries this, and Coder refuses use without delete
+    as_share_user || status 400
+    echo '{}' >"$body" && if [[ $SCENARIO == share-user-can-delete ]]; then echo 201; else echo 403; fi ;;
   "POST api/v2/users/logout" | "PATCH api/v2/templates/"*) echo '{}' ;;
   "GET api/v2/organizations/coder/templates/e2e-pool-agent") jq -n --arg t "$TPL_UUID" '{id: $t}' ;;
   "GET api/v2/templates/"*) echo '{"default_ttl_ms": 3600000}' ;;
   "GET api/v2/workspaces?q=owner:e2e-pool-owner") slurp ws | jq '{workspaces: map(select(.deleted | not))}' ;;
   "GET api/v2/workspaces/"*"?include_deleted=true") [[ -f $S/ws/$id.json ]] || status 404; cat "$S/ws/$id.json" ;;
-  "GET api/v2/workspaces/"*) jq -e '.deleted | not' "$S/ws/$id.json" >/dev/null 2>&1 || status 410; cat "$S/ws/$id.json" ;;
+  "GET api/v2/workspaces/"*)
+    jq -e '.deleted | not' "$S/ws/$id.json" >/dev/null 2>&1 || status 410
+    ! as_share_user || { [[ -f $S/acl/$id.json && $SCENARIO != share-user-cannot-read ]] || status 404; }
+    cat "$S/ws/$id.json" ;;
   "POST api/v2/workspaces/"*/usage) echo "$id" >"$S/usage" ;;
   *) status 404 ;;
 esac
@@ -223,7 +265,9 @@ chmod +x "$STUBS/kubectl" "$STUBS/curl"
 # leaked <dir>: a secret in the output outside its mask command, in argv, or in a file the driver left behind.
 leaked() {
   local secret
-  for secret in stub-token stub-session "$(cat "$1/password" 2>/dev/null)"; do
+  local passwords=()
+  [[ ! -f $1/password ]] || mapfile -t passwords <"$1/password"
+  for secret in stub-token stub-session stub-share-session "${passwords[@]}"; do
     [[ -n $secret ]] || continue
     if grep -F -- "$secret" "$1/out.log" | grep -vqxF -- "::add-mask::$secret" || grep -qF -- "$secret" "$1/calls.log" ||
       grep -rqF -- "$secret" "$1/work"; then return 0; fi
@@ -231,7 +275,7 @@ leaked() {
   return 1
 }
 
-# run_scenario <name> [part of the FAIL message] [nowrite]: without a message the driver must pass P1 to P8 and leave
+# run_scenario <name> [part of the FAIL message] [nowrite]: without a message the driver must pass P1 to P9 and leave
 # nothing behind; with one it must fail with that message, and with nowrite before any write.
 run_scenario() {
   local name=$1 want=${2:-} nowrite=${3:-} dir=$BASE/$1 rc=0 problem=""
@@ -242,10 +286,11 @@ run_scenario() {
     </dev/null >"$dir/out.log" 2>&1 || rc=$?
   if [[ -z $want ]]; then
     if ((rc != 0)); then problem="driver failed"
-    elif ! grep -qE '^phase_seconds=P1=.* P6=.* P7=.* P8=.* cleanup=' "$dir/work/receipt.txt"; then problem="phases P1 to P8 did not all run"
-    elif [[ -e $dir/pool.json || -e $dir/claim.json || -e $dir/allowed ]] || compgen -G "$dir/m/*.json" >/dev/null ||
+    elif ! grep -qE '^phase_seconds=P1=.* P6=.* P7=.* P8=.* P9=.* cleanup=' "$dir/work/receipt.txt"; then problem="phases P1 to P9 did not all run"
+    elif [[ -e $dir/pool.json || -e $dir/claim.json || -e $dir/allowed || $(cat "$dir/sharing" 2>/dev/null || echo everyone) != everyone ]] ||
+      compgen -G "$dir/m/*.json" >/dev/null ||
       cat "$dir"/ws/*.json 2>/dev/null | jq -se 'any(.[]; .deleted | not)' >/dev/null; then problem="left objects or live workspaces behind"
-    elif grep -E '^curl .*-X (DELETE|POST) .*/api/v2/workspaces' "$dir/calls.log" | grep -qv '/usage$'; then
+    elif grep -E '^curl .*-X (DELETE|POST) .*/api/v2/workspaces' "$dir/calls.log" | grep -v 'share-user.hdr' | grep -qv '/usage$'; then
       problem="the driver wrote to a workspace itself"
     fi
   elif ((rc == 0)); then problem="driver passed"
@@ -267,7 +312,7 @@ run_scenario() {
 
 run_scenario pass
 run_scenario no-token-ref "no operator token secret ref" nowrite
-run_scenario owner-not-password "owner e2e-pool-owner has an unexpected shape or organization" nowrite
+run_scenario owner-not-password "user e2e-pool-owner has an unexpected shape or organization" nowrite
 run_scenario members-before-allow "a pool whose owner is not allowed made members"
 run_scenario zero-deadline "has a zero deadline"
 run_scenario scale-101-accepted "kubectl scale --replicas=101 succeeded"
@@ -281,6 +326,12 @@ run_scenario pool-delete-keeps-workspace "the unclaimed workspace"
 run_scenario pool-delete-takes-used "the used member"
 run_scenario used-member-kept "did not delete workspace"
 run_scenario dry-run-creates "the server dry run created pool e2e-pool"
+run_scenario share-policy-ignored "ShareNotAllowed without shareGroupIDs"
+run_scenario share-group-unchecked "ShareUserNotEligible for a group that is not Everyone"
+run_scenario share-none-ignored "ShareNotAllowed while the organization's sharing is none"
+run_scenario share-acl-admin "want only e2e-share-user with use"
+run_scenario share-user-cannot-read "e2e-share-user cannot read the shared workspace"
+run_scenario share-user-can-delete "answered 201, want 403"
 
 ((FAILURES == 0)) || { echo "$FAILURES scenario(s) failed"; exit 1; }
 echo "all workspace pool driver scenarios passed"

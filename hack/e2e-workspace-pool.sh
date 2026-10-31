@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# CoderWorkspacePool E2E driver (#153 plan 10.4, phases P1 to P8). The Kind job runs it before the lifecycle driver,
-# which deletes namespace coder at its end. It imports its own template from the agent fixture. P8 deletes its claim,
-# pool, and members and checks that their workspaces are deleted in Coder. Once every phase passed, it restores the
-# control plane's spec.workspacePools. Every wait is bounded. Offline tests with stubbed tools:
+# CoderWorkspacePool E2E driver (#153 plan 10.4, phases P1 to P9). The Kind job runs it before the lifecycle driver,
+# which deletes namespace coder at its end. It imports its own template from the agent fixture. P8 and P9 delete
+# their claims, pools, and members and check that their workspaces are deleted in Coder. Once every phase passed, it
+# restores the control plane's spec.workspacePools and the organization's sharing setting. It keeps its two Coder
+# users, the pool owner and the Share user, for a rerun. Every wait is bounded. Offline tests with stubbed tools:
 # hack/e2e-workspace-pool_test.sh.
 set -euo pipefail
 umask 077 # $WORK holds the Coder token header and request bodies
@@ -20,6 +21,10 @@ POOL_SAMPLE=config/samples/coder_v1alpha1_coderworkspacepool.yaml
 CLAIM_SAMPLE=config/samples/coder_v1alpha1_coderworkspaceclaim.yaml
 POOL=${E2E_POOL:-e2e-pool}
 CLAIM=${E2E_CLAIM:-e2e-claim}
+SHARE_USER=${E2E_SHARE_USER:-e2e-share-user} # second password user created by the driver; P9 shares a workspace with it
+SHARE_POOL=${E2E_SHARE_POOL:-e2e-share-pool}
+SHARE_CLAIM=${E2E_SHARE_CLAIM:-e2e-share-claim}
+NO_GROUP=00000000-0000-4000-8000-00000000e2e9 # a group ID that is not the organization's Everyone group
 TEMPLATE_APPLY_TIMEOUT=${E2E_TEMPLATE_APPLY_TIMEOUT:-600s}
 CLAIM_READY_SECONDS=${E2E_CLAIM_READY_SECONDS:-10}
 USED_SECONDS=${E2E_USED_SECONDS:-180} # Coder flushes usage once a minute, and a member reads Coder once a minute
@@ -41,11 +46,12 @@ phase() { PHASES+=("$1=$((SECONDS - T0))s") && log "=== $1 passed in $((SECONDS 
 cleanup() {
   local p
   for p in "${BG_PIDS[@]}"; do kill "$p" 2>/dev/null || true; done
-  rm -f "$WORK/coder.hdr" "$WORK/coder-body.json" "$WORK/owner.json" "$WORK/owner-login.json" "$WORK/owner.hdr"
+  rm -f "$WORK/coder.hdr" "$WORK/coder-body.json" "$WORK"/{owner,share-user}{.json,-login.json,.hdr}
   printf '%s\n' "=== RECEIPT ($RESULT) ===" "owner=$OWNER/${OWNER_ID:-unset}" "pool_uid=${POOL_UID:-unset}" \
     "claim_ready_ms=${CLAIM_MS:-unset}" "bind_deadline=${BIND_DEADLINE:-unset}" "restart_member=${RESTART_MEMBER:-unset}" \
     "live_workspaces_after_restart=${LIVE:-unset}" "member_workspace_rows=${ROWS:-unset}" "used_member=${USED:-unset}" \
-    "used_seconds=${USED_S:-unset}" "scaled_down_workspaces=${SCALED_DOWN:-unset}" "phase_seconds=${PHASES[*]:-unset}" |
+    "used_seconds=${USED_S:-unset}" "scaled_down_workspaces=${SCALED_DOWN:-unset}" "share_user=$SHARE_USER/${SHARE_USER_ID:-unset}" \
+    "share_group_refusal=${GROUP_REFUSAL:-unset}" "share_claim_ready_ms=${SHARE_MS:-unset}" "phase_seconds=${PHASES[*]:-unset}" |
     tee "$WORK/receipt.txt"
 }
 trap cleanup EXIT
@@ -97,6 +103,45 @@ render() { # <sample> <jq filter> [jq args...]: the sample as JSON with the filt
   local sample=$1 filter=$2 && shift 2
   k create --dry-run=client -o json -f "$sample" | jq -e "$@" "$filter"
 }
+# password_user <username> <display name> <file prefix>: create the password user in the default organization, or
+# reuse it with a new password, activate it, log in once, and keep the session in $WORK/<prefix>.hdr. Sets USER_ID.
+password_user() {
+  local u=$1 name=$2 f=$WORK/$3 user_json reused="" session
+  PASSWORD=$(head -c 24 /dev/urandom | base64) # never logged; used once for the login below
+  [[ ${GITHUB_ACTIONS:-} == true ]] && echo "::add-mask::$PASSWORD"
+  # The password reaches jq through its environment, which other users cannot read, unlike argv.
+  PASSWORD=$PASSWORD jq -nc --arg u "$u" --arg n "$name" --arg o "$ORG_ID" '{username: $u, name: $n,
+    email: ($u + "@e2e.example.com"), password: env.PASSWORD, login_type: "password", organization_ids: [$o]}' >"$f.json"
+  unset PASSWORD
+  if user_json=$(coder_api POST /api/v2/users "$(<"$f.json")" 2>"$f.err"); then :
+  elif grep -q 'error: 409' "$f.err"; then
+    log "user $u exists (409): reusing it after the same checks"
+    reused=1
+    user_json=$(coder_api GET "/api/v2/users/$u") || fail "cannot read the existing user $u"
+  else fail "cannot create the user $u: $(head -c 300 "$f.err")"; fi
+  USER_ID=$(jq -er --arg u "$u" --arg o "$ORG_ID" 'select(.username == $u and .login_type == "password" and
+    (.organization_ids | index($o))) | .id' <<<"$user_json") || fail "user $u has an unexpected shape or organization"
+  [[ -z $reused ]] || coder_api PUT "/api/v2/users/$USER_ID/password" "$(jq -c '{password}' "$f.json")" \
+    >/dev/null || fail "cannot reset the password of the reused user $u"
+  # New API users start dormant, and the pool refuses an owner that is not active.
+  coder_api PUT "/api/v2/users/$USER_ID/status/activate" | jq -e '.status == "active"' >/dev/null || fail "cannot activate $u"
+  # Coder marks an active user dormant at its next check (every 15 min) once its last use is 90 days old, and a new
+  # user was never used. One login sets the last use, as a person or the claim consumer would.
+  jq -c '{email, password}' "$f.json" >"$f-login.json"
+  session=$(curl -fsS --max-time 30 -X POST -H 'Content-Type: application/json' --data @"$f-login.json" \
+    "$CODER_URL/api/v2/users/login" | jq -er '.session_token') || fail "cannot log in as $u"
+  [[ ${GITHUB_ACTIONS:-} == true ]] && echo "::add-mask::$session"
+  printf 'Coder-Session-Token: %s\n' "$session" >"$f.hdr"
+  rm -f "$f.json" "$f-login.json" "$WORK/coder-body.json"
+}
+# allow_owner <shareGroupIDs JSON array>: the control plane allows the owner with the pool template, 10 workspaces,
+# and these share groups, next to its original owners
+allow_owner() {
+  k -n "$NS" patch codercontrolplane "$CP" --type=merge -p "$(jq -nc --argjson orig "$ORIGINAL_POOLS" --arg o "$OWNER_ID" \
+    --arg t "$ORG.$TEMPLATE" --argjson g "$1" '{spec: {workspacePools: (($orig // {}) | .owners = ([.owners[]? |
+    select(.userID != $o)] + [{userID: $o, templates: [$t], maxWorkspaces: 10, shareGroupIDs: $g}]))}}')" >/dev/null ||
+    fail "cannot allowlist $OWNER on $CP"
+}
 
 log "=== setup: Coder API access (port-forward, operator token)"
 CP_JSON=$(k -n "$NS" get codercontrolplane "$CP" -o json) || fail "cannot read CoderControlPlane $NS/$CP"
@@ -116,34 +161,10 @@ wait_until "Coder API via port-forward" coder_ready
 log "=== P1: pool owner, template with a 1 h TTL, pool refused until the owner is allowed"
 ORG_ID=$(coder_api GET /api/v2/organizations | jq -er 'map(select(.is_default)) | if length == 1 then .[0].id else error end') ||
   fail "cannot read the single default organization"
-PASSWORD=$(head -c 24 /dev/urandom | base64) # never logged; used once for the login below
-[[ ${GITHUB_ACTIONS:-} == true ]] && echo "::add-mask::$PASSWORD"
-# The password reaches jq through its environment, which other users cannot read, unlike argv.
-PASSWORD=$PASSWORD jq -nc --arg u "$OWNER" --arg o "$ORG_ID" '{username: $u, name: "E2E pool owner",
-  email: ($u + "@e2e.example.com"), password: env.PASSWORD, login_type: "password", organization_ids: [$o]}' >"$WORK/owner.json"
-unset PASSWORD
-if USER_JSON=$(coder_api POST /api/v2/users "$(<"$WORK/owner.json")" 2>"$WORK/owner.err"); then :
-elif grep -q 'error: 409' "$WORK/owner.err"; then
-  log "owner $OWNER exists (409): reusing it after the same checks"
-  OWNER_REUSED=1
-  USER_JSON=$(coder_api GET "/api/v2/users/$OWNER") || fail "cannot read the existing owner $OWNER"
-else fail "cannot create the owner $OWNER: $(head -c 300 "$WORK/owner.err")"; fi
-OWNER_ID=$(jq -er --arg u "$OWNER" --arg o "$ORG_ID" 'select(.username == $u and .login_type == "password" and
-  (.organization_ids | index($o))) | .id' <<<"$USER_JSON") || fail "owner $OWNER has an unexpected shape or organization"
-[[ -z ${OWNER_REUSED:-} ]] || coder_api PUT "/api/v2/users/$OWNER_ID/password" "$(jq -c '{password}' "$WORK/owner.json")" \
-  >/dev/null || fail "cannot reset the password of the reused owner $OWNER"
-# New API users start dormant, and the pool refuses an owner that is not active.
-coder_api PUT "/api/v2/users/$OWNER_ID/status/activate" | jq -e '.status == "active"' >/dev/null || fail "cannot activate $OWNER"
-# Coder marks an active user dormant at its next check (every 15 min) once its last use is 90 days old, and a new user
-# was never used. One login sets the last use, as the claim consumer that holds the owner's credentials would.
-jq -c '{email, password}' "$WORK/owner.json" >"$WORK/owner-login.json"
-SESSION=$(curl -fsS --max-time 30 -X POST -H 'Content-Type: application/json' --data @"$WORK/owner-login.json" \
-  "$CODER_URL/api/v2/users/login" | jq -er '.session_token') || fail "cannot log in as $OWNER"
-[[ ${GITHUB_ACTIONS:-} == true ]] && echo "::add-mask::$SESSION"
-printf 'Coder-Session-Token: %s\n' "$SESSION" >"$WORK/owner.hdr"
-unset SESSION
+password_user "$OWNER" "E2E pool owner" owner
+OWNER_ID=$USER_ID
 curl -fsS --max-time 30 -X POST -H @"$WORK/owner.hdr" "$CODER_URL/api/v2/users/logout" >/dev/null || fail "cannot log out $OWNER"
-rm -f "$WORK/owner.json" "$WORK/owner-login.json" "$WORK/owner.hdr" "$WORK/coder-body.json"
+rm -f "$WORK/owner.hdr"
 render "$AGENT_MANIFEST" '.metadata.name = $n | .spec.displayName = "E2E Pool Agent Template"' --arg n "$ORG.$TEMPLATE" \
   >"$WORK/template.json" || fail "cannot render the pool template from $AGENT_MANIFEST"
 kubectl --request-timeout="$TEMPLATE_APPLY_TIMEOUT" apply -f "$WORK/template.json" >"$WORK/template-apply.out" 2>&1 ||
@@ -159,9 +180,7 @@ k create -f "$WORK/pool-manifest.json" >/dev/null || fail "cannot create pool $P
 POOL_UID=$(k -n "$NS" get coderworkspacepool "$POOL" -o jsonpath='{.metadata.uid}')
 wait_until "pool reason OwnerNotAllowed before the allowlist" pool_reason OwnerNotAllowed
 members_json && jq -e '.items | length == 0' "$WORK/members.json" >/dev/null || fail "a pool whose owner is not allowed made members"
-k -n "$NS" patch codercontrolplane "$CP" --type=merge -p "$(jq -nc --argjson orig "$ORIGINAL_POOLS" --arg o "$OWNER_ID" \
-  --arg t "$ORG.$TEMPLATE" '{spec: {workspacePools: (($orig // {}) | .owners = ([.owners[]? | select(.userID != $o)] +
-  [{userID: $o, templates: [$t], maxWorkspaces: 10}]))}}')" >/dev/null || fail "cannot allowlist $OWNER on $CP"
+allow_owner '[]'
 phase P1
 
 log "=== P2: 2 ready members, /scale, non-zero deadlines"
@@ -351,6 +370,80 @@ nothing_made() { # the pool, a member of it, or a live workspace of the owner af
 DRY_T0=$SECONDS
 wait_until "no pool, member, or workspace ${DRY_RUN_SETTLE_SECONDS}s after the server dry run" nothing_made
 phase P8
+
+log "=== P9: a Share claim gives a second user the use role on its workspace, within the organization's sharing policy"
+password_user "$SHARE_USER" "E2E share user" share-user
+SHARE_USER_ID=$USER_ID
+sharing() { coder_api GET "/api/v2/organizations/$ORG_ID/settings/workspace-sharing" | jq -er '.shareable_workspace_owners'; }
+set_sharing() { # <shareable_workspace_owners>: the admin's organization setting, which the operator never writes
+  coder_api PATCH "/api/v2/organizations/$ORG_ID/settings/workspace-sharing" "$(jq -nc --arg v "$1" '{shareable_workspace_owners: $v}')" |
+    jq -e --arg v "$1" '.shareable_workspace_owners == $v' >/dev/null || fail "cannot set the organization's workspace sharing to $1"
+}
+ORIGINAL_SHARING=$(sharing) || fail "cannot read the organization's workspace sharing setting"
+[[ $ORIGINAL_SHARING == everyone ]] || set_sharing everyone
+POOL=$SHARE_POOL CLAIM=$SHARE_CLAIM
+render "$POOL_SAMPLE" '.metadata.name = $n | .metadata.namespace = $ns | .spec.controlPlaneRef.name = $cp |
+  .spec.ownerUserID = $o | .spec.template = $t | .spec.replicas = 1 | .spec.claims.mode = "Share"' --arg n "$POOL" --arg ns "$NS" \
+  --arg cp "$CP" --arg o "$OWNER_ID" --arg t "$ORG.$TEMPLATE" >"$WORK/share-pool.json" || fail "cannot render the Share pool"
+k create -f "$WORK/share-pool.json" >/dev/null || fail "cannot create the Share pool $POOL"
+POOL_UID=$(k -n "$NS" get coderworkspacepool "$POOL" -o jsonpath='{.metadata.uid}')
+wait_until "Share pool reason ShareNotAllowed without shareGroupIDs" pool_reason ShareNotAllowed
+members_json && jq -e '.items | length == 0' "$WORK/members.json" >/dev/null || fail "a Share pool without shareGroupIDs made members"
+# Coder's group routes need a Premium license, so without one only the organization's Everyone group, whose ID is the
+# organization ID, admits a user.
+allow_owner "[\"$NO_GROUP\"]"
+wait_until "Share pool with 1 ready member" pool_ready 1 0
+render "$CLAIM_SAMPLE" '.metadata.name = $n | .metadata.namespace = $ns | .spec.poolName = $p | .spec.share.user = $u' \
+  --arg n "$CLAIM" --arg ns "$NS" --arg p "$POOL" --arg u "$SHARE_USER" >"$WORK/share-claim.json" || fail "cannot render the Share claim"
+k create -f "$WORK/share-claim.json" >/dev/null || fail "cannot create the Share claim $CLAIM"
+claim_waits() { # <reason>: the claim is Pending with this reason
+  k -n "$NS" get coderworkspaceclaim "$CLAIM" -o json >"$WORK/claim.json" || return 1
+  jq -e --arg r "$1" '.status.phase == "Pending" and .status.reason == $r' "$WORK/claim.json" >/dev/null
+}
+wait_until "Share claim Pending with ShareUserNotEligible for a group that is not Everyone" claim_waits ShareUserNotEligible
+GROUP_REFUSAL=$(jq -er '.status.message' "$WORK/claim.json")
+grep -qF "$NO_GROUP" <<<"$GROUP_REFUSAL" || fail "the refusal does not name group $NO_GROUP: $GROUP_REFUSAL"
+log "claim refused: $GROUP_REFUSAL"
+set_sharing none
+allow_owner "[\"$ORG_ID\"]"
+wait_until "Share pool reason ShareNotAllowed while the organization's sharing is none" pool_reason ShareNotAllowed
+jq -e '.status.message | contains("none")' "$WORK/pool.json" >/dev/null || fail "the pool refusal does not name the none setting"
+k -n "$NS" get coderworkspaceclaim "$CLAIM" -o json | jq -e '.status.phase == "Pending"' >/dev/null ||
+  fail "the Share claim bound while the organization's sharing is none"
+SHARE_T0=$(date +%s%N)
+set_sharing everyone
+wait_until "Share claim Bound and Ready" claim_ready
+SHARE_MS=$((($(date +%s%N) - SHARE_T0) / 1000000))
+log "Share claim Bound and Ready ${SHARE_MS}ms after sharing was allowed (the pool reads the setting at least once a minute)"
+SHARE_WS=$(jq -er '.status.workspaceID' "$WORK/claim.json")
+SHARE_MEMBER=$(jq -er '.status.memberName' "$WORK/claim.json")
+jq -e --arg u "$SHARE_USER_ID" '.status.sharedUserID == $u' "$WORK/claim.json" >/dev/null ||
+  fail "claim sharedUserID is not $SHARE_USER: $(jq -c .status "$WORK/claim.json")"
+coder_api GET "/api/v2/workspaces/$SHARE_WS/acl" >"$WORK/acl.json" || fail "cannot read the ACL of $SHARE_WS"
+jq -e --arg u "$SHARE_USER_ID" '[.users[] | {id, role}] == [{id: $u, role: "use"}] and ((.group // []) | length == 0)' \
+  "$WORK/acl.json" >/dev/null || fail "ACL of $SHARE_WS: $(jq -c . "$WORK/acl.json"), want only $SHARE_USER with use"
+curl -fsS --max-time 30 -H @"$WORK/share-user.hdr" "$CODER_URL/api/v2/workspaces/$SHARE_WS" |
+  jq -e --arg w "$SHARE_WS" '.id == $w' >/dev/null || fail "$SHARE_USER cannot read the shared workspace $SHARE_WS"
+CODE=$(curl -sS -o "$WORK/share-delete.out" -w '%{http_code}' --max-time 30 -X POST -H @"$WORK/share-user.hdr" \
+  -H 'Content-Type: application/json' --data '{"transition": "delete"}' "$CODER_URL/api/v2/workspaces/$SHARE_WS/builds")
+[[ $CODE == 403 ]] || fail "a delete build with $SHARE_USER's token answered $CODE, want 403"
+live_in_coder "$SHARE_WS" || fail "the shared workspace $SHARE_WS is not live after the refused delete"
+log "$SHARE_USER has use on $SHARE_WS, reads it, and cannot delete it (403)"
+wait_until "1 unclaimed ready member and 1 bound in the Share pool" pool_ready 1 1
+members_json
+SPARE_WS=$(jq -c --arg m "$SHARE_MEMBER" '[.items[] | select(.metadata.name != $m) | .status.workspaceID]' "$WORK/members.json")
+k -n "$NS" delete coderworkspaceclaim "$CLAIM" --wait=false >/dev/null
+wait_until "member $SHARE_MEMBER of the deleted Share claim gone" member_gone "$SHARE_MEMBER"
+deleted_in_coder "$SHARE_WS" || fail "the Share claim's workspace $SHARE_WS is not deleted in Coder"
+k -n "$NS" delete coderworkspacepool "$POOL" --wait=false >/dev/null
+pool_members_gone() { members_json && jq -e '.items | length == 0' "$WORK/members.json" >/dev/null; }
+wait_until "the members of the deleted Share pool gone" pool_members_gone
+for ws in $(jq -r '.[]' <<<"$SPARE_WS"); do deleted_in_coder "$ws" || fail "the unclaimed workspace $ws is not deleted in Coder"; done
+[[ $(sharing) == everyone ]] || fail "the organization's sharing setting changed during P9"
+[[ $ORIGINAL_SHARING == everyone ]] || set_sharing "$ORIGINAL_SHARING"
+curl -fsS --max-time 30 -X POST -H @"$WORK/share-user.hdr" "$CODER_URL/api/v2/users/logout" >/dev/null || fail "cannot log out $SHARE_USER"
+rm -f "$WORK/share-user.hdr"
+phase P9
 
 log "=== cleanup: restore spec.workspacePools"
 k -n "$NS" patch codercontrolplane "$CP" --type=merge -p "$(jq -nc --argjson orig "$ORIGINAL_POOLS" '{spec: {workspacePools: $orig}}')" \
