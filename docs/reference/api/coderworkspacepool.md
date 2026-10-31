@@ -23,6 +23,7 @@
 | `replicas` | integer | Replicas is the number of unclaimed ready workspaces to keep. Waiting claims get a workspace built on demand on top of this number. The scale subresource writes this field, so kubectl scale, HPA, and KEDA can resize the pool within the same bounds. |
 | `maxInFlight` | integer | MaxInFlight is the number of members of this pool that build at the same time. |
 | `readyTimeoutSeconds` | integer | ReadyTimeoutSeconds bounds the time from a member's creation until its workspace is ready. A member that is not ready in time fails, and the controller replaces it. |
+| `maxUnclaimedAgeSeconds` | integer | MaxUnclaimedAgeSeconds replaces an unclaimed workspace that has been ready this long, new before old: the old workspace stays claimable until its replacement is ready. Leave it out to keep unclaimed workspaces until a claim, a scale-down, or an input change. |
 | `claims` | [CoderWorkspacePoolClaims](#coderworkspacepoolclaims) | Claims configures how the pool hands out workspaces. |
 
 ## Status
@@ -63,6 +64,7 @@ CoderWorkspacePoolClaims configures how the pool hands out workspaces.
 | Field | Type | Description |
 | --- | --- | --- |
 | `mode` | string | Mode is how a claim gets its workspace. Reserve binds a ready workspace to the claim, and the workspace stays with the pool owner. |
+| `idleTimeoutSeconds` | integer | IdleTimeoutSeconds deletes a claimed workspace, with its data, once both the bind and the workspace's last use in Coder (last_used_at) are this long ago. The claim then becomes Lost with reason IdleTimeout. Leave it out to keep claimed workspaces until their claims are deleted. Unclaimed workspaces are idle by design and never count. |
 
 ### CoderWorkspacePoolFailure
 

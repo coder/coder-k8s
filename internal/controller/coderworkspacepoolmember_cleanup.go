@@ -131,7 +131,20 @@ func (r *CoderWorkspacePoolMemberReconciler) cleanupStep(
 		return step, templateTestUnavailablePoll, false, err
 	}
 	var keep func(codersdk.Workspace) (bool, error)
-	if member.Spec.ClaimRef == nil && !released {
+	keptMessage := "Someone may have used the workspace without a claim, so the controller releases the pool member and starts no delete build"
+	idleBaseline, err := poolIdleReapBaseline(ctx, r.APIReader, member)
+	switch {
+	case err != nil:
+		return nil, 0, false, err
+	case idleBaseline != nil:
+		// The pool deletes this member for idleness. A use after its idle
+		// check, or no last_used_at, on any delete step's own read keeps the
+		// workspace.
+		keptMessage = "Someone used the workspace after the pool's idle check, or Coder did not say when, so the controller releases the pool member and starts no delete build"
+		keep = func(latest codersdk.Workspace) (bool, error) {
+			return latest.LastUsedAt.IsZero() || latest.LastUsedAt.Truncate(time.Microsecond).After(*idleBaseline), nil
+		}
+	case member.Spec.ClaimRef == nil && !released:
 		// The last use check runs on the delete step's own read, before any
 		// write, on every step, so no delete build, a retry included, starts
 		// after a use (#409): a leaked workspace is better than lost work. In
@@ -159,8 +172,7 @@ func (r *CoderWorkspacePoolMemberReconciler) cleanupStep(
 	case err != nil:
 		return nil, 0, false, err
 	case result.kept:
-		log.FromContext(ctx).Info("Someone may have used the workspace without a claim, so the controller releases the pool member and starts no delete build",
-			"workspaceID", member.Status.WorkspaceID, "workspaceName", member.Status.WorkspaceName)
+		log.FromContext(ctx).Info(keptMessage, "workspaceID", member.Status.WorkspaceID, "workspaceName", member.Status.WorkspaceName)
 		return nil, 0, true, nil
 	case result.deleted:
 		step := coderWait("Deleted", "The delete build of workspace %s succeeded.", member.Status.WorkspaceName)

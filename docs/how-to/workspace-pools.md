@@ -62,6 +62,8 @@ kubectl -n coder get coderworkspacepools,coderworkspacepoolmembers
 
 Each member owns one workspace named `kwp-` plus 28 hex characters of the member's UID. Do not rename these workspaces, and do not use an unclaimed one directly. The pool releases a workspace that someone used without a claim, and never deletes it on its own. Opening an unclaimed workspace's page in the Coder dashboard counts as use too: the page asks the workspace agent for its containers, and in Coder v2.37.2 that request moves `last_used_at` ([#444](https://github.com/coder/coder-k8s/issues/444)). The workspaces list does not.
 
+An unclaimed workspace stays until a claim takes it, a scale-down removes it, or the pool's inputs change. With `version.active: true`, a new active version of the template is such a change. To also replace workspaces that have been ready for a long time, set `maxUnclaimedAgeSeconds` (at least 3600). The pool replaces outdated workspaces new before old: it builds the replacement first, and the old workspace stays claimable until the replacement is ready. So the replacement needs room under `maxWorkspaces`.
+
 `replicas` has a scale subresource, so `kubectl scale`, HPA, and KEDA can change it:
 
 ```bash
@@ -81,6 +83,11 @@ spec:
 ```
 
 A claim with a ready workspace in its pool is `Bound` and `Ready` at once. In the Kind end-to-end test, that took about 1 s. `status.ownerName` and `status.workspaceName` name the workspace. When the workspace has an autostop deadline, the operator moves it once at the bind, to the template's default TTL from now, at least 30 minutes. A workspace's max deadline (from a Premium autostop requirement) can shorten or prevent that extension, and so can a refusal by Coder: the operator then keeps the deadline and does not try again. After that, Coder's normal autostop applies. One claim is one workspace, and a claim never binds a second time. Delete the claim when you are done: that deletes its workspace.
+
+To delete claimed workspaces that nobody uses, set `claims.idleTimeoutSeconds` on the pool (at least 600). Without it, the operator never deletes a claimed workspace on its own.
+
+!!! warning "Idle reaping deletes the workspace and its data"
+    The pool deletes a claimed workspace once both the bind and the workspace's `last_used_at` in Coder are older than `claims.idleTimeoutSeconds`. A stopped workspace counts as idle. The claim then becomes `Lost` with reason `IdleTimeout`, and it never binds again. Right before the delete build, the operator reads the workspace once more. If that read shows a use after the pool's check, or no `last_used_at`, the operator keeps the workspace in Coder and only releases its member. The claim message covers both outcomes: the pool deletes the workspace unless its last check sees a use, and a kept workspace stays in Coder under its `kwp-` name, owned by the pool owner. The message names both, so `coder ssh <owner>/<workspace>` still reaches a kept workspace. To delete kept workspaces later, see [Cleanup](#cleanup). Coder writes `last_used_at` about once a minute, so a session that starts less than a minute before the delete build can still be lost.
 
 ## 5. Grant access
 
@@ -150,7 +157,7 @@ KEDA's operator creates the HPA for a `ScaledObject`, and its own role can updat
 
 ## Cost
 
-Each unclaimed workspace runs all the time, so a pool of `replicas: N` costs N running workspaces plus the claimed ones. A claimed workspace keeps a normal autostop deadline after the bind, so Coder stops it when nobody uses it. A template with a default TTL of 0 has no deadline: its claimed workspaces run until someone stops or deletes them.
+Each unclaimed workspace runs all the time, so a pool of `replicas: N` costs N running workspaces plus the claimed ones. A claimed workspace keeps a normal autostop deadline after the bind, so Coder stops it when nobody uses it. A template with a default TTL of 0 has no deadline: its claimed workspaces run until someone stops or deletes them. For such a template, `claims.idleTimeoutSeconds` is the only automatic limit.
 
 Further limits: `maxInFlight` (default 5) caps the members of a pool that build at the same time, and a pool stops creating with `Stalled` and `MemberFailureLimit` after 5 failed members in a row. To cap the number of pools and claims in a namespace, use a `ResourceQuota` on `count/coderworkspacepools.coder.com` and `count/coderworkspaceclaims.coder.com`.
 
@@ -164,6 +171,7 @@ The operator sends every pool request with its operator token. Measured in Kind 
 | A member that builds | 24 | The same two requests every 5 s, until the member is ready |
 | A pool that follows the active version | 6 | The owner, its organization membership, the organization (twice), the template, and the version, once a minute |
 | A pool of 10 ready members | 26 | 10 × 2 + 6 |
+| A claimed workspace with `claims.idleTimeoutSeconds`, after the timeout since the bind | 2 per pool check | `GET /api/v2/workspaces/<id>` and `GET /api/v2/users/me` each time the pool checks it, until it is idle or the claim is gone |
 
 A pool sends no request to `/api/v2/files`, so Coder's limit of 12 file requests per minute never applies. Coder's general limit of 512 requests per minute counts each user and each path. Each member reads its workspace on its own path, but every member also reads `/api/v2/users/me`, one path for all members of the operator. From the rates above, about 500 ready members, or about 40 members that build, reach that limit (not tested at that size). Coder then answers 429, and the operator backs off and retries.
 
