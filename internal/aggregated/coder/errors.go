@@ -123,9 +123,23 @@ func IsUncertainStatus(status int) bool {
 		status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
 }
 
+// IsCoderErrorAnswer reports whether coderErr comes from an error answer in Coder's own format: a
+// JSON body with a message. For a body that is not JSON, is empty, or has no message, for example
+// the error page of a proxy, the SDK sets one of its own messages instead.
+func IsCoderErrorAnswer(coderErr *codersdk.Error) bool {
+	if coderErr == nil {
+		panic("assertion failed: coder error must not be nil")
+	}
+	message := coderErr.Message
+	return message != "" && message != "empty response body" &&
+		!strings.HasPrefix(message, "unexpected non-JSON response ") &&
+		message != fmt.Sprintf("unexpected status code %d, response has no message", coderErr.StatusCode())
+}
+
 // MapCoderWriteError maps the error of the Coder call that creates, updates or deletes name. An
 // error that leaves it open whether Coder applied the write returns UncertainWriteError: a status
-// of IsUncertainStatus other than 504, or an error without a status after the request was sent,
+// of IsUncertainStatus other than 504, an error answer that is not Coder's own (see
+// IsCoderErrorAnswer), or an error without a status after the request was sent,
 // such as a connection that broke or a body that is not the expected JSON. A timeout, a Coder 504,
 // a request that did not reach Coder (see notSent) and every other status map as in MapCoderError.
 func MapCoderWriteError(err error, write Write, resource schema.GroupResource, name string) error {
@@ -145,7 +159,7 @@ func MapCoderWriteError(err error, write Write, resource schema.GroupResource, n
 	var coderErr *codersdk.Error
 	if errors.As(err, &coderErr) {
 		status := coderErr.StatusCode()
-		if status != http.StatusGatewayTimeout && IsUncertainStatus(status) {
+		if status != http.StatusGatewayTimeout && (IsUncertainStatus(status) || !IsCoderErrorAnswer(coderErr)) {
 			logHiddenError(err, resource, name, status)
 			return UncertainWriteError(write, resource, name, fmt.Sprintf("status %d from the Coder API", status))
 		}

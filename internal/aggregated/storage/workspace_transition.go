@@ -149,14 +149,14 @@ func (s *WorkspaceTransitionStorage) Create(
 	}
 
 	var coderErr *codersdk.Error
-	isCoderErr := errors.As(err, &coderErr)
+	refused := errors.As(err, &coderErr) && !coder.IsUncertainStatus(coderErr.StatusCode()) && coder.IsCoderErrorAnswer(coderErr)
 	switch {
-	case isCoderErr && coderErr.StatusCode() == http.StatusConflict:
+	case refused && coderErr.StatusCode() == http.StatusConflict:
 		return s.afterConflict(callCtx, sdk, namespace, name, workspace.ID, coderErr)
-	case !isCoderErr || coder.IsUncertainStatus(coderErr.StatusCode()):
-		// A timeout, a transport error, a gateway error, or an answer without the requested build
-		// leaves it open whether Coder queued the build: a proxy in front of Coder can fail
-		// after Coder accepted it. Never POST again: one confirming re-read either finds the
+	case !refused:
+		// A timeout, a transport error, a gateway error, an error answer that is not Coder's own,
+		// or an answer without the requested build leaves it open whether Coder queued the build:
+		// a proxy in front of Coder can fail after Coder accepted it. Never POST again: one confirming re-read either finds the
 		// new build or reports the doubt. The re-read gets the rest of the budget, at least
 		// confirmTimeout.
 		current, rereadErr := sdk.Workspace(budgetCtx, workspace.ID)
@@ -175,7 +175,7 @@ func (s *WorkspaceTransitionStorage) Create(
 // queued in the meantime (for example in the Coder UI) does not confirm it. If the operator
 // user itself queued a matching build elsewhere in that window, the two cannot be told apart.
 func confirmsPost(ctx context.Context, sdk *codersdk.Client, previousID uuid.UUID, found codersdk.WorkspaceBuild, req codersdk.CreateWorkspaceBuildRequest) bool {
-	if found.ID == previousID || found.Transition != req.Transition {
+	if found.ID == uuid.Nil || found.ID == previousID || found.Status == "" || found.Transition != req.Transition {
 		return false
 	}
 	if req.TemplateVersionID != uuid.Nil && found.TemplateVersionID != req.TemplateVersionID {
@@ -186,7 +186,9 @@ func confirmsPost(ctx context.Context, sdk *codersdk.Client, previousID uuid.UUI
 }
 
 // afterConflict handles a Coder 409 on the build POST: another build became active after the
-// lookup. One re-read decides whether that build already does what was requested.
+// lookup. One re-read decides whether that build already does what was requested. A 409 in Coder's
+// format can also come from a proxy after Coder queued the build, so a failed re-read leaves the
+// result open.
 func (s *WorkspaceTransitionStorage) afterConflict(
 	ctx context.Context,
 	sdk *codersdk.Client,
@@ -196,7 +198,7 @@ func (s *WorkspaceTransitionStorage) afterConflict(
 ) (runtime.Object, error) {
 	current, err := sdk.Workspace(ctx, workspaceID)
 	if err != nil {
-		return nil, coder.MapCoderError(err, aggregationv1alpha1.Resource("coderworkspaces"), name)
+		return nil, s.uncertain()
 	}
 	outcome, err := decideTransition(s.transition, name, current.LatestBuild)
 	if err != nil && !apierrors.IsConflict(err) {
