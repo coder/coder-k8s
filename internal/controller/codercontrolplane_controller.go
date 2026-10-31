@@ -105,13 +105,13 @@ var (
 
 // LicenseUploader uploads and inspects Coder Enterprise licenses in a coderd instance.
 type LicenseUploader interface {
-	AddLicense(ctx context.Context, coderURL, sessionToken, licenseJWT string) error
-	HasAnyLicense(ctx context.Context, coderURL, sessionToken string) (bool, error)
+	AddLicense(ctx context.Context, coderURL string, coderTLS *controlplaneurl.TLS, sessionToken, licenseJWT string) error
+	HasAnyLicense(ctx context.Context, coderURL string, coderTLS *controlplaneurl.TLS, sessionToken string) (bool, error)
 }
 
 // EntitlementsInspector inspects coderd entitlements.
 type EntitlementsInspector interface {
-	Entitlements(ctx context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error)
+	Entitlements(ctx context.Context, coderURL string, coderTLS *controlplaneurl.TLS, sessionToken string) (codersdk.Entitlements, error)
 }
 
 // NewSDKEntitlementsInspector returns an EntitlementsInspector backed by codersdk.
@@ -121,8 +121,8 @@ func NewSDKEntitlementsInspector() EntitlementsInspector {
 
 type sdkEntitlementsInspector struct{}
 
-func (i *sdkEntitlementsInspector) Entitlements(ctx context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error) {
-	sdkClient, err := newSDKLicenseClient(coderURL, sessionToken)
+func (i *sdkEntitlementsInspector) Entitlements(ctx context.Context, coderURL string, coderTLS *controlplaneurl.TLS, sessionToken string) (codersdk.Entitlements, error) {
+	sdkClient, err := newSDKLicenseClient(coderURL, coderTLS, sessionToken)
 	if err != nil {
 		return codersdk.Entitlements{}, err
 	}
@@ -145,12 +145,12 @@ func NewSDKLicenseUploader() LicenseUploader {
 
 type sdkLicenseUploader struct{}
 
-func (u *sdkLicenseUploader) AddLicense(ctx context.Context, coderURL, sessionToken, licenseJWT string) error {
+func (u *sdkLicenseUploader) AddLicense(ctx context.Context, coderURL string, coderTLS *controlplaneurl.TLS, sessionToken, licenseJWT string) error {
 	if licenseJWT == "" {
 		return fmt.Errorf("assertion failed: license JWT must not be empty")
 	}
 
-	sdkClient, err := newSDKLicenseClient(coderURL, sessionToken)
+	sdkClient, err := newSDKLicenseClient(coderURL, coderTLS, sessionToken)
 	if err != nil {
 		return err
 	}
@@ -162,8 +162,8 @@ func (u *sdkLicenseUploader) AddLicense(ctx context.Context, coderURL, sessionTo
 	return nil
 }
 
-func (u *sdkLicenseUploader) HasAnyLicense(ctx context.Context, coderURL, sessionToken string) (bool, error) {
-	sdkClient, err := newSDKLicenseClient(coderURL, sessionToken)
+func (u *sdkLicenseUploader) HasAnyLicense(ctx context.Context, coderURL string, coderTLS *controlplaneurl.TLS, sessionToken string) (bool, error) {
+	sdkClient, err := newSDKLicenseClient(coderURL, coderTLS, sessionToken)
 	if err != nil {
 		return false, err
 	}
@@ -176,7 +176,7 @@ func (u *sdkLicenseUploader) HasAnyLicense(ctx context.Context, coderURL, sessio
 	return len(licenses) > 0, nil
 }
 
-func newSDKLicenseClient(coderURL, sessionToken string) (*codersdk.Client, error) {
+func newSDKLicenseClient(coderURL string, coderTLS *controlplaneurl.TLS, sessionToken string) (*codersdk.Client, error) {
 	if strings.TrimSpace(coderURL) == "" {
 		return nil, fmt.Errorf("assertion failed: coder URL must not be empty")
 	}
@@ -188,7 +188,7 @@ func newSDKLicenseClient(coderURL, sessionToken string) (*codersdk.Client, error
 
 	// coder.NewSDKClient uses the shared Coder transport and refuses
 	// redirects and websocket dials that leave the control plane origin.
-	sdkClient, err := coder.NewSDKClient(coder.Config{CoderURL: parsedURL, SessionToken: sessionToken, RequestTimeout: licenseUploadRequestTimeout})
+	sdkClient, err := coder.NewSDKClient(coder.Config{CoderURL: parsedURL, SessionToken: sessionToken, RequestTimeout: licenseUploadRequestTimeout, TLS: coderTLS})
 	if err != nil {
 		return nil, fmt.Errorf("create Coder client: %w", err)
 	}
@@ -1655,10 +1655,27 @@ func (r *CoderControlPlaneReconciler) desiredStatus(
 	return nextStatus
 }
 
-func controlPlaneSDKURL(coderControlPlane *coderv1alpha1.CoderControlPlane) string {
-	// Always use HTTP for in-cluster SDK calls. TLS certs are typically provisioned
-	// for external hostnames and may fail verification against *.svc.cluster.local.
-	return controlplaneurl.InternalHTTPURL(coderControlPlane)
+// controlPlaneSDKEndpoint returns the URL and the TLS trust for the license
+// and entitlements calls. Without spec.tls.operatorAccess, it is the internal
+// HTTP URL, because TLS certificates are typically provisioned for external
+// hostnames. With it, it is status.url over HTTPS, verified with the CA
+// bundle (see controlplaneurl.CoderAPIURL and controlplaneurl.OperatorTLS).
+func (r *CoderControlPlaneReconciler) controlPlaneSDKEndpoint(
+	ctx context.Context,
+	coderControlPlane *coderv1alpha1.CoderControlPlane,
+) (string, *controlplaneurl.TLS, error) {
+	if coderControlPlane.Spec.TLS.OperatorAccess == nil {
+		return controlplaneurl.InternalHTTPURL(coderControlPlane), nil, nil
+	}
+	coderURL, err := controlplaneurl.CoderAPIURL(coderControlPlane)
+	if err != nil {
+		return "", nil, err
+	}
+	coderTLS, err := controlplaneurl.OperatorTLS(ctx, r.Client, coderControlPlane)
+	if err != nil {
+		return "", nil, err
+	}
+	return coderURL.String(), coderTLS, nil
 }
 
 func (r *CoderControlPlaneReconciler) reconcileOperatorAccess(
@@ -1889,7 +1906,22 @@ func (r *CoderControlPlaneReconciler) reconcileLicense(
 		return ctrl.Result{}, nil
 	}
 
-	controlPlaneURL := controlPlaneSDKURL(coderControlPlane)
+	controlPlaneURL, coderTLS, err := r.controlPlaneSDKEndpoint(ctx, coderControlPlane)
+	if errors.Is(err, controlplaneurl.ErrUnavailable) {
+		if err := setControlPlaneCondition(
+			nextStatus,
+			coderControlPlane.Generation,
+			coderv1alpha1.CoderControlPlaneConditionLicenseApplied,
+			metav1.ConditionFalse,
+			licenseConditionReasonPending,
+			fmt.Sprintf("Waiting for a verified HTTPS endpoint before applying license: %v.", err),
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+	} else if err != nil {
+		return ctrl.Result{}, err
+	}
 	if strings.TrimSpace(controlPlaneURL) == "" {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: control plane SDK URL must not be empty when licenseSecretRef is configured")
 	}
@@ -1986,7 +2018,7 @@ func (r *CoderControlPlaneReconciler) reconcileLicense(
 	}
 
 	if nextStatus.LicenseLastApplied != nil && nextStatus.LicenseLastAppliedHash == licenseHash {
-		hasAnyLicense, hasLicenseErr := r.LicenseUploader.HasAnyLicense(ctx, controlPlaneURL, operatorToken)
+		hasAnyLicense, hasLicenseErr := r.LicenseUploader.HasAnyLicense(ctx, controlPlaneURL, coderTLS, operatorToken)
 		if hasLicenseErr != nil {
 			var sdkErr *codersdk.Error
 			if errors.As(hasLicenseErr, &sdkErr) {
@@ -2044,7 +2076,7 @@ func (r *CoderControlPlaneReconciler) reconcileLicense(
 		}
 	}
 
-	if err := r.LicenseUploader.AddLicense(ctx, controlPlaneURL, operatorToken, licenseJWT); err != nil {
+	if err := r.LicenseUploader.AddLicense(ctx, controlPlaneURL, coderTLS, operatorToken, licenseJWT); err != nil {
 		if isDuplicateLicenseUploadError(err) {
 			now := metav1.Now()
 			nextStatus.LicenseLastApplied = &now
@@ -2145,7 +2177,12 @@ func (r *CoderControlPlaneReconciler) reconcileEntitlements(
 		nextStatus.OperatorTokenSecretRef == nil {
 		return ctrl.Result{}, nil
 	}
-	controlPlaneURL := controlPlaneSDKURL(coderControlPlane)
+	controlPlaneURL, coderTLS, err := r.controlPlaneSDKEndpoint(ctx, coderControlPlane)
+	if errors.Is(err, controlplaneurl.ErrUnavailable) {
+		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
+	} else if err != nil {
+		return ctrl.Result{}, err
+	}
 	if strings.TrimSpace(controlPlaneURL) == "" {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: control plane SDK URL must not be empty when querying entitlements")
 	}
@@ -2166,7 +2203,7 @@ func (r *CoderControlPlaneReconciler) reconcileEntitlements(
 		return ctrl.Result{RequeueAfter: operatorAccessRetryInterval}, nil
 	}
 
-	entitlements, err := r.EntitlementsInspector.Entitlements(ctx, controlPlaneURL, operatorToken)
+	entitlements, err := r.EntitlementsInspector.Entitlements(ctx, controlPlaneURL, coderTLS, operatorToken)
 	if err != nil {
 		var sdkErr *codersdk.Error
 		if errors.As(err, &sdkErr) {

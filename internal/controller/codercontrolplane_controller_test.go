@@ -34,6 +34,7 @@ import (
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/coderbootstrap"
 	"github.com/coder/coder-k8s/internal/controller"
+	"github.com/coder/coder-k8s/internal/controlplaneurl"
 )
 
 type fakeOperatorAccessProvisioner struct {
@@ -64,6 +65,7 @@ func (f *fakeOperatorAccessProvisioner) RevokeOperatorToken(_ context.Context, r
 
 type licenseUploadCall struct {
 	coderURL     string
+	coderTLS     *controlplaneurl.TLS
 	sessionToken string
 	licenseJWT   string
 }
@@ -77,9 +79,10 @@ type fakeLicenseUploader struct {
 	calls             []licenseUploadCall
 }
 
-func (f *fakeLicenseUploader) AddLicense(_ context.Context, coderURL, sessionToken, licenseJWT string) error {
+func (f *fakeLicenseUploader) AddLicense(_ context.Context, coderURL string, coderTLS *controlplaneurl.TLS, sessionToken, licenseJWT string) error {
 	f.calls = append(f.calls, licenseUploadCall{
 		coderURL:     coderURL,
+		coderTLS:     coderTLS,
 		sessionToken: sessionToken,
 		licenseJWT:   licenseJWT,
 	})
@@ -91,7 +94,7 @@ func (f *fakeLicenseUploader) AddLicense(_ context.Context, coderURL, sessionTok
 	return f.err
 }
 
-func (f *fakeLicenseUploader) HasAnyLicense(_ context.Context, _, _ string) (bool, error) {
+func (f *fakeLicenseUploader) HasAnyLicense(_ context.Context, _ string, _ *controlplaneurl.TLS, _ string) (bool, error) {
 	f.hasAnyLicenseCall++
 	if f.hasAnyLicenseErr != nil {
 		return false, f.hasAnyLicenseErr
@@ -112,12 +115,13 @@ type fakeEntitlementsInspector struct {
 
 type entitlementsInspectCall struct {
 	coderURL     string
+	coderTLS     *controlplaneurl.TLS
 	sessionToken string
 }
 
-func (f *fakeEntitlementsInspector) Entitlements(_ context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error) {
+func (f *fakeEntitlementsInspector) Entitlements(_ context.Context, coderURL string, coderTLS *controlplaneurl.TLS, sessionToken string) (codersdk.Entitlements, error) {
 	f.calls++
-	f.requests = append(f.requests, entitlementsInspectCall{coderURL: coderURL, sessionToken: sessionToken})
+	f.requests = append(f.requests, entitlementsInspectCall{coderURL: coderURL, coderTLS: coderTLS, sessionToken: sessionToken})
 	if f.err != nil {
 		return codersdk.Entitlements{}, f.err
 	}
