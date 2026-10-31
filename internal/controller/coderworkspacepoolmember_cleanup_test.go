@@ -156,6 +156,35 @@ func TestPoolMemberCleanupUseBeforeDeleteRetry(t *testing.T) {
 	}
 }
 
+// TestPoolMemberCleanupChecksLastReadBeforeDelete (#409): the use check
+// applies to the last workspace read before the delete build. A usage flush
+// between the identity guard's read and the delete step's read keeps the
+// workspace, for the first delete build and for a retry after a restart.
+func TestPoolMemberCleanupChecksLastReadBeforeDelete(t *testing.T) {
+	t.Parallel()
+	for name, retry := range map[string]bool{"first delete build": false, "retry after a restart": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			e := newPoolMemberEnv(t)
+			key, workspaceID := e.readyMember(t)
+			e.deleteMember(t, key)
+			if retry {
+				member := e.reconcileMember(t, key, 1)
+				e.fake.setBuildJob(uuid.MustParse(member.Status.DeleteBuildID), codersdk.ProvisionerJobFailed)
+				require.Equal(t, int32(1), e.reconcileMember(t, key, 1).Status.DeleteAttempts)
+			}
+			e.clock.SetTime(e.clock.Now().Add(2 * time.Minute)) // The first backoff is 1 m.
+			builds := e.fake.requestCount(routeCreateBuild)
+			e.fake.failNext(routeWorkspace, fakeFault{Rewrite: func(answer any) any { return answer }}) // The guard's read.
+			e.fake.failNext(routeWorkspace, fakeFault{Inspect: func([]byte) {
+				e.fake.mustWorkspace(workspaceID).workspace.LastUsedAt = e.clock.Now()
+			}})
+			require.Nil(t, e.reconcileMember(t, key, 1), "the member goes without deleting its workspace")
+			require.Equal(t, builds, e.fake.requestCount(routeCreateBuild), "no delete build after the use")
+		})
+	}
+}
+
 // TestPoolMemberCleanupUseNearTemplateEdit (#349): every template edit, for
 // example a version promote, moves the template's updated_at. Use half a
 // second after an edit is still use, so cleanup sends no delete build.

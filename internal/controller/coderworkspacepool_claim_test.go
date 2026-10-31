@@ -170,6 +170,30 @@ func TestPoolBindSkipsUseAfterLastRead(t *testing.T) {
 	require.Nil(t, m.Spec.ClaimRef)
 }
 
+// TestPoolBindReadsCoderForEachClaim (#409): each bind reads its member's
+// workspace right before the bind, not once per reconcile. A use that lands
+// while the pool binds the first claim keeps that member from the second.
+func TestPoolBindReadsCoderForEachClaim(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	first, _ := e.readyMember(t)
+	e.tick()
+	second, secondID := e.readyMember(t)
+	e.tick()
+	third, _ := e.readyMember(t)
+	claimA, claimB := e.createClaim(t, "a"), e.createClaim(t, "b")
+	hook := bindHookClient{Client: k8sClient, done: new(false), hook: func(m *coderv1alpha1.CoderWorkspacePoolMember) {
+		require.Equal(t, first.Name, m.Name)
+		e.fake.markUsed(secondID, e.clock.Now().Add(time.Minute))
+	}}
+	r := &controller.CoderWorkspacePoolReconciler{Client: hook, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
+	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.ns, Name: e.pool.Name}})
+	require.NoError(t, err)
+	e.requireBound(t, first, claimA)
+	require.Nil(t, e.reconcileMember(t, second, 0).Spec.ClaimRef, "the use during the first bind keeps the second member")
+	e.requireBound(t, third, claimB)
+}
+
 // bindHookClient runs hook once, right before the first member update.
 type bindHookClient struct {
 	client.Client
