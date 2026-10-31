@@ -2,10 +2,8 @@ package controller
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"time"
 
@@ -15,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/aggregated/coder"
 )
 
 // createWorkspace writes the create marker, then sends the only create
@@ -93,20 +92,14 @@ func (r *CoderTemplateTestReconciler) createWorkspace(
 // createHadNoEffect reports results that prove Coder changed nothing: the
 // rate limiter and authentication answer before the handler, Coder v2.37.2
 // answers 406 from inside a rolled-back transaction (coderd/workspaces.go,
-// createWorkspace), and a failed dial or TLS handshake never sent the request.
-// A bad TLS record header proves that only on the first record: crypto/tls
-// sets Conn only there. On a reused connection the same error type comes
-// with a nil Conn, after Coder may already have committed the request.
+// createWorkspace), and a transport error that coder.NotSent accepts never
+// sent the request. The aggregated API server uses the same transport rule.
 func createHadNoEffect(err error) bool {
 	switch coderStatus(err) {
 	case http.StatusTooManyRequests, http.StatusUnauthorized, http.StatusNotAcceptable:
 		return true
 	}
-	var opErr *net.OpError
-	var certErr *tls.CertificateVerificationError
-	var headerErr tls.RecordHeaderError
-	return (errors.As(err, &opErr) && opErr.Op == "dial") || errors.As(err, &certErr) ||
-		(errors.As(err, &headerErr) && headerErr.Conn != nil)
+	return coder.NotSent(err)
 }
 
 // statusClientClosedRequest is nginx's status for a client that closed the

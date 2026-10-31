@@ -237,7 +237,7 @@ func newCoderTransport() (*http.Transport, error) {
 }
 
 // errProxyConnectRefused marks a proxy answer other than 200 to the CONNECT for Coder. Go reports
-// that answer with an untyped error, and without this mark notSent cannot tell it apart from a
+// that answer with an untyped error, and without this mark NotSent cannot tell it apart from a
 // connection that broke after the request.
 var errProxyConnectRefused = errors.New("the proxy refused the CONNECT tunnel")
 

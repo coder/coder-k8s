@@ -141,7 +141,7 @@ func IsCoderErrorAnswer(coderErr *codersdk.Error) bool {
 // of IsUncertainStatus other than 504, an error answer that is not Coder's own (see
 // IsCoderErrorAnswer), or an error without a status after the request was sent,
 // such as a connection that broke or a body that is not the expected JSON. A timeout, a Coder 504,
-// a request that did not reach Coder (see notSent) and every other status map as in MapCoderError.
+// a request that did not reach Coder (see NotSent) and every other status map as in MapCoderError.
 func MapCoderWriteError(err error, write Write, resource schema.GroupResource, name string) error {
 	if err == nil {
 		return fmt.Errorf("assertion failed: error must not be nil")
@@ -167,7 +167,7 @@ func MapCoderWriteError(err error, write Write, resource schema.GroupResource, n
 	}
 
 	var netErr net.Error
-	if (errors.As(err, &netErr) && netErr.Timeout()) || notSent(err) {
+	if (errors.As(err, &netErr) && netErr.Timeout()) || NotSent(err) {
 		return MapCoderError(err, resource, name)
 	}
 	logHiddenError(err, resource, name, 0)
@@ -205,7 +205,7 @@ func UncertainWriteError(write Write, resource schema.GroupResource, name, reaso
 	), 0)
 }
 
-// notSent reports whether err proves that the request did not reach Coder. Each error that it
+// NotSent reports whether err proves that the request did not reach Coder. Each error that it
 // accepts comes from a step before net/http writes the request: the dial of the connection to Coder
 // or to the proxy in front of it, the proxy answer to the CONNECT tunnel, the verification of the
 // certificate, a first record of the server that is not TLS (crypto/tls sets Conn only before the
@@ -215,7 +215,7 @@ func UncertainWriteError(write Write, resource schema.GroupResource, name, reaso
 // neither is an error of a request that followed a redirect: the server that answered with the
 // redirect got the write. An error after net/http wrote the request (errAfterWrite) never proves
 // it, even when a retry on a new connection failed in one of those steps.
-func notSent(err error) bool {
+func NotSent(err error) bool {
 	if errors.Is(err, errAfterRedirect) || errors.Is(err, errAfterWrite) {
 		return false
 	}
