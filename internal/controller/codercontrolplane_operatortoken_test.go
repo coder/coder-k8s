@@ -710,22 +710,30 @@ func TestReconcile_OperatorAccess_ErrorKeepsTokenRecord(t *testing.T) {
 }
 
 // TestReconcile_OperatorAccess_Disabled_DatabaseChanged checks that disabling
-// operator access deletes the operator token only in the database where the
-// operator created it, as the delete after a replaced Secret does.
+// operator access deletes the operator token by name only in the database
+// where the operator created it, as the delete after a replaced Secret does.
+// In another database it deletes only the exact token in the owned Secret.
 func TestReconcile_OperatorAccess_Disabled_DatabaseChanged(t *testing.T) {
 	ctx := context.Background()
 	cp, provisioner, _ := publishOperatorToken(ctx, t, "operator-token-disabled-database-changed", losesOwnerPostgresURL)
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}}
 	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
 
+	otherDatabase := "postgres://coder:first-password@example.other-database/coder"
 	updateControlPlaneSpec(ctx, t, cp, func(spec *coderv1alpha1.CoderControlPlaneSpec) {
 		spec.OperatorAccess.Disabled = true
-		spec.ExtraEnv = []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: "postgres://coder:first-password@example.other-database/coder"}}
+		spec.ExtraEnv = []corev1.EnvVar{{Name: "CODER_PG_CONNECTION_URL", Value: otherDatabase}}
 	})
 	result, err := r.Reconcile(ctx, request)
 	require.NoError(t, err)
 	require.Positive(t, result.RequeueAfter)
-	require.Zero(t, provisioner.revokeCalls, "the operator must not delete a token in a database where it did not create it")
+	require.Equal(t, []coderbootstrap.RevokeOperatorTokenRequest{{
+		PostgresURL:      otherDatabase,
+		OperatorUsername: provisioner.requests[0].OperatorUsername,
+		TokenName:        provisioner.requests[0].TokenName,
+		Token:            "operator-token-published",
+	}}, provisioner.revokeRequests, "the operator must not delete a token by name in a database where it did not create it")
+	provisioner.revokeRequests, provisioner.revokeCalls = nil, 0
 	refused := getControlPlane(t, cp)
 	require.False(t, refused.Status.OperatorAccessReady)
 	require.Equal(t, cp.Status.OperatorTokenSecretRef, refused.Status.OperatorTokenSecretRef)

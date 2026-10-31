@@ -1453,9 +1453,10 @@ func TestReconcile_OperatorAccess_Disabled_DoesNotDeleteUnmanagedSecret(t *testi
 	}
 }
 
-// A status that names no operator token Secret records no token, so disabling
-// operator access deletes none in Coder, also next to an owned Secret.
-func TestReconcile_OperatorAccess_Disabled_DeletesNoTokenWithoutRecord(t *testing.T) {
+// A status that names no operator token Secret records no token name to
+// delete. Disabling operator access then deletes in Coder only the exact token
+// that the owned Secret holds, and keeps the Secret until that delete worked.
+func TestReconcile_OperatorAccess_Disabled_WithoutRecordRevokesSecretToken(t *testing.T) {
 	ensureGatewaySchemeRegistered(t)
 	ctx := context.Background()
 	testNamespace := createTestNamespace(ctx, t, "test-cp")
@@ -1504,18 +1505,39 @@ func TestReconcile_OperatorAccess_Disabled_DeletesNoTokenWithoutRecord(t *testin
 		_ = k8sClient.Delete(ctx, managedSecret)
 	})
 
-	provisioner := &fakeOperatorAccessProvisioner{}
+	provisioner := &fakeOperatorAccessProvisioner{revokeErr: errors.New("coder database unavailable")}
 	r := &controller.CoderControlPlaneReconciler{Client: k8sClient, Scheme: scheme, OperatorAccessProvisioner: provisioner}
 
 	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}})
+	if err != nil {
+		t.Fatalf("reconcile disabled control plane with failing revoke: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("expected requeue while the revoke fails, got %+v", result)
+	}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: managedSecretName, Namespace: cp.Namespace}, &corev1.Secret{}); err != nil {
+		t.Fatalf("expected managed operator secret to stay while its token can still work, got error %v", err)
+	}
+
+	provisioner.revokeErr = nil
+	result, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}})
 	if err != nil {
 		t.Fatalf("reconcile disabled control plane without status ref: %v", err)
 	}
 	if result != (ctrl.Result{}) {
 		t.Fatalf("expected empty reconcile result, got %+v", result)
 	}
-	if provisioner.revokeCalls != 0 {
-		t.Fatalf("expected no revoke without a recorded token, got %d calls", provisioner.revokeCalls)
+	wantRevoke := coderbootstrap.RevokeOperatorTokenRequest{
+		PostgresURL:      "postgres://example.disabled.revoke/coder",
+		OperatorUsername: "coder-k8s-operator",
+		TokenName:        provisioner.revokeRequests[0].TokenName,
+		Token:            "unrecorded-operator-token",
+	}
+	if len(provisioner.revokeRequests) != 2 || provisioner.revokeRequests[0] != wantRevoke || provisioner.revokeRequests[1] != wantRevoke {
+		t.Fatalf("expected two deletes of exactly the Secret's token, got %+v", provisioner.revokeRequests)
+	}
+	if !strings.HasPrefix(wantRevoke.TokenName, "coder-k8s-operator-") {
+		t.Fatalf("expected revoke token name to be scoped with prefix %q, got %q", "coder-k8s-operator-", wantRevoke.TokenName)
 	}
 	err = k8sClient.Get(ctx, types.NamespacedName{Name: managedSecretName, Namespace: cp.Namespace}, &corev1.Secret{})
 	if !apierrors.IsNotFound(err) {

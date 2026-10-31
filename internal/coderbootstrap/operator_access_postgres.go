@@ -37,6 +37,9 @@ type RevokeOperatorTokenRequest struct {
 	PostgresURL      string
 	OperatorUsername string
 	TokenName        string
+	// Token, when set, limits the delete to the token with this value, so
+	// the delete removes no other token with the same name.
+	Token string
 }
 
 // OperatorAccessProvisioner provisions and revokes operator access credentials
