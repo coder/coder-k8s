@@ -7697,8 +7697,8 @@ spec:
               usedReplicas:
                 description: |-
                   UsedReplicas is the number of members that someone may have used
-                  without a claim. They no longer count toward the pool, and the
-                  controller never deletes their workspaces.
+                  without a claim. They no longer count toward the pool, and the pool
+                  never deletes them.
                 format: int32
                 type: integer
             type: object

@@ -23,8 +23,8 @@ const poolMemberUnknownOutcomePoll = 10 * time.Minute
 
 // cleanup runs the delete steps of a member being deleted (plan 6.5). It
 // releases the finalizer once no workspace of the member can exist, the
-// workspace is deleted, the workspace was used, or the control plane is
-// gone. A workspace that nothing proves to be the member's keeps the
+// workspace is deleted, the workspace was used while the pool still held the
+// member, or the control plane is gone. A workspace that nothing proves to be the member's keeps the
 // finalizer, and the controller never touches it.
 func (r *CoderWorkspacePoolMemberReconciler) cleanup(ctx context.Context, member *coderv1alpha1.CoderWorkspacePoolMember) (ctrl.Result, error) {
 	deleted := meta.FindStatusCondition(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionWorkspaceDeleted)
@@ -110,8 +110,13 @@ func (r *CoderWorkspacePoolMemberReconciler) cleanupStep(
 	if step != nil || err != nil {
 		return step, templateTestUnavailablePoll, false, err
 	}
+	// The pool releases a used member (decision D6). With no controller left,
+	// garbage collection never deletes it: only a person or a namespace
+	// deletion does, and that delete deletes its workspace, as a claim's does.
+	released := metav1.GetControllerOf(member) == nil &&
+		meta.IsStatusConditionTrue(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionUsed)
 	var keep func(codersdk.Workspace) (bool, error)
-	if member.Spec.ClaimRef == nil {
+	if member.Spec.ClaimRef == nil && !released {
 		// The last use check runs on the delete step's own read, before any
 		// write, on every step, so no delete build, a retry included, starts
 		// after a use (#409): a leaked workspace is better than lost work. In
