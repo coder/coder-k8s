@@ -61,7 +61,7 @@ func (r *CoderWorkspacePoolReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	if mgr == nil || r.Client == nil || r.APIReader == nil || r.Scheme == nil || r.Clock == nil {
 		return errors.New("assertion failed: pool reconciler needs a manager, a client, an API reader, a scheme, and a clock")
 	}
-	if err := startControlPlaneAccessInformers(mgr); err != nil {
+	if err := startSecretInformer(mgr); err != nil {
 		return err
 	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &coderv1alpha1.CoderWorkspacePool{}, poolControlPlaneRefIndex,
@@ -95,15 +95,12 @@ func (r *CoderWorkspacePoolReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		Complete(r)
 }
 
-// startControlPlaneAccessInformers starts the informers of the kinds that
-// controlPlaneCoderClient reads through the cache: the CoderControlPlane and
-// its operator token Secret. Without them, a cache that starts informers only
-// for watched kinds refuses those reads.
-func startControlPlaneAccessInformers(mgr ctrl.Manager) error {
-	for _, obj := range []client.Object{&coderv1alpha1.CoderControlPlane{}, &corev1.Secret{}} {
-		if _, err := mgr.GetCache().GetInformer(context.Background(), obj); err != nil {
-			return fmt.Errorf("start the %T informer: %w", obj, err)
-		}
+// startSecretInformer starts the Secret informer: controlPlaneCoderClient
+// reads the operator token Secret through the cache, and a cache that starts
+// informers only for watched kinds refuses that read.
+func startSecretInformer(mgr ctrl.Manager) error {
+	if _, err := mgr.GetCache().GetInformer(context.Background(), &corev1.Secret{}); err != nil {
+		return fmt.Errorf("start the Secret informer: %w", err)
 	}
 	return nil
 }

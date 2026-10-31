@@ -107,15 +107,28 @@ func TestPoolWatches(t *testing.T) {
 }
 
 // TestPoolMemberSetupWithManager runs only the member reconciler in a
-// manager: a new member gets its finalizer and sends its create request,
-// which reads the control plane and the operator token through the cache.
+// manager. A new member gets its finalizer and waits for its control plane.
+// A control plane change wakes it before its 15 s poll, and it sends its
+// create request, which reads the control plane and the operator token
+// through the cache.
 func TestPoolMemberSetupWithManager(t *testing.T) {
 	t.Parallel()
 	e := newPoolMemberEnv(t)
+	cp := &coderv1alpha1.CoderControlPlane{}
+	require.NoError(t, k8sClient.Get(e.ctx, types.NamespacedName{Namespace: e.ns, Name: "coder"}, cp))
+	cp.Status.OperatorAccessReady = false
+	require.NoError(t, k8sClient.Status().Update(e.ctx, cp))
 	e.startPoolManager(t, false, true)
 	key := e.createMember(t, nil)
 	require.Eventually(t, func() bool {
 		m := e.reconcileMember(t, key, 0)
-		return controllerutil.ContainsFinalizer(m, coderv1alpha1.CoderWorkspacePoolMemberCleanupFinalizer) && m.Status.WorkspaceID != ""
+		return controllerutil.ContainsFinalizer(m, coderv1alpha1.CoderWorkspacePoolMemberCleanupFinalizer) && m.Status.Reason == "OperatorAccessNotReady"
 	}, 10*time.Second, 50*time.Millisecond)
+
+	settleWatchStep()
+	require.NoError(t, k8sClient.Get(e.ctx, types.NamespacedName{Namespace: e.ns, Name: "coder"}, cp))
+	cp.Status.OperatorAccessReady = true
+	require.NoError(t, k8sClient.Status().Update(e.ctx, cp))
+	require.Eventually(t, func() bool { return e.reconcileMember(t, key, 0).Status.WorkspaceID != "" },
+		watchStepTimeout, 50*time.Millisecond, "the control plane watch wakes the member")
 }
