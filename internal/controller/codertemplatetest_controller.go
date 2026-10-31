@@ -44,8 +44,11 @@ const (
 // agent is ready, records the result, and deletes the workspace.
 type CoderTemplateTestReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
-	Clock  clock.PassiveClock
+	// APIReader confirms without the cache that a control plane is gone,
+	// because that ends the test's cleanup for good.
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
+	Clock     clock.PassiveClock
 
 	rateLimited coderBackoff // Keyed by types.NamespacedName.
 }

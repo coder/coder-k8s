@@ -1,18 +1,23 @@
 package controller_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/controller"
 )
 
 func (e *templateTestEnv) deleteTest(t *testing.T, key types.NamespacedName) {
@@ -204,6 +209,60 @@ func TestTemplateTestControlPlaneGone(t *testing.T) {
 		// Namespace teardown: the control plane and a test go together.
 		e.deleteTest(t, final)
 		require.Nil(t, e.settle(t, final), "%s: deletion never waits for a gone control plane", tc.name)
+	}
+}
+
+// laggingControlPlaneCache answers CoderControlPlane reads as a cache that
+// lags behind the API: NotFound, or with deleting, the live object with a
+// deletion timestamp, as a cache that missed a re-create shows it.
+type laggingControlPlaneCache struct {
+	client.Client
+	deleting bool
+}
+
+func (c laggingControlPlaneCache) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	cp, ok := obj.(*coderv1alpha1.CoderControlPlane)
+	if !ok {
+		return c.Client.Get(ctx, key, obj, opts...)
+	}
+	if !c.deleting {
+		return apierrors.NewNotFound(coderv1alpha1.GroupVersion.WithResource("codercontrolplanes").GroupResource(), key.Name)
+	}
+	if err := c.Client.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	cp.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	return nil
+}
+
+// TestTemplateTestControlPlaneStaleCache: "control plane gone" ends a test
+// and its cleanup for good and leaves its workspace in Coder, so a cache
+// that lags behind the API does not decide it. While the control plane
+// exists, a running test keeps running, a deleted test keeps its finalizer,
+// and no Coder request goes out. TestTemplateTestControlPlaneGone covers a
+// control plane that is really gone.
+func TestTemplateTestControlPlaneStaleCache(t *testing.T) {
+	t.Parallel()
+	for _, deleting := range []bool{false, true} {
+		e := newTemplateTestEnv(t)
+		running, _, _ := e.startedTest(t)
+		final := e.failedWithWorkspace(t)
+		e.deleteTest(t, final)
+		lagging := &controller.CoderTemplateTestReconciler{
+			Client: laggingControlPlaneCache{Client: k8sClient, deleting: deleting}, APIReader: k8sClient, Scheme: scheme, Clock: e.clock,
+		}
+		requests := e.fake.totalRequests()
+		for _, key := range []types.NamespacedName{running, final} {
+			_, err := lagging.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
+			require.NoError(t, err, "deleting=%t", deleting)
+		}
+		require.Equal(t, requests, e.fake.totalRequests(), "deleting=%t: no Coder call", deleting)
+		tt := e.reconcile(t, running, 0)
+		require.Equal(t, coderv1alpha1.CoderTemplateTestPhaseRunning, tt.Status.Phase, "deleting=%t: %s", deleting, tt.Status.Message)
+		require.NotEqual(t, "ControlPlaneGone", tt.Status.Reason, "deleting=%t", deleting)
+		tt = e.reconcile(t, final, 0)
+		require.NotNil(t, tt, "deleting=%t: the finalizer stays", deleting)
+		require.NotEqual(t, "ControlPlaneGone", meta.FindStatusCondition(tt.Status.Conditions, coderv1alpha1.CoderTemplateTestConditionWorkspaceDeleted).Reason, "deleting=%t", deleting)
 	}
 }
 

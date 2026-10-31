@@ -243,7 +243,7 @@ func TestTemplateTestConfirmNeedsEveryPin(t *testing.T) {
 		require.NoError(t, k8sClient.Get(e.ctx, key, tt))
 		clear(&tt.Status)
 		require.NoError(t, k8sClient.Status().Update(e.ctx, tt))
-		r := &controller.CoderTemplateTestReconciler{Client: k8sClient, Scheme: scheme, Clock: e.clock}
+		r := &controller.CoderTemplateTestReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
 		_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
 		require.Error(t, err)
 		require.True(t, strings.HasPrefix(err.Error(), "assertion failed:"), err.Error())

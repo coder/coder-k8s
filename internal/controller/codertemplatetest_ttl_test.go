@@ -104,7 +104,7 @@ func TestTemplateTestTTLAfterFinished(t *testing.T) {
 	require.Equal(t, time.Second, e.lastStep.RequeueAfter)
 	e.clock.SetTime(finished.Status.CompletionTime.Add(60 * time.Second))
 	recorder := &deleteRecorder{Client: k8sClient}
-	r := &controller.CoderTemplateTestReconciler{Client: recorder, Scheme: scheme, Clock: e.clock}
+	r := &controller.CoderTemplateTestReconciler{Client: recorder, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
 	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
 	require.NoError(t, err)
 	require.Nil(t, e.reconcile(t, key, 1), "deleted after the TTL")

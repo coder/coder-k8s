@@ -187,7 +187,7 @@ func TestTemplateTestMarkerConflictSendsNoRequest(t *testing.T) {
 	key := e.createTest(t, "default.docker", coderv1alpha1.CoderTemplateTestVersion{Name: "v1"})
 	e.reconcile(t, key, 2) // Finalizer and initialization.
 
-	r := &controller.CoderTemplateTestReconciler{Client: markerConflictClient{k8sClient}, Scheme: scheme, Clock: e.clock}
+	r := &controller.CoderTemplateTestReconciler{Client: markerConflictClient{k8sClient}, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
 	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
 	require.True(t, apierrors.IsConflict(err), "the marker write conflict ends the reconcile: %v", err)
 	require.Zero(t, e.fake.requestCount(routeCreateWorkspace), "no create request without a stored marker")
@@ -281,7 +281,7 @@ func TestTemplateTestDeadlineAfterCreate(t *testing.T) {
 
 	// The create request returns after the deadline.
 	clock := &lateClock{times: []time.Time{deadline.Add(-3 * time.Second), deadline.Add(-2 * time.Second), deadline.Add(-time.Second), deadline}}
-	r := &controller.CoderTemplateTestReconciler{Client: k8sClient, Scheme: scheme, Clock: clock}
+	r := &controller.CoderTemplateTestReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Clock: clock}
 	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
 	require.NoError(t, err)
 	require.NoError(t, k8sClient.Get(e.ctx, key, tt))
@@ -299,7 +299,7 @@ func TestTemplateTestDeadlineAfterMarkerWrite(t *testing.T) {
 
 	// The marker write returns at the deadline: no request leaves.
 	clock := &lateClock{times: []time.Time{deadline.Add(-2 * time.Second), deadline.Add(-time.Second), deadline}}
-	r := &controller.CoderTemplateTestReconciler{Client: k8sClient, Scheme: scheme, Clock: clock}
+	r := &controller.CoderTemplateTestReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Clock: clock}
 	_, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})
 	require.NoError(t, err)
 	require.Zero(t, e.fake.requestCount(routeCreateWorkspace), "no create request after the deadline")
@@ -312,7 +312,7 @@ func TestTemplateTestDeadlineAfterMarkerWrite(t *testing.T) {
 func TestTemplateTestBackoffForgetsDeletedTests(t *testing.T) {
 	t.Parallel()
 	e := newTemplateTestEnv(t)
-	r := &controller.CoderTemplateTestReconciler{Client: k8sClient, Scheme: scheme, Clock: e.clock}
+	r := &controller.CoderTemplateTestReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Clock: e.clock}
 	run := func(key types.NamespacedName) ctrl.Result {
 		t.Helper()
 		result, err := r.Reconcile(e.ctx, ctrl.Request{NamespacedName: key})

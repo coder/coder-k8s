@@ -118,9 +118,10 @@ func SetupControllers(mgr manager.Manager) error {
 	}
 
 	templateTestReconciler := &controller.CoderTemplateTestReconciler{
-		Client: client,
-		Scheme: managerScheme,
-		Clock:  clock.RealClock{},
+		Client:    client,
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    managerScheme,
+		Clock:     clock.RealClock{},
 	}
 	if err := templateTestReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create template test controller: %w", err)

@@ -224,7 +224,7 @@ func TestTemplateTestWatchesControlPlane(t *testing.T) {
 		Controller: config.Controller{SkipNameValidation: ptrTo(true)},
 	})
 	require.NoError(t, err)
-	r := &controller.CoderTemplateTestReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Clock: clock.RealClock{}}
+	r := &controller.CoderTemplateTestReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Clock: clock.RealClock{}}
 	require.NoError(t, r.SetupWithManager(mgr))
 	ctx, cancel := context.WithCancel(e.ctx)
 	done := make(chan error, 1)
