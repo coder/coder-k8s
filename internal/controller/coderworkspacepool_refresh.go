@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"time"
@@ -136,8 +137,11 @@ func (r *CoderWorkspacePoolReconciler) reapIdleClaims(
 		*m = *marked
 		claim.Status.Phase = coderv1alpha1.CoderWorkspaceClaimPhaseLost
 		claim.Status.Reason = poolReasonIdleTimeout
-		claim.Status.Message = fmt.Sprintf("Nobody used workspace %s for %ds, so the pool deletes it. The claim never binds again.",
-			m.Status.WorkspaceName, *timeout)
+		// Lost is final, so this message also covers a workspace that the
+		// member's cleanup keeps.
+		claim.Status.Message = fmt.Sprintf("Nobody used workspace %s for %ds, so the pool deletes it, unless its last check before the delete sees a use. "+
+			"A kept workspace stays in Coder as %s, owned by %s. The claim never binds again.",
+			m.Status.WorkspaceName, *timeout, m.Status.WorkspaceName, cmp.Or(workspace.OwnerName, m.Spec.OwnerID))
 		for conditionType, status := range map[string]metav1.ConditionStatus{
 			coderv1alpha1.CoderWorkspaceClaimConditionReady:       metav1.ConditionFalse,
 			coderv1alpha1.CoderWorkspaceClaimConditionReconciling: metav1.ConditionFalse,

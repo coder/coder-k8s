@@ -138,10 +138,11 @@ func (r *CoderWorkspacePoolMemberReconciler) cleanupStep(
 		return nil, 0, false, err
 	case idleBaseline != nil:
 		// The pool deletes this member for idleness. A use after its idle
-		// check, on any delete step's own read, keeps the workspace.
-		keptMessage = "Someone used the workspace after the pool's idle check, so the controller releases the pool member and starts no delete build"
+		// check, or no last_used_at, on any delete step's own read keeps the
+		// workspace.
+		keptMessage = "Someone used the workspace after the pool's idle check, or Coder did not say when, so the controller releases the pool member and starts no delete build"
 		keep = func(latest codersdk.Workspace) (bool, error) {
-			return latest.LastUsedAt.Truncate(time.Microsecond).After(*idleBaseline), nil
+			return latest.LastUsedAt.IsZero() || latest.LastUsedAt.Truncate(time.Microsecond).After(*idleBaseline), nil
 		}
 	case member.Spec.ClaimRef == nil && !released:
 		// The last use check runs on the delete step's own read, before any

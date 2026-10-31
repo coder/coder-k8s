@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -217,12 +218,59 @@ func TestPoolIdleReapKeepsLaterUse(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, e.reconcileMember(t, member, 0).DeletionTimestamp.IsZero(), "the claim path deletes the member of a gone pool")
 
+	workspaceName := e.reconcileMember(t, member, 0).Status.WorkspaceName
 	e.fake.markUsed(workspaceID, e.clock.Now())
 	builds := e.fake.requestCount(routeCreateBuild)
 	require.Nil(t, e.reconcileMember(t, member, 1), "the member goes")
 	require.Equal(t, builds, e.fake.requestCount(routeCreateBuild), "no delete build after a use")
 	_, err = e.fake.client(t, 5*time.Second).Workspace(e.ctx, workspaceID)
 	require.NoError(t, err, "the workspace stays in Coder")
+	claim := e.claim(t, claimKey)
+	requireIdleLost(t, claim)
+	require.Contains(t, claim.Status.Message, "unless its last check before the delete sees a use")
+	require.Contains(t, claim.Status.Message, "stays in Coder as "+workspaceName+", owned by tester", "the claim tells where a kept workspace is")
+}
+
+// TestPoolIdleCleanupNeedsLastUsedAt: a reaped member's last Coder read
+// before the delete build that has no last_used_at, zero or left out, proves
+// no idleness, so the member keeps the workspace.
+func TestPoolIdleCleanupNeedsLastUsedAt(t *testing.T) {
+	t.Parallel()
+	for _, omit := range []bool{false, true} {
+		t.Run(map[bool]string{false: "zero", true: "omitted"}[omit], func(t *testing.T) {
+			t.Parallel()
+			e := newPoolMemberEnv(t)
+			e.editPool(t, func(s *coderv1alpha1.CoderWorkspacePoolSpec) {
+				s.Replicas, s.Claims.IdleTimeoutSeconds = new(int32(0)), new(int32(600))
+			})
+			member, workspaceID := e.readyMember(t)
+			claimKey := e.createClaim(t, "idle")
+			e.reconcilePool(t, 1)
+			e.requireBound(t, member, claimKey)
+			e.clock.SetTime(e.clock.Now().Add(11 * time.Minute))
+			e.reconcilePool(t, 1)
+			requireIdleLost(t, e.claim(t, claimKey))
+
+			// The identity guard reads a full answer, and the delete step's own read lacks last_used_at.
+			e.fake.failNext(routeWorkspace, fakeFault{Rewrite: func(answer any) any { return answer }})
+			e.fake.failNext(routeWorkspace, fakeFault{Rewrite: func(answer any) any {
+				raw, err := json.Marshal(answer)
+				require.NoError(t, err)
+				var body map[string]any
+				require.NoError(t, json.Unmarshal(raw, &body))
+				body["last_used_at"] = time.Time{}
+				if omit {
+					delete(body, "last_used_at")
+				}
+				return body
+			}})
+			builds := e.fake.requestCount(routeCreateBuild)
+			require.Nil(t, e.reconcileMember(t, member, 1), "the member goes")
+			require.Equal(t, builds, e.fake.requestCount(routeCreateBuild), "no delete build without last_used_at")
+			_, err := e.fake.client(t, 5*time.Second).Workspace(e.ctx, workspaceID)
+			require.NoError(t, err, "the workspace stays in Coder")
+		})
+	}
 }
 
 // failClaimStatus refuses claim status writes, as a crash right after the
