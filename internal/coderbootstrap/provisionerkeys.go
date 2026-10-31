@@ -12,7 +12,7 @@ import (
 
 	"github.com/coder/coder/v2/codersdk"
 
-	"github.com/coder/coder-k8s/internal/sameorigin"
+	"github.com/coder/coder-k8s/internal/aggregated/coder"
 )
 
 // EnsureProvisionerKeyRequest describes how to create or look up a provisioner key in Coder.
@@ -304,34 +304,20 @@ func validateProvisionerKeyInputs(coderURL, sessionToken, keyName string) error 
 	return nil
 }
 
+// newAuthenticatedClient returns a client for coderURL on the shared Coder
+// transport (see coder.NewSDKClient), which also refuses redirects and
+// websocket dials that leave the origin of coderURL.
 func newAuthenticatedClient(coderURL, sessionToken string) (*codersdk.Client, error) {
 	coderAPIURL, err := url.Parse(coderURL)
 	if err != nil {
 		return nil, xerrors.Errorf("parse coder URL: %w", err)
 	}
 
-	client := codersdk.New(coderAPIURL)
-	if client == nil {
-		return nil, xerrors.New("assertion failed: codersdk client is nil after successful construction")
+	client, err := coder.NewSDKClient(coder.Config{CoderURL: coderAPIURL, SessionToken: sessionToken, RequestTimeout: coderSDKRequestTimeout})
+	if err != nil {
+		return nil, xerrors.Errorf("create Coder client: %w", err)
 	}
-	client.SetSessionToken(sessionToken)
-	if client.HTTPClient == nil {
-		client.HTTPClient = &http.Client{}
-	}
-	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		return nil, xerrors.New("assertion failed: http.DefaultTransport is not *http.Transport")
-	}
-	// Use a dedicated transport to avoid sharing http.DefaultTransport's
-	// connection pool across parallel test servers.
-	client.HTTPClient.Transport = bypassRateLimitRoundTripper{base: defaultTransport.Clone()}
-	client.HTTPClient.Timeout = coderSDKRequestTimeout
-	// net/http copies custom headers such as Coder-Session-Token to every
-	// redirect target, so refuse redirects that leave the configured origin.
-	client.HTTPClient.CheckRedirect = sameorigin.RedirectPolicy(coderAPIURL)
-	// This client dials no websocket. codersdk websocket dials keep only the
-	// Transport and skip CheckRedirect, so before adding one, also wrap the
-	// Transport with sameorigin.RoundTripper (#299).
+	client.HTTPClient.Transport = bypassRateLimitRoundTripper{base: client.HTTPClient.Transport}
 
 	return client, nil
 }

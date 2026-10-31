@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/coder/v2/codersdk"
 
+	"github.com/coder/coder-k8s/internal/controlplaneurl"
 	"github.com/coder/coder-k8s/internal/sameorigin"
 )
 
@@ -38,9 +39,10 @@ var coderTransports = newTransportRegistry(newCoderTransport)
 const transportIdleEviction = 10 * time.Minute
 
 // transportRegistry holds one long-lived transport per Coder deployment (URL scheme,
-// host, and port). Separate transports keep the per-deployment limits separate even
-// when an HTTP proxy would make deployments share one connection-pool key. Clients stay
-// per request: the session token is set on each client, never on a transport.
+// host, and port) and TLS trust. Separate transports keep the per-deployment limits
+// separate even when an HTTP proxy would make deployments share one connection-pool key.
+// Clients stay per request: the session token is set on each client, never on a
+// transport.
 type transportRegistry struct {
 	newTransport func() (*http.Transport, error)
 	now          func() time.Time
@@ -70,10 +72,12 @@ func newTransportRegistry(newTransport func() (*http.Transport, error)) *transpo
 	}
 }
 
-// forURL returns the transport for the deployment that serves coderURL. It also drops
+// forURL returns the transport for the deployment that serves coderURL, verified with
+// trust (nil: the system roots). A changed trust, such as a rotated CA bundle, gets a new
+// transport, so no connection verified with the old trust serves it. forURL also drops
 // the transports without a request for transportIdleEviction, so deployments whose
-// control plane changed its URL or went away do not stay in the registry.
-func (r *transportRegistry) forURL(coderURL *url.URL) (*registeredTransport, error) {
+// control plane changed its URL or trust or went away do not stay in the registry.
+func (r *transportRegistry) forURL(coderURL *url.URL, trust *controlplaneurl.TLS) (*registeredTransport, error) {
 	if r == nil {
 		return nil, fmt.Errorf("assertion failed: transport registry must not be nil")
 	}
@@ -82,6 +86,9 @@ func (r *transportRegistry) forURL(coderURL *url.URL) (*registeredTransport, err
 	}
 
 	key := sameorigin.Key(coderURL)
+	if trust != nil {
+		key += " " + trust.Key()
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -104,6 +111,10 @@ func (r *transportRegistry) forURL(coderURL *url.URL) (*registeredTransport, err
 	}
 	if transport == nil {
 		return nil, fmt.Errorf("assertion failed: new Coder transport is nil after successful construction")
+	}
+	if trust != nil {
+		transport.TLSClientConfig = trust.ClientConfig()
+		transport.Proxy = refuseHTTPSProxy(transport.Proxy)
 	}
 	entry := &registeredTransport{registry: r, key: key, transport: transport, lastUsed: now}
 	r.byDeployment[key] = entry
@@ -236,6 +247,26 @@ func newCoderTransport() (*http.Transport, error) {
 	return transport, nil
 }
 
+// errHTTPSProxyWithTrust marks a request with a TLS trust that would go through an https://
+// proxy. net/http verifies the proxy with the TLSClientConfig of the transport too, so the
+// trust for Coder would also apply to the proxy, and the Coder server name would go to it.
+var errHTTPSProxyWithTrust = errors.New("an https:// proxy cannot carry a Coder request with a TLS trust; exclude the Coder host with NO_PROXY or use an http:// proxy")
+
+// refuseHTTPSProxy wraps proxy so that it refuses https:// proxies (see errHTTPSProxyWithTrust).
+// An http:// proxy stays: it tunnels the TLS connection to Coder with CONNECT.
+func refuseHTTPSProxy(proxy func(*http.Request) (*url.URL, error)) func(*http.Request) (*url.URL, error) {
+	if proxy == nil {
+		return nil
+	}
+	return func(req *http.Request) (*url.URL, error) {
+		proxyURL, err := proxy(req)
+		if err == nil && proxyURL != nil && proxyURL.Scheme == "https" {
+			return nil, fmt.Errorf("%w: %s", errHTTPSProxyWithTrust, proxyURL.Redacted())
+		}
+		return proxyURL, err
+	}
+}
+
 // errProxyConnectRefused marks a proxy answer other than 200 to the CONNECT for Coder. Go reports
 // that answer with an untyped error, and without this mark NotSent cannot tell it apart from a
 // connection that broke after the request.
@@ -305,6 +336,8 @@ type Config struct {
 	CoderURL       *url.URL
 	SessionToken   string
 	RequestTimeout time.Duration
+	// TLS verifies an HTTPS CoderURL. Nil uses the system roots.
+	TLS *controlplaneurl.TLS
 }
 
 // NewSDKClient creates a configured Coder SDK client from cfg.
@@ -314,6 +347,9 @@ func NewSDKClient(cfg Config) (*codersdk.Client, error) {
 	}
 	if cfg.SessionToken == "" {
 		return nil, fmt.Errorf("assertion failed: session token must not be empty")
+	}
+	if cfg.TLS != nil && cfg.CoderURL.Scheme != "https" {
+		return nil, fmt.Errorf("assertion failed: a TLS trust needs an HTTPS coder URL, not %q", cfg.CoderURL.Scheme)
 	}
 
 	requestTimeout := cfg.RequestTimeout
@@ -325,7 +361,7 @@ func NewSDKClient(cfg Config) (*codersdk.Client, error) {
 	}
 
 	coderURL := *cfg.CoderURL
-	transport, err := coderTransports.forURL(&coderURL)
+	transport, err := coderTransports.forURL(&coderURL, cfg.TLS)
 	if err != nil {
 		return nil, fmt.Errorf("get Coder transport: %w", err)
 	}
