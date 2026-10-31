@@ -210,7 +210,7 @@ The claim is `Ready` only after the share, and `status.sharedUserID` holds the u
 kubectl -n coder wait --for=condition=Ready coderworkspaceclaim/alice-dev
 ```
 
-The operator shares once and never revokes or rewrites a share. Deleting the claim deletes the workspace, which ends the share. Coder itself drops shares when an admin tightens the organization's sharing setting.
+The operator stores the user's ID before it shares, so a renamed user keeps the share and a new user with the old name never gets it. It reads the workspace's sharing list every minute, and the claim is `Ready` only while that list gives the user `use`. The operator never revokes a share and never shares twice. Coder itself drops shares when an admin tightens the organization's sharing setting, and a person can remove one in the Coder UI. The claim is then `Stalled` with `ShareRemoved`. Deleting the claim deletes the workspace, which ends the share.
 
 !!! warning "Share mode trusts every claimant with the pool owner"
     Every claimant can act as the pool owner, and so reach the workspaces of other claimants, if the template exposes `data.coder_workspace_owner.<name>.session_token`, if the owner has external-auth links, or through the owner's Git SSH key. Use a template that never exposes the owner's token and an owner without external-auth links, and treat the owner's Git SSH key as shared by every claimant. Anyone who can create pools on a control plane can act as every owner that the control plane lists. `maxWorkspaces` counts per control plane, so two `CoderControlPlane` objects on one Coder deployment can each allow the full cap for one owner.
