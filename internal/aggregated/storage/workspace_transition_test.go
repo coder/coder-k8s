@@ -803,3 +803,31 @@ func TestWorkspaceTransitionQueuedSendsWatchEvent(t *testing.T) {
 	}
 	assertNoWatchEvent(t, watcher, 200*time.Millisecond)
 }
+
+// TestWorkspaceTransitionConflictReReadFailureIsLogged: after a 409 in Coder's format, the re-read
+// fails. The client gets the uncertain 504, and the coder-errors log keeps the re-read error.
+func TestWorkspaceTransitionConflictReReadFailureIsLogged(t *testing.T) {
+	t.Parallel()
+
+	marker := uuid.NewString()
+	f := newTransitionFakeCoder(t, build(codersdk.WorkspaceTransitionStart, codersdk.ProvisionerJobSucceeded))
+	f.set(func(f *transitionFakeCoder) {
+		f.onPost = func(w http.ResponseWriter, _ *http.Request) { writeLogFakeError(w, http.StatusConflict) }
+		f.onReread = func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(codersdk.Response{Message: marker})
+		}
+	})
+	readLog := captureCoderErrorLog()
+	_, err := runTransition(t, newTestTransitionStorage(t, f, codersdk.WorkspaceTransitionStop), false)
+	if !apierrors.IsTimeout(err) || !strings.Contains(err.Error(), "uncertain") || f.rereads.Load() != 1 {
+		t.Fatalf("err=%v rereads=%d, want the uncertain 504 after one re-read", err, f.rereads.Load())
+	}
+	for _, line := range readLog() {
+		if strings.Contains(line, marker) && strings.Contains(line, `"status"=503 `) {
+			return
+		}
+	}
+	t.Fatalf("the coder-errors log has no line with the re-read error %q and status 503", marker)
+}

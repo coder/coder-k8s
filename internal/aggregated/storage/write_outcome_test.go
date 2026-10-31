@@ -463,21 +463,27 @@ func captureCoderErrorLog() func() []string {
 }
 
 // TestWorkspaceCreateStoppedStopBuildAnswer checks a create with spec.running=false whose stop
-// build POST gets an error or an answer without the requested build. The create succeeds, and the
-// created object shows the latest build that Coder has, whether or not the stop reached Coder.
+// build POST gets an error or an answer without the requested build, and whose re-read works. A
+// re-read that shows the stop build confirms it. After a stop that can have reached Coder, a re-read
+// that still shows the start build does not: Coder can still be queueing the stop, so the create
+// returns the uncertain 504. After a stop that Coder refused, the start build is the result.
 func TestWorkspaceCreateStoppedStopBuildAnswer(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		name      string
-		answer    brokenAnswer
-		forwarded bool
+		name          string
+		answer        brokenAnswer
+		forwarded     bool
+		wantUncertain bool
 	}{
-		{"201 with an empty object", jsonAnswer(http.StatusCreated, `{}`), true},
-		{"201 with null", jsonAnswer(http.StatusCreated, `null`), true},
-		{"201 with only a build ID", jsonAnswer(http.StatusCreated, fmt.Sprintf(`{"id":%q}`, uuid.NewString())), true},
-		{"proxy 502", gatewayPage(http.StatusBadGateway), true},
-		{"201 with an empty object for a stop that did not reach Coder", jsonAnswer(http.StatusCreated, `{}`), false},
+		{"201 with an empty object", jsonAnswer(http.StatusCreated, `{}`), true, false},
+		{"201 with null", jsonAnswer(http.StatusCreated, `null`), true, false},
+		{"201 with only a build ID", jsonAnswer(http.StatusCreated, fmt.Sprintf(`{"id":%q}`, uuid.NewString())), true, false},
+		{"proxy 502", gatewayPage(http.StatusBadGateway), true, false},
+		{"201 with an empty object for a stop that Coder has not queued yet", jsonAnswer(http.StatusCreated, `{}`), false, true},
+		{"proxy 502 for a stop that Coder has not queued yet", gatewayPage(http.StatusBadGateway), false, true},
+		{"proxy 504 for a stop that Coder has not queued yet", gatewayPage(http.StatusGatewayTimeout), false, true},
+		{"Coder 400 for the stop", jsonAnswer(http.StatusBadRequest, `{"message":"bad stop"}`), false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -504,18 +510,24 @@ func TestWorkspaceCreateStoppedStopBuildAnswer(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "acme.alice.stopped"},
 				Spec:       aggregationv1alpha1.CoderWorkspaceSpec{Organization: "acme", TemplateName: "starter-template", Running: false},
 			}, rest.ValidateAllObjectFunc, nil)
-			if err != nil {
-				t.Fatalf("create: %v", err)
-			}
-			created := createdObj.(*aggregationv1alpha1.CoderWorkspace)
-			coderObj, err := NewWorkspaceStorage(newTestClientProvider(t, coderServer.URL)).Get(ctx, "acme.alice.stopped", nil)
-			if err != nil {
-				t.Fatalf("get from Coder: %v", err)
+			coderObj, getErr := NewWorkspaceStorage(newTestClientProvider(t, coderServer.URL)).Get(ctx, "acme.alice.stopped", nil)
+			if getErr != nil {
+				t.Fatalf("get from Coder: %v", getErr)
 			}
 			inCoder := coderObj.(*aggregationv1alpha1.CoderWorkspace)
 			if inCoder.Spec.Running == tc.forwarded {
 				t.Fatalf("Coder has running=%t, want %t", inCoder.Spec.Running, !tc.forwarded)
 			}
+			if tc.wantUncertain {
+				if !apierrors.IsTimeout(err) || !strings.Contains(err.Error(), "uncertain") || !strings.Contains(err.Error(), "stop") || createdObj != nil {
+					t.Fatalf("expected the uncertain 504 about the stop and no object, got %v (object returned: %t)", err, createdObj != nil)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			created := createdObj.(*aggregationv1alpha1.CoderWorkspace)
 			if created.Status.LatestBuildID != inCoder.Status.LatestBuildID || created.Spec.Running != inCoder.Spec.Running {
 				t.Fatalf("created object has build %s running=%t, Coder has build %s running=%t",
 					created.Status.LatestBuildID, created.Spec.Running, inCoder.Status.LatestBuildID, inCoder.Spec.Running)
