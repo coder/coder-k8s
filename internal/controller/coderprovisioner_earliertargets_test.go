@@ -22,6 +22,7 @@ import (
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/coderbootstrap"
 	"github.com/coder/coder-k8s/internal/controller"
+	"github.com/coder/coder-k8s/internal/controlplaneurl"
 )
 
 // coderCallLog records the Coder URL of every call, can fail the deletes of
@@ -61,9 +62,9 @@ func (c *coderCallLog) ProvisionerKeyByName(ctx context.Context, req coderbootst
 	return c.Client.ProvisionerKeyByName(ctx, req)
 }
 
-func (c *coderCallLog) Entitlements(ctx context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error) {
+func (c *coderCallLog) Entitlements(ctx context.Context, coderURL string, coderTLS *controlplaneurl.TLS, sessionToken string) (codersdk.Entitlements, error) {
 	c.urls = append(c.urls, coderURL)
-	return c.Client.Entitlements(ctx, coderURL, sessionToken)
+	return c.Client.Entitlements(ctx, coderURL, coderTLS, sessionToken)
 }
 
 // TestCoderProvisionerKey_EarlierTargetRevokedWhileTargetNotReady checks a

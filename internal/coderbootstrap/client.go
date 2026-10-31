@@ -10,6 +10,8 @@ import (
 	"golang.org/x/xerrors"
 
 	"github.com/coder/coder/v2/codersdk"
+
+	"github.com/coder/coder-k8s/internal/controlplaneurl"
 )
 
 const (
@@ -97,7 +99,7 @@ type Client interface {
 	DeleteProvisionerKeyByID(context.Context, DeleteProvisionerKeyByIDRequest) error
 	ProvisionerKeyByID(context.Context, ProvisionerKeyByIDRequest) (*codersdk.ProvisionerKey, error)
 	ProvisionerKeyByName(context.Context, ProvisionerKeyByNameRequest) (*codersdk.ProvisionerKey, error)
-	Entitlements(ctx context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error)
+	Entitlements(ctx context.Context, coderURL string, coderTLS *controlplaneurl.TLS, sessionToken string) (codersdk.Entitlements, error)
 }
 
 // SDKClient uses codersdk to perform bootstrap operations.
@@ -121,7 +123,7 @@ func (c *SDKClient) EnsureWorkspaceProxy(ctx context.Context, req RegisterWorksp
 		return RegisterWorkspaceProxyResponse{}, xerrors.New("proxy name is required")
 	}
 
-	client, err := newAuthenticatedClient(req.CoderURL, req.SessionToken)
+	client, err := newAuthenticatedClient(req.CoderURL, nil, req.SessionToken)
 	if err != nil {
 		return RegisterWorkspaceProxyResponse{}, err
 	}

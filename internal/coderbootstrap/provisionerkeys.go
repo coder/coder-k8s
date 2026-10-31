@@ -13,11 +13,13 @@ import (
 	"github.com/coder/coder/v2/codersdk"
 
 	"github.com/coder/coder-k8s/internal/aggregated/coder"
+	"github.com/coder/coder-k8s/internal/controlplaneurl"
 )
 
 // EnsureProvisionerKeyRequest describes how to create or look up a provisioner key in Coder.
 type EnsureProvisionerKeyRequest struct {
 	CoderURL         string
+	CoderTLS         *controlplaneurl.TLS
 	SessionToken     string
 	OrganizationName string
 	KeyName          string
@@ -40,7 +42,7 @@ func (c *SDKClient) EnsureProvisionerKey(ctx context.Context, req EnsureProvisio
 		return EnsureProvisionerKeyResponse{}, err
 	}
 
-	client, err := newAuthenticatedClient(req.CoderURL, req.SessionToken)
+	client, err := newAuthenticatedClient(req.CoderURL, req.CoderTLS, req.SessionToken)
 	if err != nil {
 		return EnsureProvisionerKeyResponse{}, err
 	}
@@ -107,6 +109,7 @@ func (c *SDKClient) EnsureProvisionerKey(ctx context.Context, req EnsureProvisio
 // ProvisionerKeyByNameRequest identifies a provisioner key by its name.
 type ProvisionerKeyByNameRequest struct {
 	CoderURL         string
+	CoderTLS         *controlplaneurl.TLS
 	SessionToken     string
 	OrganizationName string
 	KeyName          string
@@ -120,7 +123,7 @@ func (c *SDKClient) ProvisionerKeyByName(ctx context.Context, req ProvisionerKey
 		return nil, err
 	}
 
-	client, err := newAuthenticatedClient(req.CoderURL, req.SessionToken)
+	client, err := newAuthenticatedClient(req.CoderURL, req.CoderTLS, req.SessionToken)
 	if err != nil {
 		return nil, err
 	}
@@ -152,6 +155,7 @@ func (c *SDKClient) ProvisionerKeyByName(ctx context.Context, req ProvisionerKey
 // the caller recorded when it applied the key.
 type ProvisionerKeyByIDRequest struct {
 	CoderURL       string
+	CoderTLS       *controlplaneurl.TLS
 	SessionToken   string
 	OrganizationID uuid.UUID
 	KeyID          uuid.UUID
@@ -173,6 +177,7 @@ func (c *SDKClient) ProvisionerKeyByID(ctx context.Context, req ProvisionerKeyBy
 // that the caller recorded when it applied the key.
 type DeleteProvisionerKeyByIDRequest struct {
 	CoderURL       string
+	CoderTLS       *controlplaneurl.TLS
 	SessionToken   string
 	OrganizationID uuid.UUID
 	KeyID          uuid.UUID
@@ -222,7 +227,7 @@ func newProvisionerKeyByIDClient(req ProvisionerKeyByIDRequest) (*codersdk.Clien
 		return nil, xerrors.New("provisioner key ID is required")
 	}
 
-	return newAuthenticatedClient(req.CoderURL, req.SessionToken)
+	return newAuthenticatedClient(req.CoderURL, req.CoderTLS, req.SessionToken)
 }
 
 // findProvisionerKeyByID returns the key with keyID in the organization
@@ -264,7 +269,7 @@ func isNotFound(err error) bool {
 }
 
 // Entitlements returns deployment entitlements for the given coderd instance.
-func (c *SDKClient) Entitlements(ctx context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error) {
+func (c *SDKClient) Entitlements(ctx context.Context, coderURL string, coderTLS *controlplaneurl.TLS, sessionToken string) (codersdk.Entitlements, error) {
 	if coderURL == "" {
 		return codersdk.Entitlements{}, xerrors.New("coder URL is required")
 	}
@@ -272,7 +277,7 @@ func (c *SDKClient) Entitlements(ctx context.Context, coderURL, sessionToken str
 		return codersdk.Entitlements{}, xerrors.New("session token is required")
 	}
 
-	client, err := newAuthenticatedClient(coderURL, sessionToken)
+	client, err := newAuthenticatedClient(coderURL, coderTLS, sessionToken)
 	if err != nil {
 		return codersdk.Entitlements{}, err
 	}
@@ -305,15 +310,16 @@ func validateProvisionerKeyInputs(coderURL, sessionToken, keyName string) error 
 }
 
 // newAuthenticatedClient returns a client for coderURL on the shared Coder
-// transport (see coder.NewSDKClient), which also refuses redirects and
-// websocket dials that leave the origin of coderURL.
-func newAuthenticatedClient(coderURL, sessionToken string) (*codersdk.Client, error) {
+// transport (see coder.NewSDKClient), verified with coderTLS (nil: the system
+// roots). The transport also refuses redirects and websocket dials that leave
+// the origin of coderURL.
+func newAuthenticatedClient(coderURL string, coderTLS *controlplaneurl.TLS, sessionToken string) (*codersdk.Client, error) {
 	coderAPIURL, err := url.Parse(coderURL)
 	if err != nil {
 		return nil, xerrors.Errorf("parse coder URL: %w", err)
 	}
 
-	client, err := coder.NewSDKClient(coder.Config{CoderURL: coderAPIURL, SessionToken: sessionToken, RequestTimeout: coderSDKRequestTimeout})
+	client, err := coder.NewSDKClient(coder.Config{CoderURL: coderAPIURL, SessionToken: sessionToken, RequestTimeout: coderSDKRequestTimeout, TLS: coderTLS})
 	if err != nil {
 		return nil, xerrors.Errorf("create Coder client: %w", err)
 	}

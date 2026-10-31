@@ -75,16 +75,21 @@ func controlPlaneCoderClientFor(ctx context.Context, reader client.Reader, names
 	if err != nil {
 		return nil, nil, newControlPlaneWait("ControlPlaneNotReady", "CoderControlPlane %s has no usable Coder URL: %v", key.Name, err), nil
 	}
-	sdk, err := coder.NewSDKClient(coder.Config{CoderURL: coderURL, SessionToken: token, RequestTimeout: controlPlaneCoderTimeout})
+	trust, err := controlplaneurl.OperatorTLS(ctx, reader, controlPlane)
+	if errors.Is(err, controlplaneurl.ErrUnavailable) {
+		return nil, nil, newControlPlaneWait("ControlPlaneNotReady", "CoderControlPlane %s: %v.", key.Name, err), nil
+	} else if err != nil {
+		return nil, nil, nil, fmt.Errorf("read the TLS trust of codercontrolplane %s: %w", key, err)
+	}
+	sdk, err := coder.NewSDKClient(coder.Config{CoderURL: coderURL, TLS: trust, SessionToken: token, RequestTimeout: controlPlaneCoderTimeout})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create Coder client for codercontrolplane %s: %w", key, err)
 	}
 	return sdk, controlPlane, nil, nil
 }
 
-// controlPlaneCoderURL returns the URL for Coder calls. With TLS, status.url
-// is HTTPS on the service name, which certificates rarely cover, so the
-// controller uses the internal HTTP URL like the control-plane controller.
+// controlPlaneCoderURL returns the URL for Coder calls (see
+// controlplaneurl.CoderAPIURL).
 func controlPlaneCoderURL(controlPlane *coderv1alpha1.CoderControlPlane) (*url.URL, error) {
 	return controlplaneurl.CoderAPIURL(controlPlane)
 }

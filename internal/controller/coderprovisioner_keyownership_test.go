@@ -25,6 +25,7 @@ import (
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
 	"github.com/coder/coder-k8s/internal/coderbootstrap"
+	"github.com/coder/coder-k8s/internal/controlplaneurl"
 )
 
 // TestCoderProvisionerKey_OtherProvisionersKeyKept checks two provisioners P
@@ -395,8 +396,8 @@ func (c *renamedOrgCoder) EnsureProvisionerKey(ctx context.Context, req coderboo
 	return response, err
 }
 
-func (c *renamedOrgCoder) Entitlements(ctx context.Context, coderURL, sessionToken string) (codersdk.Entitlements, error) {
-	return c.fake.Entitlements(ctx, coderURL, sessionToken)
+func (c *renamedOrgCoder) Entitlements(ctx context.Context, coderURL string, coderTLS *controlplaneurl.TLS, sessionToken string) (codersdk.Entitlements, error) {
+	return c.fake.Entitlements(ctx, coderURL, coderTLS, sessionToken)
 }
 
 func (c *renamedOrgCoder) serveHTTP(t *testing.T, w http.ResponseWriter, r *http.Request) {

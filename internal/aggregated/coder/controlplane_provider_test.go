@@ -2,10 +2,12 @@ package coder
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,6 +17,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 
 	coderv1alpha1 "github.com/coder/coder-k8s/api/v1alpha1"
+	"github.com/coder/coder-k8s/internal/tlstest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -79,6 +82,44 @@ func TestControlPlaneClientProviderClientForNamespaceTLSUsesInternalHTTPURL(t *t
 	if got, want := resolvedClient.URL.String(), "http://coder.team-a.svc.cluster.local:8080"; got != want {
 		t.Fatalf("expected URL %q, got %q", want, got)
 	}
+}
+
+func TestControlPlaneClientProviderClientForNamespaceOperatorTLS(t *testing.T) {
+	t.Parallel()
+
+	ca := tlstest.NewCA(t)
+	coder := &countingCoder{}
+	server := ca.NewServer(t, coder, "127.0.0.1")
+	controlPlane := eligibleControlPlane("team-a", "coder")
+	controlPlane.Spec.TLS = coderv1alpha1.TLSSpec{SecretNames: []string{"coder-tls"}, OperatorAccess: &coderv1alpha1.OperatorTLSSpec{
+		CABundleRef: &coderv1alpha1.ConfigMapKeySelector{Name: "coder-ca", Key: "ca.crt"},
+	}}
+	controlPlane.Status.URL = server.URL
+	tokenSecret := ownedBy(secretWithStringData("team-a", "operator-token", map[string]string{"token": "operator-token"}), controlPlane)
+	caConfigMap := corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "coder-ca"}, Data: map[string]string{"ca.crt": string(ca.PEM)}}
+
+	provider, _ := newControlPlaneProviderForTest(t, []coderv1alpha1.CoderControlPlane{controlPlane}, []corev1.Secret{tokenSecret}, caConfigMap)
+	resolvedClient, err := provider.ClientForNamespace(context.Background(), "team-a")
+	require.NoError(t, err)
+	require.Equal(t, server.URL, resolvedClient.URL.String())
+	res, err := resolvedClient.Request(context.Background(), http.MethodGet, "/api/v2/buildinfo", nil)
+	require.NoError(t, err, "the client must verify Coder with the CA bundle")
+	require.NoError(t, res.Body.Close())
+	require.Len(t, coder.requests(), 1)
+
+	for name, configMaps := range map[string][]corev1.ConfigMap{
+		"CA bundle missing": nil,
+		"CA bundle invalid": {{ObjectMeta: caConfigMap.ObjectMeta, Data: map[string]string{"ca.crt": "not a certificate"}}},
+	} {
+		provider, _ := newControlPlaneProviderForTest(t, []coderv1alpha1.CoderControlPlane{controlPlane}, []corev1.Secret{tokenSecret}, configMaps...)
+		_, err := provider.ClientForNamespace(context.Background(), "team-a")
+		require.Truef(t, apierrors.IsServiceUnavailable(err), "%s: want 503, got %v", name, err)
+	}
+
+	controlPlane.Status.URL = "http://coder.team-a.svc.cluster.local:80"
+	provider, _ = newControlPlaneProviderForTest(t, []coderv1alpha1.CoderControlPlane{controlPlane}, []corev1.Secret{tokenSecret}, caConfigMap)
+	_, err = provider.ClientForNamespace(context.Background(), "team-a")
+	require.Truef(t, apierrors.IsServiceUnavailable(err), "HTTP status.url: want 503, never a plain HTTP client, got %v", err)
 }
 
 func TestControlPlaneClientProviderClientForNamespaceSkipsDisabledControlPlaneWithoutSecretRead(t *testing.T) {
@@ -516,6 +557,7 @@ func newControlPlaneProviderForTest(
 	t *testing.T,
 	controlPlanes []coderv1alpha1.CoderControlPlane,
 	secrets []corev1.Secret,
+	configMaps ...corev1.ConfigMap,
 ) (*ControlPlaneClientProvider, *countingReader) {
 	t.Helper()
 
@@ -523,7 +565,7 @@ func newControlPlaneProviderForTest(
 
 	cpReader := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithLists(&coderv1alpha1.CoderControlPlaneList{Items: controlPlanes}).
+		WithLists(&coderv1alpha1.CoderControlPlaneList{Items: controlPlanes}, &corev1.ConfigMapList{Items: configMaps}).
 		Build()
 
 	baseSecretReader := fake.NewClientBuilder().

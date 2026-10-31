@@ -11,6 +11,7 @@ import (
 	"hash/fnv"
 	"maps"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -255,10 +256,11 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
-	sessionToken, operatorAccessResult, operatorAccessReason, operatorAccessMessage, err := r.readOperatorSessionToken(ctx, provisioner, controlPlane)
+	access, operatorAccessResult, operatorAccessReason, operatorAccessMessage, err := r.readOperatorAccess(ctx, provisioner, controlPlane)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	sessionToken, coderTLS := access.token, access.coderTLS
 	if operatorAccessResult.RequeueAfter > 0 {
 		setCondition(
 			provisioner,
@@ -278,7 +280,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		operatorAccessMessage,
 	)
 
-	entitlementResult, entitlementErr := r.reconcileExternalProvisionerEntitlement(ctx, provisioner, controlPlane, sessionToken)
+	entitlementResult, entitlementErr := r.reconcileExternalProvisionerEntitlement(ctx, provisioner, controlPlane, access)
 	if entitlementErr != nil {
 		if statusSnapshot == nil {
 			return ctrl.Result{}, fmt.Errorf("assertion failed: status snapshot must not be nil")
@@ -360,6 +362,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if appliedOrgID, appliedKeyID, ok := parseKeyIDs(status.OrganizationID, status.ProvisionerKeyID); ok {
 			applied, err = r.BootstrapClient.ProvisionerKeyByID(ctx, coderbootstrap.ProvisionerKeyByIDRequest{
 				CoderURL:       coderURL,
+				CoderTLS:       coderTLS,
 				SessionToken:   sessionToken,
 				OrganizationID: appliedOrgID,
 				KeyID:          appliedKeyID,
@@ -387,6 +390,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if replacing {
 		existingKey, err = r.BootstrapClient.ProvisionerKeyByName(ctx, coderbootstrap.ProvisionerKeyByNameRequest{
 			CoderURL:         coderURL,
+			CoderTLS:         coderTLS,
 			SessionToken:     sessionToken,
 			OrganizationName: organizationName,
 			KeyName:          keyName,
@@ -472,6 +476,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if existingKey != nil {
 			replacedKeys = append(replacedKeys, coderbootstrap.DeleteProvisionerKeyByIDRequest{
 				CoderURL:       coderURL,
+				CoderTLS:       coderTLS,
 				SessionToken:   sessionToken,
 				OrganizationID: existingKey.OrganizationID,
 				KeyID:          existingKey.ID,
@@ -490,6 +495,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			}
 			replacedKeys = append(replacedKeys, coderbootstrap.DeleteProvisionerKeyByIDRequest{
 				CoderURL:       coderURL,
+				CoderTLS:       coderTLS,
 				SessionToken:   sessionToken,
 				OrganizationID: recordOrgID,
 				KeyID:          recordKeyID,
@@ -506,6 +512,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		response, ensureErr := r.BootstrapClient.EnsureProvisionerKey(ctx, coderbootstrap.EnsureProvisionerKeyRequest{
 			CoderURL:         coderURL,
+			CoderTLS:         coderTLS,
 			SessionToken:     sessionToken,
 			OrganizationName: organizationName,
 			KeyName:          keyName,
@@ -562,7 +569,7 @@ func (r *CoderProvisionerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		provisioner.Status.PendingKeys[i].OrganizationID = organizationID
 		provisioner.Status.PendingKeys[i].KeyID = provisionerKeyID
 		if err := r.Status().Update(ctx, provisioner); err != nil {
-			r.revokeUnpublishedKey(ctx, coderURL, sessionToken, organizationID, provisionerKeyID)
+			r.revokeUnpublishedKey(ctx, coderURL, coderTLS, sessionToken, organizationID, provisionerKeyID)
 			return ctrl.Result{}, fmt.Errorf("record new provisioner key in status: %w", err)
 		}
 		statusSnapshot = provisioner.Status.DeepCopy()
@@ -801,7 +808,7 @@ func (r *CoderProvisionerReconciler) refuseKeyNameInUse(
 // revokeUnpublishedKey deletes a key whose plaintext was never written to a
 // Secret. It is best-effort: when it fails, the pending record without key
 // IDs still names the key.
-func (r *CoderProvisionerReconciler) revokeUnpublishedKey(ctx context.Context, coderURL, sessionToken, organizationID, keyID string) {
+func (r *CoderProvisionerReconciler) revokeUnpublishedKey(ctx context.Context, coderURL string, coderTLS *controlplaneurl.TLS, sessionToken, organizationID, keyID string) {
 	log := ctrl.LoggerFrom(ctx)
 	orgID, orgErr := uuid.Parse(organizationID)
 	parsedKeyID, keyErr := uuid.Parse(keyID)
@@ -811,6 +818,7 @@ func (r *CoderProvisionerReconciler) revokeUnpublishedKey(ctx context.Context, c
 	}
 	if err := r.BootstrapClient.DeleteProvisionerKeyByID(ctx, coderbootstrap.DeleteProvisionerKeyByIDRequest{
 		CoderURL:       coderURL,
+		CoderTLS:       coderTLS,
 		SessionToken:   sessionToken,
 		OrganizationID: orgID,
 		KeyID:          parsedKeyID,
@@ -975,18 +983,52 @@ const (
 // not get its token sent to the URL of the old one, and its answer does not
 // show whether the key of the old one is gone, also at the same URL. A record
 // without a UID, from an operator that did not record it, is bound only at
-// the current Coder API URL of controlPlane.
+// the current Coder API URL of controlPlane (see recordCallURL).
 func tokenBoundTo(record coderv1alpha1.CoderProvisionerKeyRecord, controlPlane *coderv1alpha1.CoderControlPlane) bool {
 	if record.ControlPlaneUID != "" {
 		return record.ControlPlaneUID == string(controlPlane.UID)
 	}
 	current, err := coderAPIURL(controlPlane)
-	return err == nil && current == record.CoderURL
+	if err != nil {
+		return false
+	}
+	callURL, err := recordCallURL(record, controlPlane)
+	return err == nil && callURL == current
 }
 
-// revokeKey deletes the key that record names, at record.CoderURL with the
-// operator token of the control plane record.ControlPlaneRefName. A record
-// without key IDs deletes no key.
+// recordCallURL returns the URL for the Coder calls of record with the
+// operator access of controlPlane: record.CoderURL, or the current Coder API
+// URL of controlPlane when record.CoderURL has the other scheme on the same
+// host. Such a record is from before spec.tls.operatorAccess was set or
+// removed, and its key is behind the same control plane Service. With
+// spec.tls.operatorAccess, any other plain HTTP URL is an error, so the
+// operator token never travels over plain HTTP.
+func recordCallURL(record coderv1alpha1.CoderProvisionerKeyRecord, controlPlane *coderv1alpha1.CoderControlPlane) (string, error) {
+	current, err := coderAPIURL(controlPlane)
+	if err != nil {
+		return "", err
+	}
+	currentURL, err := url.Parse(current)
+	if err != nil {
+		return "", fmt.Errorf("assertion failed: parse the Coder API URL %q: %w", current, err)
+	}
+	recorded, err := url.Parse(record.CoderURL)
+	if err != nil {
+		return "", fmt.Errorf("parse the recorded Coder URL %q: %w", record.CoderURL, err)
+	}
+	if recorded.Scheme != currentURL.Scheme && strings.EqualFold(recorded.Hostname(), currentURL.Hostname()) {
+		return current, nil
+	}
+	if controlPlane.Spec.TLS.OperatorAccess != nil && recorded.Scheme != "https" {
+		return "", fmt.Errorf("CoderControlPlane %s has spec.tls.operatorAccess, so the operator sends its token to no plain HTTP URL such as %q",
+			controlPlane.Name, record.CoderURL)
+	}
+	return record.CoderURL, nil
+}
+
+// revokeKey deletes the key that record names, at record.CoderURL (see
+// recordCallURL) with the operator access of the control plane
+// record.ControlPlaneRefName. A record without key IDs deletes no key.
 func (r *CoderProvisionerReconciler) revokeKey(
 	ctx context.Context,
 	provisioner *coderv1alpha1.CoderProvisioner,
@@ -1003,17 +1045,23 @@ func (r *CoderProvisionerReconciler) revokeKey(
 			"recordedUID", record.ControlPlaneUID, "currentUID", controlPlane.UID)
 		return keyControlPlaneChanged, nil
 	}
-	sessionToken, tokenResult, tokenReason, tokenMessage, tokenErr := r.readOperatorSessionToken(ctx, provisioner, controlPlane)
+	access, tokenResult, tokenReason, tokenMessage, tokenErr := r.readOperatorAccess(ctx, provisioner, controlPlane)
 	if tokenErr != nil || tokenResult.RequeueAfter > 0 {
 		log.Info("operator access is not available, keeping the provisioner key record",
 			"reason", tokenReason, "message", tokenMessage, "error", tokenErr)
 		return keyKept, nil
 	}
+	coderURL, err := recordCallURL(record, controlPlane)
+	if err != nil {
+		log.Info("keeping the provisioner key record", "error", err)
+		return keyKept, nil
+	}
 
 	if organizationID, keyID, ok := parseKeyIDs(record.OrganizationID, record.KeyID); ok {
 		if err := r.BootstrapClient.DeleteProvisionerKeyByID(ctx, coderbootstrap.DeleteProvisionerKeyByIDRequest{
-			CoderURL:       record.CoderURL,
-			SessionToken:   sessionToken,
+			CoderURL:       coderURL,
+			CoderTLS:       access.coderTLS,
+			SessionToken:   access.token,
 			OrganizationID: organizationID,
 			KeyID:          keyID,
 		}); err != nil {
@@ -1024,8 +1072,9 @@ func (r *CoderProvisionerReconciler) revokeKey(
 	}
 
 	key, err := r.BootstrapClient.ProvisionerKeyByName(ctx, coderbootstrap.ProvisionerKeyByNameRequest{
-		CoderURL:         record.CoderURL,
-		SessionToken:     sessionToken,
+		CoderURL:         coderURL,
+		CoderTLS:         access.coderTLS,
+		SessionToken:     access.token,
 		OrganizationName: record.OrganizationName,
 		KeyName:          record.KeyName,
 	})
@@ -1271,20 +1320,28 @@ func (r *CoderProvisionerReconciler) fetchControlPlane(ctx context.Context, prov
 	return controlPlane, nil
 }
 
-func (r *CoderProvisionerReconciler) readOperatorSessionToken(
+// operatorAccess is what the operator sends its Coder calls to one control
+// plane with: the operator token, and the TLS trust for the Coder API URL
+// (nil without spec.tls.operatorAccess).
+type operatorAccess struct {
+	token    string
+	coderTLS *controlplaneurl.TLS
+}
+
+func (r *CoderProvisionerReconciler) readOperatorAccess(
 	ctx context.Context,
 	provisioner *coderv1alpha1.CoderProvisioner,
 	controlPlane *coderv1alpha1.CoderControlPlane,
-) (string, ctrl.Result, string, string, error) {
+) (operatorAccess, ctrl.Result, string, string, error) {
 	if provisioner == nil {
-		return "", ctrl.Result{}, "", "", fmt.Errorf("assertion failed: coder provisioner must not be nil")
+		return operatorAccess{}, ctrl.Result{}, "", "", fmt.Errorf("assertion failed: coder provisioner must not be nil")
 	}
 	if controlPlane == nil {
-		return "", ctrl.Result{}, "", "", fmt.Errorf("assertion failed: coder control plane must not be nil")
+		return operatorAccess{}, ctrl.Result{}, "", "", fmt.Errorf("assertion failed: coder control plane must not be nil")
 	}
 
 	if !controlPlane.Status.OperatorAccessReady {
-		return "", ctrl.Result{RequeueAfter: provisionerOperatorAccessRetryInterval},
+		return operatorAccess{}, ctrl.Result{RequeueAfter: provisionerOperatorAccessRetryInterval},
 			"OperatorAccessNotReady",
 			fmt.Sprintf("Waiting for CoderControlPlane %s/%s status.operatorAccessReady=true before reconciling provisioner keys.", controlPlane.Namespace, controlPlane.Name),
 			nil
@@ -1292,7 +1349,7 @@ func (r *CoderProvisionerReconciler) readOperatorSessionToken(
 
 	operatorTokenRef := controlPlane.Status.OperatorTokenSecretRef
 	if operatorTokenRef == nil {
-		return "", ctrl.Result{RequeueAfter: provisionerOperatorAccessRetryInterval},
+		return operatorAccess{}, ctrl.Result{RequeueAfter: provisionerOperatorAccessRetryInterval},
 			"OperatorTokenSecretRefMissing",
 			fmt.Sprintf("Waiting for CoderControlPlane %s/%s status.operatorTokenSecretRef to be set by operator access bootstrap.", controlPlane.Namespace, controlPlane.Name),
 			nil
@@ -1300,7 +1357,7 @@ func (r *CoderProvisionerReconciler) readOperatorSessionToken(
 
 	operatorTokenSecretName := strings.TrimSpace(operatorTokenRef.Name)
 	if operatorTokenSecretName == "" {
-		return "", ctrl.Result{RequeueAfter: provisionerOperatorAccessRetryInterval},
+		return operatorAccess{}, ctrl.Result{RequeueAfter: provisionerOperatorAccessRetryInterval},
 			"OperatorTokenSecretRefInvalid",
 			fmt.Sprintf("Waiting for CoderControlPlane %s/%s status.operatorTokenSecretRef.name to be non-empty.", controlPlane.Namespace, controlPlane.Name),
 			nil
@@ -1312,15 +1369,26 @@ func (r *CoderProvisionerReconciler) readOperatorSessionToken(
 
 	token, err := operatortoken.Read(ctx, r.Client, controlPlane)
 	if errors.Is(err, operatortoken.ErrUnavailable) {
-		return "", ctrl.Result{RequeueAfter: provisionerOperatorAccessRetryInterval},
+		return operatorAccess{}, ctrl.Result{RequeueAfter: provisionerOperatorAccessRetryInterval},
 			"OperatorTokenSecretUnavailable",
 			fmt.Sprintf("Failed to read operator token Secret %q/%q key %q from referenced control plane status: %v", provisioner.Namespace, operatorTokenSecretName, operatorTokenSecretKey, err),
 			nil
 	} else if err != nil {
-		return "", ctrl.Result{}, "", "", err
+		return operatorAccess{}, ctrl.Result{}, "", "", err
 	}
 
-	return token, ctrl.Result{}, "OperatorAccessReady", "Operator-managed access token from referenced control plane is available", nil
+	coderTLS, err := controlplaneurl.OperatorTLS(ctx, r.Client, controlPlane)
+	if errors.Is(err, controlplaneurl.ErrUnavailable) {
+		return operatorAccess{}, ctrl.Result{RequeueAfter: provisionerOperatorAccessRetryInterval},
+			"OperatorTLSUnavailable",
+			fmt.Sprintf("Waiting for the TLS trust of CoderControlPlane %s/%s: %v", controlPlane.Namespace, controlPlane.Name, err),
+			nil
+	} else if err != nil {
+		return operatorAccess{}, ctrl.Result{}, "", "", err
+	}
+
+	return operatorAccess{token: token, coderTLS: coderTLS},
+		ctrl.Result{}, "OperatorAccessReady", "Operator-managed access token from referenced control plane is available", nil
 }
 
 // checkProvisionerCredentials rejects reserved extraEnv and extraArgs entries,
@@ -1363,7 +1431,7 @@ func (r *CoderProvisionerReconciler) reconcileExternalProvisionerEntitlement(
 	ctx context.Context,
 	provisioner *coderv1alpha1.CoderProvisioner,
 	controlPlane *coderv1alpha1.CoderControlPlane,
-	sessionToken string,
+	access operatorAccess,
 ) (ctrl.Result, error) {
 	if provisioner == nil {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: coder provisioner must not be nil")
@@ -1374,7 +1442,7 @@ func (r *CoderProvisionerReconciler) reconcileExternalProvisionerEntitlement(
 	if strings.TrimSpace(controlPlane.Status.URL) == "" {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: coder control plane URL must not be empty")
 	}
-	if sessionToken == "" {
+	if access.token == "" {
 		return ctrl.Result{}, fmt.Errorf("assertion failed: operator session token must not be empty")
 	}
 
@@ -1411,7 +1479,7 @@ func (r *CoderProvisionerReconciler) reconcileExternalProvisionerEntitlement(
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	entitlements, err := r.BootstrapClient.Entitlements(ctx, coderURL, sessionToken)
+	entitlements, err := r.BootstrapClient.Entitlements(ctx, coderURL, access.coderTLS, access.token)
 	if err != nil {
 		reason := "EntitlementsQueryFailed"
 		message := "Failed to query Coder entitlements; retrying."
