@@ -253,7 +253,7 @@ spec:
           averageValue: "1"
 ```
 
-HPA cannot scale to 0: `minReplicas: 0` needs the alpha feature gate `HPAScaleToZero`, and HPA stops scaling a pool at `spec.replicas: 0`. HPA sets the pool to `minReplicas` before it reads any metric. The Kind test runs HPA only through KEDA.
+Without the alpha feature gate `HPAScaleToZero`, HPA cannot scale to 0: `minReplicas` must be at least 1, and HPA stops scaling a pool at `spec.replicas: 0`. When a pool with at least 1 replica is below `minReplicas`, HPA raises it to `minReplicas` before it reads any metric. The Kind test runs HPA only through KEDA.
 
 ### KEDA
 
@@ -332,19 +332,20 @@ Checks that fall due together wait in line, so with a 1 s delay some checks wait
 
 ## Cleanup
 
-A member deletes its workspace in Coder when the member is deleted, except in the cases that the table names. Before each delete build of an unclaimed workspace, the member checks `last_used_at` once more. If someone used the workspace, the member keeps it in Coder and goes away alone.
+A member deletes its workspace in Coder when the member is deleted, except in the cases that the table names. Before each delete build of an unclaimed workspace that was ready, the member checks `last_used_at` once more. If someone used the workspace, the member keeps it in Coder and goes away alone.
 
 | What you do | What happens to the workspaces |
 | --- | --- |
 | Delete a claim | Its workspace is deleted. A share ends with it. |
 | Delete a pool | Its unclaimed workspaces are deleted. Claimed workspaces stay with their claims, and the claims stay `Bound`. |
-| Lower `spec.replicas` | Unclaimed workspaces above the new value are deleted: first those without a create request, then those that are not ready (newest first), then ready ones (oldest first). Claimed and used workspaces stay. |
+| Lower `spec.replicas` | Unclaimed workspaces above the new value plus the waiting claims are deleted: first those without a create request, then those that are not ready (newest first), then ready ones (oldest first). Claimed and used workspaces stay. |
 | Change the pool's version, preset, or parameters, or wait for a new active version or for `maxUnclaimedAgeSeconds` | Outdated unclaimed workspaces are deleted, new before old (see [step 3](#3-create-a-pool)). |
 | Remove the owner or the template from the control plane, or make the owner ineligible, for example dormant | Every unclaimed workspace is deleted. Claimed workspaces stay. |
 | Let idle reaping delete a claimed workspace | It is deleted, unless a late use keeps it (see [step 4](#4-claim-a-workspace)). A kept workspace stays in Coder without a member. |
 | Use an unclaimed workspace without a claim | Its member gets `Used=True`, and the pool releases it: neither a scale-down nor deleting the pool deletes it. A cluster admin who deletes such a member deletes its workspace in Coder, as deleting a claim does. To keep the work, copy it out first. A used member that still lists the pool as its controller is not released yet, and deleting it keeps the workspace in Coder. |
+| Rename a `kwp-` workspace in Coder | Nothing proves that the workspace is the member's, so the operator never deletes it, and the member keeps its finalizer. See [A pool member does not finish deleting](troubleshooting.md#a-pool-member-does-not-finish-deleting). |
 | Delete the namespace | The control plane in the namespace is deleted too. Members that have not deleted their workspaces when its deletion starts release without a Coder call, as in the next row, and released used members always keep their workspaces. To delete the workspaces, delete the claims and pools first, and wait until their members are gone. |
-| Delete the `CoderControlPlane` | From the start of its deletion, members no longer call Coder, so they neither check nor remove shares ([#448](https://github.com/coder/coder-k8s/issues/448)). A member that is deleted after that releases its finalizer without a Coder call, and its workspace stays in Coder. To end every share first, delete the Share claims before the control plane. |
+| Delete the `CoderControlPlane` | From the start of its deletion, members no longer call Coder, so they neither check nor remove shares ([#448](https://github.com/coder/coder-k8s/issues/448)). A member that is deleted after that releases its finalizer without a Coder call, and its workspace stays in Coder. To end every share first, delete the Share claims, and wait until their members are gone, before you delete the control plane. |
 
 To find workspaces that stayed in Coder, filter the Coder workspaces list with `owner:<pool owner>`, and look for names that start with `kwp-` that no member lists in `status.workspaceName`. Delete those that you do not need.
 
@@ -353,7 +354,7 @@ To find workspaces that stayed in Coder, filter the Coder workspaces list with `
 - Every start build hands the pool owner's token to the template's Terraform. The control plane admin decides which owners and templates pools can use (step 2), and the owner rules (step 1) refuse privileged users. Anyone who can create pools on a control plane can act as every owner that the control plane lists.
 - `spec.parameters` are stored in plain text in the pool and in each member. Never put secrets there.
 - The install adds to the built-in `view`, `edit`, and `admin` roles only read access to members. Users need a Role as in [step 5](#5-grant-access) for pools and claims, and no user role can write members. Anyone who can create an HPA can still resize a pool, unless you add the admission policy from step 5.
-- `status.message` holds the controller's text and Coder's short error message. It never holds Coder's error details, build logs, parameter values, or tokens. It can name Coder users and facts about them, for example in Share mode ([#449](https://github.com/coder/coder-k8s/issues/449)).
+- `status.message` holds the controller's text and Coder's short error message, never Coder's error details or build logs. It can name Coder users and facts about them, for example in Share mode ([#449](https://github.com/coder/coder-k8s/issues/449)).
 - In Share mode, every claimant can act as the pool owner through the template or the owner's credentials. See [step 6](#6-share-a-workspace-with-a-person).
 - With TLS on the control plane and without `spec.tls.operatorAccess`, pools send the operator token to Coder over plain HTTP inside the cluster. See [Where the operator token goes](deploy-controller.md#where-the-operator-token-goes).
 
