@@ -212,7 +212,7 @@ The operator stores the user's ID before it shares, so a renamed user keeps the 
     Every claimant can act as the pool owner, and so reach the workspaces of other claimants, if the template exposes `data.coder_workspace_owner.<name>.session_token`, if the owner has external-auth links, or through the owner's Git SSH key. Use a template that never exposes the owner's token and an owner without external-auth links, and treat the owner's Git SSH key as shared by every claimant.
 
 !!! warning "A Share workspace that idle reaping keeps stays shared"
-    When [idle reaping](#4-claim-a-workspace) keeps a claimed workspace because of a late use, the pool releases its member, and the workspace stays in Coder. The workspace of a Share claim then keeps the shared user's `use` role, and the operator no longer checks the share policy for it ([#451](https://github.com/coder/coder-k8s/issues/451)). If the admin later withdraws the share, for example removes the user from every listed group, nothing removes it. Remove the user from the workspace's sharing settings in Coder, or delete the workspace in Coder.
+    When [idle reaping](#4-claim-a-workspace) keeps a claimed workspace because of a late use, the pool releases its member, and the workspace stays in Coder. The workspace of a Share claim then keeps the shared user's `use` role, and the operator no longer checks the share policy for it ([#451](https://github.com/coder/coder-k8s/issues/451)). If the admin later withdraws the share, for example removes the user from every listed group, nothing removes it. Remove the user from the workspace's sharing settings in Coder: that keeps the work. Deleting the workspace in Coder also ends the share, but it deletes the kept work too.
 
 ## Autoscale a pool
 
