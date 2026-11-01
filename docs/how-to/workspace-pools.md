@@ -64,13 +64,7 @@ Each member owns one workspace named `kwp-` plus 28 hex characters of the member
 
 An unclaimed workspace stays until a claim takes it, a scale-down removes it, or the pool's inputs change. With `version.active: true`, a new active version of the template is such a change. To also replace workspaces that have been ready for a long time, set `maxUnclaimedAgeSeconds` (at least 3600). The pool replaces outdated workspaces new before old: it builds the replacement first, and the old workspace stays claimable until the replacement is ready. So the replacement needs room under `maxWorkspaces`.
 
-`replicas` has a scale subresource, so `kubectl scale`, HPA, and KEDA can change it:
-
-```bash
-kubectl -n coder scale coderworkspacepool ci-runners --replicas=5
-```
-
-The pool's `status.selector` matches no pods, so an HPA must use External or Object metrics with target type `AverageValue`. KEDA's HPAs do that by default, and KEDA also moves a pool between 0 and 1. In the Kind end-to-end test, a KEDA v2.21.0 `cron` ScaledObject with `minReplicaCount: 0` moves a pool from 0 to 2 ready workspaces and back to 0. Its HPA reports `ScalingActive=True`. At `replicas: 0`, a claim still gets a workspace: the pool builds one for it.
+`replicas` has a scale subresource, so `kubectl scale`, an HPA, and KEDA can change it. See [Autoscale a pool](#autoscale-a-pool).
 
 ## 4. Claim a workspace
 
@@ -215,13 +209,101 @@ kubectl -n coder wait --for=condition=Ready coderworkspaceclaim/alice-dev
 The operator stores the user's ID before it shares, so a renamed user keeps the share and a new user with the old name never gets it. It checks the share every minute, and at once when the control plane changes. The claim is `Ready` only while the workspace's sharing list has the user and the policy above still allows it. If a person changes the user's role in Coder, for example to `admin`, the operator keeps that role. When the admin withdraws what allowed the share, for example removes the user from every listed group, empties `shareGroupIDs`, removes the owner from `owners`, or suspends the user, the operator removes the share, and the claim is `Stalled` with `ShareRevoked`. Coder itself drops shares when an admin tightens the organization's sharing setting, and a person can remove one in the Coder UI. The claim is then `Stalled` with `ShareRemoved`. In both cases the user keeps access until the workspace restarts or stops: Coder applies the removal of a share only then ([Shared workspaces](https://coder.com/docs/user-guides/shared-workspaces)), and the operator does not restart or stop the workspace. To end the access at once, restart or stop the workspace in Coder, or delete the claim, which deletes the workspace. The operator never shares a second time, so create a new claim instead. Deleting the claim deletes the workspace, which ends the share.
 
 !!! warning "Share mode trusts every claimant with the pool owner"
-    Every claimant can act as the pool owner, and so reach the workspaces of other claimants, if the template exposes `data.coder_workspace_owner.<name>.session_token`, if the owner has external-auth links, or through the owner's Git SSH key. Use a template that never exposes the owner's token and an owner without external-auth links, and treat the owner's Git SSH key as shared by every claimant. Anyone who can create pools on a control plane can act as every owner that the control plane lists. `maxWorkspaces` counts per control plane, so two `CoderControlPlane` objects on one Coder deployment can each allow the full cap for one owner.
+    Every claimant can act as the pool owner, and so reach the workspaces of other claimants, if the template exposes `data.coder_workspace_owner.<name>.session_token`, if the owner has external-auth links, or through the owner's Git SSH key. Use a template that never exposes the owner's token and an owner without external-auth links, and treat the owner's Git SSH key as shared by every claimant.
+
+!!! warning "A Share workspace that idle reaping keeps stays shared"
+    When [idle reaping](#4-claim-a-workspace) keeps a claimed workspace because of a late use, the pool releases its member, and the workspace stays in Coder. The workspace of a Share claim then keeps the shared user's `use` role, and the operator no longer checks the share policy for it ([#451](https://github.com/coder/coder-k8s/issues/451)). If the admin later withdraws the share, for example removes the user from every listed group, nothing removes it. Remove the user from the workspace's sharing settings in Coder, or delete the workspace in Coder.
+
+## Autoscale a pool
+
+`spec.replicas` has a scale subresource. Every `/scale` write runs the CRD schema, so `kubectl scale`, an HPA, and KEDA all stop at 100:
+
+```bash
+kubectl -n coder scale coderworkspacepool ci-runners --replicas=5
+```
+
+At `replicas: 0`, the pool keeps no unclaimed workspace, and a claim still gets one: the pool builds it for the claim, so the claim waits for a full build. The Kind end-to-end test checks this.
+
+To let only the users who can resize a pool autoscale it, add the admission policy in [Grant access](#5-grant-access).
+
+### HPA
+
+The pool's `status.selector`, `coder.com/workspace-pool-uid=<pool UID>`, matches no pods. So an HPA must use an `External` or `Object` metric with the target type `AverageValue`: HPA then computes the replicas from the metric and `status.replicas`, and lists no pods. With a `Value` target, HPA counts pods by the selector and fails with `no pods returned by selector` once the metric moves outside its tolerance. This example keeps one ready workspace for each queued CI job, from a metric that your external metrics adapter serves:
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ci-runners
+  namespace: coder
+spec:
+  scaleTargetRef:
+    apiVersion: coder.com/v1alpha1
+    kind: CoderWorkspacePool
+    name: ci-runners
+  minReplicas: 1
+  maxReplicas: 20
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: ci_jobs_queued # your adapter's metric
+        target:
+          type: AverageValue
+          averageValue: "1"
+```
+
+HPA cannot scale to 0: `minReplicas: 0` needs the alpha feature gate `HPAScaleToZero`, and HPA stops scaling a pool at `spec.replicas: 0`. HPA sets the pool to `minReplicas` before it reads any metric. The Kind test runs HPA only through KEDA.
+
+### KEDA
+
+KEDA moves a pool between 0 and 1 itself, and makes an HPA with an `AverageValue` metric for 1 to `maxReplicaCount`. Before it goes back to 0, KEDA waits `cooldownPeriod`, 300 s by default. In the Kind end-to-end test, KEDA v2.21.0 with a `cron` ScaledObject like this one moved a pool from 0 to 2 ready workspaces and back to 0, and its HPA reported `ScalingActive=True`. The test used a 3-minute window and `cooldownPeriod: 30`.
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: ci-runners-office-hours
+  namespace: coder
+spec:
+  scaleTargetRef:
+    apiVersion: coder.com/v1alpha1
+    kind: CoderWorkspacePool
+    name: ci-runners
+  minReplicaCount: 0
+  maxReplicaCount: 2
+  triggers:
+    - type: cron
+      metadata:
+        timezone: Etc/UTC
+        start: 0 8 * * 1-5 # 08:00 on weekdays
+        end: 0 18 * * 1-5
+        desiredReplicas: "2"
+```
+
+### Autoscalers and GitOps
+
+An autoscaler writes `spec.replicas`, so a GitOps tool that applies `spec.replicas` from Git sets it back at each sync. Leave `spec.replicas` out of the manifest in Git: the pool then starts at the default of 1, and only the autoscaler changes it. In Argo CD, you can instead ignore the field. Argo CD then still applies it at a sync, unless you also set `RespectIgnoreDifferences=true`:
+
+```yaml
+spec:
+  ignoreDifferences:
+    - group: coder.com
+      kind: CoderWorkspacePool
+      jsonPointers:
+        - /spec/replicas
+  syncPolicy:
+    syncOptions:
+      - RespectIgnoreDifferences=true
+```
+
+To make Argo CD or Flux wait for a pool or a claim, install the [health rules](gitops.md#health-rules-for-coderworkspacepool-and-coderworkspaceclaim). Each `/scale` write makes the pool `Progressing` until the controller has counted its members for the new `spec.replicas`.
 
 ## Cost
 
 Each unclaimed workspace runs all the time, so a pool of `replicas: N` costs N running workspaces plus the claimed ones. A claimed workspace keeps a normal autostop deadline after the bind, so Coder stops it when nobody uses it. A template with a default TTL of 0 has no deadline: its claimed workspaces run until someone stops or deletes them. For such a template, `claims.idleTimeoutSeconds` is the only automatic limit.
 
-Further limits: `maxInFlight` (default 5) caps the members of a pool that build at the same time, and a pool stops creating with `Stalled` and `MemberFailureLimit` after 5 failed members in a row. To cap the number of pools and claims in a namespace, use a `ResourceQuota` on `count/coderworkspacepools.coder.com` and `count/coderworkspaceclaims.coder.com`.
+`maxWorkspaces` caps each owner per control plane, so two `CoderControlPlane` objects on one Coder deployment can each allow the full cap for one owner. Further limits: `maxInFlight` (default 5) caps the members of a pool that build at the same time, and a pool stops creating with `Stalled` and `MemberFailureLimit` after 5 failed members in a row. To cap the number of pools and claims in a namespace, use a `ResourceQuota` on `count/coderworkspacepools.coder.com` and `count/coderworkspaceclaims.coder.com`.
 
 ### Coder API requests
 
@@ -229,7 +311,7 @@ The operator sends every pool request with its operator token. Measured in Kind 
 
 | What | Requests per minute | Requests |
 | --- | --- | --- |
-| A ready member | 2 | `GET /api/v2/workspaces/<id>` and `GET /api/v2/users/me` once a minute |
+| A ready member | 2 | `GET /api/v2/workspaces/<id>` and `GET /api/v2/users/me` once a minute ([#443](https://github.com/coder/coder-k8s/issues/443) tracks the second read) |
 | A shared member of a Share claim | 6 | The two requests above, plus the workspace's sharing list, the owner, the shared user, and the organization's sharing setting once a minute (and each listed group other than `Everyone`) |
 | A member that builds | 24 | The same two requests every 5 s, until the member is ready |
 | A pool that follows the active version | 6 | The owner, its organization membership, the organization (twice), the template, and the version, once a minute |
@@ -250,9 +332,31 @@ Checks that fall due together wait in line, so with a 1 s delay some checks wait
 
 ## Cleanup
 
-- Delete a claim to delete its workspace.
-- Delete a pool to delete its unclaimed workspaces. Claimed workspaces stay with their claims, and the claims stay `Bound`.
-- A member whose workspace someone used without a claim (`Used=True`) leaves the pool: the pool removes itself as the member's owner, so neither a scale-down nor deleting the pool deletes it. A cluster admin who deletes such a member deletes its workspace in Coder, as deleting a claim does. To keep the work, copy it out of the workspace first. Deleting the namespace keeps a used member's workspace in Coder. Find it as the next item says. A used member that still lists the pool as its controller is not released yet, and deleting it keeps the workspace in Coder.
-- When the `CoderControlPlane` is deleted, members release their finalizers without a Coder call. Find leftover workspaces in Coder with the filter `owner:<pool owner>` and delete those whose names start with `kwp-`. From the start of the delete, members no longer check or remove shares, so shared users keep access while Coder runs. To end every share first, delete the Share claims before the control plane.
+A member deletes its workspace in Coder when the member is deleted, except in the cases that the table names. Before each delete build of an unclaimed workspace, the member checks `last_used_at` once more. If someone used the workspace, the member keeps it in Coder and goes away alone.
 
-With TLS on the control plane and without `spec.tls.operatorAccess`, pools send the operator token to Coder over plain HTTP inside the cluster. See [Where the operator token goes](deploy-controller.md#where-the-operator-token-goes).
+| What you do | What happens to the workspaces |
+| --- | --- |
+| Delete a claim | Its workspace is deleted. A share ends with it. |
+| Delete a pool | Its unclaimed workspaces are deleted. Claimed workspaces stay with their claims, and the claims stay `Bound`. |
+| Lower `spec.replicas` | Unclaimed workspaces above the new value are deleted: first those without a create request, then those that are not ready (newest first), then ready ones (oldest first). Claimed and used workspaces stay. |
+| Change the pool's version, preset, or parameters, or wait for a new active version or for `maxUnclaimedAgeSeconds` | Outdated unclaimed workspaces are deleted, new before old (see [step 3](#3-create-a-pool)). |
+| Remove the owner or the template from the control plane, or make the owner ineligible, for example dormant | Every unclaimed workspace is deleted. Claimed workspaces stay. |
+| Let idle reaping delete a claimed workspace | It is deleted, unless a late use keeps it (see [step 4](#4-claim-a-workspace)). A kept workspace stays in Coder without a member. |
+| Use an unclaimed workspace without a claim | Its member gets `Used=True`, and the pool releases it: neither a scale-down nor deleting the pool deletes it. A cluster admin who deletes such a member deletes its workspace in Coder, as deleting a claim does. To keep the work, copy it out first. A used member that still lists the pool as its controller is not released yet, and deleting it keeps the workspace in Coder. |
+| Delete the namespace | The control plane in the namespace is deleted too. Members that have not deleted their workspaces when its deletion starts release without a Coder call, as in the next row, and released used members always keep their workspaces. To delete the workspaces, delete the claims and pools first, and wait until their members are gone. |
+| Delete the `CoderControlPlane` | From the start of its deletion, members no longer call Coder, so they neither check nor remove shares ([#448](https://github.com/coder/coder-k8s/issues/448)). A member that is deleted after that releases its finalizer without a Coder call, and its workspace stays in Coder. To end every share first, delete the Share claims before the control plane. |
+
+To find workspaces that stayed in Coder, filter the Coder workspaces list with `owner:<pool owner>`, and look for names that start with `kwp-` that no member lists in `status.workspaceName`. Delete those that you do not need.
+
+## Security notes
+
+- Every start build hands the pool owner's token to the template's Terraform. The control plane admin decides which owners and templates pools can use (step 2), and the owner rules (step 1) refuse privileged users. Anyone who can create pools on a control plane can act as every owner that the control plane lists.
+- `spec.parameters` are stored in plain text in the pool and in each member. Never put secrets there.
+- The install adds to the built-in `view`, `edit`, and `admin` roles only read access to members. Users need a Role as in [step 5](#5-grant-access) for pools and claims, and no user role can write members. Anyone who can create an HPA can still resize a pool, unless you add the admission policy from step 5.
+- `status.message` holds the controller's text and Coder's short error message. It never holds Coder's error details, build logs, parameter values, or tokens. It can name Coder users and facts about them, for example in Share mode ([#449](https://github.com/coder/coder-k8s/issues/449)).
+- In Share mode, every claimant can act as the pool owner through the template or the owner's credentials. See [step 6](#6-share-a-workspace-with-a-person).
+- With TLS on the control plane and without `spec.tls.operatorAccess`, pools send the operator token to Coder over plain HTTP inside the cluster. See [Where the operator token goes](deploy-controller.md#where-the-operator-token-goes).
+
+## Troubleshooting
+
+For every reason of a pool, a member, and a claim, and how to fix it, see [Troubleshoot workspace pools](troubleshooting.md#troubleshoot-workspace-pools).
