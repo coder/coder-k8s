@@ -216,7 +216,7 @@ The operator stores the user's ID before it shares, so a renamed user keeps the 
 
 ## Autoscale a pool
 
-`spec.replicas` has a scale subresource. Every `/scale` write runs the CRD schema, so `kubectl scale`, an HPA, and KEDA all stop at 100:
+`spec.replicas` has a scale subresource. Every `/scale` write runs the CRD schema, which refuses a value above 100: `kubectl scale` then returns a validation error, and an update by an HPA or KEDA fails, so the pool keeps its old size. Set `maxReplicas` of an HPA and `maxReplicaCount` of a ScaledObject to 100 or less. To resize a pool by hand:
 
 ```bash
 kubectl -n coder scale coderworkspacepool ci-runners --replicas=5
@@ -338,7 +338,7 @@ A member deletes its workspace in Coder when the member is deleted, except in th
 | --- | --- |
 | Delete a claim | Its workspace is deleted. A share ends with it. |
 | Delete a pool | Its unclaimed workspaces are deleted. Claimed workspaces stay with their claims, and the claims stay `Bound`. |
-| Lower `spec.replicas` | Unclaimed workspaces above the new value plus the waiting claims are deleted: first those without a create request, then those that are not ready (newest first), then ready ones (oldest first). Claimed and used workspaces stay. |
+| Lower `spec.replicas` | The pool keeps the new value plus one unclaimed workspace for each waiting claim, and deletes the unclaimed workspaces above that: first those without a create request, then those that are not ready (newest first), then ready ones (oldest first). Claimed and used workspaces stay. |
 | Change the pool's version, preset, or parameters, or wait for a new active version or for `maxUnclaimedAgeSeconds` | Outdated unclaimed workspaces are deleted, new before old (see [step 3](#3-create-a-pool)). |
 | Remove the owner or the template from the control plane, or make the owner ineligible, for example dormant | Every unclaimed workspace is deleted. Claimed workspaces stay. |
 | Let idle reaping delete a claimed workspace | It is deleted, unless a late use keeps it (see [step 4](#4-claim-a-workspace)). A kept workspace stays in Coder without a member. |
