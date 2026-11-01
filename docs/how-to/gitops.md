@@ -1,6 +1,6 @@
 # Gate template promotion with GitOps
 
-This guide shows how to make Argo CD or Flux wait for a [`CoderTemplateTest`](test-templates.md) result, and how to promote a template version only after its test passed. The health rules live in `config/gitops/` in this repository. This page copies them, and a unit test keeps the copies equal to the files. The page also holds the [health rules for `CoderAIProvider`](#health-rules-for-coderaiprovider).
+This guide shows how to make Argo CD or Flux wait for a [`CoderTemplateTest`](test-templates.md) result, and how to promote a template version only after its test passed. The health rules live in `config/gitops/` in this repository. This page copies them, and a unit test keeps the copies equal to the files. The page also holds the [health rules for `CoderAIProvider`](#health-rules-for-coderaiprovider), and for [`CoderWorkspacePool` and `CoderWorkspaceClaim`](#health-rules-for-coderworkspacepool-and-coderworkspaceclaim).
 
 ## Why custom health rules are needed
 
@@ -229,6 +229,143 @@ Add this entry (`config/gitops/flux-healthcheck-coderaiprovider.yaml`) to `spec.
   current: "status.conditions.exists(c, c.type == 'Ready' && c.status == 'True')"
 ```
 
+## Health rules for CoderWorkspacePool and CoderWorkspaceClaim
+
+Argo CD and Flux also need health rules to wait for a [workspace pool](workspace-pools.md) and its claims. Without them, Argo CD has no health check for the kinds, and Flux reports a new pool or claim as current before the controller writes its first status. The controller writes the conditions `Ready`, `Reconciling` and `Stalled` of a pool or a claim together, with one reason and message, and with the object's `metadata.generation` as the condition's `observedGeneration`. The rules ignore a condition whose `observedGeneration` is older.
+
+A pool also has `status.observedGeneration`, and both pool rules wait until it equals `metadata.generation`. Every `/scale` write raises the generation, so after `kubectl scale`, or a resize by an HPA or KEDA, the pool shows `Progressing` until the controller has counted its members for the new `spec.replicas`.
+
+| Pool conditions | Argo CD | Flux |
+| --- | --- | --- |
+| no status, or a stale `observedGeneration` on the status or the `Ready` condition | `Progressing` | `InProgress` (`Unknown` before the first status) |
+| `Reconciling=True`, for example `WaitingForMembers` or `OwnerWorkspaceLimit` | `Progressing` | `InProgress` |
+| `Ready=True`: at least `spec.replicas` current unclaimed workspaces are ready, and no outdated one is left | `Healthy` | `Current` |
+| `Stalled=True`, for example `MemberFailureLimit` | `Degraded` | `Failed` |
+
+A claim has no `status.observedGeneration`, and its spec cannot change, so the claim rules read only the conditions and `status.phase`:
+
+| Claim | Argo CD | Flux |
+| --- | --- | --- |
+| no status, or no conditions of the current generation | `Progressing` | `InProgress` (`Unknown` before the first status) |
+| `Pending`, or `Bound` to a workspace that is not ready (`Reconciling=True`) | `Progressing` | `InProgress` |
+| `Bound` to a ready workspace (`Ready=True`) | `Healthy` | `Current` |
+| `Lost`, or `Stalled=True` | `Degraded` | `Failed` |
+
+`Lost` is final: the claim never binds again. To get a workspace again, delete the claim, and let the GitOps tool create it again. The new object binds a new workspace. In Share mode, a claim that is not `Lost` can also be `Stalled`: `ClaimModeMismatch` never binds, `ShareRevoking` means the operator removes the share, and `ShareRefused`, `ShareRevoked`, and `ShareRemoved` leave a bound workspace without its share. `ShareRefused` clears once the policy and Coder allow the share. After `ShareRevoked` or `ShareRemoved`, the operator does not share the workspace again.
+
+A bound claim whose member failed with `OwnershipUnknown` or `ChangedExternally` stays `Progressing` and never becomes `Degraded`, so a GitOps wait for it ends only at its timeout ([#454](https://github.com/coder/coder-k8s/issues/454)). The claim shows the member's reason. To recover, delete the claim, and let the GitOps tool create it again. See [A pool member does not finish deleting](troubleshooting.md#a-pool-member-does-not-finish-deleting). For every reason, see [Troubleshoot workspace pools](troubleshooting.md#troubleshoot-workspace-pools). The Argo CD message is `<reason>: <message>` of the `Ready` condition. While the object is being deleted, Argo CD shows `Deleting the workspace pool` or `Deleting the workspace claim`.
+
+Add the scripts as the `argocd-cm` keys `resource.customizations.health.coder.com_CoderWorkspacePool` (`config/gitops/argocd-health-coderworkspacepool.lua`):
+
+```lua
+-- Argo CD health check for CoderWorkspacePool (coder.com/v1alpha1).
+-- Install it as the argocd-cm key
+-- resource.customizations.health.coder.com_CoderWorkspacePool.
+-- docs/how-to/gitops.md copies this file. A test keeps the copy equal.
+local hs = { status = "Progressing", message = "Waiting for the controller" }
+if obj.metadata.deletionTimestamp ~= nil then
+  -- Argo CD shows deletionMessage, not message, for a resource being deleted.
+  hs.deletionMessage = "Deleting the workspace pool"
+  hs.message = hs.deletionMessage
+  return hs
+end
+local st = obj.status
+if st == nil or st.observedGeneration == nil or st.observedGeneration ~= obj.metadata.generation then
+  return hs
+end
+-- A condition from an older generation does not describe the current spec.
+local conditions = {}
+for _, c in ipairs(st.conditions or {}) do
+  if c.observedGeneration == obj.metadata.generation then
+    table.insert(conditions, c)
+  end
+end
+for _, c in ipairs(conditions) do
+  if c.type == "Ready" and c.reason ~= nil and c.message ~= nil then
+    hs.message = c.reason .. ": " .. c.message
+  end
+end
+for _, c in ipairs(conditions) do
+  if c.type == "Ready" and c.status == "True" then
+    hs.status = "Healthy"
+  elseif c.type == "Stalled" and c.status == "True" then
+    hs.status = "Degraded"
+  end
+end
+return hs
+```
+
+and `resource.customizations.health.coder.com_CoderWorkspaceClaim` (`config/gitops/argocd-health-coderworkspaceclaim.lua`):
+
+```lua
+-- Argo CD health check for CoderWorkspaceClaim (coder.com/v1alpha1).
+-- Install it as the argocd-cm key
+-- resource.customizations.health.coder.com_CoderWorkspaceClaim.
+-- docs/how-to/gitops.md copies this file. A test keeps the copy equal.
+local hs = { status = "Progressing", message = "Waiting for the controller" }
+if obj.metadata.deletionTimestamp ~= nil then
+  -- Argo CD shows deletionMessage, not message, for a resource being deleted.
+  hs.deletionMessage = "Deleting the workspace claim"
+  hs.message = hs.deletionMessage
+  return hs
+end
+local st = obj.status
+if st == nil then
+  return hs
+end
+-- A claim has no status.observedGeneration, so only the conditions tell
+-- whether the controller saw the current spec.
+local conditions = {}
+for _, c in ipairs(st.conditions or {}) do
+  if c.observedGeneration == obj.metadata.generation then
+    table.insert(conditions, c)
+  end
+end
+for _, c in ipairs(conditions) do
+  if c.type == "Ready" and c.reason ~= nil and c.message ~= nil then
+    hs.message = c.reason .. ": " .. c.message
+  end
+end
+for _, c in ipairs(conditions) do
+  if c.type == "Ready" and c.status == "True" then
+    hs.status = "Healthy"
+  elseif c.type == "Stalled" and c.status == "True" then
+    hs.status = "Degraded"
+  end
+end
+-- Lost is final: the claim never binds again.
+if st.phase == "Lost" then
+  hs.status = "Degraded"
+end
+return hs
+```
+
+Add these entries (`config/gitops/flux-healthcheck-coderworkspacepool.yaml` and `config/gitops/flux-healthcheck-coderworkspaceclaim.yaml`) to `spec.healthCheckExprs` of a Flux v2.5+ Kustomization with `spec.wait: true`:
+
+```yaml
+# Flux health check expressions for CoderWorkspacePool (coder.com/v1alpha1).
+# Add this entry to spec.healthCheckExprs of a Flux v2.5+ Kustomization
+# with spec.wait: true.
+# docs/how-to/gitops.md copies this file. A test keeps the copy equal.
+- apiVersion: coder.com/v1alpha1
+  kind: CoderWorkspacePool
+  inProgress: "!has(status.observedGeneration) || status.observedGeneration != metadata.generation || !has(status.conditions) || !status.conditions.exists(c, c.type == 'Ready' && has(c.observedGeneration) && c.observedGeneration == metadata.generation) || status.conditions.exists(c, c.type == 'Reconciling' && c.status == 'True')"
+  failed: "status.conditions.exists(c, c.type == 'Stalled' && c.status == 'True')"
+  current: "status.conditions.exists(c, c.type == 'Ready' && c.status == 'True')"
+```
+
+```yaml
+# Flux health check expressions for CoderWorkspaceClaim (coder.com/v1alpha1).
+# Add this entry to spec.healthCheckExprs of a Flux v2.5+ Kustomization
+# with spec.wait: true.
+# docs/how-to/gitops.md copies this file. A test keeps the copy equal.
+- apiVersion: coder.com/v1alpha1
+  kind: CoderWorkspaceClaim
+  inProgress: "(!has(status.phase) || status.phase != 'Lost') && (!has(status.conditions) || !status.conditions.exists(c, c.type == 'Ready' && has(c.observedGeneration) && c.observedGeneration == metadata.generation) || status.conditions.exists(c, c.type == 'Reconciling' && c.status == 'True'))"
+  failed: "(has(status.phase) && status.phase == 'Lost') || status.conditions.exists(c, c.type == 'Stalled' && c.status == 'True')"
+  current: "status.conditions.exists(c, c.type == 'Ready' && c.status == 'True')"
+```
+
 ## What CI covers
 
-The unit test in `config/gitops/` runs the Lua script with gopher-lua, the Lua engine of Argo CD, and the Flux expressions with cel-go, both over fixed test objects. The unit test in `examples/gitops-promotion/` renders the example with Kustomize and runs `promote.sh` against a fake `kubectl`. Its cases include a test that someone created first with other parameters, which the script must refuse, and a test that runs for the longest `timeoutSeconds`. CI does not run Argo CD or Flux.
+The unit test in `config/gitops/` runs the Lua scripts with gopher-lua, the Lua engine of Argo CD, and the Flux expressions with cel-go, both over fixed test objects. The unit test in `examples/gitops-promotion/` renders the example with Kustomize and runs `promote.sh` against a fake `kubectl`. Its cases include a test that someone created first with other parameters, which the script must refuse, and a test that runs for the longest `timeoutSeconds`. CI does not run Argo CD or Flux.

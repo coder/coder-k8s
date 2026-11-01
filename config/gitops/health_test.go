@@ -1,6 +1,7 @@
 // Package gitops_test checks the GitOps health rules for CoderTemplateTest,
-// CoderMCPServer and CoderAIProvider. The rules are data files, so this
-// package has no production code.
+// CoderMCPServer, CoderAIProvider, CoderWorkspacePool and
+// CoderWorkspaceClaim. The rules are data files, so this package has no
+// production code.
 package gitops_test
 
 import (
@@ -30,6 +31,8 @@ var ruleSets = []ruleSet{
 	{"CoderTemplateTest", "argocd-health-codertemplatetest.lua", "flux-healthcheck-codertemplatetest.yaml", "../../docs/how-to/gitops.md", healthCases},
 	{"CoderMCPServer", "argocd-health-codermcpserver.lua", "flux-healthcheck-codermcpserver.yaml", "../../docs/how-to/manage-mcp-servers.md", mcpServerCases},
 	{"CoderAIProvider", "argocd-health-coderaiprovider.lua", "flux-healthcheck-coderaiprovider.yaml", "../../docs/how-to/gitops.md", aiProviderCases},
+	{"CoderWorkspacePool", "argocd-health-coderworkspacepool.lua", "flux-healthcheck-coderworkspacepool.yaml", "../../docs/how-to/gitops.md", workspacePoolCases},
+	{"CoderWorkspaceClaim", "argocd-health-coderworkspaceclaim.lua", "flux-healthcheck-coderworkspaceclaim.yaml", "../../docs/how-to/gitops.md", workspaceClaimCases},
 }
 
 // fluxHealthCheck is one entry of a Flux Kustomization spec.healthCheckExprs.
@@ -129,9 +132,10 @@ func mcpServerObject(status map[string]any) map[string]any {
 	return obj
 }
 
-// readyReconcilingStalled returns the three conditions that the CoderMCPServer
-// and CoderAIProvider controllers always write together, with one reason and
-// message: ready, reconciling (neither ready nor stalled), or stalled.
+// readyReconcilingStalled returns the three conditions that the CoderMCPServer,
+// CoderAIProvider, CoderWorkspacePool and CoderWorkspaceClaim controllers
+// always write together, with one reason and message: ready, reconciling
+// (neither ready nor stalled), or stalled.
 func readyReconcilingStalled(state, reason string) map[string]any {
 	ready, reconciling, stalled := "False", "True", "False"
 	switch state {
@@ -233,6 +237,110 @@ func aiProviderCases() []healthCase {
 		// Flux has no deletion rule: it waits for pruned objects separately.
 		{"being deleted", deleting, "Progressing", "Deleting the Coder AI provider", "Current", "Deleting the Coder AI provider"},
 		{"being deleted while Coder is down", deletingWait, "Progressing", "Deleting the Coder AI provider", "InProgress", "Deleting the Coder AI provider"},
+	}
+}
+
+// workspacePoolObject returns a CoderWorkspacePool at generation 2 with the
+// given status.
+func workspacePoolObject(status map[string]any) map[string]any {
+	obj := map[string]any{
+		"apiVersion": "coder.com/v1alpha1",
+		"kind":       "CoderWorkspacePool",
+		"metadata":   map[string]any{"name": "ci-runners", "namespace": "coder", "generation": int64(2)},
+		"spec":       map[string]any{"template": "coder.ci-runner", "replicas": int64(3)},
+	}
+	if status != nil {
+		obj["status"] = status
+	}
+	return obj
+}
+
+func workspacePoolCases() []healthCase {
+	// A /scale write bumps the generation, so the pool is stale until the
+	// controller counts its members for the new replicas.
+	rescaled := readyReconcilingStalled("ready", "Ready")
+	rescaled["observedGeneration"] = int64(1)
+	noConditions := map[string]any{"observedGeneration": int64(2)}
+	staleConditions := readyReconcilingStalled("ready", "Ready")
+	for _, c := range staleConditions["conditions"].([]any) {
+		c.(map[string]any)["observedGeneration"] = int64(1)
+	}
+	deleting := workspacePoolObject(readyReconcilingStalled("ready", "Ready"))
+	deleting["metadata"].(map[string]any)["deletionTimestamp"] = "2026-11-01T10:00:00Z"
+	deletingWait := workspacePoolObject(readyReconcilingStalled("reconciling", "WaitingForMembers"))
+	deletingWait["metadata"].(map[string]any)["deletionTimestamp"] = "2026-11-01T10:00:00Z"
+	return []healthCase{
+		{"no status", workspacePoolObject(nil), "Progressing", "Waiting for the controller", "Unknown", ""},
+		{"rescaled", workspacePoolObject(rescaled), "Progressing", "Waiting for the controller", "InProgress", ""},
+		{"no conditions", workspacePoolObject(noConditions), "Progressing", "Waiting for the controller", "InProgress", ""},
+		{"stale conditions", workspacePoolObject(staleConditions), "Progressing", "Waiting for the controller", "InProgress", ""},
+		{"ready", workspacePoolObject(readyReconcilingStalled("ready", "Ready")), "Healthy", "Ready: details", "Current", ""},
+		{"waiting for members", workspacePoolObject(readyReconcilingStalled("reconciling", "WaitingForMembers")), "Progressing", "WaitingForMembers: details", "InProgress", ""},
+		{"owner not allowed", workspacePoolObject(readyReconcilingStalled("reconciling", "OwnerNotAllowed")), "Progressing", "OwnerNotAllowed: details", "InProgress", ""},
+		{"owner cap", workspacePoolObject(readyReconcilingStalled("reconciling", "OwnerWorkspaceLimit")), "Progressing", "OwnerWorkspaceLimit: details", "InProgress", ""},
+		{"failure limit", workspacePoolObject(readyReconcilingStalled("stalled", "MemberFailureLimit")), "Degraded", "MemberFailureLimit: details", "Failed", ""},
+		{"version archived", workspacePoolObject(readyReconcilingStalled("stalled", "TemplateVersionArchived")), "Degraded", "TemplateVersionArchived: details", "Failed", ""},
+		// Flux has no deletion rule: it waits for pruned objects separately.
+		{"being deleted", deleting, "Progressing", "Deleting the workspace pool", "Current", "Deleting the workspace pool"},
+		{"being deleted while members build", deletingWait, "Progressing", "Deleting the workspace pool", "InProgress", "Deleting the workspace pool"},
+	}
+}
+
+// workspaceClaimObject returns a CoderWorkspaceClaim at generation 2 with the
+// given status.
+func workspaceClaimObject(status map[string]any) map[string]any {
+	obj := map[string]any{
+		"apiVersion": "coder.com/v1alpha1",
+		"kind":       "CoderWorkspaceClaim",
+		"metadata":   map[string]any{"name": "build-1234", "namespace": "coder", "generation": int64(2)},
+		"spec":       map[string]any{"poolName": "ci-runners"},
+	}
+	if status != nil {
+		obj["status"] = status
+	}
+	return obj
+}
+
+// claimStatus returns a claim status in phase with the conditions of state.
+// A claim status has no observedGeneration: only its conditions carry one.
+func claimStatus(phase, state, reason string) map[string]any {
+	st := readyReconcilingStalled(state, reason)
+	delete(st, "observedGeneration")
+	st["phase"] = phase
+	return st
+}
+
+func workspaceClaimCases() []healthCase {
+	staleConditions := claimStatus("Bound", "ready", "WorkspaceReady")
+	for _, c := range staleConditions["conditions"].([]any) {
+		c.(map[string]any)["observedGeneration"] = int64(1)
+	}
+	deleting := workspaceClaimObject(claimStatus("Bound", "ready", "WorkspaceReady"))
+	deleting["metadata"].(map[string]any)["deletionTimestamp"] = "2026-11-01T10:00:00Z"
+	deletingWait := workspaceClaimObject(claimStatus("Pending", "reconciling", "WaitingForReadyWorkspace"))
+	deletingWait["metadata"].(map[string]any)["deletionTimestamp"] = "2026-11-01T10:00:00Z"
+	return []healthCase{
+		{"no status", workspaceClaimObject(nil), "Progressing", "Waiting for the controller", "Unknown", ""},
+		{"no conditions", workspaceClaimObject(map[string]any{"phase": "Pending"}), "Progressing", "Waiting for the controller", "InProgress", ""},
+		{"stale conditions", workspaceClaimObject(staleConditions), "Progressing", "Waiting for the controller", "InProgress", ""},
+		{"waiting for a workspace", workspaceClaimObject(claimStatus("Pending", "reconciling", "WaitingForReadyWorkspace")), "Progressing", "WaitingForReadyWorkspace: details", "InProgress", ""},
+		{"pool not found", workspaceClaimObject(claimStatus("Pending", "reconciling", "PoolNotFound")), "Progressing", "PoolNotFound: details", "InProgress", ""},
+		{"bound and ready", workspaceClaimObject(claimStatus("Bound", "ready", "WorkspaceReady")), "Healthy", "WorkspaceReady: details", "Current", ""},
+		{"bound, agent not ready", workspaceClaimObject(claimStatus("Bound", "reconciling", "AgentNotReady")), "Progressing", "AgentNotReady: details", "InProgress", ""},
+		{"member deleted", workspaceClaimObject(claimStatus("Lost", "stalled", "MemberDeleted")), "Degraded", "MemberDeleted: details", "Failed", ""},
+		{"workspace deleted", workspaceClaimObject(claimStatus("Lost", "stalled", "WorkspaceDeleted")), "Degraded", "WorkspaceDeleted: details", "Failed", ""},
+		{"idle timeout", workspaceClaimObject(claimStatus("Lost", "stalled", "IdleTimeout")), "Degraded", "IdleTimeout: details", "Failed", ""},
+		// The controller writes Lost and Stalled=True together. Lost alone
+		// still counts.
+		{"lost without conditions", workspaceClaimObject(map[string]any{"phase": "Lost"}), "Degraded", "Waiting for the controller", "Failed", ""},
+		{"claim mode mismatch", workspaceClaimObject(claimStatus("Pending", "stalled", "ClaimModeMismatch")), "Degraded", "ClaimModeMismatch: details", "Failed", ""},
+		{"share user not eligible", workspaceClaimObject(claimStatus("Pending", "reconciling", "ShareUserNotEligible")), "Progressing", "ShareUserNotEligible: details", "InProgress", ""},
+		{"sharing", workspaceClaimObject(claimStatus("Bound", "reconciling", "SharingWorkspace")), "Progressing", "SharingWorkspace: details", "InProgress", ""},
+		{"share refused", workspaceClaimObject(claimStatus("Bound", "stalled", "ShareRefused")), "Degraded", "ShareRefused: details", "Failed", ""},
+		{"share revoked", workspaceClaimObject(claimStatus("Bound", "stalled", "ShareRevoked")), "Degraded", "ShareRevoked: details", "Failed", ""},
+		// Flux has no deletion rule: it waits for pruned objects separately.
+		{"being deleted", deleting, "Progressing", "Deleting the workspace claim", "Current", "Deleting the workspace claim"},
+		{"being deleted while waiting", deletingWait, "Progressing", "Deleting the workspace claim", "InProgress", "Deleting the workspace claim"},
 	}
 }
 
