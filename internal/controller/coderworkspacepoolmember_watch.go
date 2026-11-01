@@ -35,8 +35,8 @@ func (r *CoderWorkspacePoolMemberReconciler) watchReady(
 	// answers 410 once someone deleted the workspace, which sets
 	// WorkspaceDeleted=True, and the claim becomes Lost.
 	workspace, operatorID, step, err := readPoolMemberWorkspace(ctx, sdk, member)
-	if step != nil || err != nil {
-		return step, err
+	if step, err = memberWaitOnWrongAnswer(ctx, step, err); step != nil || err != nil {
+		return poolMemberKeepAgentNotReady(member, step), err
 	}
 	if bound && member.Status.BindExtended {
 		// The one extension at bind is done. Builds by the claimant, a stop
@@ -113,4 +113,20 @@ func poolMemberAgentStep(member *coderv1alpha1.CoderWorkspacePoolMember, build c
 		return coderFail("AgentLost", "%s It has not been ready since %s.", step.message, since.UTC().Format(time.RFC3339))
 	}
 	return coderWait("AgentNotReady", "%s", step.message)
+}
+
+// poolMemberKeepAgentNotReady keeps watch rule 3 across a step that read no
+// agent, such as a failed Coder read (plan section 16): a member whose agent
+// was not ready stays not ready, so its 5 minutes keep counting from the read
+// that found the agent not ready.
+func poolMemberKeepAgentNotReady(member *coderv1alpha1.CoderWorkspacePoolMember, step *coderStep) *coderStep {
+	c := meta.FindStatusCondition(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionReady)
+	if step == nil || step.failed || member.Status.ReadyTime == nil || c == nil ||
+		c.Status != metav1.ConditionFalse || c.Reason != "AgentNotReady" {
+		return step
+	}
+	kept := *step
+	kept.reason = "AgentNotReady"
+	kept.message = step.message + " The agent was not ready at the last read, so the member stays not ready."
+	return &kept
 }

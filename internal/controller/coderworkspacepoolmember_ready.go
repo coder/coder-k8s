@@ -28,7 +28,7 @@ func (r *CoderWorkspacePoolMemberReconciler) readWorkspace(
 	sdk, _, wait, err := controlPlaneCoderClient(ctx, r.Client, member.Namespace, member.Spec.ControlPlaneRef.Name)
 	switch {
 	case wait != nil:
-		return coderWait(wait.reason, "%s", wait.message), nil
+		return poolMemberKeepAgentNotReady(member, coderWait(wait.reason, "%s", wait.message)), nil
 	case err != nil:
 		return nil, err
 	case member.Status.WorkspaceID == "":
