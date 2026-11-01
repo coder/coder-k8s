@@ -1,0 +1,9 @@
+# Flux health check expressions for CoderWorkspaceClaim (coder.com/v1alpha1).
+# Add this entry to spec.healthCheckExprs of a Flux v2.5+ Kustomization
+# with spec.wait: true.
+# docs/how-to/gitops.md copies this file. A test keeps the copy equal.
+- apiVersion: coder.com/v1alpha1
+  kind: CoderWorkspaceClaim
+  inProgress: "(!has(status.phase) || status.phase != 'Lost') && (!has(status.conditions) || !status.conditions.exists(c, c.type == 'Ready' && has(c.observedGeneration) && c.observedGeneration == metadata.generation) || status.conditions.exists(c, c.type == 'Reconciling' && c.status == 'True'))"
+  failed: "(has(status.phase) && status.phase == 'Lost') || status.conditions.exists(c, c.type == 'Stalled' && c.status == 'True')"
+  current: "status.conditions.exists(c, c.type == 'Ready' && c.status == 'True')"
