@@ -316,7 +316,7 @@ kubectl get coderworkspacepools,coderworkspacepoolmembers,coderworkspaceclaims -
 kubectl get coderworkspacepoolmember <name> -n <namespace> -o jsonpath='{.status.reason}: {.status.message}{"\n"}'
 ```
 
-A wait ends by itself when its cause goes away. A failure is final for a member: its phase becomes `Failed`. The pool deletes a failed unclaimed member and creates a new one. A claimed member that fails stays, and its claim stays `Bound` and not ready until you delete the claim. If its workspace is gone, the claim becomes `Lost` instead. A failure of the pool sets `Stalled=True`. The pool reads Coder again every 60 s, also while it is stalled, so a fix in Coder ends a stall without a spec change. A claim often does not show why its pool cannot create workspaces. If a claim waits for a long time, read the reason of its pool.
+A wait ends by itself when its cause goes away. A failure is final for a member: its phase becomes `Failed`. The pool deletes a failed unclaimed member and creates a new one. A claimed member that fails stays, and its claim stays `Bound` and not ready until you delete the claim. If its workspace is gone, the claim becomes `Lost` instead. A failure of the pool sets `Stalled=True`. A stalled pool reads Coder again every 60 s, so a fix in Coder ends the stall without a spec change. A claim often does not show why its pool cannot create workspaces. If a claim waits for a long time, read the reason of its pool.
 
 ### Reasons of a pool and of a member before its create request
 
@@ -412,7 +412,7 @@ After `ShareRevoked` or `ShareRemoved`, Coder no longer lists the user on the wo
 
 ### The pool owner is dormant
 
-The pool waits with `OwnerNotEligible`, and the message names the status `dormant`. Coder creates users through its API as `dormant`, and every 15 minutes it marks each active user dormant whose last login or API use is older than 90 days. An activation does not count as a use. Activate the owner in Coder, then log in as it once, for example with `POST /api/v2/users/login`. After that, use the owner's credentials at least once every 90 days. The pool deletes its unclaimed workspaces while the owner is not eligible, and builds new ones once the owner is active.
+The pool waits with `OwnerNotEligible`, and the message names the status `dormant`. Coder creates users through its API as `dormant`, unless the create request sets another status. Every 15 minutes, Coder marks each active user dormant whose last login or API use is older than 90 days. An activation does not count as a use. Activate the owner in Coder, then send one request with the owner's credentials, for example a password login with `POST /api/v2/users/login`. A service account cannot log in: send a request such as `GET /api/v2/users/me` with its API token instead. After that, use the owner's credentials at least once every 90 days. The pool deletes its unclaimed workspaces while the owner is not eligible, and builds new ones once the owner is active.
 
 ### A claim stays `Pending` and names a member
 

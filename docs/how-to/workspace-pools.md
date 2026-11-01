@@ -14,7 +14,7 @@ You need:
 
 Every start build hands the owner's token to the template's Terraform. So the owner must pass the same rules as the tester of a template test (see [Test a template version](test-templates.md#1-create-the-tester-user)): status `active`, a service account or a password user, no site role other than `member`, and only `organization-member` or `organization-workspace-access` in each organization. Coder's prebuilds system user is refused. Without a Premium license, Coder has no service accounts, so use a password user that no person logs in as.
 
-Coder creates users through its API as `dormant`. Activate the owner, then log in as it once, for example with `POST /api/v2/users/login`. Coder checks every 15 minutes and marks each active user dormant whose last login or API use is older than 90 days. An activation does not count as a use, so a new owner that never logged in turns dormant at the next check. A dormant owner stops the pool with `OwnerNotEligible`, and the pool deletes its unclaimed workspaces. Use the owner's credentials at least once every 90 days. A claim consumer that connects with the owner's token does that.
+Coder creates users through its API as `dormant`, unless the create request sets another status. Activate the owner, then send one request with the owner's credentials: a password login with `POST /api/v2/users/login`, or, for a service account, which cannot log in, a request such as `GET /api/v2/users/me` with its API token. Coder checks every 15 minutes and marks each active user dormant whose last login or API use is older than 90 days. An activation does not count as a use, so a new owner that never sent a request turns dormant at the next check. A dormant owner stops the pool with `OwnerNotEligible`, and the pool deletes its unclaimed workspaces. Use the owner's credentials at least once every 90 days. A claim consumer that connects with the owner's token does that.
 
 ## 2. Allow the owner on the control plane
 
@@ -297,7 +297,7 @@ spec:
       - RespectIgnoreDifferences=true
 ```
 
-To make Argo CD or Flux wait for a pool or a claim, install the [health rules](gitops.md#health-rules-for-coderworkspacepool-and-coderworkspaceclaim). Each `/scale` write makes the pool `Progressing` until the controller has counted its members for the new `spec.replicas`.
+To make Argo CD or Flux wait for a pool or a claim, install the [health rules](gitops.md#health-rules-for-coderworkspacepool-and-coderworkspaceclaim). Each change of `spec.replicas` makes the pool `Progressing` until the controller has counted its members for the new value.
 
 ## Cost
 
