@@ -100,7 +100,7 @@ func requireShareClaim(t *testing.T, claim *coderv1alpha1.CoderWorkspaceClaim, p
 // member's next reconcile gives the named user the use role with exactly one
 // ACL write. That reconcile is also the first one after a crash right after
 // the bind. The claim is Ready only after the share, and later reconciles
-// never read or write the ACL again.
+// read the ACL but never write it again.
 func TestPoolSharesWorkspace(t *testing.T) {
 	t.Parallel()
 	for _, form := range []string{"username", "UUID"} {
