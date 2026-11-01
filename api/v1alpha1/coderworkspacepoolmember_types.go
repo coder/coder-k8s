@@ -30,6 +30,15 @@ const (
 	// CoderWorkspacePoolMemberConditionWorkspaceDeleted reports whether the
 	// member's workspace is gone, with the CoderTemplateTest reasons.
 	CoderWorkspacePoolMemberConditionWorkspaceDeleted = "WorkspaceDeleted"
+	// CoderWorkspacePoolMemberConditionShared is True while Coder's ACL gives
+	// status.sharedUserID a role on the workspace of a Share claim (use, or
+	// one that a person set later) and the share policy allows it. Reason
+	// ShareRefused: the policy or Coder refused the share. ShareRevoked: the
+	// policy no longer allowed the share, and the controller removed it
+	// (ShareRevoking until that worked).
+	// ShareRemoved: someone else removed the share. The controller does not
+	// share again after ShareRevoked or ShareRemoved.
+	CoderWorkspacePoolMemberConditionShared = "Shared"
 
 	// CoderWorkspacePoolMemberCleanupFinalizer keeps a member until its
 	// workspace is deleted.
@@ -177,6 +186,16 @@ type CoderWorkspacePoolMemberStatus struct {
 	// that the extension happened.
 	// +optional
 	BindExtendDeadline *metav1.Time `json:"bindExtendDeadline,omitempty"`
+	// SharedUserID is the Coder user that the controller shares the
+	// workspace with for a Share claim. The controller stores it before its
+	// first ACL write and never changes it, so a renamed or reused username
+	// never moves the share to another user. The Shared condition reports
+	// whether Coder's ACL gives this user a role.
+	// +kubebuilder:validation:MaxLength=36
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
+	// +kubebuilder:validation:XValidation:rule="self != 'c42fdf75-3097-471c-8c33-fb52454d81c0'",message="sharedUserID must not be the Coder prebuilds system user"
+	// +optional
+	SharedUserID string `json:"sharedUserID,omitempty"`
 	// DeleteBuildID is the ID of the current delete build.
 	// +optional
 	DeleteBuildID string `json:"deleteBuildID,omitempty"`
@@ -190,7 +209,8 @@ type CoderWorkspacePoolMemberStatus struct {
 	// logs, parameter values, or tokens.
 	// +optional
 	Message string `json:"message,omitempty"`
-	// Conditions are Ready, Used, and WorkspaceDeleted.
+	// Conditions are Ready, Used, WorkspaceDeleted, and, for a Share claim,
+	// Shared.
 	// +listType=map
 	// +listMapKey=type
 	// +optional

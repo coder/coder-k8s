@@ -4390,6 +4390,22 @@ spec:
                           maximum: 100
                           minimum: 1
                           type: integer
+                        shareGroupIDs:
+                          description: |-
+                            ShareGroupIDs turn on Share mode for this owner: they are the Coder
+                            groups whose members a Share claim can name. Empty means Share mode is
+                            off for this owner. The template organization's ID names its Everyone
+                            group: every active member of that organization, without a license.
+                            Other groups need a Premium license (Coder answers 403 without one, and
+                            the share is refused). Every claimant can act as the pool owner if the
+                            template exposes the owner's session token (see the how-to).
+                          items:
+                            maxLength: 36
+                            pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                            type: string
+                          maxItems: 16
+                          type: array
+                          x-kubernetes-list-type: set
                         templates:
                           description: |-
                             Templates are the only Coder templates, as `<organization>.<template>`,

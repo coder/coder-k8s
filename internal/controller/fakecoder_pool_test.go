@@ -74,12 +74,22 @@ func (f *fakeCoder) addPreset(versionID uuid.UUID, name string, params ...coders
 	return p.ID
 }
 
-// setSharing sets an organization's shareable_workspace_owners setting.
+// setSharing sets an organization's shareable_workspace_owners setting. Like
+// Coder v2.37 (enterprise/coderd/workspacesharing.go), any value but
+// everyone drops the ACLs of the organization's workspaces, except those of
+// service accounts under service_accounts.
 func (f *fakeCoder) setSharing(orgID uuid.UUID, owners codersdk.ShareableWorkspaceOwners) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	require.Contains(f.t, f.orgs, orgID, "assertion failed: unknown organization")
 	f.pool.sharing[orgID] = owners
+	for id, fw := range f.workspaces {
+		keep := owners == codersdk.ShareableWorkspaceOwnersEveryone ||
+			(owners == codersdk.ShareableWorkspaceOwnersServiceAccounts && f.users[fw.workspace.OwnerID].IsServiceAccount)
+		if fw.workspace.OrganizationID == orgID && !keep {
+			delete(f.pool.acls, id)
+		}
+	}
 }
 
 // markUsed sets last_used_at as Coder's usage tracker does after a session,

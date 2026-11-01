@@ -63,7 +63,7 @@ CoderWorkspacePoolClaims configures how the pool hands out workspaces.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `mode` | string | Mode is how a claim gets its workspace. Reserve binds a ready workspace to the claim, and the workspace stays with the pool owner. |
+| `mode` | string | Mode is how a claim gets its workspace. Reserve binds a ready workspace to the claim, and the workspace stays with the pool owner. Share also gives the claim's spec.share.user the Coder `use` role on the workspace (open apps, SSH, start, stop; never delete), where the organization's sharing setting and the owner's shareGroupIDs allow it. |
 | `idleTimeoutSeconds` | integer | IdleTimeoutSeconds deletes a claimed workspace, with its data, once both the bind and the workspace's last use in Coder (last_used_at) are this long ago. The claim then becomes Lost with reason IdleTimeout. Leave it out to keep claimed workspaces until their claims are deleted. Unclaimed workspaces are idle by design and never count. |
 
 ### CoderWorkspacePoolFailure

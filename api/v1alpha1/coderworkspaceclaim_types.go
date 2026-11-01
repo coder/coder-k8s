@@ -14,8 +14,8 @@ const (
 	// a claim never binds again.
 	CoderWorkspaceClaimPhaseLost = "Lost"
 
-	// CoderWorkspaceClaimConditionReady is True when the claim is bound and
-	// its workspace is ready.
+	// CoderWorkspaceClaimConditionReady is True when the claim is bound, its
+	// workspace is ready, and, with spec.share, shared.
 	CoderWorkspaceClaimConditionReady = "Ready"
 	// CoderWorkspaceClaimConditionReconciling is True while the claim waits.
 	CoderWorkspaceClaimConditionReconciling = "Reconciling"
@@ -33,6 +33,22 @@ type CoderWorkspaceClaimSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	PoolName string `json:"poolName"`
+	// Share names the Coder user that gets the workspace. Required when the
+	// pool's claims.mode is Share, refused otherwise: such a claim never binds
+	// and is Stalled with ClaimModeMismatch.
+	// +optional
+	Share *CoderWorkspaceClaimShare `json:"share,omitempty"`
+}
+
+// CoderWorkspaceClaimShare names the Coder user of a Share claim.
+type CoderWorkspaceClaimShare struct {
+	// User is a Coder username or user UUID (lower case with hyphens).
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=36
+	// +kubebuilder:validation:Pattern=`^([a-zA-Z0-9]+(-[a-zA-Z0-9]+)*|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`
+	// +kubebuilder:validation:XValidation:rule="self.size() <= 32 || self.matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')",message="user must be a Coder username of at most 32 characters or a lower-case UUID"
+	// +kubebuilder:validation:XValidation:rule="self != 'c42fdf75-3097-471c-8c33-fb52454d81c0'",message="user must not be the Coder prebuilds system user"
+	User string `json:"user"`
 }
 
 // CoderWorkspaceClaimStatus defines the observed state of a
@@ -60,6 +76,14 @@ type CoderWorkspaceClaimStatus struct {
 	// BoundTime is when a member took the claim.
 	// +optional
 	BoundTime *metav1.Time `json:"boundTime,omitempty"`
+	// SharedUserID is the Coder user that has a role on the workspace
+	// through this claim, as the member last read it from Coder. The
+	// controller grants `use`.
+	// +kubebuilder:validation:MaxLength=36
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
+	// +kubebuilder:validation:XValidation:rule="self != 'c42fdf75-3097-471c-8c33-fb52454d81c0'",message="sharedUserID must not be the Coder prebuilds system user"
+	// +optional
+	SharedUserID string `json:"sharedUserID,omitempty"`
 	// Reason is the current wait reason or the reason for Lost.
 	// +optional
 	Reason string `json:"reason,omitempty"`

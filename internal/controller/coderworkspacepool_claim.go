@@ -8,10 +8,12 @@ import (
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
+	"github.com/google/uuid"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -45,16 +47,136 @@ func poolClaimWaits(claim *coderv1alpha1.CoderWorkspaceClaim, all []coderv1alpha
 }
 
 // poolWant is the number of current unclaimed members the pool wants:
-// spec.replicas plus the waiting claims (decision D4), so a pool at
-// replicas 0 still creates a member for each claim.
-func poolWant(pool *coderv1alpha1.CoderWorkspacePool, claims []coderv1alpha1.CoderWorkspaceClaim, all []coderv1alpha1.CoderWorkspacePoolMember) int32 {
+// spec.replicas plus the waiting claims that are not refused (decision D4),
+// so a pool at replicas 0 still creates a member for each claim that can
+// bind. A claim whose check could not read Coder still counts, so a short
+// outage does not delete the member built for it.
+func poolWant(
+	pool *coderv1alpha1.CoderWorkspacePool, claims []coderv1alpha1.CoderWorkspaceClaim, all []coderv1alpha1.CoderWorkspacePoolMember,
+	steps map[types.UID]*coderStep,
+) int32 {
 	want := *pool.Spec.Replicas
 	for i := range claims {
-		if poolClaimWaits(&claims[i], all) {
+		step := steps[claims[i].UID]
+		if poolClaimWaits(&claims[i], all) && (step == nil || step.reason == "CoderUnavailable" || step.reason == "CoderAnswerMismatch") {
 			want++
 		}
 	}
 	return want
+}
+
+// poolClaimModeStep refuses a claim whose spec.share does not match the
+// pool's claims.mode. Both are immutable, so the refusal is final.
+func poolClaimModeStep(pool *coderv1alpha1.CoderWorkspacePool, claim *coderv1alpha1.CoderWorkspaceClaim) *coderStep {
+	share := pool.Spec.Claims.Mode == coderv1alpha1.CoderWorkspacePoolClaimModeShare
+	switch {
+	case share && claim.Spec.Share == nil:
+		return coderFail("ClaimModeMismatch", "CoderWorkspacePool %s is in Share mode, so the claim needs spec.share.user.", pool.Name)
+	case !share && claim.Spec.Share != nil:
+		return coderFail("ClaimModeMismatch", "CoderWorkspacePool %s is in %s mode, so the claim must not set spec.share.", pool.Name, pool.Spec.Claims.Mode)
+	}
+	return nil
+}
+
+// checkShareClaims checks the Coder user of each waiting claim of a Share
+// pool before any bind (plan 6.8 item 3), and stores each refusal in steps.
+// The member checks the whole policy again right before its ACL write.
+func (r *CoderWorkspacePoolReconciler) checkShareClaims(
+	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, claims []coderv1alpha1.CoderWorkspaceClaim,
+	all []coderv1alpha1.CoderWorkspacePoolMember, steps map[types.UID]*coderStep,
+) error {
+	if pool.Spec.Claims.Mode != coderv1alpha1.CoderWorkspacePoolClaimModeShare {
+		return nil
+	}
+	var waiting []*coderv1alpha1.CoderWorkspaceClaim
+	for i := range claims {
+		if poolClaimWaits(&claims[i], all) && steps[claims[i].UID] == nil {
+			waiting = append(waiting, &claims[i])
+		}
+	}
+	if len(waiting) == 0 {
+		return nil
+	}
+	sdk, controlPlane, wait, err := controlPlaneCoderClient(ctx, r.Client, pool.Namespace, pool.Spec.ControlPlaneRef.Name)
+	if err != nil {
+		return err
+	}
+	ownerID := pool.Status.Resolved.OwnerID
+	var step *coderStep
+	if wait != nil {
+		step = coderWait(wait.reason, "%s", wait.message)
+	} else {
+		// Uncached, as in freshOwnerCap: a bind cannot be undone, so consent
+		// or groups that an admin just withdrew win over the cache.
+		controlPlane = &coderv1alpha1.CoderControlPlane{}
+		key := types.NamespacedName{Namespace: pool.Namespace, Name: pool.Spec.ControlPlaneRef.Name}
+		if err := r.APIReader.Get(ctx, key, controlPlane); err != nil {
+			return fmt.Errorf("get CoderControlPlane %s: %w", key, err)
+		}
+		step = workspacePoolConsent(controlPlane, ownerID, pool.Spec.Template)
+	}
+	if step != nil {
+		for _, claim := range waiting {
+			steps[claim.UID] = step
+		}
+		return nil
+	}
+	shareGroupIDs := workspacePoolOwner(controlPlane, ownerID).ShareGroupIDs
+	orgID := uuid.MustParse(pool.Status.Resolved.OrganizationID) // It equals what resolve read from Coder in this reconcile.
+	// Any claim author can add claims that the policy refuses. So each group
+	// is read once per reconcile, a refusal holds for one poll, and a 429
+	// ends the checks: such claims cost Coder at most one user read each per
+	// poll.
+	type groupAnswer struct {
+		group codersdk.Group
+		err   error
+	}
+	groups := map[uuid.UUID]groupAnswer{}
+	readGroup := func(ctx context.Context, id uuid.UUID) (codersdk.Group, error) {
+		if a, ok := groups[id]; ok {
+			return a.group, a.err
+		}
+		group, err := sdk.Group(ctx, id, codersdk.GroupRequest{})
+		groups[id] = groupAnswer{group, err}
+		return group, err
+	}
+	now := r.Clock.Now()
+	r.shareRefusals.Range(func(uid, refusal any) bool {
+		if !now.Before(refusal.(poolShareRefusal).until) {
+			r.shareRefusals.Delete(uid)
+		}
+		return true
+	})
+	for i, claim := range waiting {
+		if refusal, ok := r.shareRefusals.Load(claim.UID); ok {
+			steps[claim.UID] = refusal.(poolShareRefusal).step
+			continue
+		}
+		_, step, err := checkWorkspaceShareUser(ctx, sdk, readGroup, orgID, shareGroupIDs, claim.Spec.Share.User)
+		if step, err = memberWaitOnWrongAnswer(ctx, step, err); err != nil {
+			return err
+		}
+		if step == nil {
+			continue
+		}
+		steps[claim.UID] = step
+		switch {
+		case step.rateLimited:
+			for _, rest := range waiting[i+1:] {
+				steps[rest.UID] = step
+			}
+			return nil
+		case step.reason != "CoderUnavailable" && step.reason != "CoderAnswerMismatch":
+			r.shareRefusals.Store(claim.UID, poolShareRefusal{step: step, until: now.Add(poolResolvePoll)})
+		}
+	}
+	return nil
+}
+
+// poolShareRefusal is a Share claim's refusal until its next check.
+type poolShareRefusal struct {
+	step  *coderStep
+	until time.Time
 }
 
 // reconcileOrphanClaims writes the status of the claims of a pool that is
@@ -73,7 +195,7 @@ func (r *CoderWorkspacePoolReconciler) reconcileOrphanClaims(ctx context.Context
 	if err := r.finishIdleReaps(ctx, claims, all.Items, r.Clock.Now()); err != nil {
 		return err
 	}
-	return r.writeClaimStatuses(ctx, poolName, true, claims, all.Items, "", "")
+	return r.writeClaimStatuses(ctx, poolName, true, claims, all.Items, nil, "", "")
 }
 
 // poolClaimHolder returns the member of the claim's pool that holds the
@@ -146,7 +268,7 @@ func (r *CoderWorkspacePoolReconciler) refreshWaitingClaims(
 // otherwise. It also sets the pool label again, in case it drifted.
 func (r *CoderWorkspacePoolReconciler) bindClaims(
 	ctx context.Context, pool *coderv1alpha1.CoderWorkspacePool, claims []coderv1alpha1.CoderWorkspaceClaim,
-	all []coderv1alpha1.CoderWorkspacePoolMember, counts *poolMemberCounts, ownerName string, now time.Time,
+	all []coderv1alpha1.CoderWorkspacePoolMember, steps map[types.UID]*coderStep, counts *poolMemberCounts, ownerName string, now time.Time,
 ) (skipped bool, err error) {
 	if ownerName == "" {
 		return false, fmt.Errorf("assertion failed: pool %s/%s binds claims without the owner's Coder username", pool.Namespace, pool.Name)
@@ -187,7 +309,7 @@ func (r *CoderWorkspacePoolReconciler) bindClaims(
 		if len(free) == 0 {
 			return skipped, nil
 		}
-		if !poolClaimWaits(claim, all) {
+		if !poolClaimWaits(claim, all) || steps[claim.UID] != nil {
 			continue
 		}
 		follow := claim.Status.MemberName != ""
@@ -317,11 +439,13 @@ func poolMemberUnusedNow(ctx context.Context, sdk *codersdk.Client, member *code
 // ownerID, the pool's owner, from this reconcile, or "" when the owner read
 // did not run. It updates only the claims whose member ownerID owns: a new
 // pool with the name of a deleted one can have another owner. A pending
-// claim keeps memberName, its reservation (see bindClaims). poolMissing
-// marks a pool that is gone or being deleted.
+// claim keeps memberName, its reservation (see bindClaims), and reports its
+// step from steps, if any. A bound Share claim is ready only once its member
+// shared the workspace. poolMissing marks a pool that is gone or being
+// deleted.
 func (r *CoderWorkspacePoolReconciler) writeClaimStatuses(
 	ctx context.Context, poolName string, poolMissing bool, claims []coderv1alpha1.CoderWorkspaceClaim,
-	all []coderv1alpha1.CoderWorkspacePoolMember, ownerID, ownerName string,
+	all []coderv1alpha1.CoderWorkspacePoolMember, steps map[types.UID]*coderStep, ownerID, ownerName string,
 ) error {
 	now := metav1.NewTime(r.Clock.Now())
 	for i := range claims {
@@ -331,7 +455,8 @@ func (r *CoderWorkspacePoolReconciler) writeClaimStatuses(
 		}
 		before := claim.Status.DeepCopy()
 		st := &claim.Status
-		ready, lost, reason, message := false, false, "WaitingForReadyWorkspace", fmt.Sprintf("CoderWorkspacePool %s has no ready workspace for this claim yet.", poolName)
+		ready, lost, stalled := false, false, false
+		reason, message := "WaitingForReadyWorkspace", fmt.Sprintf("CoderWorkspacePool %s has no ready workspace for this claim yet.", poolName)
 		if poolMissing {
 			reason, message = "PoolNotFound", fmt.Sprintf("CoderWorkspacePool %s does not exist or is being deleted.", poolName)
 		}
@@ -360,10 +485,22 @@ func (r *CoderWorkspacePoolReconciler) writeClaimStatuses(
 			if st.BoundTime == nil {
 				st.BoundTime = &now
 			}
-			ready = poolMemberReady(m)
+			memberReady := poolMemberReady(m)
+			shared := meta.FindStatusCondition(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionShared)
+			isShared := shared != nil && shared.Status == metav1.ConditionTrue
+			ready = memberReady && (claim.Spec.Share == nil || isShared)
+			st.SharedUserID = ""
+			if claim.Spec.Share != nil && isShared {
+				st.SharedUserID = m.Status.SharedUserID
+			}
 			reason, message = "WorkspaceReady", fmt.Sprintf("Workspace %s is ready.", m.Status.WorkspaceName)
-			if !ready {
+			switch {
+			case !memberReady:
 				reason, message = cmp.Or(m.Status.Reason, "WorkspaceNotReady"), truncateTemplateTestMessage(m.Status.Message)
+			case !ready && shared != nil && slices.Contains([]string{"ShareRefused", "ShareRemoved", "ShareRevoked", "ShareRevoking"}, shared.Reason):
+				reason, message, stalled = shared.Reason, truncateTemplateTestMessage(shared.Message), true
+			case !ready:
+				reason, message = "SharingWorkspace", fmt.Sprintf("Workspace %s is being shared with Coder user %s.", m.Status.WorkspaceName, claim.Spec.Share.User)
 			}
 			if meta.IsStatusConditionTrue(m.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionWorkspaceDeleted) {
 				st.Phase, lost = coderv1alpha1.CoderWorkspaceClaimPhaseLost, true
@@ -371,12 +508,15 @@ func (r *CoderWorkspacePoolReconciler) writeClaimStatuses(
 			}
 		default:
 			st.Phase = coderv1alpha1.CoderWorkspaceClaimPhasePending
+			if step := steps[claim.UID]; step != nil {
+				reason, message, stalled = step.reason, truncateTemplateTestMessage(step.message), step.failed
+			}
 		}
 		st.Reason, st.Message = reason, message
 		for conditionType, ok := range map[string]bool{
 			coderv1alpha1.CoderWorkspaceClaimConditionReady:       ready,
-			coderv1alpha1.CoderWorkspaceClaimConditionReconciling: !ready && !lost,
-			coderv1alpha1.CoderWorkspaceClaimConditionStalled:     lost,
+			coderv1alpha1.CoderWorkspaceClaimConditionReconciling: !ready && !lost && !stalled,
+			coderv1alpha1.CoderWorkspaceClaimConditionStalled:     lost || stalled,
 		} {
 			status := metav1.ConditionFalse
 			if ok {

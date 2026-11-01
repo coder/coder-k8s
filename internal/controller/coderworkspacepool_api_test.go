@@ -63,7 +63,10 @@ func TestCoderWorkspacePoolAPIValidation(t *testing.T) {
 		{name: "two versions", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Version.Name = "v1" }, wantErr: "set exactly one of name, id, or active"},
 		{name: "active false", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Version.Active = ptrTo(false) }, wantErr: "active must be true when set"},
 		{name: "prebuilds strategy", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Strategy = "Prebuilds" }, wantErr: "spec.strategy"},
-		{name: "share mode", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Claims.Mode = "Share" }, wantErr: "spec.claims.mode"},
+		{name: "share mode", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) {
+			s.Claims.Mode = coderv1alpha1.CoderWorkspacePoolClaimModeShare
+		}},
+		{name: "unknown mode", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Claims.Mode = "Lend" }, wantErr: "spec.claims.mode"},
 		{name: "owner not a UUID", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.OwnerUserID = "alice" }, wantErr: "spec.ownerUserID"},
 		{name: "prebuilds owner", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) {
 			s.OwnerUserID = "c42fdf75-3097-471c-8c33-fb52454d81c0"
@@ -146,6 +149,9 @@ func TestCoderWorkspacePoolAPIDefaultsAndImmutability(t *testing.T) {
 			s.OwnerUserID = "5f0c3c4e-0000-4000-8000-000000000009"
 		}, wantErr: "ownerUserID is immutable"},
 		{name: "template", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) { s.Template = "default.other" }, wantErr: "template is immutable"},
+		{name: "claims mode", mutate: func(s *coderv1alpha1.CoderWorkspacePoolSpec) {
+			s.Claims.Mode = coderv1alpha1.CoderWorkspacePoolClaimModeShare
+		}, wantErr: "claims.mode is immutable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			changed := got.DeepCopy()

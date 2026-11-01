@@ -82,9 +82,13 @@ spec:
                     default: Reserve
                     description: |-
                       Mode is how a claim gets its workspace. Reserve binds a ready workspace
-                      to the claim, and the workspace stays with the pool owner.
+                      to the claim, and the workspace stays with the pool owner. Share also
+                      gives the claim's spec.share.user the Coder `use` role on the workspace
+                      (open apps, SSH, start, stop; never delete), where the organization's
+                      sharing setting and the owner's shareGroupIDs allow it.
                     enum:
                     - Reserve
+                    - Share
                     type: string
                     x-kubernetes-validations:
                     - message: claims.mode is immutable

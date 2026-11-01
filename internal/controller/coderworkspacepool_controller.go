@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/coder/coder/v2/codersdk"
@@ -43,6 +44,8 @@ type CoderWorkspacePoolReconciler struct {
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
 	Clock     clock.PassiveClock
+
+	shareRefusals sync.Map // Claim UID -> poolShareRefusal.
 }
 
 const poolControlPlaneRefIndex = ".spec.controlPlaneRef.name"
@@ -202,6 +205,17 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	// A claim with a step neither binds nor counts as demand.
+	claimSteps := map[types.UID]*coderStep{}
+	for i := range claims {
+		claimStep := poolClaimModeStep(pool, &claims[i])
+		if claimStep == nil && step != nil && step.reason == "ShareNotAllowed" {
+			claimStep = step // No claim of the pool can get its share.
+		}
+		if claimStep != nil && poolClaimWaits(&claims[i], all.Items) {
+			claimSteps[claims[i].UID] = claimStep
+		}
+	}
 	if err := r.releaseUsedMembers(ctx, pool, members); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -241,11 +255,14 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if claims, err = r.refreshWaitingClaims(ctx, claims, all.Items); err != nil {
 			return ctrl.Result{}, err
 		}
-		skipped, err := r.bindClaims(ctx, pool, claims, all.Items, &counts, ownerName, now)
+		if err := r.checkShareClaims(ctx, pool, claims, all.Items, claimSteps); err != nil {
+			return ctrl.Result{}, err
+		}
+		skipped, err := r.bindClaims(ctx, pool, claims, all.Items, claimSteps, &counts, ownerName, now)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		step, requeue, err = r.createMembers(ctx, pool, poolWant(pool, claims, all.Items), maxWorkspaces, all.Items, &counts)
+		step, requeue, err = r.createMembers(ctx, pool, poolWant(pool, claims, all.Items, claimSteps), maxWorkspaces, all.Items, &counts)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -256,15 +273,20 @@ func (r *CoderWorkspacePoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 	// The namespace list, where trimToOwnerCap marked its deletes.
-	if err := r.deleteUnclaimedMembers(ctx, pool, poolWant(pool, claims, all.Items), all.Items, step, now); err != nil {
+	if err := r.deleteUnclaimedMembers(ctx, pool, poolWant(pool, claims, all.Items, claimSteps), all.Items, step, now); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.writeClaimStatuses(ctx, pool.Name, false, claims, all.Items, pool.Spec.OwnerUserID, ownerName); err != nil {
+	if err := r.writeClaimStatuses(ctx, pool.Name, false, claims, all.Items, claimSteps, pool.Spec.OwnerUserID, ownerName); err != nil {
 		return ctrl.Result{}, err
 	}
 	r.applyPoolStatus(pool, counts, step)
 	if err := r.writePoolStatus(ctx, pool, before); err != nil {
 		return ctrl.Result{}, err
+	}
+	for _, s := range claimSteps {
+		if !s.failed && (requeue == 0 || requeue > poolResolvePoll) {
+			requeue = poolResolvePoll // A fix of a user or a group in Coder sends no Kubernetes event.
+		}
 	}
 	switch {
 	case requeue > 0:
@@ -676,6 +698,15 @@ func (r *CoderWorkspacePoolReconciler) resolve(
 	template, step, err := resolveCoderTemplate(ctx, sdk, spec.Template, owner)
 	if step != nil || err != nil {
 		return nil, step, err
+	}
+	if spec.Claims.Mode == coderv1alpha1.CoderWorkspacePoolClaimModeShare {
+		entry := workspacePoolOwner(controlPlane, spec.OwnerUserID)
+		if entry == nil {
+			return nil, nil, fmt.Errorf("assertion failed: CoderControlPlane %s lists no Coder user %s after the consent check", controlPlane.Name, spec.OwnerUserID)
+		}
+		if step := checkWorkspaceSharePolicy(ctx, sdk, template.OrganizationID, owner, entry.ShareGroupIDs); step != nil {
+			return nil, step, nil
+		}
 	}
 	version, step, err := readCoderTemplateVersion(ctx, sdk, spec.Template, template, spec.Version.ID, spec.Version.Name)
 	if step != nil || err != nil {

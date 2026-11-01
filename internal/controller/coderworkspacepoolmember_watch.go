@@ -19,8 +19,9 @@ const (
 )
 
 // watchReady runs the rules of a ready member on one read of its workspace:
-// the watch rules of an unclaimed member in plan order (6.2 step 10), and
-// the deadline steps (step 10 rule 5, step 11 rule 1).
+// the watch rules of an unclaimed member in plan order (6.2 step 10), the
+// deadline steps (step 10 rule 5, step 11 rule 1), and, once the bind
+// extension is done, the share of a Share claim (step 11 rule 2).
 func (r *CoderWorkspacePoolMemberReconciler) watchReady(
 	ctx context.Context, sdk *codersdk.Client, member *coderv1alpha1.CoderWorkspacePoolMember, before *coderv1alpha1.CoderWorkspacePoolMemberStatus, now time.Time,
 ) (*coderStep, error) {
@@ -40,7 +41,7 @@ func (r *CoderWorkspacePoolMemberReconciler) watchReady(
 	if bound && member.Status.BindExtended {
 		// The one extension at bind is done. Builds by the claimant, a stop
 		// included, are normal and change nothing.
-		return coderWait(member.Status.Reason, "%s", member.Status.Message), nil
+		return r.shareWorkspace(ctx, sdk, member, before, workspace, coderWait(member.Status.Reason, "%s", member.Status.Message))
 	}
 	name := member.Status.WorkspaceName
 	if !bound {
@@ -60,7 +61,11 @@ func (r *CoderWorkspacePoolMemberReconciler) watchReady(
 			return coderFail("Dormant", "Workspace %s is dormant.", name), nil // Rule 4.
 		}
 	}
-	return r.keepWarm(ctx, sdk, member, before, workspace, now)
+	step, err = r.keepWarm(ctx, sdk, member, before, workspace, now)
+	if err != nil || !bound || !member.Status.BindExtended {
+		return step, err
+	}
+	return r.shareWorkspace(ctx, sdk, member, before, workspace, step)
 }
 
 // checkPoolMemberUse applies watch rule 1: a last_used_at later than the
