@@ -249,9 +249,9 @@ A claim has no `status.observedGeneration`, and its spec cannot change, so the c
 | no status, or no conditions of the current generation | `Progressing` | `InProgress` (`Unknown` before the first status) |
 | `Pending`, or `Bound` to a workspace that is not ready (`Reconciling=True`) | `Progressing` | `InProgress` |
 | `Bound` to a ready workspace (`Ready=True`) | `Healthy` | `Current` |
-| `Lost` (`Stalled=True`) | `Degraded` | `Failed` |
+| `Lost`, or `Stalled=True` | `Degraded` | `Failed` |
 
-`Lost` is final: the claim never binds again. To get a workspace again, delete the claim, and let the GitOps tool create it again. The new object binds a new workspace. For every reason, see [Troubleshoot workspace pools](troubleshooting.md#troubleshoot-workspace-pools). The Argo CD message is `<reason>: <message>` of the `Ready` condition. While the object is being deleted, Argo CD shows `Deleting the workspace pool` or `Deleting the workspace claim`.
+`Lost` is final: the claim never binds again. To get a workspace again, delete the claim, and let the GitOps tool create it again. The new object binds a new workspace. In Share mode, a claim that is not `Lost` can also be `Stalled`: `ClaimModeMismatch` never binds, and `ShareRefused`, `ShareRevoked`, and `ShareRemoved` leave a bound workspace without its share. Only `ShareRefused` can become healthy again without a new claim. For every reason, see [Troubleshoot workspace pools](troubleshooting.md#troubleshoot-workspace-pools). The Argo CD message is `<reason>: <message>` of the `Ready` condition. While the object is being deleted, Argo CD shows `Deleting the workspace pool` or `Deleting the workspace claim`.
 
 Add the scripts as the `argocd-cm` keys `resource.customizations.health.coder.com_CoderWorkspacePool` (`config/gitops/argocd-health-coderworkspacepool.lua`):
 

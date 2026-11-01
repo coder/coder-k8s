@@ -330,10 +330,14 @@ func workspaceClaimCases() []healthCase {
 		{"member deleted", workspaceClaimObject(claimStatus("Lost", "stalled", "MemberDeleted")), "Degraded", "MemberDeleted: details", "Failed", ""},
 		{"workspace deleted", workspaceClaimObject(claimStatus("Lost", "stalled", "WorkspaceDeleted")), "Degraded", "WorkspaceDeleted: details", "Failed", ""},
 		{"idle timeout", workspaceClaimObject(claimStatus("Lost", "stalled", "IdleTimeout")), "Degraded", "IdleTimeout: details", "Failed", ""},
-		// The controller writes Lost and Stalled=True together. Each one alone
+		// The controller writes Lost and Stalled=True together. Lost alone
 		// still counts.
 		{"lost without conditions", workspaceClaimObject(map[string]any{"phase": "Lost"}), "Degraded", "Waiting for the controller", "Failed", ""},
-		{"stalled while bound", workspaceClaimObject(claimStatus("Bound", "stalled", "WorkspaceDeleted")), "Degraded", "WorkspaceDeleted: details", "Failed", ""},
+		{"claim mode mismatch", workspaceClaimObject(claimStatus("Pending", "stalled", "ClaimModeMismatch")), "Degraded", "ClaimModeMismatch: details", "Failed", ""},
+		{"share user not eligible", workspaceClaimObject(claimStatus("Pending", "reconciling", "ShareUserNotEligible")), "Progressing", "ShareUserNotEligible: details", "InProgress", ""},
+		{"sharing", workspaceClaimObject(claimStatus("Bound", "reconciling", "SharingWorkspace")), "Progressing", "SharingWorkspace: details", "InProgress", ""},
+		{"share refused", workspaceClaimObject(claimStatus("Bound", "stalled", "ShareRefused")), "Degraded", "ShareRefused: details", "Failed", ""},
+		{"share revoked", workspaceClaimObject(claimStatus("Bound", "stalled", "ShareRevoked")), "Degraded", "ShareRevoked: details", "Failed", ""},
 		// Flux has no deletion rule: it waits for pruned objects separately.
 		{"being deleted", deleting, "Progressing", "Deleting the workspace claim", "Current", "Deleting the workspace claim"},
 		{"being deleted while waiting", deletingWait, "Progressing", "Deleting the workspace claim", "InProgress", "Deleting the workspace claim"},

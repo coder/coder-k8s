@@ -316,7 +316,7 @@ kubectl get coderworkspacepools,coderworkspacepoolmembers,coderworkspaceclaims -
 kubectl get coderworkspacepoolmember <name> -n <namespace> -o jsonpath='{.status.reason}: {.status.message}{"\n"}'
 ```
 
-A wait ends by itself when its cause goes away. A failure is final for a member: its phase becomes `Failed`, and the pool deletes it and creates a new one. A failure of the pool sets `Stalled=True`. The pool reads Coder again every 60 s, also while it is stalled, so a fix in Coder ends a stall without a spec change. A claim does not show why its pool cannot create workspaces. If a claim waits for a long time, read the reason of its pool.
+A wait ends by itself when its cause goes away. A failure is final for a member: its phase becomes `Failed`, and the pool deletes it and creates a new one. A failure of the pool sets `Stalled=True`. The pool reads Coder again every 60 s, also while it is stalled, so a fix in Coder ends a stall without a spec change. A claim often does not show why its pool cannot create workspaces. If a claim waits for a long time, read the reason of its pool.
 
 ### Reasons of a pool and of a member before its create request
 
@@ -325,7 +325,7 @@ The pool checks its inputs in Coder, and each member checks them again right bef
 | Reason | Kind | Cause | Fix |
 | --- | --- | --- | --- |
 | `ControlPlaneNotReady`, `OperatorAccessNotReady` | wait | The control plane in `spec.controlPlaneRef` does not exist, is being deleted, or has no URL, operator access, or TLS trust yet. | See [`CoderControlPlane` stays `Pending`](#codercontrolplane-stays-pending). |
-| `ControlPlaneDeleting` | wait | The control plane is being deleted. No member creates a workspace. | None. See [Cleanup](workspace-pools.md#cleanup). |
+| `ControlPlaneDeleting` | wait | The control plane is being deleted. No member creates a workspace, and members no longer check or remove shares ([#448](https://github.com/coder/coder-k8s/issues/448)). | None. See [Cleanup](workspace-pools.md#cleanup). |
 | `OwnerNotAllowed`, `TemplateNotAllowed` | wait | `spec.workspacePools.owners` of the control plane does not list the owner, or does not list the template for that owner. The pool deletes its unclaimed workspaces. | The control plane admin adds the owner or the template. |
 | `OwnerNotEligible` | wait | The owner breaks an [owner rule](workspace-pools.md#1-create-the-pool-owner), and the message names the rule, or the owner is not a member of the template's organization. The pool deletes its unclaimed workspaces. | Fix the owner in Coder. For a dormant owner, see [The owner is dormant](#the-pool-owner-is-dormant). |
 | `TemplateNotFound`, `TemplateVersionNotFound`, `PresetNotFound` | wait | `spec.template`, `spec.version`, or `spec.presetName` names nothing in Coder. | Create it in Coder, or fix `spec.version` or `spec.presetName`. `spec.template` cannot change: create a new pool. |
@@ -342,6 +342,7 @@ The pool checks its inputs in Coder, and each member checks them again right bef
 | `WaitingForMembers` | wait | Workspaces build, or outdated workspaces wait for their replacements. | Read the reasons of the members that are not `Ready`. |
 | `OwnerWorkspaceLimit` | wait | The owner has `maxWorkspaces` members on this control plane, across all pools. Claimed and used members count. | Delete claims or used members, or raise `maxWorkspaces`. |
 | `FailureBackoff` | wait | A member failed. The pool waits 30 s, doubled per failure in a row up to 10 min, before it creates the next member. `status.lastFailure` names the failed member and its reason. | Fix the cause of the failure. |
+| `ShareNotAllowed` | wait | The pool is in Share mode, and its owner may not share: the control plane lists no `shareGroupIDs` for the owner, the deployment disables sharing, or the organization's sharing setting does not let the owner share. The claims of the pool wait with the same reason and are no demand. | See [Share a workspace with a person](workspace-pools.md#6-share-a-workspace-with-a-person). |
 | `MemberFailureLimit` | failure | 5 members failed in a row, and the pool creates no more. `status.runFailures` lists them. | Fix the cause. Then change `spec.version`, `spec.presetName`, `spec.parameters`, or `spec.readyTimeoutSeconds`, or wait for a new active version. A resize does not reset the count. |
 
 ### Reasons of a member
@@ -363,7 +364,7 @@ The pool checks its inputs in Coder, and each member checks them again right bef
 | `AgentStartError`, `AgentStartTimeout`, `AgentStopped`, `AgentConnectionTimeout` | failure | The startup script of an agent failed or timed out, an agent stopped, or an agent did not connect in time. | Read the agent logs in Coder. |
 | `DeadlineExceeded` | failure | The workspace was not ready within `spec.readyTimeoutSeconds` (default 900) of the member's creation. The message names the last wait. | Fix the cause of the last wait, or raise `readyTimeoutSeconds`. |
 | `WorkspaceReady` | ready | Every agent is ready. A claim can take the workspace. | None. |
-| `Used` | wait | The workspace's `last_used_at` moved after it became ready, so someone may have used it without a claim. The member gets `Used=True`, and the pool releases it. | See [Cleanup](workspace-pools.md#cleanup). |
+| `Used` | wait | The workspace's `last_used_at` moved after it became ready, so someone may have used it without a claim. Opening the workspace's page in the Coder dashboard counts ([#444](https://github.com/coder/coder-k8s/issues/444)). The member gets `Used=True`, and the pool releases it. | See [Cleanup](workspace-pools.md#cleanup). |
 | `AgentNotReady` | wait | An agent of a ready workspace disconnected or is no longer ready. No claim takes the workspace meanwhile. | None, unless it becomes `AgentLost`. |
 | `AgentLost` | failure | An agent stayed not ready for 5 min. | Read the agent logs in Coder. |
 | `ChangedExternally` | failure | Someone else started a build of the workspace, for example a stop, an update, or Coder's autostop. | None. The pool replaces the member. |
@@ -373,6 +374,7 @@ The pool checks its inputs in Coder, and each member checks them again right bef
 | `OwnershipUnknown` | failure | Nothing proves that the workspace is the member's: someone renamed it, it has another owner or template, or the operator did not start its build. | See [A member does not finish deleting](#a-pool-member-does-not-finish-deleting). |
 | `WorkspaceDeletedExternally` | failure | Someone deleted the workspace in Coder. A claim that holds the member becomes `Lost`. | None. |
 | `Bound` | ready | A claim holds the member. The operator extends its autostop deadline at most once, at the bind. | None. |
+| `Shared`, `ShareRefused`, `ShareRevoking`, `ShareRevoked`, `ShareRemoved` | ready | The state of the share for a Share claim, also in the member's condition `Shared`. `Shared` means that Coder lists the claim's user on the workspace. | See [Reasons of a claim](#reasons-of-a-claim). |
 | `Deleting`, `DeleteRetrying` | wait | The member is being deleted, and its delete build runs, or failed and runs again after 1 min, doubled per failure up to 30 min. The operator cancels an active start or stop build first. | Read the log of the delete build in Coder. |
 | `Deleted` | done | The delete build succeeded, and the member's finalizer goes. | None. |
 
@@ -384,13 +386,29 @@ The condition `WorkspaceDeleted` tells whether the member's workspace still exis
 | --- | --- | --- | --- |
 | `WaitingForReadyWorkspace` | `Pending` | The pool has no ready unclaimed workspace for the claim yet. The pool creates one for each waiting claim, also at `replicas: 0`. | If it stays, read the reason of the pool. |
 | `PoolNotFound` | `Pending` | `spec.poolName` names no pool, or the pool is being deleted. | Create the pool. |
-| `WorkspaceReady` | `Bound` | The claimed workspace is ready. `status.ownerName` and `status.workspaceName` name it. | None. |
+| `ShareUserNotFound` | `Pending` | `spec.share.user` names no Coder user. The pool checks the claim again every minute. | Create the user in Coder, or create a claim with the right name. |
+| `ShareUserNotEligible` | `Pending` | The user is not active, is not a member of the template's organization, or is in none of the groups in the owner's `shareGroupIDs`. The message names each group that the operator could not read. The pool checks the claim again every minute. | See [A Share claim waits with `ShareUserNotEligible`](#a-share-claim-waits-with-shareusernoteligible). |
+| `ShareNotAllowed` | `Pending` | The pool's owner may not share. | See the pool reason `ShareNotAllowed`. |
+| `ClaimModeMismatch` | `Pending` | The claim sets `spec.share`, but the pool is in Reserve mode, or the other way around. Both are immutable, so the claim is `Stalled` and never binds. | Delete the claim, and create one that matches the pool's `claims.mode`. |
+| `WorkspaceReady` | `Bound` | The claimed workspace is ready, and in Share mode shared. `status.ownerName` and `status.workspaceName` name it. | None. |
+| `SharingWorkspace` | `Bound` | The claim is bound, and its member shares the workspace with `spec.share.user`. | None. |
+| `ShareRefused` | `Bound` | The share policy or Coder refused the share after the bind. The claim is `Stalled`, and the member checks again every minute. | Fix what the message names. |
+| `ShareRevoking`, `ShareRevoked` | `Bound` | The admin withdrew what allowed the share, and the operator removes it (`ShareRevoking`) or removed it. The claim is `Stalled`. | See [A user keeps access after a share ends](#a-user-keeps-access-after-a-share-ends). |
+| `ShareRemoved` | `Bound` | Coder no longer lists the user on the workspace: an admin tightened the organization's sharing setting, or a person removed the share. The claim is `Stalled`. | See [A user keeps access after a share ends](#a-user-keeps-access-after-a-share-ends). |
 | a member reason, or `WorkspaceNotReady` | `Bound` | The claimed workspace is not ready. The claim shows the reason of its member. | See [Reasons of a member](#reasons-of-a-member). |
 | `MemberDeleted` | `Lost` | The member that held the claim is gone. | Delete the claim, and create a new one. |
 | `WorkspaceDeleted` | `Lost` | Someone deleted the claimed workspace in Coder. | Delete the claim, and create a new one. |
 | `IdleTimeout` | `Lost` | Nobody used the workspace for `spec.claims.idleTimeoutSeconds` since the bind and since its last use, so the pool deletes it, unless its last check before the delete sees a use. | See [Idle reaping](workspace-pools.md#4-claim-a-workspace). |
 
-`Lost` is final: the claim never binds again.
+`Lost` is final: the claim never binds again. A claim of a Share pool can also wait with a reason of its pool, for example `OwnerNotAllowed` or `CoderUnavailable`.
+
+### A Share claim waits with `ShareUserNotEligible`
+
+The message says which check failed. When it says that a group could not be read, Coder answered `403` or `404` to the group read. Every group other than an organization's `Everyone` group needs a Premium license, and without one Coder answers `403`. Without a license, list the ID of the template's organization in `shareGroupIDs`: it stands for that organization's `Everyone` group, so every active member of the organization can get a share. The message tells the claim's author facts about the Coder user, such as its status ([#449](https://github.com/coder/coder-k8s/issues/449)).
+
+### A user keeps access after a share ends
+
+After `ShareRevoked` or `ShareRemoved`, Coder no longer lists the user on the workspace, but the user keeps access until the workspace restarts or stops. Coder applies the removal of a share only then, and the operator does not restart or stop the workspace ([#450](https://github.com/coder/coder-k8s/issues/450)). To end the access now, restart or stop the workspace in Coder, or delete the claim. The operator does not share the workspace again for this claim.
 
 ### The pool owner is dormant
 
