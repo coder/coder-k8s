@@ -326,6 +326,44 @@ func TestPoolMemberBindExtensionConfirmed(t *testing.T) {
 	require.Equal(t, requests, e.fake.requestCount(routeExtendWorkspace))
 }
 
+// TestPoolMemberBoundsStoredExtendTimes: a status writer chooses no deadline
+// (plan section 16). A stored bind target later than a fresh extension counts
+// as missing, and a future lastExtendTime stops no extension.
+func TestPoolMemberBoundsStoredExtendTimes(t *testing.T) {
+	t.Parallel()
+	e := newPoolMemberEnv(t)
+	e.fake.setTemplateSchedule(e.tplID, time.Hour, 0)
+	started := e.clock.Now()
+	future := metav1.NewTime(started.Add(365 * 24 * time.Hour))
+
+	key, workspaceID := e.readyMember(t)
+	e.clock.SetTime(started.Add(10 * time.Minute))
+	member := e.reconcileMember(t, key, 0)
+	member.Spec.ClaimRef = &coderv1alpha1.CoderWorkspaceClaimReference{Name: "build-1", UID: uuid.NewString()}
+	require.NoError(t, k8sClient.Update(e.ctx, member))
+	member.Status.BindExtendDeadline = &future
+	require.NoError(t, k8sClient.Status().Update(e.ctx, member))
+	member = e.reconcileMember(t, key, 1)
+	requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "Bound", "bound to claim build-1")
+	want := e.clock.Now().Add(time.Hour)
+	require.True(t, e.deadline(t, workspaceID).Time.Equal(want), "Coder deadline %s, want now + TTL", e.deadline(t, workspaceID).Time)
+	require.True(t, member.Status.BindExtendDeadline.Time.Equal(want), "the member stores the target it asks for")
+	require.True(t, member.Status.BindExtended)
+
+	e.clock.SetTime(started)
+	key, workspaceID = e.readyMember(t)
+	member = e.reconcileMember(t, key, 0)
+	member.Status.LastExtendTime = &future
+	require.NoError(t, k8sClient.Status().Update(e.ctx, member))
+	extends := e.fake.requestCount(routeExtendWorkspace)
+	e.clock.SetTime(started.Add(46 * time.Minute))
+	member = e.reconcileMember(t, key, 1)
+	requireReady(t, member, "extended the deadline")
+	require.Equal(t, extends+1, e.fake.requestCount(routeExtendWorkspace))
+	require.True(t, member.Status.LastExtendTime.Time.Equal(e.clock.Now()))
+	require.True(t, e.deadline(t, workspaceID).Time.Equal(e.clock.Now().Add(time.Hour)))
+}
+
 // TestPoolMemberGuardsEveryExtension: the read right before an extension
 // proves that the workspace is the member's own and still runs its start
 // build. Otherwise the member never writes to it.

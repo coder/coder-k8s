@@ -151,6 +151,37 @@ func TestPoolMemberWatchRules(t *testing.T) {
 	// The 5 minutes count from the first read that found the agent lost.
 	e.fake.setAgents(buildID, lost)
 	requireNotReady(t, 4*time.Minute)
+	// A read that proves nothing keeps the member not ready, and the 5
+	// minutes run on (plan section 16).
+	setOperatorAccess := func(t *testing.T, ready bool) {
+		t.Helper()
+		cp := &coderv1alpha1.CoderControlPlane{}
+		require.NoError(t, k8sClient.Get(e.ctx, types.NamespacedName{Namespace: e.ns, Name: "coder"}, cp))
+		cp.Status.OperatorAccessReady = ready
+		require.NoError(t, k8sClient.Status().Update(e.ctx, cp))
+	}
+	for i, c := range []struct {
+		fail    func(t *testing.T)
+		message string
+	}{
+		{func(*testing.T) { e.fake.failNext(routeWorkspace, fakeFault{Status: 503}) }, "Coder answered 503"},
+		{func(*testing.T) {
+			e.fake.failNext(routeWorkspace, fakeFault{Rewrite: func(answer any) any {
+				ws := answer.(codersdk.Workspace)
+				ws.ID = uuid.New()
+				return ws
+			}})
+		}, "Coder answered workspace"},
+		{func(t *testing.T) { setOperatorAccess(t, false) }, "no operator access"},
+	} {
+		e.clock.SetTime(started.Add(5*time.Minute + time.Duration(i)*time.Minute))
+		c.fail(t)
+		member := e.reconcileMember(t, key, 1)
+		requireMember(t, member, coderv1alpha1.CoderWorkspacePoolMemberPhaseReady, "AgentNotReady", c.message)
+		ready := meta.FindStatusCondition(member.Status.Conditions, coderv1alpha1.CoderWorkspacePoolMemberConditionReady)
+		require.True(t, ready.LastTransitionTime.Time.Equal(started.Add(4*time.Minute)), "the agent is not ready since %s", ready.LastTransitionTime)
+	}
+	setOperatorAccess(t, true)
 	requireNotReady(t, 9*time.Minute-time.Second)
 	e.clock.SetTime(started.Add(9 * time.Minute))
 	requireMemberFailed(t, e.reconcileMember(t, key, 1), "AgentLost", "has not been ready since", metav1.ConditionFalse)

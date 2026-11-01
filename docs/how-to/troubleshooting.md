@@ -365,7 +365,7 @@ The pool checks its inputs in Coder, and each member checks them again right bef
 | `DeadlineExceeded` | failure | The workspace was not ready within `spec.readyTimeoutSeconds` (default 900) of the member's creation. The message names the last wait. | Fix the cause of the last wait, or raise `readyTimeoutSeconds`. |
 | `WorkspaceReady` | ready | Every agent is ready. A claim can take the workspace. | None. |
 | `Used` | wait | The workspace's `last_used_at` moved after it became ready, so someone used it without a claim, or Coder counted something else as a use. Opening the workspace's page in the Coder dashboard counts ([#444](https://github.com/coder/coder-k8s/issues/444)). The member gets `Used=True`, and the pool releases it. | See [Cleanup](workspace-pools.md#cleanup). |
-| `AgentNotReady` | wait | An agent of a ready workspace disconnected or is no longer ready. No claim takes the workspace meanwhile. | None, unless it becomes `AgentLost`. |
+| `AgentNotReady` | wait | An agent of a ready workspace disconnected or is no longer ready. No claim takes the workspace meanwhile. A failed Coder read keeps this reason, and the 5 min keep counting. | None, unless it becomes `AgentLost`. |
 | `AgentLost` | failure | An agent stayed not ready for 5 min. | Read the agent logs in Coder. |
 | `ChangedExternally` | failure | Someone else started a build of the workspace, for example a stop, an update, or Coder's autostop. | None. The pool replaces an unclaimed member. |
 | `Dormant` | failure | Coder marked the workspace dormant, or scheduled its deletion. | Check the template's dormancy settings. |

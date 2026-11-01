@@ -84,9 +84,11 @@ func (r *CoderWorkspacePoolMemberReconciler) keepWarm(
 		return coderWait("MaxDeadline", "Coder stops workspace %s at its max deadline %s, which allows no extension.",
 			name, build.MaxDeadline.Time.UTC().Format(time.RFC3339)), nil
 	}
-	if bound && target == nil {
+	if bound && (target == nil || target.After(to)) {
 		// Store the target before the request: a later read then proves
 		// whether the extension happened, whatever status write is lost.
+		// A stored target later than a fresh extension counts as missing,
+		// so a status writer cannot choose the deadline (plan section 16).
 		member.Status.BindExtendDeadline = &metav1.Time{Time: to}
 		if err := r.writeStatus(ctx, member, before); err != nil {
 			return nil, err
