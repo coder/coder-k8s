@@ -123,6 +123,14 @@ func checkWorkspaceShareUser(
 	return user, coderWait("ShareUserNotEligible", "Coder user %s is in none of the groups in shareGroupIDs.%s", user.Username, unread.String()), nil
 }
 
+// shareAccessLasts follows the first clause of a removed share's message,
+// before any reason, because the claim keeps only the first 256 bytes. Coder
+// applies the removal of a share only when the workspace restarts (Coder
+// docs, user-guides/shared-workspaces), and the controller does not restart
+// it.
+const shareAccessLasts = "the user keeps access until the workspace restarts or stops: restart or stop it, or delete the claim, to end that now. " +
+	"The controller does not share it again."
+
 // shareWorkspace gives the Coder user of the member's Share claim the use
 // role on workspace (plan 6.2 step 11 rule 2), which the caller read with the
 // identity guard in this reconcile, and reports in the Shared condition
@@ -166,12 +174,11 @@ func (r *CoderWorkspacePoolMemberReconciler) shareWorkspace(
 	case !has && granted && shared.Reason == "ShareRevoked":
 		return coderWait(shared.Reason, "%s", shared.Message), nil
 	case !has && granted && shared.Reason == "ShareRevoking":
-		return report(metav1.ConditionFalse, "ShareRevoked", "The controller removed the share of workspace %s with Coder user %s. It does not share it again.", name, target), nil
+		return report(metav1.ConditionFalse, "ShareRevoked", "The controller removed the share, but %s", shareAccessLasts), nil
 	case !has && granted:
 		// For example, Coder drops shares when an admin tightens the
 		// organization's sharing setting.
-		return report(metav1.ConditionFalse, "ShareRemoved",
-			"Coder user %s no longer has a role on workspace %s. The controller does not share it again. Delete the claim to free the workspace.", target, name), nil
+		return report(metav1.ConditionFalse, "ShareRemoved", "Coder no longer lists the user on the workspace, but %s", shareAccessLasts), nil
 	}
 
 	// After the first check, the stored user ID, never the claim's username
@@ -195,8 +202,7 @@ func (r *CoderWorkspacePoolMemberReconciler) shareWorkspace(
 			return report(metav1.ConditionFalse, "ShareRevoking", "The share of workspace %s with Coder user %s is no longer allowed: %s The controller could not remove it yet: %s",
 				name, target, s.message, coderErrorSummary(err)), nil
 		}
-		return report(metav1.ConditionFalse, "ShareRevoked", "The controller removed the share of workspace %s with Coder user %s: %s It does not share it again.",
-			name, target, s.message), nil
+		return report(metav1.ConditionFalse, "ShareRevoked", "The controller removed the share, but %s Reason: %s", shareAccessLasts, s.message), nil
 	case s != nil:
 		return report(metav1.ConditionFalse, "ShareRefused", "Workspace %s is not shared: %s", name, s.message), nil
 	}
