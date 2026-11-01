@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# CoderWorkspacePool E2E driver (#153 plan 10.4, phases P1 to P9). The Kind job runs it before the lifecycle driver,
-# which deletes namespace coder at its end. It imports its own template from the agent fixture. P8 and P9 delete
-# their claims, pools, and members and check that their workspaces are deleted in Coder. Once every phase passed, it
-# restores the control plane's spec.workspacePools and the organization's sharing setting. It keeps its two Coder
-# users, the pool owner and the Share user, for a rerun. Every wait is bounded. Offline tests with stubbed tools:
-# hack/e2e-workspace-pool_test.sh.
+# CoderWorkspacePool E2E driver (#153 plan 10.4, phases P1 to P12). The Kind job runs it before the lifecycle driver,
+# which deletes namespace coder at its end. It imports its own template from the agent fixture, and P12 adds a version
+# to it. P8 to P12 delete their claims, pools, and members and check that their workspaces are deleted in Coder. P11
+# installs KEDA from a pinned manifest and removes it again. Once every phase passed, it restores the control plane's
+# spec.workspacePools and the organization's sharing setting. It keeps its two Coder users, the pool owner and the
+# Share user, for a rerun. Every wait is bounded. Offline tests with stubbed tools: hack/e2e-workspace-pool_test.sh.
 set -euo pipefail
 umask 077 # $WORK holds the Coder token header and request bodies
 shopt -s inherit_errexit
@@ -29,6 +29,12 @@ TEMPLATE_APPLY_TIMEOUT=${E2E_TEMPLATE_APPLY_TIMEOUT:-600s}
 CLAIM_READY_SECONDS=${E2E_CLAIM_READY_SECONDS:-10}
 USED_SECONDS=${E2E_USED_SECONDS:-180} # Coder flushes usage once a minute, and a member reads Coder once a minute
 DRY_RUN_SETTLE_SECONDS=${E2E_DRY_RUN_SETTLE_SECONDS:-10}
+KEDA_MANIFEST_URL=${E2E_KEDA_MANIFEST_URL:-https://github.com/kedacore/keda/releases/download/v2.21.0/keda-2.21.0.yaml}
+KEDA_MANIFEST_SHA256=${E2E_KEDA_MANIFEST_SHA256:-b43c89ffeef81722d7e2dd2c079d74789767a0f89cae1336cff784994814f6d7}
+KEDA_TIMEOUT=${E2E_KEDA_TIMEOUT_SECONDS:-360} # the cron window opens within a minute and stays 3 minutes, then a 30 s cooldown
+SCALED_OBJECT=${E2E_SCALED_OBJECT:-e2e-pool-cron}
+ROLLOUT_TIMEOUT=${E2E_ROLLOUT_TIMEOUT_SECONDS:-300}
+ROLLOUT_POLL=${E2E_ROLLOUT_POLL_SECONDS:-2} # readyReplicas samples during the rollout
 TIMEOUT=${E2E_TIMEOUT_SECONDS:-300}
 POLL=${E2E_POLL_SECONDS:-2}
 PORT=${E2E_CODER_LOCAL_PORT:-13001}
@@ -51,12 +57,14 @@ cleanup() {
     "claim_ready_ms=${CLAIM_MS:-unset}" "bind_deadline=${BIND_DEADLINE:-unset}" "restart_member=${RESTART_MEMBER:-unset}" \
     "live_workspaces_after_restart=${LIVE:-unset}" "member_workspace_rows=${ROWS:-unset}" "used_member=${USED:-unset}" \
     "used_seconds=${USED_S:-unset}" "scaled_down_workspaces=${SCALED_DOWN:-unset}" "share_user=$SHARE_USER/${SHARE_USER_ID:-unset}" \
-    "share_group_refusal=${GROUP_REFUSAL:-unset}" "share_claim_ready_ms=${SHARE_MS:-unset}" "phase_seconds=${PHASES[*]:-unset}" |
+    "share_group_refusal=${GROUP_REFUSAL:-unset}" "share_claim_ready_ms=${SHARE_MS:-unset}" \
+    "on_demand_member=${ON_DEMAND:-unset}" "keda_up_seconds=${KEDA_UP_S:-unset}" "keda_down_seconds=${KEDA_DOWN_S:-unset}" \
+    "keda_hpa=${KEDA_HPA:-unset}" "rollout_ready_samples=${ROLL_SEEN:-unset}" "phase_seconds=${PHASES[*]:-unset}" |
     tee "$WORK/receipt.txt"
 }
 trap cleanup EXIT
 
-for tool in kubectl curl jq base64 date; do command -v "$tool" >/dev/null || fail "missing tool: $tool"; done
+for tool in kubectl curl jq base64 date sha256sum; do command -v "$tool" >/dev/null || fail "missing tool: $tool"; done
 
 # wait_until <description> <command...>: retry until success, bounded by TIMEOUT.
 wait_until() {
@@ -449,6 +457,104 @@ for ws in $(jq -r '.[]' <<<"$SPARE_WS"); do deleted_in_coder "$ws" || fail "the 
 curl -fsS --max-time 30 -X POST -H @"$WORK/share-user.hdr" "$CODER_URL/api/v2/users/logout" >/dev/null || fail "cannot log out $SHARE_USER"
 rm -f "$WORK/share-user.hdr"
 phase P9
+
+log "=== P10: at replicas 0, a claim gets a member built on demand"
+POOL=${E2E_POOL:-e2e-pool} CLAIM=${E2E_CLAIM:-e2e-claim}
+jq '.spec.replicas = 0' "$WORK/pool-manifest.json" >"$WORK/pool-zero.json"
+k create -f "$WORK/pool-zero.json" >/dev/null || fail "cannot create pool $POOL at replicas 0"
+POOL_UID=$(k -n "$NS" get coderworkspacepool "$POOL" -o jsonpath='{.metadata.uid}')
+wait_until "pool Ready with 0 members" pool_ready 0 0
+members_json && jq -e '.items | length == 0' "$WORK/members.json" >/dev/null || fail "a pool at replicas 0 made members without a claim"
+k create -f "$WORK/claim-manifest.json" >/dev/null || fail "cannot create claim $CLAIM"
+wait_until "claim Bound and Ready on a member built on demand" claim_ready
+ON_DEMAND=$(jq -er '.status.memberName' "$WORK/claim.json")
+ON_DEMAND_WS=$(jq -er '.status.workspaceID' "$WORK/claim.json")
+wait_until "0 unclaimed members and 1 bound" pool_ready 0 1
+members_json
+jq -e --arg m "$ON_DEMAND" '[.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name] == [$m]' "$WORK/members.json" \
+  >/dev/null || fail "want only the claim's member $ON_DEMAND: $(jq -c '[.items[].metadata.name]' "$WORK/members.json")"
+k -n "$NS" delete coderworkspaceclaim "$CLAIM" --wait=false >/dev/null
+wait_until "member $ON_DEMAND of the deleted claim gone" member_gone "$ON_DEMAND"
+deleted_in_coder "$ON_DEMAND_WS" || fail "the on-demand workspace $ON_DEMAND_WS is not deleted in Coder"
+phase P10
+
+log "=== P11: KEDA from a pinned manifest; a cron ScaledObject moves the pool from 0 to 2 and back to 0"
+curl -fsSL --max-time 120 -o "$WORK/keda.yaml" "$KEDA_MANIFEST_URL" || fail "cannot download $KEDA_MANIFEST_URL"
+KEDA_SUM=$(sha256sum "$WORK/keda.yaml" | cut -d' ' -f1)
+[[ $KEDA_SUM == "$KEDA_MANIFEST_SHA256" ]] || fail "the KEDA manifest has SHA-256 $KEDA_SUM, want $KEDA_MANIFEST_SHA256"
+k apply --server-side -f "$WORK/keda.yaml" >"$WORK/keda-apply.out" 2>&1 ||
+  fail "cannot install KEDA: $(tail -c 400 "$WORK/keda-apply.out")"
+kubectl -n keda wait --for=condition=Available deploy --all --timeout=300s >/dev/null || fail "KEDA did not become available"
+kubectl wait --for=condition=Available apiservice/v1beta1.external.metrics.k8s.io --timeout=180s >/dev/null ||
+  fail "KEDA's metrics APIService is not available"
+# A 3-minute window from the next minute on. KEDA moves a target between 0 and 1 itself, and its HPA moves it above 1.
+jq -n --arg n "$SCALED_OBJECT" --arg ns "$NS" --arg p "$POOL" --arg s "$(date -u -d '+1 minute' +%-M) * * * *" \
+  --arg e "$(date -u -d '+4 minutes' +%-M) * * * *" '{apiVersion: "keda.sh/v1alpha1", kind: "ScaledObject",
+  metadata: {name: $n, namespace: $ns}, spec: {scaleTargetRef: {apiVersion: "coder.com/v1alpha1", kind: "CoderWorkspacePool",
+  name: $p}, minReplicaCount: 0, maxReplicaCount: 2, cooldownPeriod: 30, pollingInterval: 5, triggers: [{type: "cron",
+  metadata: {timezone: "Etc/UTC", start: $s, end: $e, desiredReplicas: "2"}}]}}' >"$WORK/scaledobject.json"
+k create -f "$WORK/scaledobject.json" >/dev/null || fail "cannot create ScaledObject $SCALED_OBJECT"
+log "ScaledObject $SCALED_OBJECT: $(jq -c '.spec.triggers[0].metadata' "$WORK/scaledobject.json")"
+KEDA_T0=$SECONDS
+scaled_to() { pool_json && jq -e --argjson r "$1" '.spec.replicas == $r' "$WORK/pool.json" >/dev/null && pool_ready "$1" 0; }
+TIMEOUT=$KEDA_TIMEOUT wait_until "KEDA scales the pool to 2" scaled_to 2
+KEDA_UP_S=$((SECONDS - KEDA_T0))
+hpa_active() { # the HPA that KEDA made computes a scale on the pool's selector, which matches no pods (R4)
+  k -n "$NS" get hpa "keda-hpa-$SCALED_OBJECT" -o json >"$WORK/hpa.json" &&
+    jq -e '.status.conditions // [] | any(.type == "ScalingActive" and .status == "True")' "$WORK/hpa.json" >/dev/null
+}
+wait_until "KEDA's HPA with ScalingActive=True" hpa_active
+KEDA_HPA=$(jq -c '{target: .spec.scaleTargetRef.kind, minReplicas: .spec.minReplicas, maxReplicas: .spec.maxReplicas,
+  targetType: .spec.metrics[0].external.target.type, currentReplicas: .status.currentReplicas,
+  scalingActive: (.status.conditions[] | select(.type == "ScalingActive") | .reason)}' "$WORK/hpa.json")
+log "KEDA's HPA: $KEDA_HPA"
+jq -e '.spec.scaleTargetRef.kind == "CoderWorkspacePool" and .spec.metrics[0].external.target.type == "AverageValue"' \
+  "$WORK/hpa.json" >/dev/null || fail "KEDA's HPA does not target the pool with an AverageValue metric: $KEDA_HPA"
+members_json
+SCALED_WS=$(jq -c '[.items[] | select(.metadata.deletionTimestamp == null) | .status.workspaceID]' "$WORK/members.json")
+TIMEOUT=$KEDA_TIMEOUT wait_until "KEDA scales the pool back to 0 after the window" scaled_to 0
+KEDA_DOWN_S=$((SECONDS - KEDA_T0 - KEDA_UP_S))
+for ws in $(jq -r '.[]' <<<"$SCALED_WS"); do wait_until "workspace $ws deleted in Coder" deleted_in_coder "$ws"; done
+log "KEDA: 0 -> 2 in ${KEDA_UP_S}s, 2 -> 0 in ${KEDA_DOWN_S}s"
+k -n "$NS" delete scaledobject "$SCALED_OBJECT" --wait=false >/dev/null
+wait_until "ScaledObject $SCALED_OBJECT and its HPA gone" absent scaledobject "$SCALED_OBJECT"
+wait_until "KEDA's HPA gone" absent hpa "keda-hpa-$SCALED_OBJECT"
+# The APIService goes first: one that cannot reach its service stalls every namespace deletion on discovery.
+k delete apiservice v1beta1.external.metrics.k8s.io >/dev/null
+k delete -f "$WORK/keda.yaml" --ignore-not-found --wait=false >/dev/null 2>&1 || fail "cannot remove KEDA"
+wait_until "namespace keda gone" absent namespace keda
+phase P11
+
+log "=== P12: a new active template version replaces the members new before old, with 2 ready all along"
+k -n "$NS" scale coderworkspacepool "$POOL" --replicas=2 >/dev/null
+wait_until "pool with 2 ready members" pool_ready 2 0
+OLD_VERSION=$(jq -er '.status.resolved.templateVersionID' "$WORK/pool.json")
+members_json
+OLD_WS=$(jq -c '[.items[] | select(.metadata.deletionTimestamp == null) | .status.workspaceID]' "$WORK/members.json")
+# Changing spec.files makes the update import a new version and activate it.
+jq '.spec.files["main.tf"] += "\n# coder-k8s e2e: a new version for the pool rollout\n"' "$WORK/template.json" >"$WORK/template-v2.json"
+kubectl --request-timeout="$TEMPLATE_APPLY_TIMEOUT" apply -f "$WORK/template-v2.json" >"$WORK/template-v2.out" 2>&1 ||
+  fail "cannot update template $ORG.$TEMPLATE: $(tr -s '\n' ' ' <"$WORK/template-v2.out" | cut -c1-400)"
+ROLL_MIN=2 ROLL_SAMPLES=0 ROLL_SEEN=""
+rolled_out() { # one readyReplicas sample per call; below 2 fails at once
+  local ready
+  pool_json || return 1
+  ready=$(jq -er '.status.readyReplicas // 0' "$WORK/pool.json") || return 1
+  ROLL_SAMPLES=$((ROLL_SAMPLES + 1)) ROLL_MIN=$((ready < ROLL_MIN ? ready : ROLL_MIN)) ROLL_SEEN+="$ready "
+  ((ready >= 2)) || fail "readyReplicas dropped to $ready during the rollout (sample $ROLL_SAMPLES)"
+  NEW_VERSION=$(jq -er '.status.resolved.templateVersionID' "$WORK/pool.json") && [[ $NEW_VERSION != "$OLD_VERSION" ]] &&
+    members_json && jq -e --arg v "$NEW_VERSION" '[.items[] | select(.metadata.deletionTimestamp == null)] |
+    length == 2 and all(.spec.templateVersionID == $v)' "$WORK/members.json" >/dev/null && pool_ready 2 0
+}
+POLL=$ROLLOUT_POLL TIMEOUT=$ROLLOUT_TIMEOUT wait_until "2 members on the new version, 2 ready all along" rolled_out
+log "rollout: $ROLL_SAMPLES samples of readyReplicas, never below $ROLL_MIN: $ROLL_SEEN"
+for ws in $(jq -r '.[]' <<<"$OLD_WS"); do wait_until "old workspace $ws deleted in Coder" deleted_in_coder "$ws"; done
+NEW_WS=$(jq -c '[.items[] | select(.metadata.deletionTimestamp == null) | .status.workspaceID]' "$WORK/members.json")
+k -n "$NS" delete coderworkspacepool "$POOL" --wait=false >/dev/null
+for ws in $(jq -r '.[]' <<<"$NEW_WS"); do wait_until "workspace $ws deleted in Coder" deleted_in_coder "$ws"; done
+no_members() { k -n "$NS" get coderworkspacepoolmembers -o json | jq -e --arg p "$POOL" '[.items[] | select(.spec.poolName == $p)] | length == 0' >/dev/null; }
+wait_until "no member of $POOL" no_members
+phase P12
 
 log "=== cleanup: restore spec.workspacePools"
 k -n "$NS" patch codercontrolplane "$CP" --type=merge -p "$(jq -nc --argjson orig "$ORIGINAL_POOLS" '{spec: {workspacePools: $orig}}')" \

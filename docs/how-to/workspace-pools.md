@@ -70,6 +70,8 @@ An unclaimed workspace stays until a claim takes it, a scale-down removes it, or
 kubectl -n coder scale coderworkspacepool ci-runners --replicas=5
 ```
 
+The pool's `status.selector` matches no pods, so an HPA must use External or Object metrics with target type `AverageValue`. KEDA's HPAs do that by default, and KEDA also moves a pool between 0 and 1. In the Kind end-to-end test, a KEDA v2.21.0 `cron` ScaledObject with `minReplicaCount: 0` moves a pool from 0 to 2 ready workspaces and back to 0. Its HPA reports `ScalingActive=True`. At `replicas: 0`, a claim still gets a workspace: the pool builds one for it.
+
 ## 4. Claim a workspace
 
 ```yaml
