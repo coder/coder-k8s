@@ -231,9 +231,9 @@ Add this entry (`config/gitops/flux-healthcheck-coderaiprovider.yaml`) to `spec.
 
 ## Health rules for CoderWorkspacePool and CoderWorkspaceClaim
 
-Argo CD and Flux also need health rules to wait for a [workspace pool](workspace-pools.md) and its claims. Without them, Argo CD has no health check for the kinds, and Flux reports a new pool or claim as current before the controller writes its first status. The controller writes the conditions `Ready`, `Reconciling` and `Stalled` of a pool or a claim together, with one reason and message, and with the object's `metadata.generation` as the condition's `observedGeneration`. The rules ignore a condition whose `observedGeneration` is older.
+Argo CD and Flux also need health rules to wait for a [workspace pool](workspace-pools.md) and its claims. Without them, Argo CD has no health check for the kinds, and Flux reports a new pool or claim as current before the controller writes its first status. The controller writes the conditions `Ready`, `Reconciling` and `Stalled` of a pool or a claim together, with one reason and message, and with the object's `metadata.generation` as the condition's `observedGeneration`. The Argo CD rules ignore each condition whose `observedGeneration` is older. The Flux rules wait for a `Ready` condition of the current generation, and then read the conditions without that filter. The controller gives all three conditions one generation, so both rules agree on what it writes.
 
-A pool also has `status.observedGeneration`, and both pool rules wait until it equals `metadata.generation`. Every `/scale` write raises the generation, so after `kubectl scale`, or a resize by an HPA or KEDA, the pool shows `Progressing` until the controller has counted its members for the new `spec.replicas`.
+A pool also has `status.observedGeneration`, and both pool rules wait until it equals `metadata.generation`. A change of `spec.replicas` through `/scale` raises the generation, so after `kubectl scale`, or a resize by an HPA or KEDA, the pool shows `Progressing` until the controller has counted its members for the new `spec.replicas`.
 
 | Pool conditions | Argo CD | Flux |
 | --- | --- | --- |
